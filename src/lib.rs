@@ -36,7 +36,6 @@
 //! - `agent`: Original simple agent (kept for compatibility)
 
 pub mod api;
-pub mod agent;
 pub mod agents;
 pub mod budget;
 pub mod config;
