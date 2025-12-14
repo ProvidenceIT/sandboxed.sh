@@ -10,7 +10,7 @@ use crate::agents::{
     Agent, AgentContext, AgentId, AgentResult, AgentType, LeafAgent, LeafCapability,
 };
 use crate::llm::{ChatMessage, Role, ToolCall};
-use crate::task::Task;
+use crate::task::{Task, TokenUsageSummary};
 use crate::tools::ToolRegistry;
 
 /// Agent that executes tasks using tools.
@@ -87,9 +87,13 @@ When task is complete, provide a clear summary of:
         task: &Task,
         model: &str,
         ctx: &AgentContext,
-    ) -> (String, u64, Vec<String>) {
-        let mut total_cost = 0u64;
+    ) -> (String, u64, Vec<String>, Option<TokenUsageSummary>) {
+        let mut total_cost_cents = 0u64;
         let mut tool_log = Vec::new();
+        let mut usage: Option<TokenUsageSummary> = None;
+
+        // If we can fetch pricing, compute real costs from token usage.
+        let pricing = ctx.pricing.get_pricing(model).await;
 
         // Build initial messages
         let system_prompt = self.build_system_prompt(&ctx.workspace_str(), &ctx.tools);
@@ -117,11 +121,12 @@ When task is complete, provide a clear summary of:
 
             // Check budget
             let remaining = task.budget().remaining_cents();
-            if remaining == 0 && total_cost > 0 {
+            if remaining == 0 && total_cost_cents > 0 {
                 return (
                     "Budget exhausted before task completion".to_string(),
-                    total_cost,
+                    total_cost_cents,
                     tool_log,
+                    usage,
                 );
             }
 
@@ -131,14 +136,33 @@ When task is complete, provide a clear summary of:
                 Err(e) => {
                     return (
                         format!("LLM error: {}", e),
-                        total_cost,
+                        total_cost_cents,
                         tool_log,
+                        usage,
                     );
                 }
             };
 
-            // Estimate cost (rough: ~1 cent per request for cheap models)
-            total_cost += 2;
+            // Cost + usage accounting.
+            if let Some(u) = &response.usage {
+                let u_sum = TokenUsageSummary::new(u.prompt_tokens, u.completion_tokens);
+                usage = Some(match &usage {
+                    Some(acc) => acc.add(&u_sum),
+                    None => u_sum,
+                });
+
+                if let Some(p) = &pricing {
+                    total_cost_cents = total_cost_cents.saturating_add(
+                        p.calculate_cost_cents(u.prompt_tokens, u.completion_tokens),
+                    );
+                } else {
+                    // Fallback heuristic when usage exists but pricing doesn't.
+                    total_cost_cents = total_cost_cents.saturating_add(2);
+                }
+            } else {
+                // Legacy heuristic if upstream doesn't return usage.
+                total_cost_cents = total_cost_cents.saturating_add(2);
+            }
 
             // Check for tool calls
             if let Some(tool_calls) = &response.tool_calls {
@@ -179,21 +203,23 @@ When task is complete, provide a clear summary of:
 
             // No tool calls - final response
             if let Some(content) = response.content {
-                return (content, total_cost, tool_log);
+                return (content, total_cost_cents, tool_log, usage);
             }
 
             // Empty response
             return (
                 "LLM returned empty response".to_string(),
-                total_cost,
+                total_cost_cents,
                 tool_log,
+                usage,
             );
         }
 
         (
             format!("Max iterations ({}) reached", ctx.max_iterations),
-            total_cost,
+            total_cost_cents,
             tool_log,
+            usage,
         )
     }
 }
@@ -219,19 +245,33 @@ impl Agent for TaskExecutor {
     }
 
     async fn execute(&self, task: &mut Task, ctx: &AgentContext) -> AgentResult {
-        // Use default model or from context
-        let model = &ctx.config.default_model;
+        // Use model selected during planning, otherwise fall back to default.
+        let selected = task
+            .analysis()
+            .selected_model
+            .clone()
+            .unwrap_or_else(|| ctx.config.default_model.clone());
+        let model = selected.as_str();
 
-        let (output, cost, tool_log) = self.run_loop(task, model, ctx).await;
+        let (output, cost_cents, tool_log, usage) = self.run_loop(task, model, ctx).await;
+
+        // Record telemetry
+        task.analysis_mut().selected_model = Some(model.to_string());
+        task.analysis_mut().actual_usage = usage.clone();
 
         // Update task budget
-        let _ = task.budget_mut().try_spend(cost);
+        let _ = task.budget_mut().try_spend(cost_cents);
 
-        AgentResult::success(&output, cost)
+        AgentResult::success(&output, cost_cents)
             .with_model(model)
             .with_data(json!({
                 "tool_calls": tool_log.len(),
                 "tools_used": tool_log,
+                "usage": usage.map(|u| json!({
+                    "prompt_tokens": u.prompt_tokens,
+                    "completion_tokens": u.completion_tokens,
+                    "total_tokens": u.total_tokens
+                })),
             }))
     }
 }

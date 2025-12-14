@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
-use super::{ChatMessage, ChatResponse, LlmClient, ToolCall, ToolDefinition};
+use super::{ChatMessage, ChatOptions, ChatResponse, LlmClient, TokenUsage, ToolCall, ToolDefinition};
 
 const OPENROUTER_API_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
 
@@ -32,11 +32,25 @@ impl LlmClient for OpenRouterClient {
         messages: &[ChatMessage],
         tools: Option<&[ToolDefinition]>,
     ) -> anyhow::Result<ChatResponse> {
+        self.chat_completion_with_options(model, messages, tools, ChatOptions::default())
+            .await
+    }
+
+    async fn chat_completion_with_options(
+        &self,
+        model: &str,
+        messages: &[ChatMessage],
+        tools: Option<&[ToolDefinition]>,
+        options: ChatOptions,
+    ) -> anyhow::Result<ChatResponse> {
         let request = OpenRouterRequest {
             model: model.to_string(),
             messages: messages.to_vec(),
             tools: tools.map(|t| t.to_vec()),
             tool_choice: tools.map(|_| "auto".to_string()),
+            temperature: options.temperature,
+            top_p: options.top_p,
+            max_tokens: options.max_tokens,
         };
 
         tracing::debug!("Sending request to OpenRouter: model={}", model);
@@ -79,6 +93,8 @@ impl LlmClient for OpenRouterClient {
             content: choice.message.content,
             tool_calls: choice.message.tool_calls,
             finish_reason: choice.finish_reason,
+            usage: response.usage.map(|u| TokenUsage::new(u.prompt_tokens, u.completion_tokens)),
+            model: response.model.or_else(|| Some(model.to_string())),
         })
     }
 }
@@ -92,12 +108,22 @@ struct OpenRouterRequest {
     tools: Option<Vec<ToolDefinition>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    top_p: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u64>,
 }
 
 /// OpenRouter API response format.
 #[derive(Debug, Deserialize)]
 struct OpenRouterResponse {
     choices: Vec<OpenRouterChoice>,
+    #[serde(default)]
+    usage: Option<OpenRouterUsage>,
+    #[serde(default)]
+    model: Option<String>,
 }
 
 /// A choice in the OpenRouter response.
@@ -112,5 +138,14 @@ struct OpenRouterChoice {
 struct OpenRouterMessage {
     content: Option<String>,
     tool_calls: Option<Vec<ToolCall>>,
+}
+
+/// Usage data (OpenAI-compatible).
+#[derive(Debug, Deserialize)]
+struct OpenRouterUsage {
+    prompt_tokens: u64,
+    completion_tokens: u64,
+    #[serde(rename = "total_tokens")]
+    _total_tokens: u64,
 }
 

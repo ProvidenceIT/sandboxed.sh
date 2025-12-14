@@ -10,6 +10,71 @@ use uuid::Uuid;
 use super::verification::VerificationCriteria;
 use crate::budget::Budget;
 
+/// Analysis and telemetry for a task.
+///
+/// This is mutable, but only via explicit `analysis_mut()` accessor on `Task`.
+///
+/// # Design Notes (Provability)
+/// - This is intended as *auxiliary metadata*; it must not affect the logical
+///   correctness of task execution.
+/// - In future proofs, we can treat this as observational data (logs).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TaskAnalysis {
+    /// Estimated complexity score in [0.0, 1.0]
+    pub complexity_score: Option<f64>,
+    /// Reasoning for complexity estimate
+    pub complexity_reasoning: Option<String>,
+    /// Whether the task should be split (per estimator)
+    pub should_split: Option<bool>,
+    /// Estimated total tokens for completing the task (input + output)
+    pub estimated_total_tokens: Option<u64>,
+
+    /// Model chosen for execution (if selected)
+    pub selected_model: Option<String>,
+    /// Estimated cost in cents (if computed)
+    pub estimated_cost_cents: Option<u64>,
+
+    /// Actual usage aggregated over all LLM calls during execution
+    pub actual_usage: Option<TokenUsageSummary>,
+}
+
+/// Aggregate token usage (LLM telemetry).
+///
+/// # Invariants
+/// - `total_tokens == prompt_tokens + completion_tokens` (enforced in constructor)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenUsageSummary {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub total_tokens: u64,
+}
+
+impl TokenUsageSummary {
+    /// Create a new token usage summary.
+    ///
+    /// # Postcondition
+    /// `total_tokens == prompt_tokens + completion_tokens`
+    pub fn new(prompt_tokens: u64, completion_tokens: u64) -> Self {
+        Self {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens: prompt_tokens.saturating_add(completion_tokens),
+        }
+    }
+
+    /// Add another usage summary.
+    ///
+    /// # Postcondition
+    /// Totals are component-wise sums.
+    pub fn add(&self, other: &TokenUsageSummary) -> TokenUsageSummary {
+        TokenUsageSummary::new(
+            self.prompt_tokens.saturating_add(other.prompt_tokens),
+            self.completion_tokens
+                .saturating_add(other.completion_tokens),
+        )
+    }
+}
+
 /// Unique identifier for a task.
 /// 
 /// # Properties
@@ -111,6 +176,9 @@ pub struct Task {
     /// Budget constraints for this task
     budget: Budget,
     
+    /// Analysis and telemetry (optional)
+    analysis: TaskAnalysis,
+
     /// Parent task ID if this is a subtask
     parent_id: Option<TaskId>,
     
@@ -147,6 +215,7 @@ impl Task {
             description,
             verification,
             budget,
+            analysis: TaskAnalysis::default(),
             parent_id: None,
             status: TaskStatus::Pending,
         })
@@ -188,6 +257,14 @@ impl Task {
 
     pub fn budget_mut(&mut self) -> &mut Budget {
         &mut self.budget
+    }
+
+    pub fn analysis(&self) -> &TaskAnalysis {
+        &self.analysis
+    }
+
+    pub fn analysis_mut(&mut self) -> &mut TaskAnalysis {
+        &mut self.analysis
     }
 
     pub fn parent_id(&self) -> Option<TaskId> {
