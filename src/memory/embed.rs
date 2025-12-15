@@ -125,3 +125,4 @@ struct EmbeddingUsage {
     total_tokens: u32,
 }
 
+

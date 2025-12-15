@@ -21,6 +21,7 @@ use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation};
 
 use super::types::{LoginRequest, LoginResponse};
 use super::routes::AppState;
+use crate::config::Config;
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct Claims {
@@ -69,6 +70,21 @@ fn verify_jwt(token: &str, secret: &str) -> anyhow::Result<Claims> {
         &validation,
     )?;
     Ok(token_data.claims)
+}
+
+/// Verify a JWT against the server config.
+/// Returns true iff:
+/// - auth is not required (dev mode), OR
+/// - auth is required and the token is valid.
+pub fn verify_token_for_config(token: &str, config: &Config) -> bool {
+    if !config.auth.auth_required(config.dev_mode) {
+        return true;
+    }
+    let secret = match config.auth.jwt_secret.as_deref() {
+        Some(s) => s,
+        None => return false,
+    };
+    verify_jwt(token, secret).is_ok()
 }
 
 pub async fn login(

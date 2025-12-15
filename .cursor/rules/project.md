@@ -280,6 +280,32 @@ curl -sS http://127.0.0.1:3000/api/tasks \
 - This is **not** multi-tenant; the JWT only proves “dashboard knows the password”.
 - The dashboard uses a **fetch-based SSE client** (instead of `EventSource`) so it can send auth headers.
 
+## Dashboard Console (SSH + SFTP)
+
+The dashboard includes a **Console** page that can:
+- open a **full-featured TTY** (colors, interactive programs) via WebSocket → PTY → `ssh`
+- browse/upload/download files via **SFTP**
+
+### Backend endpoints
+- `GET /api/console/ws` (WebSocket)
+- `GET /api/fs/list?path=...`
+- `POST /api/fs/upload?path=...` (multipart form-data)
+- `GET /api/fs/download?path=...`
+- `POST /api/fs/mkdir`
+- `POST /api/fs/rm`
+
+### Auth nuance (WebSocket)
+Browsers can't set an `Authorization` header for WebSockets, so the console uses a **WebSocket subprotocol**:
+- client connects with protocols: `["openagent", "jwt.<token>"]`
+- server validates the JWT from `Sec-WebSocket-Protocol` (only when `DEV_MODE=false`)
+
+### Required env vars
+Set these on the backend:
+- `CONSOLE_SSH_HOST` (e.g. `95.216.112.253`)
+- `CONSOLE_SSH_PORT` (default `22`)
+- `CONSOLE_SSH_USER` (default `root`)
+- `CONSOLE_SSH_PRIVATE_KEY_B64` (preferred) or `CONSOLE_SSH_PRIVATE_KEY`
+
 ## Dashboard package manager (Bun)
 
 The dashboard in `dashboard/` uses **Bun** (not npm/yarn/pnpm).

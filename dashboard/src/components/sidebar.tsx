@@ -8,6 +8,7 @@ import {
   MessageSquare,
   Network,
   History,
+  Terminal,
   Settings,
 } from 'lucide-react';
 
@@ -15,6 +16,7 @@ const navigation = [
   { name: 'Overview', href: '/', icon: LayoutDashboard },
   { name: 'Control', href: '/control', icon: MessageSquare },
   { name: 'Agents', href: '/agents', icon: Network },
+  { name: 'Console', href: '/console', icon: Terminal },
   { name: 'History', href: '/history', icon: History },
   { name: 'Settings', href: '/settings', icon: Settings },
 ];

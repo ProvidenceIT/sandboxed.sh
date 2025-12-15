@@ -9,6 +9,9 @@
 
 mod routes;
 mod auth;
+mod console;
+mod fs;
+mod ssh_util;
 pub mod types;
 
 pub use routes::serve;

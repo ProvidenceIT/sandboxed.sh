@@ -31,6 +31,8 @@ use crate::tools::ToolRegistry;
 
 use super::types::*;
 use super::auth;
+use super::console;
+use super::fs;
 
 /// Shared application state.
 pub struct AppState {
@@ -62,7 +64,9 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
 
     let public_routes = Router::new()
         .route("/api/health", get(health))
-        .route("/api/auth/login", post(auth::login));
+        .route("/api/auth/login", post(auth::login))
+        // WebSocket console uses subprotocol-based auth (browser can't set Authorization header)
+        .route("/api/console/ws", get(console::console_ws));
 
     let protected_routes = Router::new()
         .route("/api/stats", get(get_stats))
@@ -77,6 +81,12 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         .route("/api/runs/:id/events", get(get_run_events))
         .route("/api/runs/:id/tasks", get(get_run_tasks))
         .route("/api/memory/search", get(search_memory))
+        // Remote file explorer endpoints (use Authorization header)
+        .route("/api/fs/list", get(fs::list))
+        .route("/api/fs/download", get(fs::download))
+        .route("/api/fs/upload", post(fs::upload))
+        .route("/api/fs/mkdir", post(fs::mkdir))
+        .route("/api/fs/rm", post(fs::rm))
         .layer(middleware::from_fn_with_state(Arc::clone(&state), auth::require_auth));
 
     let app = Router::new()

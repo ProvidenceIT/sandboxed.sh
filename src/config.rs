@@ -7,6 +7,11 @@
 //! - `HOST` - Optional. Server host. Defaults to `127.0.0.1`.
 //! - `PORT` - Optional. Server port. Defaults to `3000`.
 //! - `MAX_ITERATIONS` - Optional. Maximum agent loop iterations. Defaults to `50`.
+//! - `CONSOLE_SSH_HOST` - Optional. Host for dashboard console/file explorer SSH (default: 127.0.0.1).
+//! - `CONSOLE_SSH_PORT` - Optional. SSH port (default: 22).
+//! - `CONSOLE_SSH_USER` - Optional. SSH user (default: root).
+//! - `CONSOLE_SSH_PRIVATE_KEY_B64` - Optional. Base64-encoded OpenSSH private key.
+//! - `CONSOLE_SSH_PRIVATE_KEY` - Optional. Raw (multiline) OpenSSH private key (fallback).
 //! - `SUPABASE_URL` - Optional. Supabase project URL for memory storage.
 //! - `SUPABASE_SERVICE_ROLE_KEY` - Optional. Service role key for Supabase.
 //! - `MEMORY_EMBED_MODEL` - Optional. Embedding model. Defaults to `openai/text-embedding-3-small`.
@@ -14,6 +19,7 @@
 
 use std::path::PathBuf;
 use thiserror::Error;
+use base64::Engine;
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -89,8 +95,41 @@ pub struct Config {
     /// API auth configuration (dashboard login)
     pub auth: AuthConfig,
 
+    /// Remote console/file explorer SSH configuration (optional).
+    pub console_ssh: ConsoleSshConfig,
+
     /// Memory/storage configuration
     pub memory: MemoryConfig,
+}
+
+/// SSH configuration for the dashboard console + file explorer.
+#[derive(Debug, Clone)]
+pub struct ConsoleSshConfig {
+    /// Host to SSH into (default: 127.0.0.1)
+    pub host: String,
+    /// SSH port (default: 22)
+    pub port: u16,
+    /// SSH username (default: root)
+    pub user: String,
+    /// Private key (OpenSSH) used for auth (prefer *_B64 env)
+    pub private_key: Option<String>,
+}
+
+impl Default for ConsoleSshConfig {
+    fn default() -> Self {
+        Self {
+            host: "127.0.0.1".to_string(),
+            port: 22,
+            user: "root".to_string(),
+            private_key: None,
+        }
+    }
+}
+
+impl ConsoleSshConfig {
+    pub fn is_configured(&self) -> bool {
+        self.private_key.as_ref().map(|s| !s.trim().is_empty()).unwrap_or(false)
+    }
 }
 
 /// API auth configuration (single-tenant).
@@ -189,6 +228,17 @@ impl Config {
             rerank_model: std::env::var("MEMORY_RERANK_MODEL").ok(),
             embed_dimension: 1536, // OpenAI text-embedding-3-small default
         };
+
+        let console_ssh = ConsoleSshConfig {
+            host: std::env::var("CONSOLE_SSH_HOST").unwrap_or_else(|_| "127.0.0.1".to_string()),
+            port: std::env::var("CONSOLE_SSH_PORT")
+                .ok()
+                .map(|v| v.parse::<u16>().map_err(|e| ConfigError::InvalidValue("CONSOLE_SSH_PORT".to_string(), format!("{}", e))))
+                .transpose()?
+                .unwrap_or(22),
+            user: std::env::var("CONSOLE_SSH_USER").unwrap_or_else(|_| "root".to_string()),
+            private_key: read_private_key_from_env()?,
+        };
         
         Ok(Self {
             api_key,
@@ -199,6 +249,7 @@ impl Config {
             max_iterations,
             dev_mode,
             auth,
+            console_ssh,
             memory,
         })
     }
@@ -218,6 +269,7 @@ impl Config {
             max_iterations: 50,
             dev_mode: true,
             auth: AuthConfig::default(),
+            console_ssh: ConsoleSshConfig::default(),
             memory: MemoryConfig::default(),
         }
     }
@@ -228,6 +280,27 @@ fn parse_bool(value: &str) -> Result<bool, String> {
         "1" | "true" | "t" | "yes" | "y" | "on" => Ok(true),
         "0" | "false" | "f" | "no" | "n" | "off" => Ok(false),
         other => Err(format!("expected boolean-like value, got: {}", other)),
+    }
+}
+
+fn read_private_key_from_env() -> Result<Option<String>, ConfigError> {
+    // Prefer base64 to avoid multiline env complications.
+    if let Ok(b64) = std::env::var("CONSOLE_SSH_PRIVATE_KEY_B64") {
+        if b64.trim().is_empty() {
+            return Ok(None);
+        }
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(b64.trim().as_bytes())
+            .map_err(|e| ConfigError::InvalidValue("CONSOLE_SSH_PRIVATE_KEY_B64".to_string(), format!("{}", e)))?;
+        let s = String::from_utf8(bytes)
+            .map_err(|e| ConfigError::InvalidValue("CONSOLE_SSH_PRIVATE_KEY_B64".to_string(), format!("{}", e)))?;
+        return Ok(Some(s));
+    }
+
+    // Fallback: raw private key in env (EnvironmentFile can support multiline).
+    match std::env::var("CONSOLE_SSH_PRIVATE_KEY") {
+        Ok(s) if !s.trim().is_empty() => Ok(Some(s)),
+        _ => Ok(None),
     }
 }
 
