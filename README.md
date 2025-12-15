@@ -163,6 +163,16 @@ cargo fmt
 cargo clippy
 ```
 
+## Dashboard (Bun)
+
+The dashboard lives in `dashboard/` and uses **Bun** as the package manager.
+
+```bash
+cd dashboard
+bun install
+PORT=3001 bun dev
+```
+
 ## Calibration (Trial-and-Error Tuning)
 
 Open Agent supports empirical tuning of its **difficulty (complexity)** and **cost** estimation via a calibration harness.

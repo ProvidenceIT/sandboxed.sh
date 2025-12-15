@@ -229,6 +229,67 @@ CREATE TABLE task_outcomes (
 );
 ```
 
+## Dashboard Auth (v4 - Minimal JWT)
+
+### Goals
+- Keep the API **private by default** in non-dev mode.
+- Keep local iteration/debugging easy (explicit dev mode bypass).
+- Use a minimal, single-tenant auth model (no users/orgs/RLS yet).
+
+### How it works
+- The dashboard calls `POST /api/auth/login` with a password.
+- The server verifies the password and returns a **JWT** with an `exp` claim.
+- The dashboard stores the JWT + exp in **`sessionStorage`**.
+- When **`DEV_MODE=false`**, all API requests (including task streaming) must include:
+  - `Authorization: Bearer <jwt>`
+
+JWT validity: **30 days** by default (configurable).
+
+### Dev mode + debugging
+
+To debug quickly (no auth), run with:
+- `DEV_MODE=true`
+
+In `DEV_MODE=true`:
+- `/api/health` will report `auth_required=false`
+- The dashboard will not prompt for a password
+- The API will not require the `Authorization` header
+
+### Required env vars (when DEV_MODE=false)
+- `DASHBOARD_PASSWORD`: the dashboard password
+- `JWT_SECRET`: HMAC secret used to sign/verify JWTs
+- `JWT_TTL_DAYS` (optional, default 30)
+
+### Debugging with curl
+Get a token:
+
+```bash
+curl -sS -X POST http://127.0.0.1:3000/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"password":"YOUR_PASSWORD"}'
+```
+
+Use the token:
+
+```bash
+curl -sS http://127.0.0.1:3000/api/tasks \
+  -H "Authorization: Bearer YOUR_JWT"
+```
+
+### Notes / limitations
+- This is **not** multi-tenant; the JWT only proves “dashboard knows the password”.
+- The dashboard uses a **fetch-based SSE client** (instead of `EventSource`) so it can send auth headers.
+
+## Dashboard package manager (Bun)
+
+The dashboard in `dashboard/` uses **Bun** (not npm/yarn/pnpm).
+
+```bash
+cd dashboard
+bun install
+PORT=3001 bun dev
+```
+
 ### RPC Functions
 - `get_model_stats(complexity_min, complexity_max)` - Model performance by complexity tier
 - `search_similar_outcomes(embedding, threshold, limit)` - Find similar past tasks

@@ -83,8 +83,44 @@ pub struct Config {
     /// Maximum iterations for the agent loop
     pub max_iterations: usize,
     
+    /// Development mode (disables auth; more permissive defaults)
+    pub dev_mode: bool,
+
+    /// API auth configuration (dashboard login)
+    pub auth: AuthConfig,
+
     /// Memory/storage configuration
     pub memory: MemoryConfig,
+}
+
+/// API auth configuration (single-tenant).
+#[derive(Debug, Clone)]
+pub struct AuthConfig {
+    /// Password required by the dashboard to obtain a JWT.
+    pub dashboard_password: Option<String>,
+
+    /// HMAC secret for signing/verifying JWTs.
+    pub jwt_secret: Option<String>,
+
+    /// JWT validity in days.
+    pub jwt_ttl_days: i64,
+}
+
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self {
+            dashboard_password: None,
+            jwt_secret: None,
+            jwt_ttl_days: 30,
+        }
+    }
+}
+
+impl AuthConfig {
+    /// Whether auth is required for API requests.
+    pub fn auth_required(&self, dev_mode: bool) -> bool {
+        !dev_mode && self.dashboard_password.is_some() && self.jwt_secret.is_some()
+    }
 }
 
 impl Config {
@@ -116,6 +152,33 @@ impl Config {
             .unwrap_or_else(|_| "50".to_string())
             .parse()
             .map_err(|e| ConfigError::InvalidValue("MAX_ITERATIONS".to_string(), format!("{}", e)))?;
+
+        let dev_mode = std::env::var("DEV_MODE")
+            .ok()
+            .map(|v| parse_bool(&v).map_err(|e| ConfigError::InvalidValue("DEV_MODE".to_string(), e)))
+            .transpose()?
+            // In debug builds, default to dev_mode=true; in release, default to false.
+            .unwrap_or(cfg!(debug_assertions));
+
+        let auth = AuthConfig {
+            dashboard_password: std::env::var("DASHBOARD_PASSWORD").ok(),
+            jwt_secret: std::env::var("JWT_SECRET").ok(),
+            jwt_ttl_days: std::env::var("JWT_TTL_DAYS")
+                .ok()
+                .map(|v| v.parse::<i64>().map_err(|e| ConfigError::InvalidValue("JWT_TTL_DAYS".to_string(), format!("{}", e))))
+                .transpose()?
+                .unwrap_or(30),
+        };
+
+        // In non-dev mode, require auth secrets to be set.
+        if !dev_mode {
+            if auth.dashboard_password.is_none() {
+                return Err(ConfigError::MissingEnvVar("DASHBOARD_PASSWORD".to_string()));
+            }
+            if auth.jwt_secret.is_none() {
+                return Err(ConfigError::MissingEnvVar("JWT_SECRET".to_string()));
+            }
+        }
         
         // Memory configuration (optional)
         let memory = MemoryConfig {
@@ -134,6 +197,8 @@ impl Config {
             host,
             port,
             max_iterations,
+            dev_mode,
+            auth,
             memory,
         })
     }
@@ -151,8 +216,18 @@ impl Config {
             host: "127.0.0.1".to_string(),
             port: 3000,
             max_iterations: 50,
+            dev_mode: true,
+            auth: AuthConfig::default(),
             memory: MemoryConfig::default(),
         }
+    }
+}
+
+fn parse_bool(value: &str) -> Result<bool, String> {
+    match value.trim().to_lowercase().as_str() {
+        "1" | "true" | "t" | "yes" | "y" | "on" => Ok(true),
+        "0" | "false" | "f" | "no" | "n" | "off" => Ok(false),
+        other => Err(format!("expected boolean-like value, got: {}", other)),
     }
 }
 

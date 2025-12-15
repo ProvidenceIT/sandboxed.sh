@@ -16,6 +16,7 @@ use axum::{
 };
 use futures::stream::Stream;
 use serde::Deserialize;
+use axum::middleware;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
@@ -29,6 +30,7 @@ use crate::memory::{self, MemorySystem};
 use crate::tools::ToolRegistry;
 
 use super::types::*;
+use super::auth;
 
 /// Shared application state.
 pub struct AppState {
@@ -58,17 +60,28 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         memory,
     });
 
-    let app = Router::new()
+    let public_routes = Router::new()
         .route("/api/health", get(health))
+        .route("/api/auth/login", post(auth::login));
+
+    let protected_routes = Router::new()
+        .route("/api/stats", get(get_stats))
         .route("/api/task", post(create_task))
         .route("/api/task/:id", get(get_task))
+        .route("/api/task/:id/stop", post(stop_task))
         .route("/api/task/:id/stream", get(stream_task))
+        .route("/api/tasks", get(list_tasks))
         // Memory endpoints
         .route("/api/runs", get(list_runs))
         .route("/api/runs/:id", get(get_run))
         .route("/api/runs/:id/events", get(get_run_events))
         .route("/api/runs/:id/tasks", get(get_run_tasks))
         .route("/api/memory/search", get(search_memory))
+        .layer(middleware::from_fn_with_state(Arc::clone(&state), auth::require_auth));
+
+    let app = Router::new()
+        .merge(public_routes)
+        .merge(protected_routes)
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state);
@@ -83,11 +96,78 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
 }
 
 /// Health check endpoint.
-async fn health() -> Json<HealthResponse> {
+async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
+        dev_mode: state.config.dev_mode,
+        auth_required: state.config.auth.auth_required(state.config.dev_mode),
     })
+}
+
+/// Get system statistics.
+async fn get_stats(
+    State(state): State<Arc<AppState>>,
+) -> Json<StatsResponse> {
+    let tasks = state.tasks.read().await;
+    
+    let total_tasks = tasks.len();
+    let active_tasks = tasks.values().filter(|t| t.status == TaskStatus::Running).count();
+    let completed_tasks = tasks.values().filter(|t| t.status == TaskStatus::Completed).count();
+    let failed_tasks = tasks.values().filter(|t| t.status == TaskStatus::Failed).count();
+    
+    // Calculate total cost (would need to track this properly in production)
+    let total_cost_cents = 0u64; // TODO: Track actual costs
+    
+    let finished = completed_tasks + failed_tasks;
+    let success_rate = if finished > 0 {
+        completed_tasks as f64 / finished as f64
+    } else {
+        1.0
+    };
+    
+    Json(StatsResponse {
+        total_tasks,
+        active_tasks,
+        completed_tasks,
+        failed_tasks,
+        total_cost_cents,
+        success_rate,
+    })
+}
+
+/// List all tasks.
+async fn list_tasks(
+    State(state): State<Arc<AppState>>,
+) -> Json<Vec<TaskState>> {
+    let tasks = state.tasks.read().await;
+    let mut task_list: Vec<_> = tasks.values().cloned().collect();
+    // Sort by most recent first (by ID since UUIDs are time-ordered)
+    task_list.sort_by(|a, b| b.id.cmp(&a.id));
+    Json(task_list)
+}
+
+/// Stop a running task.
+async fn stop_task(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let mut tasks = state.tasks.write().await;
+    
+    if let Some(task) = tasks.get_mut(&id) {
+        if task.status == TaskStatus::Running {
+            task.status = TaskStatus::Cancelled;
+            task.result = Some("Task was cancelled by user".to_string());
+            Ok(Json(serde_json::json!({
+                "success": true,
+                "message": "Task cancelled"
+            })))
+        } else {
+            Err((StatusCode::BAD_REQUEST, format!("Task {} is not running (status: {:?})", id, task.status)))
+        }
+    } else {
+        Err((StatusCode::NOT_FOUND, format!("Task {} not found", id)))
+    }
 }
 
 /// Create a new task.
