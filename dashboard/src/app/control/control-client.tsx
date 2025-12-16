@@ -14,6 +14,7 @@ import {
   createMission,
   setMissionStatus,
   getCurrentMission,
+  getMission,
   uploadFile,
   type ControlRunState,
   type Mission,
@@ -432,6 +433,35 @@ export default function ControlClient() {
     });
   }, []);
 
+  // Refresh mission data (used for catching up when reconnecting)
+  const refreshMission = useCallback(async () => {
+    if (!currentMission) return;
+    try {
+      const mission = await getMission(currentMission.id);
+      setCurrentMission(mission);
+      // Only update items if we have more history than what's currently displayed
+      // This prevents overwriting local state during active streaming
+      const historyItems = missionHistoryToItems(mission);
+      setItems((prev) => {
+        // Count non-streaming items (those from history)
+        const historyCount = prev.filter(
+          (it) => it.id.startsWith('history-')
+        ).length;
+        // If server has more history, update with it
+        if (historyItems.length > historyCount) {
+          // Preserve any streaming items (thinking, tool calls not in history)
+          const streamingItems = prev.filter(
+            (it) => !it.id.startsWith('history-')
+          );
+          return [...historyItems, ...streamingItems];
+        }
+        return prev;
+      });
+    } catch (err) {
+      console.error('Failed to refresh mission:', err);
+    }
+  }, [currentMission, missionHistoryToItems]);
+
   // Load mission from URL param on mount
   useEffect(() => {
     const missionId = searchParams.get('mission');
@@ -461,6 +491,18 @@ export default function ControlClient() {
         });
     }
   }, [searchParams, router, missionHistoryToItems]);
+
+  // Poll for mission updates while running to catch up with missed events
+  useEffect(() => {
+    if (runState === 'idle' || !currentMission) return;
+    
+    // Poll every 3 seconds while mission is running
+    const interval = setInterval(() => {
+      void refreshMission();
+    }, 3000);
+    
+    return () => clearInterval(interval);
+  }, [runState, currentMission, refreshMission]);
 
   // Handle creating a new mission
   const handleNewMission = async () => {
