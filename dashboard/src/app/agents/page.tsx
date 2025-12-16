@@ -1,8 +1,9 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, useRef } from 'react';
+import Link from 'next/link';
 import { cn } from '@/lib/utils';
-import { listTasks, TaskState } from '@/lib/api';
+import { listTasks, listRuns, TaskState, Run } from '@/lib/api';
 import { formatCents } from '@/lib/utils';
 import {
   Bot,
@@ -18,6 +19,7 @@ import {
   Zap,
   GitBranch,
   Target,
+  MessageSquare,
 } from 'lucide-react';
 
 // Mock agent tree structure (in production, this would come from the API)
@@ -184,6 +186,7 @@ function AgentTreeNode({
 
 export default function AgentsPage() {
   const [tasks, setTasks] = useState<TaskState[]>([]);
+  const [runs, setRuns] = useState<Run[]>([]);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const selectedTask = useMemo(
     () => tasks.find((t) => t.id === selectedTaskId) ?? null,
@@ -191,26 +194,34 @@ export default function AgentsPage() {
   );
   const [selectedAgent, setSelectedAgent] = useState<AgentNode | null>(null);
   const [loading, setLoading] = useState(true);
+  const fetchedRef = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
     let seq = 0;
 
-    const fetchTasks = async () => {
+    const fetchData = async () => {
       const mySeq = ++seq;
       try {
-        const data = await listTasks();
+        const [tasksData, runsData] = await Promise.all([
+          listTasks().catch(() => []),
+          !fetchedRef.current ? listRuns().catch(() => ({ runs: [] })) : Promise.resolve({ runs }),
+        ]);
         if (cancelled || mySeq !== seq) return;
-
-        setTasks(data);
+        
+        fetchedRef.current = true;
+        setTasks(tasksData);
+        if ('runs' in runsData) {
+          setRuns(runsData.runs || []);
+        }
         setSelectedTaskId((prev) => {
-          if (data.length === 0) return null;
-          if (!prev) return data[0]!.id;
-          const stillExists = data.some((t) => t.id === prev);
-          return stillExists ? prev : data[0]!.id;
+          if (tasksData.length === 0) return null;
+          if (!prev) return tasksData[0]!.id;
+          const stillExists = tasksData.some((t) => t.id === prev);
+          return stillExists ? prev : tasksData[0]!.id;
         });
       } catch (error) {
-        console.error('Failed to fetch tasks:', error);
+        console.error('Failed to fetch data:', error);
       } finally {
         if (!cancelled && mySeq === seq) {
           setLoading(false);
@@ -218,14 +229,14 @@ export default function AgentsPage() {
       }
     };
 
-    fetchTasks();
-    const interval = setInterval(fetchTasks, 3000);
+    fetchData();
+    const interval = setInterval(fetchData, 3000);
     return () => {
       cancelled = true;
       seq += 1; // invalidate any in-flight request
       clearInterval(interval);
     };
-  }, []);
+  }, [runs]);
 
   // Mock agent tree for the selected task
   const mockAgentTree: AgentNode | null = selectedTask
@@ -350,6 +361,32 @@ export default function AgentsPage() {
               onSelect={setSelectedAgent}
               selectedId={selectedAgent?.id || null}
             />
+          </div>
+        ) : tasks.length === 0 ? (
+          <div className="flex items-center justify-center py-12">
+            <div className="text-center">
+              <MessageSquare className="mx-auto h-12 w-12 text-[var(--foreground-muted)]" />
+              <p className="mt-4 text-[var(--foreground)]">No active tasks</p>
+              <p className="mt-2 text-sm text-[var(--foreground-muted)]">
+                Start a conversation in the{' '}
+                <Link href="/control" className="text-[var(--accent)] hover:underline">
+                  Control
+                </Link>{' '}
+                page to interact with the agent.
+              </p>
+              <p className="mt-1 text-xs text-[var(--foreground-muted)]">
+                Note: Control conversations show here only while running via the task API.
+              </p>
+              {runs.length > 0 && (
+                <p className="mt-3 text-sm text-[var(--foreground-muted)]">
+                  You have {runs.length} archived runs in{' '}
+                  <Link href="/history" className="text-[var(--accent)] hover:underline">
+                    History
+                  </Link>
+                  .
+                </p>
+              )}
+            </div>
           </div>
         ) : (
           <div className="flex items-center justify-center py-12">

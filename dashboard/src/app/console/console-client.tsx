@@ -136,87 +136,38 @@ function TerminalTab({ tabId, isActive }: { tabId: string; isActive: boolean }) 
   const termRef = useRef<XTerm | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  // Monotonically increasing counter to ignore stale websocket events.
+  const wsSeqRef = useRef(0);
   const mountedRef = useRef(true);
-  const initAttemptedRef = useRef(false);
+  const terminalInitializedRef = useRef(false);
   const [wsStatus, setWsStatus] = useState<
     "disconnected" | "connecting" | "connected" | "error"
   >("disconnected");
 
-  // Initialize terminal and WebSocket
-  useEffect(() => {
-    // Track mount state for async operations
-    mountedRef.current = true;
+  // Helper to create WebSocket connection
+  const connectWebSocket = useCallback((term: XTerm, fit: FitAddon, isReconnect = false) => {
+    // Invalidate any in-flight websocket callbacks.
+    wsSeqRef.current += 1;
+    const seq = wsSeqRef.current;
+
+    // Close existing WebSocket if any (and detach handlers so it can't write stale output)
+    const prev = wsRef.current;
+    if (prev) {
+      try {
+        prev.onopen = null;
+        prev.onmessage = null;
+        prev.onerror = null;
+        prev.onclose = null;
+      } catch {
+        /* ignore */
+      }
+      try {
+        prev.close();
+      } catch {
+        /* ignore */
+      }
+    }
     
-    // Only init once per tab instance, and only when active
-    if (!isActive || initAttemptedRef.current) return;
-    initAttemptedRef.current = true;
-
-    const container = termElRef.current;
-    if (!container) return;
-
-    // Create terminal
-    const term = new XTerm({
-      fontFamily:
-        'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
-      fontSize: 13,
-      lineHeight: 1.25,
-      cursorBlink: true,
-      convertEol: true,
-      allowProposedApi: true,
-      theme: {
-        background: "transparent",
-      },
-    });
-    const fit = new FitAddon();
-    term.loadAddon(fit);
-
-    termRef.current = term;
-    fitRef.current = fit;
-
-    // Defer opening to next frame to ensure container has dimensions
-    const openFrame = requestAnimationFrame(() => {
-      if (!mountedRef.current) return;
-      try {
-        term.open(container);
-        // Another frame for fit after open
-        requestAnimationFrame(() => {
-          if (!mountedRef.current) return;
-          try {
-            fit.fit();
-          } catch {
-            // Ignore fit errors
-          }
-        });
-      } catch {
-        // Ignore open errors
-      }
-    });
-
-    // Resize handler
-    const onResize = () => {
-      if (!mountedRef.current) return;
-      try {
-        fit.fit();
-        const ws = wsRef.current;
-        if (ws?.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ t: "r", c: term.cols, r: term.rows }));
-        }
-      } catch {
-        // Ignore
-      }
-    };
-    window.addEventListener("resize", onResize);
-
-    // Forward terminal input to WebSocket
-    const onDataDisposable = term.onData((d) => {
-      const ws = wsRef.current;
-      if (ws?.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ t: "i", d }));
-      }
-    });
-
-    // Connect WebSocket
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     setWsStatus("connecting");
     const jwt = getValidJwt()?.token ?? null;
     const proto = jwt
@@ -225,88 +176,169 @@ function TerminalTab({ tabId, isActive }: { tabId: string; isActive: boolean }) 
     const API_BASE = getRuntimeApiBase();
     const u = new URL(`${API_BASE}/api/console/ws`);
     u.protocol = u.protocol === "https:" ? "wss:" : "ws:";
+    
+    term.writeln(`\x1b[90mConnecting to ${u.host}...\x1b[0m`);
+    
+    let didOpen = false;
     const ws = new WebSocket(u.toString(), proto);
     wsRef.current = ws;
 
     ws.onopen = () => {
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || wsSeqRef.current !== seq) return;
+      didOpen = true;
       setWsStatus("connected");
-      term.writeln("\x1b[1;34mConnected.\x1b[0m");
+      term.writeln(isReconnect ? "\x1b[1;32mReconnected.\x1b[0m" : "\x1b[1;32mConnected.\x1b[0m");
       // Fit and send dimensions after connection
       setTimeout(() => {
-        if (!mountedRef.current) return;
+        if (!mountedRef.current || wsSeqRef.current !== seq) return;
         try {
           fit.fit();
-          ws.send(JSON.stringify({ t: "r", c: term.cols, r: term.rows }));
-        } catch {
-          // Ignore
-        }
-      }, 50);
-    };
-    ws.onmessage = (evt) => {
-      if (!mountedRef.current) return;
-      term.write(typeof evt.data === "string" ? evt.data : "");
-    };
-    ws.onerror = () => {
-      if (mountedRef.current) setWsStatus("error");
-    };
-    ws.onclose = () => {
-      if (mountedRef.current) setWsStatus("disconnected");
-    };
-
-    // Cleanup on unmount
-    return () => {
-      mountedRef.current = false;
-      cancelAnimationFrame(openFrame);
-      window.removeEventListener("resize", onResize);
-      try { onDataDisposable.dispose(); } catch { /* ignore */ }
-      try { ws.close(); } catch { /* ignore */ }
-      try { term.dispose(); } catch { /* ignore */ }
-      wsRef.current = null;
-      termRef.current = null;
-      fitRef.current = null;
-    };
-  }, [isActive]);
-
-  // Reconnect function
-  const reconnect = useCallback(() => {
-    // Close existing
-    try { wsRef.current?.close(); } catch { /* ignore */ }
-    
-    const term = termRef.current;
-    const fit = fitRef.current;
-    if (!term) return;
-
-    setWsStatus("connecting");
-    const jwt = getValidJwt()?.token ?? null;
-    const proto = jwt
-      ? (["openagent", `jwt.${jwt}`] as string[])
-      : (["openagent"] as string[]);
-    const API_BASE = getRuntimeApiBase();
-    const u = new URL(`${API_BASE}/api/console/ws`);
-    u.protocol = u.protocol === "https:" ? "wss:" : "ws:";
-    const ws = new WebSocket(u.toString(), proto);
-    wsRef.current = ws;
-
-    ws.onopen = () => {
-      if (!mountedRef.current) return;
-      setWsStatus("connected");
-      term.writeln("\x1b[1;34mReconnected.\x1b[0m");
-      setTimeout(() => {
-        if (!mountedRef.current) return;
-        try {
-          fit?.fit();
           ws.send(JSON.stringify({ t: "r", c: term.cols, r: term.rows }));
         } catch { /* ignore */ }
       }, 50);
     };
     ws.onmessage = (evt) => {
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || wsSeqRef.current !== seq) return;
       term.write(typeof evt.data === "string" ? evt.data : "");
     };
-    ws.onerror = () => { if (mountedRef.current) setWsStatus("error"); };
-    ws.onclose = () => { if (mountedRef.current) setWsStatus("disconnected"); };
+    ws.onerror = () => {
+      if (mountedRef.current && wsSeqRef.current === seq) {
+        setWsStatus("error");
+        if (!didOpen) {
+          term.writeln("\x1b[1;31mFailed to connect. Server may be offline or blocking WebSocket.\x1b[0m");
+        } else {
+          term.writeln("\x1b[1;31mConnection error.\x1b[0m");
+        }
+      }
+    };
+    ws.onclose = (e) => {
+      if (mountedRef.current && wsSeqRef.current === seq) {
+        setWsStatus("disconnected");
+        // Code 1006 = abnormal closure (connection failed or was terminated)
+        // Code 1000 = normal closure
+        // Code 1001 = going away
+        if (e.code === 1006 && !didOpen) {
+          term.writeln("\x1b[1;33mConnection failed (code: 1006).\x1b[0m");
+          term.writeln("\x1b[90mPossible causes:\x1b[0m");
+          term.writeln("\x1b[90m  - SSH console not configured on server\x1b[0m");
+          term.writeln("\x1b[90m  - Backend not running or unreachable\x1b[0m");
+          term.writeln("\x1b[90m  - Authentication failed\x1b[0m");
+        } else if (e.code !== 1000) {
+          term.writeln(`\x1b[1;33mDisconnected (code: ${e.code}).\x1b[0m`);
+        }
+      }
+    };
+    
+    return ws;
   }, []);
+
+  // Initialize terminal (only once per tab instance)
+  useEffect(() => {
+    mountedRef.current = true;
+    
+    // Only init terminal structure once, but connect when active
+    if (!isActive) return;
+    
+    const container = termElRef.current;
+    if (!container) return;
+
+    // Create terminal if not already created
+    if (!terminalInitializedRef.current) {
+      terminalInitializedRef.current = true;
+      
+      const term = new XTerm({
+        fontFamily:
+          '"JetBrainsMono Nerd Font Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
+        fontSize: 13,
+        lineHeight: 1.25,
+        cursorBlink: true,
+        convertEol: true,
+        allowProposedApi: true,
+        theme: {
+          background: "transparent",
+        },
+      });
+      const fit = new FitAddon();
+      term.loadAddon(fit);
+
+      termRef.current = term;
+      fitRef.current = fit;
+
+      // Defer opening to next frame to ensure container has dimensions
+      requestAnimationFrame(() => {
+        if (!mountedRef.current) return;
+        try {
+          term.open(container);
+          requestAnimationFrame(() => {
+            if (!mountedRef.current) return;
+            try {
+              fit.fit();
+            } catch { /* Ignore fit errors */ }
+            // Connect WebSocket after terminal is ready
+            connectWebSocket(term, fit, false);
+          });
+        } catch { /* Ignore open errors */ }
+      });
+
+      // Resize handler
+      const onResize = () => {
+        if (!mountedRef.current) return;
+        try {
+          fit.fit();
+          const ws = wsRef.current;
+          if (ws?.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ t: "r", c: term.cols, r: term.rows }));
+          }
+        } catch { /* Ignore */ }
+      };
+      window.addEventListener("resize", onResize);
+
+      // Forward terminal input to WebSocket
+      const onDataDisposable = term.onData((d) => {
+        const ws = wsRef.current;
+        if (ws?.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ t: "i", d }));
+        }
+      });
+
+      // Cleanup on unmount
+      return () => {
+        mountedRef.current = false;
+        // Invalidate websocket callbacks for this terminal instance.
+        wsSeqRef.current += 1;
+        window.removeEventListener("resize", onResize);
+        try { onDataDisposable.dispose(); } catch { /* ignore */ }
+        const ws = wsRef.current;
+        if (ws) {
+          try {
+            ws.onopen = null;
+            ws.onmessage = null;
+            ws.onerror = null;
+            ws.onclose = null;
+          } catch {
+            /* ignore */
+          }
+        }
+        try { ws?.close(); } catch { /* ignore */ }
+        try { term.dispose(); } catch { /* ignore */ }
+        wsRef.current = null;
+        termRef.current = null;
+        fitRef.current = null;
+        terminalInitializedRef.current = false;
+      };
+    }
+  }, [isActive, connectWebSocket]);
+
+  // Reconnect function
+  const reconnect = useCallback(() => {
+    const term = termRef.current;
+    const fit = fitRef.current;
+    if (!term || !fit) {
+      // Terminal not ready yet, nothing to reconnect
+      return;
+    }
+    connectWebSocket(term, fit, true);
+  }, [connectWebSocket]);
 
   // Fit terminal when tab becomes active
   useEffect(() => {
@@ -352,7 +384,7 @@ function TerminalTab({ tabId, isActive }: { tabId: string; isActive: boolean }) 
         </button>
       </div>
       <div
-        className="flex-1 min-h-0 rounded-md border border-[var(--border)] bg-[var(--background)]/40 overflow-hidden"
+        className="flex-1 min-h-0 rounded-md border border-[var(--border)] bg-[var(--background)] overflow-hidden"
         ref={termElRef}
       />
     </div>
@@ -370,6 +402,9 @@ function FilesTab({ isActive }: { tabId: string; isActive: boolean }) {
     done: number;
     total: number;
   } | null>(null);
+  // Track the last loaded directory to avoid unnecessary reloads
+  const lastLoadedDirRef = useRef<string | null>(null);
+  const hasEverLoadedRef = useRef(false);
 
   const sortedEntries = useMemo(() => {
     const dirs = entries
@@ -381,13 +416,20 @@ function FilesTab({ isActive }: { tabId: string; isActive: boolean }) {
     return [...dirs, ...files];
   }, [entries]);
 
-  const refreshDir = useCallback(async (path: string) => {
+  const refreshDir = useCallback(async (path: string, force = false) => {
+    // Skip if we already loaded this directory (unless forced)
+    if (!force && lastLoadedDirRef.current === path && hasEverLoadedRef.current) {
+      return;
+    }
+    
     setFsLoading(true);
     setFsError(null);
     try {
       const data = await listDir(path);
       setEntries(data);
       setSelected(null);
+      lastLoadedDirRef.current = path;
+      hasEverLoadedRef.current = true;
     } catch (e) {
       setFsError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -395,12 +437,20 @@ function FilesTab({ isActive }: { tabId: string; isActive: boolean }) {
     }
   }, []);
 
+  // Load directory when cwd changes or when becoming active for the first time
   useEffect(() => {
     if (isActive) {
-      void refreshDir(cwd);
+      // Only reload if directory changed or never loaded
+      void refreshDir(cwd, false);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cwd, isActive]);
+  }, [cwd, isActive, refreshDir]);
+  
+  // Force reload when cwd changes (user navigated)
+  useEffect(() => {
+    if (isActive && lastLoadedDirRef.current !== cwd) {
+      void refreshDir(cwd, true);
+    }
+  }, [cwd, isActive, refreshDir]);
 
   return (
     <div
@@ -413,7 +463,7 @@ function FilesTab({ isActive }: { tabId: string; isActive: boolean }) {
         <div className="flex items-center gap-2">
           <button
             className="rounded-md border border-[var(--border)] bg-[var(--background-tertiary)] px-2 py-1 text-xs text-[var(--foreground)] hover:bg-[var(--background-tertiary)]/70"
-            onClick={() => void refreshDir(cwd)}
+            onClick={() => void refreshDir(cwd, true)}
           >
             Refresh
           </button>
@@ -426,7 +476,7 @@ function FilesTab({ isActive }: { tabId: string; isActive: boolean }) {
                 ? `${cwd}${name}`
                 : `${cwd}/${name}`;
               await mkdir(target);
-              await refreshDir(cwd);
+              await refreshDir(cwd, true);
             }}
           >
             New folder
@@ -632,7 +682,7 @@ export default function ConsoleClient() {
   };
 
   return (
-    <div className="flex min-h-screen flex-col p-8">
+    <div className="flex min-h-screen flex-col px-8 pt-8 pb-0">
       <div className="mb-6 flex items-start justify-between gap-6">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight text-[var(--foreground)]">

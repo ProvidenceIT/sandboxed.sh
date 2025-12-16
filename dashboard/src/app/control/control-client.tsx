@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
+import Markdown from 'react-markdown';
 import { cn } from '@/lib/utils';
 import {
   cancelControl,
@@ -26,6 +27,10 @@ import {
   parseSerializableOptionList,
   type OptionListSelection,
 } from '@/components/tool-ui/option-list';
+import {
+  DataTable,
+  parseSerializableDataTable,
+} from '@/components/tool-ui/data-table';
 
 type ChatItem =
   | {
@@ -282,6 +287,10 @@ export default function ControlClient() {
                 if (item.kind === 'assistant') {
                   const statusIcon = item.success ? CheckCircle : XCircle;
                   const StatusIcon = statusIcon;
+                  // Truncate long model names (e.g., "tngtech/tng-r1t-chimera:free" -> "tng-r1t-chimera:free")
+                  const displayModel = item.model 
+                    ? (item.model.includes('/') ? item.model.split('/').pop() : item.model)
+                    : null;
                   return (
                     <div key={item.id} className="flex justify-start gap-4">
                       <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-[var(--accent)] to-[var(--accent-secondary)]">
@@ -296,14 +305,22 @@ export default function ControlClient() {
                             )}
                           />
                           <span>{item.success ? 'Completed' : 'Failed'}</span>
-                          {item.model && (
+                          {displayModel && (
                             <>
                               <span>•</span>
-                              <span className="font-mono">{item.model}</span>
+                              <span className="font-mono truncate max-w-[150px]" title={item.model ?? undefined}>{displayModel}</span>
+                            </>
+                          )}
+                          {item.costCents > 0 && (
+                            <>
+                              <span>•</span>
+                              <span className="text-[var(--success)]">${(item.costCents / 100).toFixed(4)}</span>
                             </>
                           )}
                         </div>
-                        <p className="whitespace-pre-wrap text-sm">{item.content}</p>
+                        <div className="prose prose-sm prose-invert max-w-none text-sm [&_p]:my-2 [&_a]:text-[var(--accent)] [&_a]:underline [&_strong]:text-[var(--foreground)] [&_code]:bg-[var(--background-tertiary)] [&_code]:px-1 [&_code]:py-0.5 [&_code]:rounded">
+                          <Markdown>{item.content}</Markdown>
+                        </div>
                       </div>
                     </div>
                   );
@@ -381,6 +398,36 @@ export default function ControlClient() {
                                 }}
                               />
                             </OptionListErrorBoundary>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  }
+
+                  if (item.name === 'ui_dataTable') {
+                    const rawArgs: Record<string, unknown> = isRecord(item.args) ? item.args : {};
+                    const dataTable = parseSerializableDataTable(rawArgs);
+
+                    return (
+                      <div key={item.id} className="flex justify-start gap-4">
+                        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-[var(--accent)] to-[var(--accent-secondary)]">
+                          <Bot className="h-4 w-4 text-white" />
+                        </div>
+                        <div className="max-w-[90%] rounded-lg bg-[var(--background-secondary)] px-4 py-3 text-[var(--foreground)]">
+                          <div className="mb-2 text-xs text-[var(--foreground-muted)]">
+                            Tool UI: <span className="font-mono">{item.name}</span>
+                          </div>
+                          {dataTable ? (
+                            <DataTable
+                              id={dataTable.id}
+                              title={dataTable.title}
+                              columns={dataTable.columns}
+                              rows={dataTable.rows}
+                            />
+                          ) : (
+                            <div className="rounded-lg border border-[var(--border)] bg-[var(--background-tertiary)] p-3 text-sm text-[var(--error)]">
+                              Failed to render DataTable
+                            </div>
                           )}
                         </div>
                       </div>

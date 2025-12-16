@@ -1,5 +1,26 @@
 @import "tailwindcss";
 
+/* Terminal font (JetBrainsMono Nerd Font Mono) */
+@font-face {
+  font-family: "JetBrainsMono Nerd Font Mono";
+  src:
+    url("/fonts/jetbrainsmono-nerd-font/JetBrainsMonoNerdFontMono-Regular.ttf")
+      format("truetype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "JetBrainsMono Nerd Font Mono";
+  src:
+    url("/fonts/jetbrainsmono-nerd-font/JetBrainsMonoNerdFontMono-Bold.ttf")
+      format("truetype");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
 :root {
   --background: #0d0d12;
   --background-secondary: #15151d;
@@ -158,4 +179,11 @@ body {
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
+}
+
+/* XTerm: eliminate leftover pixel gap at bottom */
+.xterm,
+.xterm .xterm-screen,
+.xterm .xterm-viewport {
+  height: 100%;
 }

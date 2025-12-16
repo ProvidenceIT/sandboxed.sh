@@ -1,9 +1,9 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import Link from 'next/link';
 import { cn } from '@/lib/utils';
-import { listTasks, TaskState } from '@/lib/api';
+import { listTasks, listRuns, TaskState, Run } from '@/lib/api';
 import {
   CheckCircle,
   XCircle,
@@ -13,6 +13,7 @@ import {
   ArrowRight,
   Search,
   Filter,
+  MessageSquare,
 } from 'lucide-react';
 
 const statusIcons = {
@@ -33,15 +34,25 @@ const statusColors = {
 
 export default function HistoryPage() {
   const [tasks, setTasks] = useState<TaskState[]>([]);
+  const [runs, setRuns] = useState<Run[]>([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<string>('all');
   const [search, setSearch] = useState('');
+  const fetchedRef = useRef(false);
 
   useEffect(() => {
+    // Prevent double-fetch in React strict mode
+    if (fetchedRef.current) return;
+    fetchedRef.current = true;
+    
     const fetchData = async () => {
       try {
-        const tasksData = await listTasks();
+        const [tasksData, runsData] = await Promise.all([
+          listTasks().catch(() => []),
+          listRuns().catch(() => ({ runs: [] })),
+        ]);
         setTasks(tasksData);
+        setRuns(runsData.runs || []);
       } catch (error) {
         console.error('Failed to fetch data:', error);
       } finally {
@@ -57,6 +68,14 @@ export default function HistoryPage() {
     if (search && !task.task.toLowerCase().includes(search.toLowerCase())) return false;
     return true;
   });
+
+  const filteredRuns = runs.filter((run) => {
+    if (filter !== 'all' && run.status !== filter) return false;
+    if (search && !run.input_text.toLowerCase().includes(search.toLowerCase())) return false;
+    return true;
+  });
+
+  const hasData = filteredTasks.length > 0 || filteredRuns.length > 0;
 
   return (
     <div className="p-8">
@@ -105,80 +124,170 @@ export default function HistoryPage() {
         <div className="flex items-center justify-center py-12">
           <Loader className="h-8 w-8 animate-spin text-[var(--accent)]" />
         </div>
-      ) : filteredTasks.length === 0 ? (
+      ) : !hasData ? (
         <div className="panel rounded-lg p-12 text-center">
-          <p className="text-[var(--foreground-muted)]">No tasks found</p>
+          <MessageSquare className="mx-auto h-12 w-12 text-[var(--foreground-muted)]" />
+          <p className="mt-4 text-[var(--foreground)]">No history yet</p>
+          <p className="mt-2 text-sm text-[var(--foreground-muted)]">
+            Start a conversation in the{' '}
+            <Link href="/control" className="text-[var(--accent)] hover:underline">
+              Control
+            </Link>{' '}
+            page to interact with the agent.
+          </p>
+          <p className="mt-1 text-xs text-[var(--foreground-muted)]">
+            Note: Control conversations are not persisted here. Create tasks via the API to see them in history.
+          </p>
         </div>
       ) : (
-        <div className="panel rounded-lg overflow-hidden">
-          <table className="w-full">
-            <thead>
-              <tr className="border-b border-[var(--border)]">
-                <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-[var(--foreground-muted)]">
-                  Status
-                </th>
-                <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-[var(--foreground-muted)]">
-                  Task
-                </th>
-                <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-[var(--foreground-muted)]">
-                  Model
-                </th>
-                <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-[var(--foreground-muted)]">
-                  Iterations
-                </th>
-                <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-[var(--foreground-muted)]">
-                  Actions
-                </th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-[var(--border)]">
-              {filteredTasks.map((task) => {
-                const Icon = statusIcons[task.status];
-                return (
-                  <tr
-                    key={task.id}
-                    className="hover:bg-[var(--background-tertiary)] transition-colors"
-                  >
-                    <td className="px-4 py-4">
-                      <span
-                        className={cn(
-                          'inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium',
-                          statusColors[task.status]
-                        )}
-                      >
-                        <Icon
-                          className={cn(
-                            'h-3 w-3',
-                            task.status === 'running' && 'animate-spin'
-                          )}
-                        />
-                        {task.status}
-                      </span>
-                    </td>
-                    <td className="px-4 py-4">
-                      <p className="max-w-md truncate text-sm text-[var(--foreground)]">
-                        {task.task}
-                      </p>
-                    </td>
-                    <td className="px-4 py-4">
-                      <span className="text-sm text-[var(--foreground-muted)]">{task.model}</span>
-                    </td>
-                    <td className="px-4 py-4">
-                      <span className="text-sm text-[var(--foreground)]">{task.iterations}</span>
-                    </td>
-                    <td className="px-4 py-4">
-                      <Link
-                        href={`/control?task=${task.id}`}
-                        className="inline-flex items-center gap-1 text-sm text-[var(--accent)] hover:underline"
-                      >
-                        View <ArrowRight className="h-3 w-3" />
-                      </Link>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+        <div className="space-y-6">
+          {/* Active Tasks (in-memory) */}
+          {filteredTasks.length > 0 && (
+            <div>
+              <h2 className="mb-3 text-sm font-medium text-[var(--foreground-muted)]">
+                Active Tasks ({filteredTasks.length})
+              </h2>
+              <div className="panel rounded-lg overflow-hidden">
+                <table className="w-full">
+                  <thead>
+                    <tr className="border-b border-[var(--border)]">
+                      <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-[var(--foreground-muted)]">
+                        Status
+                      </th>
+                      <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-[var(--foreground-muted)]">
+                        Task
+                      </th>
+                      <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-[var(--foreground-muted)]">
+                        Model
+                      </th>
+                      <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-[var(--foreground-muted)]">
+                        Iterations
+                      </th>
+                      <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-[var(--foreground-muted)]">
+                        Actions
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[var(--border)]">
+                    {filteredTasks.map((task) => {
+                      const Icon = statusIcons[task.status];
+                      return (
+                        <tr
+                          key={task.id}
+                          className="hover:bg-[var(--background-tertiary)] transition-colors"
+                        >
+                          <td className="px-4 py-4">
+                            <span
+                              className={cn(
+                                'inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium',
+                                statusColors[task.status]
+                              )}
+                            >
+                              <Icon
+                                className={cn(
+                                  'h-3 w-3',
+                                  task.status === 'running' && 'animate-spin'
+                                )}
+                              />
+                              {task.status}
+                            </span>
+                          </td>
+                          <td className="px-4 py-4">
+                            <p className="max-w-md truncate text-sm text-[var(--foreground)]">
+                              {task.task}
+                            </p>
+                          </td>
+                          <td className="px-4 py-4">
+                            <span className="text-sm text-[var(--foreground-muted)]">{task.model}</span>
+                          </td>
+                          <td className="px-4 py-4">
+                            <span className="text-sm text-[var(--foreground)]">{task.iterations}</span>
+                          </td>
+                          <td className="px-4 py-4">
+                            <Link
+                              href={`/control?task=${task.id}`}
+                              className="inline-flex items-center gap-1 text-sm text-[var(--accent)] hover:underline"
+                            >
+                              View <ArrowRight className="h-3 w-3" />
+                            </Link>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* Archived Runs (from memory/Supabase) */}
+          {filteredRuns.length > 0 && (
+            <div>
+              <h2 className="mb-3 text-sm font-medium text-[var(--foreground-muted)]">
+                Archived Runs ({filteredRuns.length})
+              </h2>
+              <div className="panel rounded-lg overflow-hidden">
+                <table className="w-full">
+                  <thead>
+                    <tr className="border-b border-[var(--border)]">
+                      <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-[var(--foreground-muted)]">
+                        Status
+                      </th>
+                      <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-[var(--foreground-muted)]">
+                        Input
+                      </th>
+                      <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-[var(--foreground-muted)]">
+                        Created
+                      </th>
+                      <th className="px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-[var(--foreground-muted)]">
+                        Cost
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[var(--border)]">
+                    {filteredRuns.map((run) => {
+                      const status = run.status as keyof typeof statusIcons;
+                      const Icon = statusIcons[status] || Clock;
+                      const colorClass = statusColors[status] || statusColors.pending;
+                      return (
+                        <tr
+                          key={run.id}
+                          className="hover:bg-[var(--background-tertiary)] transition-colors"
+                        >
+                          <td className="px-4 py-4">
+                            <span
+                              className={cn(
+                                'inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium',
+                                colorClass
+                              )}
+                            >
+                              <Icon className="h-3 w-3" />
+                              {run.status}
+                            </span>
+                          </td>
+                          <td className="px-4 py-4">
+                            <p className="max-w-md truncate text-sm text-[var(--foreground)]">
+                              {run.input_text}
+                            </p>
+                          </td>
+                          <td className="px-4 py-4">
+                            <span className="text-sm text-[var(--foreground-muted)]">
+                              {new Date(run.created_at).toLocaleString()}
+                            </span>
+                          </td>
+                          <td className="px-4 py-4">
+                            <span className="text-sm text-[var(--foreground)]">
+                              ${(run.total_cost_cents / 100).toFixed(2)}
+                            </span>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>
