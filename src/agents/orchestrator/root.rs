@@ -330,9 +330,13 @@ impl Agent for RootAgent {
         }
 
         // Simple task or failed to split: execute directly
-        // Step 2b: Select model (U-curve) for direct execution.
-        let sel = self.model_selector.execute(task, ctx).await;
-        total_cost += sel.cost_cents;
+        // Always use the configured default model for now
+        // The U-curve model selector was picking weak models like gpt-4o-mini
+        // that don't handle complex tasks well
+        {
+            let a = task.analysis_mut();
+            a.selected_model = Some(ctx.config.default_model.clone());
+        }
 
         let result = self.task_executor.execute(task, ctx).await;
 
