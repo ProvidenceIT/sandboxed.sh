@@ -4,6 +4,10 @@
 //! - Complexity score (0-1)
 //! - Whether to split into subtasks
 //! - Estimated token count
+//!
+//! ## Learning Integration
+//! When memory is available, the estimator queries similar past tasks
+//! and adjusts predictions based on historical actual token usage.
 
 use async_trait::async_trait;
 use serde_json::json;
@@ -12,6 +16,7 @@ use crate::agents::{
     Agent, AgentContext, AgentId, AgentResult, AgentType, Complexity, LeafAgent, LeafCapability,
 };
 use crate::llm::{ChatMessage, ChatOptions, Role};
+use crate::memory::HistoricalContext;
 use crate::task::Task;
 
 /// Agent that estimates task complexity.
@@ -176,6 +181,61 @@ Rubric for score:
 
         None
     }
+
+    /// Query historical context for similar tasks.
+    /// 
+    /// Returns adjustment multipliers based on past actual vs predicted values.
+    async fn get_historical_adjustments(
+        &self,
+        task_description: &str,
+        ctx: &AgentContext,
+    ) -> Option<HistoricalContext> {
+        let memory = ctx.memory.as_ref()?;
+        
+        match memory.retriever.get_historical_context(task_description, 5).await {
+            Ok(context) => {
+                if let Some(ref hist) = context {
+                    tracing::debug!(
+                        "Historical context found: {} similar tasks, avg token ratio: {:.2}, success rate: {:.2}",
+                        hist.similar_outcomes.len(),
+                        hist.avg_token_multiplier,
+                        hist.similar_success_rate
+                    );
+                }
+                context
+            }
+            Err(e) => {
+                tracing::warn!("Failed to fetch historical context: {}", e);
+                None
+            }
+        }
+    }
+
+    /// Adjust token estimate based on historical data.
+    /// 
+    /// If similar past tasks consistently used more/fewer tokens than predicted,
+    /// we adjust our estimate accordingly.
+    fn apply_historical_adjustment(
+        &self,
+        base_tokens: u64,
+        historical: Option<&HistoricalContext>,
+    ) -> u64 {
+        match historical {
+            Some(hist) if hist.similar_outcomes.len() >= 2 => {
+                // Apply the historical token multiplier (clamped to reasonable range)
+                let multiplier = hist.avg_token_multiplier.clamp(0.5, 3.0);
+                let adjusted = (base_tokens as f64 * multiplier).round() as u64;
+                
+                tracing::debug!(
+                    "Adjusted token estimate: {} -> {} (multiplier: {:.2})",
+                    base_tokens, adjusted, multiplier
+                );
+                
+                adjusted
+            }
+            _ => base_tokens,
+        }
+    }
 }
 
 impl Default for ComplexityEstimator {
@@ -202,7 +262,14 @@ impl Agent for ComplexityEstimator {
     /// 
     /// # Returns
     /// AgentResult with Complexity data in the `data` field.
+    /// 
+    /// # Learning Integration
+    /// When memory is available, queries similar past tasks to adjust predictions
+    /// based on actual historical token usage.
     async fn execute(&self, task: &mut Task, ctx: &AgentContext) -> AgentResult {
+        // Query historical context for similar tasks (if memory available)
+        let historical = self.get_historical_adjustments(task.description(), ctx).await;
+        
         let prompt = self.build_prompt(task);
         
         let messages = vec![
@@ -240,9 +307,13 @@ impl Agent for ComplexityEstimator {
                 let parsed = self.parse_response(&content);
 
                 // Apply calibrated adjustments (pure post-processing).
-                let adjusted_tokens = ((parsed.estimated_tokens() as f64) * self.token_multiplier)
+                let base_tokens = ((parsed.estimated_tokens() as f64) * self.token_multiplier)
                     .round()
                     .max(1.0) as u64;
+                
+                // Apply historical adjustment if we have relevant data
+                let adjusted_tokens = self.apply_historical_adjustment(base_tokens, historical.as_ref());
+                
                 let should_split = parsed.score() > self.split_threshold;
                 let complexity = Complexity::new(parsed.score(), parsed.reasoning(), adjusted_tokens)
                     .with_split(should_split);
@@ -262,11 +333,20 @@ impl Agent for ComplexityEstimator {
                     _ => 1, // fallback tiny cost
                 };
                 
+                // Build historical info for response data
+                let historical_info = historical.as_ref().map(|h| json!({
+                    "similar_tasks_found": h.similar_outcomes.len(),
+                    "avg_token_multiplier": h.avg_token_multiplier,
+                    "avg_cost_multiplier": h.avg_cost_multiplier,
+                    "similar_success_rate": h.similar_success_rate,
+                }));
+                
                 AgentResult::success(
                     format!(
-                        "Complexity: {:.2} - {}",
+                        "Complexity: {:.2} - {}{}",
                         complexity.score(),
-                        if complexity.should_split() { "Should split" } else { "Execute directly" }
+                        if complexity.should_split() { "Should split" } else { "Execute directly" },
+                        if historical.is_some() { " (adjusted from history)" } else { "" }
                     ),
                     cost_cents,
                 )
@@ -276,6 +356,8 @@ impl Agent for ComplexityEstimator {
                     "reasoning": complexity.reasoning(),
                     "should_split": complexity.should_split(),
                     "estimated_tokens": complexity.estimated_tokens(),
+                    "base_tokens_before_history": base_tokens,
+                    "historical_adjustment": historical_info,
                     "usage": response.usage.as_ref().map(|u| json!({
                         "prompt_tokens": u.prompt_tokens,
                         "completion_tokens": u.completion_tokens,

@@ -8,14 +8,20 @@
 //!
 //! # Cost Model
 //! Expected Cost = base_cost * (1 + failure_rate * retry_multiplier) * token_efficiency
+//!
+//! # Learning Integration
+//! When memory is available, uses historical model statistics (actual success rates,
+//! cost ratios) instead of pure heuristics.
 
 use async_trait::async_trait;
 use serde_json::json;
+use std::collections::HashMap;
 
 use crate::agents::{
     Agent, AgentContext, AgentId, AgentResult, AgentType, LeafAgent, LeafCapability,
 };
 use crate::budget::PricingInfo;
+use crate::memory::ModelStats;
 use crate::task::Task;
 
 /// Agent that selects the optimal model for a task.
@@ -49,6 +55,9 @@ pub struct ModelRecommendation {
     
     /// Alternative models if primary fails
     pub fallbacks: Vec<String>,
+    
+    /// Whether historical data was used for this selection
+    pub used_historical_data: bool,
 }
 
 impl ModelSelector {
@@ -176,15 +185,22 @@ impl ModelSelector {
         complexity: f64,
         estimated_tokens: u64,
         budget_cents: u64,
+        historical_stats: Option<&HashMap<String, ModelStats>>,
     ) -> Option<ModelRecommendation> {
         if models.is_empty() {
             return None;
         }
 
-        // Calculate expected cost for all models
+        // Calculate expected cost for all models, using historical stats when available
         let mut costs: Vec<ExpectedCost> = models
             .iter()
-            .map(|m| self.calculate_expected_cost(m, complexity, estimated_tokens))
+            .map(|m| {
+                if let Some(stats) = historical_stats.and_then(|h| h.get(&m.model_id)) {
+                    self.calculate_expected_cost_with_history(m, complexity, estimated_tokens, stats)
+                } else {
+                    self.calculate_expected_cost(m, complexity, estimated_tokens)
+                }
+            })
             .collect();
 
         // Sort by expected cost (ascending)
@@ -209,19 +225,101 @@ impl ModelSelector {
             .map(|c| c.model_id.clone())
             .collect();
 
+        let used_history = historical_stats.and_then(|h| h.get(&selected.model_id)).is_some();
+
         Some(ModelRecommendation {
             model_id: selected.model_id.clone(),
             expected_cost_cents: selected.expected_cost_cents,
             confidence: 1.0 - selected.failure_probability,
             reasoning: format!(
-                "Selected {} with expected cost {} cents (capability: {:.2}, failure prob: {:.2})",
+                "Selected {} with expected cost {} cents (capability: {:.2}, failure prob: {:.2}){}",
                 selected.model_id,
                 selected.expected_cost_cents,
                 selected.capability,
-                selected.failure_probability
+                selected.failure_probability,
+                if used_history { " [from historical data]" } else { "" }
             ),
             fallbacks,
+            used_historical_data: used_history,
         })
+    }
+
+    /// Calculate expected cost using actual historical statistics.
+    /// 
+    /// This uses real success rates and cost ratios from past executions
+    /// instead of heuristic estimates.
+    fn calculate_expected_cost_with_history(
+        &self,
+        pricing: &PricingInfo,
+        _complexity: f64,
+        estimated_tokens: u64,
+        stats: &ModelStats,
+    ) -> ExpectedCost {
+        // Use actual failure rate from history (inverted success rate)
+        let failure_prob = (1.0 - stats.success_rate).clamp(0.0, self.max_failure_probability);
+        
+        // Use actual token ratio from history for inefficiency
+        let inefficiency = stats.avg_token_ratio.clamp(0.5, 3.0);
+        
+        // Base cost for estimated tokens
+        let input_tokens = estimated_tokens / 2;
+        let output_tokens = estimated_tokens / 2;
+        let base_cost = pricing.calculate_cost_cents(input_tokens, output_tokens);
+        
+        // Adjust for actual inefficiency
+        let adjusted_tokens = ((estimated_tokens as f64) * inefficiency) as u64;
+        let adjusted_cost = pricing.calculate_cost_cents(adjusted_tokens / 2, adjusted_tokens / 2);
+        
+        // Apply actual cost ratio (how much more/less than predicted)
+        let cost_with_ratio = (adjusted_cost as f64) * stats.avg_cost_ratio.clamp(0.5, 3.0);
+        
+        // Expected cost including retry probability
+        let expected_cost = cost_with_ratio * (1.0 + failure_prob * self.retry_multiplier);
+        
+        // Capability estimated from success rate rather than price
+        let capability = stats.success_rate.clamp(0.3, 0.95);
+        
+        ExpectedCost {
+            model_id: pricing.model_id.clone(),
+            base_cost_cents: base_cost,
+            expected_cost_cents: expected_cost.ceil() as u64,
+            failure_probability: failure_prob,
+            capability,
+            inefficiency,
+        }
+    }
+
+    /// Query historical model stats from memory.
+    async fn get_historical_model_stats(
+        &self,
+        complexity: f64,
+        ctx: &AgentContext,
+    ) -> Option<HashMap<String, ModelStats>> {
+        let memory = ctx.memory.as_ref()?;
+        
+        // Query stats for models at similar complexity levels (+/- 0.2)
+        match memory.retriever.get_model_stats(complexity, 0.2).await {
+            Ok(stats) if !stats.is_empty() => {
+                tracing::debug!(
+                    "Found historical stats for {} models at complexity ~{:.2}",
+                    stats.len(),
+                    complexity
+                );
+                
+                // Convert to HashMap for easy lookup
+                Some(stats.into_iter()
+                    .map(|s| (s.model_id.clone(), s))
+                    .collect())
+            }
+            Ok(_) => {
+                tracing::debug!("No historical stats found for complexity ~{:.2}", complexity);
+                None
+            }
+            Err(e) => {
+                tracing::warn!("Failed to fetch model stats: {}", e);
+                None
+            }
+        }
     }
 }
 
@@ -265,6 +363,10 @@ impl Agent for ModelSelector {
     /// 
     /// # Returns
     /// AgentResult with ModelRecommendation in the `data` field.
+    /// 
+    /// # Learning Integration
+    /// When memory is available, queries historical model statistics and uses
+    /// actual success rates/cost ratios instead of heuristics.
     async fn execute(&self, task: &mut Task, ctx: &AgentContext) -> AgentResult {
         // Get complexity + estimated tokens from task analysis (populated by ComplexityEstimator).
         let complexity = task
@@ -276,6 +378,9 @@ impl Agent for ModelSelector {
         
         // Get available budget
         let budget_cents = task.budget().remaining_cents();
+        
+        // Query historical model stats (if memory available)
+        let historical_stats = self.get_historical_model_stats(complexity, ctx).await;
         
         // Fetch pricing for tool-supporting models only
         let models = ctx.pricing.models_by_cost_filtered(true).await;
@@ -300,10 +405,11 @@ impl Agent for ModelSelector {
                 "confidence": 0.8,
                 "reasoning": "Fallback to configured default model",
                 "fallbacks": [],
+                "used_historical_data": false,
             }));
         }
 
-        match self.select_optimal(&models, complexity, estimated_tokens, budget_cents) {
+        match self.select_optimal(&models, complexity, estimated_tokens, budget_cents, historical_stats.as_ref()) {
             Some(rec) => {
                 // Record selection in analysis
                 {
@@ -322,6 +428,8 @@ impl Agent for ModelSelector {
                     "confidence": rec.confidence,
                     "reasoning": rec.reasoning,
                     "fallbacks": rec.fallbacks,
+                    "used_historical_data": rec.used_historical_data,
+                    "historical_stats_available": historical_stats.as_ref().map(|h| h.len()),
                     "inputs": {
                         "complexity": complexity,
                         "estimated_tokens": estimated_tokens,

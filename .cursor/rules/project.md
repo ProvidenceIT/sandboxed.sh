@@ -190,13 +190,22 @@ src/
 - **Postgres (pgvector)**: runs, tasks (hierarchical), events (preview), chunks (embeddings), **task_outcomes**
 - **Supabase Storage**: full event streams (jsonl), large artifacts
 
-## Learning System (v3)
+## Learning System (v3 - Implemented)
 
 ### Purpose
 Enable data-driven optimization of:
 - **Complexity estimation**: learn actual token usage vs predicted
 - **Model selection**: learn actual success rates per model/complexity
 - **Budget allocation**: learn actual costs vs estimated
+
+### Current Implementation Status (as of Dec 2024)
+
+| Component | Learning Integration | Status |
+|-----------|---------------------|--------|
+| ComplexityEstimator | Queries `get_historical_context()` to adjust token estimates | ✅ Implemented |
+| ModelSelector | Queries `get_model_stats()` for actual success rates | ✅ Implemented |
+| TaskExecutor | Auto-discovers `/root/tools/` and injects tool inventory | ✅ Implemented |
+| routes.rs | Records task outcomes via `record_task_outcome()` | ✅ Implemented |
 
 ### Architecture
 ```
@@ -212,22 +221,34 @@ Enable data-driven optimization of:
 │  ┌────────────────┐                └───────────────┬─────────────┘   │
 │  │ Complexity     │◀── historical context ─────────┘                 │
 │  │ Estimator      │    (avg token ratio, avg cost ratio)             │
-│  │ (enhanced)     │                                                  │
+│  │ (learning)     │                                                  │
 │  └────────┬───────┘                                                  │
 │           │                                                          │
 │           ▼                                                          │
 │  ┌────────────────┐   Query: "models at complexity ~0.6"             │
 │  │ Model Selector │   Returns: actual success rates, cost ratios     │
-│  │ (enhanced)     │                                                  │
+│  │ (learning)     │                                                  │
 │  └────────┬───────┘                                                  │
 │           │                                                          │
 │           ▼                                                          │
-│  ┌────────────────┐                                                  │
+│  ┌────────────────┐   Discovers /root/tools/ inventory               │
 │  │ TaskExecutor   │──▶ record_task_outcome() ──▶ task_outcomes      │
+│  │ (tool reuse)   │                                                  │
 │  └────────────────┘                                                  │
 │                                                                       │
 └──────────────────────────────────────────────────────────────────────┘
 ```
+
+### Tool Reuse System
+
+The TaskExecutor automatically discovers reusable tools:
+
+1. **At execution start**: Scans `/root/tools/` (or `{working_dir}/tools`)
+2. **Extracts documentation**: Reads README.md files and lists scripts
+3. **Injects into prompt**: Adds tool inventory to system prompt
+4. **Agent guidance**: Prompts agent to check existing tools before creating new ones
+
+This enables cross-task learning where tools created in one task can be reused in future tasks.
 
 ### Database Schema: `task_outcomes`
 ```sql
@@ -472,12 +493,14 @@ This is intentional - the agent is designed to be a powerful system-wide assista
 
 - [ ] Formal verification in Lean (extract pure logic)
 - [ ] WebSocket for bidirectional streaming
-- [ ] Enhanced ComplexityEstimator with historical context injection
-- [ ] Enhanced ModelSelector with data-driven success rates
+- [x] Enhanced ComplexityEstimator with historical context injection (Dec 2024)
+- [x] Enhanced ModelSelector with data-driven success rates (Dec 2024)
+- [x] Tool reuse system with auto-discovery (Dec 2024)
 - [x] Semantic code search (embeddings-based)
 - [x] Multi-model support (U-curve optimization)
 - [x] Cost tracking (Budget system)
 - [x] Persistent memory (Supabase + pgvector)
 - [x] Learning system (task_outcomes table, historical queries)
 - [x] Smart retry strategy (analyze failure mode → upgrade/downgrade model)
+- [x] Task outcome recording for learning (Dec 2024)
 

@@ -2,9 +2,14 @@
 //!
 //! This is a refactored version of the original agent loop,
 //! now as a leaf agent in the hierarchical tree.
+//!
+//! ## Tool Reuse
+//! The executor automatically discovers and lists reusable tools in `/root/tools/`
+//! at the start of each execution, injecting their documentation into the system prompt.
 
 use async_trait::async_trait;
 use serde_json::json;
+use std::path::Path;
 
 use crate::agents::{
     Agent, AgentContext, AgentId, AgentResult, AgentType, LeafAgent, LeafCapability,
@@ -53,8 +58,112 @@ impl TaskExecutor {
         Self { id: AgentId::new() }
     }
 
+    /// Discover reusable tools in /root/tools/.
+    /// 
+    /// Scans the directory for README.md files and tool scripts,
+    /// building an inventory of available reusable tools.
+    async fn discover_reusable_tools(&self, working_dir: &str) -> String {
+        let tools_dir = if working_dir.starts_with('/') {
+            // Find the root (e.g., /root or the working directory's ancestor)
+            if working_dir.contains("/root") {
+                "/root/tools".to_string()
+            } else {
+                format!("{}/tools", working_dir)
+            }
+        } else {
+            "/root/tools".to_string()
+        };
+
+        let tools_path = Path::new(&tools_dir);
+        if !tools_path.exists() {
+            return String::new();
+        }
+
+        let mut tool_inventory = Vec::new();
+
+        // Try to read the directory
+        if let Ok(entries) = std::fs::read_dir(&tools_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = entry.file_name().to_string_lossy().to_string();
+                
+                // Skip hidden files
+                if name.starts_with('.') {
+                    continue;
+                }
+
+                if path.is_dir() {
+                    // Check for README.md in the tool folder
+                    let readme_path = path.join("README.md");
+                    if readme_path.exists() {
+                        if let Ok(content) = std::fs::read_to_string(&readme_path) {
+                            // Extract first paragraph or first 500 chars as description
+                            let description = content
+                                .lines()
+                                .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+                                .take(3)
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                                .chars()
+                                .take(300)
+                                .collect::<String>();
+                            
+                            tool_inventory.push(format!("- **{}**: {}", name, description));
+                        } else {
+                            tool_inventory.push(format!("- **{}**: (tool folder, check README.md for details)", name));
+                        }
+                    } else {
+                        // List scripts in the folder
+                        let scripts: Vec<_> = std::fs::read_dir(&path)
+                            .ok()
+                            .map(|entries| {
+                                entries
+                                    .flatten()
+                                    .filter(|e| {
+                                        let name = e.file_name().to_string_lossy().to_string();
+                                        name.ends_with(".sh") || name.ends_with(".py") || name.ends_with(".rs")
+                                    })
+                                    .map(|e| e.file_name().to_string_lossy().to_string())
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        
+                        if !scripts.is_empty() {
+                            tool_inventory.push(format!("- **{}**: scripts: {}", name, scripts.join(", ")));
+                        }
+                    }
+                } else if name.ends_with(".sh") || name.ends_with(".py") || name.ends_with(".rs") {
+                    // Standalone script
+                    tool_inventory.push(format!("- **{}**: standalone script", name));
+                }
+            }
+        }
+
+        // Also check for top-level README
+        let main_readme = Path::new(&tools_dir).join("README.md");
+        if main_readme.exists() {
+            if let Ok(content) = std::fs::read_to_string(&main_readme) {
+                // Return the entire tools README as inventory
+                return format!(
+                    "\n## Available Reusable Tools (from /root/tools/)\n\n{}\n\n### Tool Inventory\n{}",
+                    content.chars().take(1000).collect::<String>(),
+                    tool_inventory.join("\n")
+                );
+            }
+        }
+
+        if tool_inventory.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\n## Available Reusable Tools (from /root/tools/)\n\nThese tools have been created in previous runs. Check their documentation before recreating them!\n\n{}\n",
+                tool_inventory.join("\n")
+            )
+        }
+    }
+
     /// Build the system prompt for task execution.
-    fn build_system_prompt(&self, working_dir: &str, tools: &ToolRegistry) -> String {
+    fn build_system_prompt(&self, working_dir: &str, tools: &ToolRegistry, reusable_tools: &str) -> String {
         let tool_descriptions = tools
             .list_tools()
             .iter()
@@ -91,13 +200,14 @@ Run `ls -la /root/context/` to see what's available before doing anything else.
 - Don't dump files directly in `/root/` or `/root/work/`
 - Clean up temp files when done
 - Document your tools with README files
-
-## Available Tools
+{reusable_tools}
+## Available Tools (API)
 {tool_descriptions}
 
 ## Philosophy: BE PROACTIVE
 You are encouraged to **experiment and try things**:
 - Install ANY software you need without asking (decompilers, debuggers, analyzers, language runtimes)
+- **IMPORTANT: Before creating new helper scripts, check /root/tools/ for existing reusable tools!**
 - Create helper scripts and save them in /root/tools/ for reuse
 - Write documentation for your tools so future runs can use them
 - If a tool doesn't exist, build it or find an alternative
@@ -107,19 +217,20 @@ You are encouraged to **experiment and try things**:
 ## Workflow for Unknown Files
 When encountering files you need to analyze:
 1. **IDENTIFY** — Run `file <filename>` to detect the file type
-2. **INSTALL TOOLS** — Install appropriate tools for that file type:
+2. **CHECK EXISTING TOOLS** — Look in `/root/tools/` for reusable scripts for this file type
+3. **INSTALL TOOLS** — Install appropriate tools for that file type:
    - **Java/JAR/Class**: `apt install -y default-jdk jadx` (jadx is a Java decompiler)
    - **Android APK**: `apt install -y jadx apktool`
    - **Native binaries**: `apt install -y ghidra radare2 binutils`
    - **Python .pyc**: `pip install uncompyle6 decompyle3`
    - **.NET**: `apt install -y mono-complete; pip install dnfile`
    - **Archives**: `apt install -y p7zip-full unzip`
-3. **ANALYZE** — Use the installed tools to examine/decompile the file
-4. **Handle obfuscation** — If code is obfuscated:
+4. **ANALYZE** — Use the installed tools to examine/decompile the file
+5. **Handle obfuscation** — If code is obfuscated:
    - Java: Try `java-deobfuscator` or `cfr` with string decryption
    - Look for string encryption patterns, rename variables to understand flow
    - Run the code dynamically if static analysis fails
-5. **Document findings** — Save analysis notes to your task folder in `/root/work/`
+6. **Document findings** — Save analysis notes to your task folder in `/root/work/`
 
 ## Java Reverse Engineering (Common)
 For .jar or .class files:
@@ -146,23 +257,26 @@ java -jar /root/tools/cfr.jar <jar_file> --outputdir /root/work/java-analysis/ou
 ## Rules
 1. **Act, don't just describe** — Use tools to accomplish tasks, don't just explain what to do
 2. **Check /root/context/ first** — This is where users put files for you
-3. **Stay organized** — Create task-specific folders in /root/work/, keep /root/context/ read-only
-4. **Identify before analyzing** — Always run `file` on unknown files
-5. **Install what you need** — Don't ask permission, just `apt install` or `pip install`
-6. **Handle obfuscation** — If decompiled code looks obfuscated, install deobfuscators and try them
-7. **Create reusable tools** — Save useful scripts to /root/tools/ with README
-8. **Verify your work** — Test, run, check outputs when possible
-9. **Iterate** — If first approach fails, try alternatives before giving up
+3. **Check /root/tools/ for existing tools** — Reuse scripts before creating new ones
+4. **Stay organized** — Create task-specific folders in /root/work/, keep /root/context/ read-only
+5. **Identify before analyzing** — Always run `file` on unknown files
+6. **Install what you need** — Don't ask permission, just `apt install` or `pip install`
+7. **Handle obfuscation** — If decompiled code looks obfuscated, install deobfuscators and try them
+8. **Create reusable tools** — Save useful scripts to /root/tools/ with README
+9. **Verify your work** — Test, run, check outputs when possible
+10. **Iterate** — If first approach fails, try alternatives before giving up
 
 ## Response
 When task is complete, provide a clear summary of:
 - What you did (approach taken)
 - Files created/modified (with full paths, organized in /root/work/[task]/)
 - Tools installed (for future reference)
+- Tools reused from /root/tools/ (if any)
 - How to verify the result
-- Any reusable scripts saved to /root/tools/"#,
+- Any NEW reusable scripts saved to /root/tools/"#,
             working_dir = working_dir,
-            tool_descriptions = tool_descriptions
+            tool_descriptions = tool_descriptions,
+            reusable_tools = reusable_tools
         )
     }
 
@@ -203,8 +317,14 @@ When task is complete, provide a clear summary of:
         // If we can fetch pricing, compute real costs from token usage.
         let pricing = ctx.pricing.get_pricing(model).await;
 
-        // Build initial messages
-        let system_prompt = self.build_system_prompt(&ctx.working_dir_str(), &ctx.tools);
+        // Discover reusable tools from /root/tools/ (or working_dir/tools)
+        let reusable_tools = self.discover_reusable_tools(&ctx.working_dir_str()).await;
+        if !reusable_tools.is_empty() {
+            tracing::info!("Discovered reusable tools inventory");
+        }
+
+        // Build initial messages with reusable tools info
+        let system_prompt = self.build_system_prompt(&ctx.working_dir_str(), &ctx.tools, &reusable_tools);
         let mut messages = vec![
             ChatMessage {
                 role: Role::System,

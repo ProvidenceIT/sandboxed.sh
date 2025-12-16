@@ -362,6 +362,43 @@ async fn run_agent_task(
             )
             .await;
 
+        // Record task outcome for learning system
+        // Extract metrics from the task analysis and result
+        let analysis = task.analysis();
+        let actual_usage = analysis.actual_usage.as_ref();
+        let actual_tokens = actual_usage.map(|u| u.total_tokens as i64);
+        
+        // Extract tool call count from result data
+        let tool_calls_count = result.data.as_ref()
+            .and_then(|d| d.get("tool_calls"))
+            .and_then(|v| v.as_i64())
+            .map(|v| v as i32);
+        
+        // Extract iterations from execution signals if available
+        let iterations = result.data.as_ref()
+            .and_then(|d| d.get("execution_signals"))
+            .and_then(|s| s.get("iterations"))
+            .and_then(|v| v.as_i64())
+            .map(|v| v as i32);
+        
+        let _ = mem
+            .writer
+            .record_task_outcome(
+                run_id,
+                task.id().as_uuid(),
+                &task_description,
+                analysis.complexity_score,
+                analysis.estimated_total_tokens.map(|t| t as i64),
+                analysis.estimated_cost_cents.map(|c| c as i64),
+                analysis.selected_model.clone(),
+                actual_tokens,
+                Some(result.cost_cents as i64),
+                result.success,
+                iterations,
+                tool_calls_count,
+            )
+            .await;
+
         // Generate and store summary
         let summary = format!(
             "Task: {}\nResult: {}\nSuccess: {}",
