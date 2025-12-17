@@ -68,11 +68,12 @@ impl Tool for RunCommand {
 
         tracing::info!("Executing command in {:?}: {}", cwd, command);
 
-        // Determine shell based on OS
+        // Determine shell based on OS - use absolute paths to ensure shell is found
         let (shell, shell_arg) = if cfg!(target_os = "windows") {
             ("cmd", "/C")
         } else {
-            ("sh", "-c")
+            // Use absolute path to shell to avoid PATH issues
+            ("/bin/sh", "-c")
         };
 
         let output = match tokio::time::timeout(

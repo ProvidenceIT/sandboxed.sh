@@ -49,6 +49,8 @@ pub struct AppState {
     pub control: control::ControlState,
     /// MCP server registry
     pub mcp: Arc<McpRegistry>,
+    /// Benchmark registry for task-aware model selection
+    pub benchmarks: crate::budget::SharedBenchmarkRegistry,
 }
 
 /// Start the HTTP server.
@@ -72,9 +74,12 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         });
     }
 
+    // Load benchmark registry for task-aware model selection
+    let benchmarks = crate::budget::load_benchmarks(&config.working_dir.to_string_lossy());
+
     // Spawn the single global control session actor.
     let control_state =
-        control::spawn_control_session(config.clone(), Arc::clone(&root_agent), memory.clone());
+        control::spawn_control_session(config.clone(), Arc::clone(&root_agent), memory.clone(), Arc::clone(&benchmarks));
 
     let state = Arc::new(AppState {
         config: config.clone(),
@@ -83,6 +88,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         memory,
         control: control_state,
         mcp,
+        benchmarks,
     });
 
     let public_routes = Router::new()
@@ -326,7 +332,7 @@ async fn run_agent_task(
     let tools = ToolRegistry::new();
     let pricing = Arc::new(ModelPricing::new());
 
-    let ctx = AgentContext::with_memory(
+    let mut ctx = AgentContext::with_memory(
         state.config.clone(),
         llm,
         tools,
@@ -334,6 +340,7 @@ async fn run_agent_task(
         working_dir,
         state.memory.clone(),
     );
+    ctx.benchmarks = Some(Arc::clone(&state.benchmarks));
 
     // Create a run in memory if available
     let memory_run_id = if let Some(ref mem) = state.memory {

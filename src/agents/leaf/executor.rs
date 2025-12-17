@@ -634,10 +634,22 @@ When task is complete, provide a clear summary of:
                             });
                         }
 
+                        // Truncate tool result if too large to prevent context overflow
+                        const MAX_TOOL_RESULT_CHARS: usize = 15000;
+                        let truncated_content = if tool_message_content.len() > MAX_TOOL_RESULT_CHARS {
+                            format!(
+                                "{}... [truncated, {} chars total. For large data, consider writing to a file and reading specific sections]",
+                                &tool_message_content[..MAX_TOOL_RESULT_CHARS],
+                                tool_message_content.len()
+                            )
+                        } else {
+                            tool_message_content
+                        };
+
                         // Add tool result
                         messages.push(ChatMessage {
                             role: Role::Tool,
-                            content: Some(tool_message_content),
+                            content: Some(truncated_content),
                             tool_calls: None,
                             tool_call_id: Some(tool_call.id.clone()),
                         });

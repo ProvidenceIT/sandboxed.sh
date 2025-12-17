@@ -534,6 +534,7 @@ pub fn spawn_control_session(
     config: Config,
     root_agent: AgentRef,
     memory: Option<MemorySystem>,
+    benchmarks: crate::budget::SharedBenchmarkRegistry,
 ) -> ControlState {
     let (cmd_tx, cmd_rx) = mpsc::channel::<ControlCommand>(256);
     let (events_tx, _events_rx) = broadcast::channel::<AgentEvent>(1024);
@@ -556,6 +557,7 @@ pub fn spawn_control_session(
         config,
         root_agent,
         memory,
+        benchmarks,
         cmd_rx,
         events_tx,
         tool_hub,
@@ -570,6 +572,7 @@ async fn control_actor_loop(
     config: Config,
     root_agent: AgentRef,
     memory: Option<MemorySystem>,
+    benchmarks: crate::budget::SharedBenchmarkRegistry,
     mut cmd_rx: mpsc::Receiver<ControlCommand>,
     events_tx: broadcast::Sender<AgentEvent>,
     tool_hub: Arc<FrontendToolHub>,
@@ -696,6 +699,7 @@ async fn control_actor_loop(
                                 let cfg = config.clone();
                                 let agent = Arc::clone(&root_agent);
                                 let mem = memory.clone();
+                                let bench = Arc::clone(&benchmarks);
                                 let events = events_tx.clone();
                                 let tools_hub = Arc::clone(&tool_hub);
                                 let status_ref = Arc::clone(&status);
@@ -708,6 +712,7 @@ async fn control_actor_loop(
                                         cfg,
                                         agent,
                                         mem,
+                                        bench,
                                         pricing,
                                         events,
                                         tools_hub,
@@ -823,6 +828,7 @@ async fn control_actor_loop(
                     let cfg = config.clone();
                     let agent = Arc::clone(&root_agent);
                     let mem = memory.clone();
+                    let bench = Arc::clone(&benchmarks);
                     let events = events_tx.clone();
                     let tools_hub = Arc::clone(&tool_hub);
                     let status_ref = Arc::clone(&status);
@@ -835,6 +841,7 @@ async fn control_actor_loop(
                             cfg,
                             agent,
                             mem,
+                            bench,
                             pricing,
                             events,
                             tools_hub,
@@ -854,10 +861,57 @@ async fn control_actor_loop(
     }
 }
 
+/// Truncate a string to a maximum character count, adding an ellipsis if truncated.
+fn truncate_message(content: &str, max_chars: usize) -> String {
+    if content.len() <= max_chars {
+        content.to_string()
+    } else {
+        format!("{}... [truncated, {} chars total]", &content[..max_chars], content.len())
+    }
+}
+
+/// Build a conversation context from history with size limits.
+/// 
+/// This prevents context overflow by:
+/// 1. Limiting total history to last N messages
+/// 2. Truncating individual messages that are too long
+/// 3. Capping total context size
+fn build_conversation_context(history: &[(String, String)], max_messages: usize, max_message_chars: usize, max_total_chars: usize) -> String {
+    let mut context = String::new();
+    
+    if history.is_empty() {
+        return context;
+    }
+    
+    // Take only the most recent messages
+    let start_idx = history.len().saturating_sub(max_messages);
+    let recent_history = &history[start_idx..];
+    
+    // Build context with truncation
+    context.push_str("Conversation so far:\n");
+    
+    for (role, content) in recent_history {
+        let truncated_content = truncate_message(content, max_message_chars);
+        let entry = format!("{}: {}\n", role, truncated_content);
+        
+        // Check if adding this would exceed total limit
+        if context.len() + entry.len() > max_total_chars {
+            context.push_str("... [earlier messages omitted due to size limits]\n");
+            break;
+        }
+        
+        context.push_str(&entry);
+    }
+    
+    context.push('\n');
+    context
+}
+
 async fn run_single_control_turn(
     config: Config,
     root_agent: AgentRef,
     memory: Option<MemorySystem>,
+    benchmarks: crate::budget::SharedBenchmarkRegistry,
     pricing: Arc<ModelPricing>,
     events_tx: broadcast::Sender<AgentEvent>,
     tool_hub: Arc<FrontendToolHub>,
@@ -866,18 +920,24 @@ async fn run_single_control_turn(
     history: Vec<(String, String)>,
     user_message: String,
 ) -> crate::agents::AgentResult {
-    // Build a task prompt that includes lightweight conversation context.
+    // Build a task prompt that includes conversation context with size limits.
+    // This prevents context overflow when history gets large.
+    const MAX_HISTORY_MESSAGES: usize = 10;      // Keep only last 10 messages
+    const MAX_MESSAGE_CHARS: usize = 5000;       // Truncate individual messages to 5K chars
+    const MAX_TOTAL_CONTEXT_CHARS: usize = 30000; // Cap total context at 30K chars
+    
+    let history_context = build_conversation_context(
+        &history, 
+        MAX_HISTORY_MESSAGES, 
+        MAX_MESSAGE_CHARS, 
+        MAX_TOTAL_CONTEXT_CHARS
+    );
+    
     let mut convo = String::new();
-    if !history.is_empty() {
-        convo.push_str("Conversation so far:\n");
-        for (role, content) in &history {
-            convo.push_str(&format!("{}: {}\n", role, content));
-        }
-        convo.push('\n');
-    }
+    convo.push_str(&history_context);
     convo.push_str("User:\n");
     convo.push_str(&user_message);
-    convo.push_str("\n\nInstructions:\n- Continue the conversation helpfully.\n- You may use tools to gather information or make changes.\n- When appropriate, use Tool UI tools (ui_*) for structured output or to ask for user selections.\n");
+    convo.push_str("\n\nInstructions:\n- Continue the conversation helpfully.\n- You may use tools to gather information or make changes.\n- When appropriate, use Tool UI tools (ui_*) for structured output or to ask for user selections.\n- For large data processing tasks (>10KB), use run_command to execute Python scripts rather than processing inline.\n");
 
     let budget = Budget::new(1000);
     let verification = VerificationCriteria::None;
@@ -904,6 +964,7 @@ async fn run_single_control_turn(
     ctx.frontend_tool_hub = Some(tool_hub);
     ctx.control_status = Some(status);
     ctx.cancel_token = Some(cancel);
+    ctx.benchmarks = Some(benchmarks);
 
     let result = root_agent.execute(&mut task, &ctx).await;
     result

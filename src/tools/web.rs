@@ -202,13 +202,9 @@ impl Tool for FetchUrl {
         // For large responses, save to file and return path
         const MAX_INLINE_SIZE: usize = 20000;
         if body.len() > MAX_INLINE_SIZE {
-            // Ensure /root/tmp exists
-            let tmp_dir = Path::new("/root/tmp");
-            if let Err(e) = std::fs::create_dir_all(tmp_dir) {
-                tracing::warn!("Failed to create /root/tmp: {}", e);
-                // Fall back to workspace tmp
-            }
-
+            // Use /tmp which works on all systems (macOS, Linux)
+            let tmp_dir = Path::new("/tmp");
+            
             // Generate unique filename
             let file_id = uuid::Uuid::new_v4();
             let filename = format!("fetch_{}.{}", file_id, extension);

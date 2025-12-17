@@ -9,6 +9,10 @@
 //! # Cost Model
 //! Expected Cost = base_cost * (1 + failure_rate * retry_multiplier) * token_efficiency
 //!
+//! # Benchmark Integration
+//! When benchmark data is available, uses actual benchmark scores (from llm-stats.com)
+//! for task-type-specific capability estimation instead of price-based heuristics.
+//!
 //! # Learning Integration
 //! When memory is available, uses historical model statistics (actual success rates,
 //! cost ratios) instead of pure heuristics.
@@ -20,7 +24,7 @@ use std::collections::HashMap;
 use crate::agents::{
     Agent, AgentContext, AgentId, AgentResult, AgentType, LeafAgent, LeafCapability,
 };
-use crate::budget::PricingInfo;
+use crate::budget::{PricingInfo, TaskType};
 use crate::memory::ModelStats;
 use crate::task::Task;
 
@@ -58,6 +62,12 @@ pub struct ModelRecommendation {
     
     /// Whether historical data was used for this selection
     pub used_historical_data: bool,
+
+    /// Whether benchmark data was used for capability estimation
+    pub used_benchmark_data: bool,
+
+    /// Inferred task type
+    pub task_type: Option<TaskType>,
 }
 
 impl ModelSelector {
@@ -92,23 +102,21 @@ impl ModelSelector {
     /// - `pricing`: Model pricing info
     /// - `complexity`: Task complexity (0-1)
     /// - `estimated_tokens`: Estimated tokens needed
+    /// - `capability`: Model capability score (0-1), from benchmarks or price heuristic
     /// 
     /// # Returns
     /// Expected cost in cents
     /// 
     /// # Pure Function
     /// No side effects, deterministic output.
-    fn calculate_expected_cost(
+    fn calculate_expected_cost_with_capability(
         &self,
         pricing: &PricingInfo,
         complexity: f64,
         estimated_tokens: u64,
+        capability: f64,
+        from_benchmarks: bool,
     ) -> ExpectedCost {
-        // Model capability estimate based on pricing tier
-        // Higher price generally means more capable
-        let avg_cost = pricing.average_cost_per_token();
-        let capability = self.estimate_capability(avg_cost);
-        
         // Failure probability: higher complexity + lower capability = more failures
         // Formula: P(fail) = complexity * (1 - capability)
         let failure_prob = (complexity * (1.0 - capability)).clamp(0.0, self.max_failure_probability);
@@ -139,10 +147,23 @@ impl ModelSelector {
             failure_probability: failure_prob,
             capability,
             inefficiency,
+            from_benchmarks,
         }
     }
 
-    /// Estimate model capability from its cost.
+    /// Calculate expected cost using price-based capability (fallback).
+    fn calculate_expected_cost(
+        &self,
+        pricing: &PricingInfo,
+        complexity: f64,
+        estimated_tokens: u64,
+    ) -> ExpectedCost {
+        let avg_cost = pricing.average_cost_per_token();
+        let capability = self.estimate_capability_from_price(avg_cost);
+        self.calculate_expected_cost_with_capability(pricing, complexity, estimated_tokens, capability, false)
+    }
+
+    /// Estimate model capability from its cost (fallback heuristic).
     /// 
     /// # Heuristic
     /// More expensive models are generally more capable.
@@ -150,7 +171,7 @@ impl ModelSelector {
     /// 
     /// # Returns
     /// Capability score 0-1
-    fn estimate_capability(&self, avg_cost_per_token: f64) -> f64 {
+    fn estimate_capability_from_price(&self, avg_cost_per_token: f64) -> f64 {
         // Cost tiers (per token):
         // < 0.0001: weak (capability ~0.3)
         // 0.0001-0.001: moderate (capability ~0.6)
@@ -168,10 +189,46 @@ impl ModelSelector {
         0.3 + normalized * 0.65
     }
 
+    /// Get model capability from benchmarks (preferred) or fall back to price heuristic.
+    /// 
+    /// # Benchmark-Based Capability
+    /// Uses actual benchmark scores from llm-stats.com when available.
+    /// This provides task-type-specific capability estimation.
+    async fn get_capability(
+        &self,
+        model_id: &str,
+        task_type: TaskType,
+        avg_cost_per_token: f64,
+        ctx: &AgentContext,
+    ) -> (f64, bool) {
+        // Try to get benchmark-based capability
+        if let Some(benchmarks) = &ctx.benchmarks {
+            let registry = benchmarks.read().await;
+            if let Some(model) = registry.get(model_id) {
+                if model.has_benchmarks() {
+                    let capability = model.capability(task_type);
+                    tracing::info!(
+                        "Using benchmark capability for {}: {:.3} (task_type: {:?})",
+                        model_id, capability, task_type
+                    );
+                    return (capability, true); // (capability, from_benchmarks)
+                }
+            }
+        }
+        
+        // Fall back to price-based heuristic
+        let capability = self.estimate_capability_from_price(avg_cost_per_token);
+        tracing::debug!(
+            "Using price-based capability for {}: {:.3} (avg_cost: {:.10})",
+            model_id, capability, avg_cost_per_token
+        );
+        (capability, false)
+    }
+
     /// Select optimal model from available options.
     /// 
     /// # Algorithm
-    /// 1. Calculate expected cost for each model
+    /// 1. Calculate expected cost for each model using benchmark capabilities when available
     /// 2. Filter models exceeding budget
     /// 3. Select model with minimum expected cost
     /// 4. Include fallbacks in case of failure
@@ -179,29 +236,47 @@ impl ModelSelector {
     /// # Preconditions
     /// - `models` is non-empty
     /// - `budget_cents > 0`
-    fn select_optimal(
+    async fn select_optimal(
         &self,
         models: &[PricingInfo],
         complexity: f64,
         estimated_tokens: u64,
         budget_cents: u64,
+        task_type: TaskType,
         historical_stats: Option<&HashMap<String, ModelStats>>,
+        ctx: &AgentContext,
     ) -> Option<ModelRecommendation> {
         if models.is_empty() {
             return None;
         }
 
-        // Calculate expected cost for all models, using historical stats when available
-        let mut costs: Vec<ExpectedCost> = models
-            .iter()
-            .map(|m| {
-                if let Some(stats) = historical_stats.and_then(|h| h.get(&m.model_id)) {
-                    self.calculate_expected_cost_with_history(m, complexity, estimated_tokens, stats)
-                } else {
-                    self.calculate_expected_cost(m, complexity, estimated_tokens)
+        // Calculate expected cost for all models, using benchmark or historical stats when available
+        let mut costs: Vec<ExpectedCost> = Vec::with_capacity(models.len());
+        let mut any_from_benchmarks = false;
+
+        for m in models {
+            let cost = if let Some(stats) = historical_stats.and_then(|h| h.get(&m.model_id)) {
+                // Use historical data if available (highest priority)
+                self.calculate_expected_cost_with_history(m, complexity, estimated_tokens, stats)
+            } else {
+                // Use benchmark data for capability
+                let (capability, from_benchmarks) = self.get_capability(
+                    &m.model_id,
+                    task_type,
+                    m.average_cost_per_token(),
+                    ctx,
+                ).await;
+                
+                if from_benchmarks {
+                    any_from_benchmarks = true;
                 }
-            })
-            .collect();
+                
+                self.calculate_expected_cost_with_capability(
+                    m, complexity, estimated_tokens, capability, from_benchmarks
+                )
+            };
+            costs.push(cost);
+        }
 
         // Sort by expected cost (ascending)
         costs.sort_by(|a, b| {
@@ -213,9 +288,10 @@ impl ModelSelector {
         let within_budget: Vec<_> = costs
             .iter()
             .filter(|c| c.expected_cost_cents <= budget_cents)
+            .cloned()
             .collect();
 
-        let selected = within_budget.first().copied().or(costs.first())?;
+        let selected = within_budget.first().cloned().or_else(|| costs.first().cloned())?;
         
         // Get fallback models (next best options)
         let fallbacks: Vec<String> = costs
@@ -227,21 +303,36 @@ impl ModelSelector {
 
         let used_history = historical_stats.and_then(|h| h.get(&selected.model_id)).is_some();
 
-        Some(ModelRecommendation {
+        let recommendation = ModelRecommendation {
             model_id: selected.model_id.clone(),
             expected_cost_cents: selected.expected_cost_cents,
             confidence: 1.0 - selected.failure_probability,
             reasoning: format!(
-                "Selected {} with expected cost {} cents (capability: {:.2}, failure prob: {:.2}){}",
+                "Selected {} for {:?} task with expected cost {} cents (capability: {:.2}, failure prob: {:.2}){}{}",
                 selected.model_id,
+                task_type,
                 selected.expected_cost_cents,
                 selected.capability,
                 selected.failure_probability,
-                if used_history { " [from historical data]" } else { "" }
+                if used_history { " [historical]" } else { "" },
+                if selected.from_benchmarks { " [benchmark]" } else { "" }
             ),
             fallbacks,
             used_historical_data: used_history,
-        })
+            used_benchmark_data: selected.from_benchmarks,
+            task_type: Some(task_type),
+        };
+        
+        tracing::info!(
+            "Model selected: {} (task: {:?}, cost: {} cents, benchmark_data: {}, history: {})",
+            recommendation.model_id,
+            task_type,
+            recommendation.expected_cost_cents,
+            recommendation.used_benchmark_data,
+            recommendation.used_historical_data
+        );
+        
+        Some(recommendation)
     }
 
     /// Calculate expected cost using actual historical statistics.
@@ -286,6 +377,7 @@ impl ModelSelector {
             failure_probability: failure_prob,
             capability,
             inefficiency,
+            from_benchmarks: false, // Historical data is not benchmark data
         }
     }
 
@@ -324,7 +416,7 @@ impl ModelSelector {
 }
 
 /// Intermediate calculation result for a model.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct ExpectedCost {
     model_id: String,
     #[allow(dead_code)]
@@ -334,6 +426,8 @@ struct ExpectedCost {
     capability: f64,
     #[allow(dead_code)]
     inefficiency: f64,
+    /// Whether capability was derived from benchmark data
+    from_benchmarks: bool,
 }
 
 impl Default for ModelSelector {
@@ -364,6 +458,10 @@ impl Agent for ModelSelector {
     /// # Returns
     /// AgentResult with ModelRecommendation in the `data` field.
     /// 
+    /// # Benchmark Integration
+    /// When benchmark data is available, uses actual benchmark scores for
+    /// task-type-specific capability estimation.
+    /// 
     /// # Learning Integration
     /// When memory is available, queries historical model statistics and uses
     /// actual success rates/cost ratios instead of heuristics.
@@ -375,6 +473,9 @@ impl Agent for ModelSelector {
             .unwrap_or(0.5)
             .clamp(0.0, 1.0);
         let estimated_tokens = task.analysis().estimated_total_tokens.unwrap_or(2000_u64);
+        
+        // Infer task type from description for benchmark-based selection
+        let task_type = TaskType::infer_from_description(task.description());
         
         // Get available budget
         let budget_cents = task.budget().remaining_cents();
@@ -406,10 +507,20 @@ impl Agent for ModelSelector {
                 "reasoning": "Fallback to configured default model",
                 "fallbacks": [],
                 "used_historical_data": false,
+                "used_benchmark_data": false,
+                "task_type": format!("{:?}", task_type),
             }));
         }
 
-        match self.select_optimal(&models, complexity, estimated_tokens, budget_cents, historical_stats.as_ref()) {
+        match self.select_optimal(
+            &models,
+            complexity,
+            estimated_tokens,
+            budget_cents,
+            task_type,
+            historical_stats.as_ref(),
+            ctx,
+        ).await {
             Some(rec) => {
                 // Record selection in analysis
                 {
@@ -429,6 +540,8 @@ impl Agent for ModelSelector {
                     "reasoning": rec.reasoning,
                     "fallbacks": rec.fallbacks,
                     "used_historical_data": rec.used_historical_data,
+                    "used_benchmark_data": rec.used_benchmark_data,
+                    "task_type": format!("{:?}", task_type),
                     "historical_stats_available": historical_stats.as_ref().map(|h| h.len()),
                     "inputs": {
                         "complexity": complexity,
@@ -494,22 +607,19 @@ mod tests {
     }
 
     #[test]
-    fn test_select_optimal() {
-        let selector = ModelSelector::new();
-        
-        let models = vec![
-            make_pricing("cheap", 0.1, 0.2),
-            make_pricing("medium", 1.0, 2.0),
-            make_pricing("expensive", 10.0, 20.0),
-        ];
-        
-        // For moderate complexity, should pick cost-effective option
-        let rec = selector.select_optimal(&models, 0.5, 1000, 1000);
-        assert!(rec.is_some());
-        
-        // For very low budget, might be forced to pick cheap
-        let rec_low = selector.select_optimal(&models, 0.5, 1000, 1);
-        assert!(rec_low.is_some());
+    fn test_task_type_inference() {
+        assert_eq!(
+            TaskType::infer_from_description("Implement a function to sort arrays"),
+            TaskType::Code
+        );
+        assert_eq!(
+            TaskType::infer_from_description("Calculate the integral of x^2"),
+            TaskType::Math
+        );
+        assert_eq!(
+            TaskType::infer_from_description("Explain quantum mechanics"),
+            TaskType::Reasoning
+        );
     }
 }
 

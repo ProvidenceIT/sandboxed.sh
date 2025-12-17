@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::budget::ModelPricing;
+use crate::budget::{ModelPricing, SharedBenchmarkRegistry};
 use crate::config::Config;
 use crate::llm::LlmClient;
 use crate::memory::MemorySystem;
@@ -56,6 +56,9 @@ pub struct AgentContext {
 
     /// Optional cancellation token for cooperative cancellation.
     pub cancel_token: Option<tokio_util::sync::CancellationToken>,
+
+    /// Benchmark registry for task-aware model selection.
+    pub benchmarks: Option<SharedBenchmarkRegistry>,
 }
 
 impl AgentContext {
@@ -80,6 +83,7 @@ impl AgentContext {
             frontend_tool_hub: None,
             control_status: None,
             cancel_token: None,
+            benchmarks: None,
         }
     }
     
@@ -105,6 +109,7 @@ impl AgentContext {
             frontend_tool_hub: None,
             control_status: None,
             cancel_token: None,
+            benchmarks: None,
         }
     }
 
@@ -126,6 +131,7 @@ impl AgentContext {
             frontend_tool_hub: self.frontend_tool_hub.clone(),
             control_status: self.control_status.clone(),
             cancel_token: self.cancel_token.clone(),
+            benchmarks: self.benchmarks.clone(),
         }
     }
 

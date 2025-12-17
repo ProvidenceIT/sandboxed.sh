@@ -330,12 +330,32 @@ impl Agent for RootAgent {
         }
 
         // Simple task or failed to split: execute directly
-        // Always use the configured default model for now
-        // The U-curve model selector was picking weak models like gpt-4o-mini
-        // that don't handle complex tasks well
-        {
+        // Use ModelSelector when we have benchmark data, otherwise use default model
+        let has_benchmarks = if let Some(b) = &ctx.benchmarks {
+            let registry = b.read().await;
+            registry.benchmark_count() > 0
+        } else {
+            false
+        };
+        
+        if has_benchmarks {
+            // Use benchmark-informed model selection
+            let sel_result = self.model_selector.execute(task, ctx).await;
+            total_cost += sel_result.cost_cents;
+            
+            tracing::info!(
+                "ModelSelector used (has benchmarks): {}",
+                task.analysis().selected_model.as_ref().unwrap_or(&"none".to_string())
+            );
+        } else {
+            // Fall back to default model when no benchmarks available
             let a = task.analysis_mut();
             a.selected_model = Some(ctx.config.default_model.clone());
+            
+            tracing::info!(
+                "Using default model (no benchmarks): {}",
+                ctx.config.default_model
+            );
         }
 
         let result = self.task_executor.execute(task, ctx).await;
