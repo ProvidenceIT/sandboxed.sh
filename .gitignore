@@ -14,7 +14,11 @@ Cargo.lock
 .env.local
 .env.prod
 
-# Calibration / local artifacts
+# Secrets (NEVER commit)
+secrets.json
+
+# Runtime data / local artifacts
+.open_agent/
 .open_agent_calibration/
 
 # OS files
