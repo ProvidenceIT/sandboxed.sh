@@ -47,6 +47,8 @@ pub struct ToolCall {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FunctionCall {
     pub name: String,
+    /// Arguments as a JSON string. May be empty or missing for no-argument functions.
+    #[serde(default)]
     pub arguments: String,
 }
 
