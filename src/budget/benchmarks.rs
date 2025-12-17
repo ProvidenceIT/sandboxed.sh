@@ -51,7 +51,7 @@ impl TaskType {
     /// Infer task type from task description.
     pub fn infer_from_description(description: &str) -> Self {
         let desc_lower = description.to_lowercase();
-        
+
         // Code indicators
         if desc_lower.contains("code")
             || desc_lower.contains("implement")
@@ -247,32 +247,40 @@ impl BenchmarkRegistry {
     pub fn load_from_file(path: impl AsRef<Path>) -> Result<Self, String> {
         let content = std::fs::read_to_string(path.as_ref())
             .map_err(|e| format!("Failed to read benchmark file: {}", e))?;
-        
+
         let data: BenchmarkData = serde_json::from_str(&content)
             .map_err(|e| format!("Failed to parse benchmark file: {}", e))?;
 
         let mut registry = Self::new();
-        
+
         for model in data.models {
             let id = model.id.clone();
             let normalized = Self::normalize_id(&id);
-            
-            registry.normalized_index.insert(normalized.clone(), id.clone());
-            
+
+            registry
+                .normalized_index
+                .insert(normalized.clone(), id.clone());
+
             // Also index by the model name part (after the slash)
             if let Some(name_part) = id.split('/').last() {
                 let normalized_name = Self::normalize_id(name_part);
                 if !registry.normalized_index.contains_key(&normalized_name) {
-                    registry.normalized_index.insert(normalized_name, id.clone());
+                    registry
+                        .normalized_index
+                        .insert(normalized_name, id.clone());
                 }
             }
-            
+
             registry.models.insert(id, model);
         }
 
         tracing::info!(
             "Loaded {} models with benchmarks ({} total indexed)",
-            registry.models.values().filter(|m| m.has_benchmarks()).count(),
+            registry
+                .models
+                .values()
+                .filter(|m| m.has_benchmarks())
+                .count(),
             registry.models.len()
         );
 
@@ -281,8 +289,7 @@ impl BenchmarkRegistry {
 
     /// Normalize a model ID for matching.
     fn normalize_id(id: &str) -> String {
-        id.to_lowercase()
-            .replace([':', '-', '_', '.'], "")
+        id.to_lowercase().replace([':', '-', '_', '.'], "")
     }
 
     /// Look up a model by ID (with fuzzy matching).
@@ -322,7 +329,8 @@ impl BenchmarkRegistry {
             .models
             .iter()
             .filter_map(|(id, model)| {
-                model.category_scores
+                model
+                    .category_scores
                     .as_ref()
                     .and_then(|cs| cs.get(task_type))
                     .map(|score| (id.as_str(), score))
@@ -357,7 +365,7 @@ pub type SharedBenchmarkRegistry = Arc<RwLock<BenchmarkRegistry>>;
 /// Create a shared benchmark registry, loading from default path.
 pub fn load_benchmarks(workspace_dir: &str) -> SharedBenchmarkRegistry {
     let path = format!("{}/models_with_benchmarks.json", workspace_dir);
-    
+
     match BenchmarkRegistry::load_from_file(&path) {
         Ok(registry) => {
             tracing::info!("Loaded benchmark registry from {}", path);
