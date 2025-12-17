@@ -688,6 +688,7 @@ async fn control_actor_loop(
                 let Some(cmd) = cmd else { break };
                 match cmd {
                     ControlCommand::UserMessage { id, content } => {
+                        tracing::info!("Control actor received UserMessage id={}", id);
                         // Auto-create mission on first message if none exists
                         {
                             let mission_id = current_mission.read().await.clone();
@@ -706,8 +707,10 @@ async fn control_actor_loop(
                             if running.is_some() { ControlRunState::Running } else { ControlRunState::Idle },
                             queue.len(),
                         ).await;
+                        tracing::info!("Queue length after push: {}, running={}", queue.len(), running.is_some());
                         if running.is_none() {
                             if let Some((mid, msg)) = queue.pop_front() {
+                                tracing::info!("Spawning agent task for message id={}", mid);
                                 set_and_emit_status(&status, &events_tx, ControlRunState::Running, queue.len()).await;
                                 let _ = events_tx.send(AgentEvent::UserMessage { id: mid, content: msg.clone() });
                                 let cfg = config.clone();
