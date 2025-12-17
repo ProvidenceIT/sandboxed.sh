@@ -11,6 +11,7 @@ enum ChatMessageType {
     case user
     case assistant(success: Bool, costCents: Int, model: String?)
     case thinking(done: Bool, startTime: Date)
+    case toolUI(name: String)
     case system
     case error
 }
@@ -19,12 +20,14 @@ struct ChatMessage: Identifiable {
     let id: String
     let type: ChatMessageType
     var content: String
+    var toolUI: ToolUIContent?
     let timestamp: Date
     
-    init(id: String = UUID().uuidString, type: ChatMessageType, content: String, timestamp: Date = Date()) {
+    init(id: String = UUID().uuidString, type: ChatMessageType, content: String, toolUI: ToolUIContent? = nil, timestamp: Date = Date()) {
         self.id = id
         self.type = type
         self.content = content
+        self.toolUI = toolUI
         self.timestamp = timestamp
     }
     
@@ -40,6 +43,11 @@ struct ChatMessage: Identifiable {
     
     var isThinking: Bool {
         if case .thinking = type { return true }
+        return false
+    }
+    
+    var isToolUI: Bool {
+        if case .toolUI = type { return true }
         return false
     }
     

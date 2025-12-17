@@ -8,8 +8,12 @@
 
 /* Begin PBXBuildFile section */
 		02DB7F25245D03FF72DD8E2E /* ControlView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A84519FDE8FC75084938B292 /* ControlView.swift */; };
+		03176DF3878C25A0B557462C /* ToolUIOptionListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A4D419C8490A0C5FC4DCDF20 /* ToolUIOptionListView.swift */; };
 		0620B298DEF91DFCAE050DAC /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 66A48A20D2178760301256C9 /* Assets.xcassets */; };
+		1BBE749F3758FD704D1BFA0B /* ToolUIDataTableView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 45213C3E550D451EDC566CDE /* ToolUIDataTableView.swift */; };
 		29372E691F6A5C5D2CCD9331 /* HistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A09A33A3A1A99446C8A88DC /* HistoryView.swift */; };
+		3361B14E949CB2A6E75B6962 /* ToolUIView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02CBD2029F8CF6751AD7C4E2 /* ToolUIView.swift */; };
+		3DD4D1D2E080C2F89C4881B7 /* ToolUIModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A6128ECBCA632D9E2D415F2 /* ToolUIModels.swift */; };
 		4B50B97618C0CC469FF64592 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 504A1222CE8971417834D229 /* Theme.swift */; };
 		4D0CF2666262F45370D000DF /* TerminalView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0AC6317C4EAD4DB9A8190209 /* TerminalView.swift */; };
 		5152C5313CD5AC01276D0AE6 /* FileEntry.swift in Sources */ = {isa = PBXBuildFile; fileRef = BA70A2A73D3A386EAFD69FC4 /* FileEntry.swift */; };
@@ -27,19 +31,23 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		02CBD2029F8CF6751AD7C4E2 /* ToolUIView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolUIView.swift; sourceTree = "<group>"; };
 		0AC6317C4EAD4DB9A8190209 /* TerminalView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalView.swift; sourceTree = "<group>"; };
 		139C740B7D55C13F3B167EF3 /* OpenAgentDashboardApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenAgentDashboardApp.swift; sourceTree = "<group>"; };
 		2B9834D4EE32058824F9DF00 /* LoadingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoadingView.swift; sourceTree = "<group>"; };
 		3729F39FBF53046124D05BC1 /* NavigationState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NavigationState.swift; sourceTree = "<group>"; };
 		3CB591B632D3EF26AB217976 /* ChatMessage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatMessage.swift; sourceTree = "<group>"; };
 		43A2EBAE84C0FFDCA5E1D66E /* OpenAgentDashboard.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = OpenAgentDashboard.entitlements; sourceTree = "<group>"; };
+		45213C3E550D451EDC566CDE /* ToolUIDataTableView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolUIDataTableView.swift; sourceTree = "<group>"; };
 		4D3D6B3EA3B04DE534F9709A /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		504A1222CE8971417834D229 /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
 		5267DE67017A858357F68424 /* GlassButton.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlassButton.swift; sourceTree = "<group>"; };
 		5908645A518F48B501390AB8 /* FilesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FilesView.swift; sourceTree = "<group>"; };
 		5A09A33A3A1A99446C8A88DC /* HistoryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryView.swift; sourceTree = "<group>"; };
 		66A48A20D2178760301256C9 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		8A6128ECBCA632D9E2D415F2 /* ToolUIModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolUIModels.swift; sourceTree = "<group>"; };
 		99B57FC3136B64DC87413CA6 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		A4D419C8490A0C5FC4DCDF20 /* ToolUIOptionListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolUIOptionListView.swift; sourceTree = "<group>"; };
 		A84519FDE8FC75084938B292 /* ControlView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ControlView.swift; sourceTree = "<group>"; };
 		BA70A2A73D3A386EAFD69FC4 /* FileEntry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileEntry.swift; sourceTree = "<group>"; };
 		CBC90C32FEF604E025FFBF78 /* APIService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIService.swift; sourceTree = "<group>"; };
@@ -89,6 +97,7 @@
 				EB5A4720378F06807FDE73E1 /* GlassCard.swift */,
 				2B9834D4EE32058824F9DF00 /* LoadingView.swift */,
 				CD6FB2E54DC07BE7A1EB08F8 /* StatusBadge.swift */,
+				D09E84E812213CF7E52E4FEF /* ToolUI */,
 			);
 			path = Components;
 			sourceTree = "<group>";
@@ -145,6 +154,17 @@
 				73D80C56FA670F92E007E712 /* Views */,
 			);
 			path = OpenAgentDashboard;
+			sourceTree = "<group>";
+		};
+		D09E84E812213CF7E52E4FEF /* ToolUI */ = {
+			isa = PBXGroup;
+			children = (
+				45213C3E550D451EDC566CDE /* ToolUIDataTableView.swift */,
+				8A6128ECBCA632D9E2D415F2 /* ToolUIModels.swift */,
+				A4D419C8490A0C5FC4DCDF20 /* ToolUIOptionListView.swift */,
+				02CBD2029F8CF6751AD7C4E2 /* ToolUIView.swift */,
+			);
+			path = ToolUI;
 			sourceTree = "<group>";
 		};
 		DABAA3652C0B0A54CFC3221B /* Control */ = {
@@ -250,6 +270,10 @@
 				FA7E68F22D16E1AC0B5F5E22 /* StatusBadge.swift in Sources */,
 				4D0CF2666262F45370D000DF /* TerminalView.swift in Sources */,
 				4B50B97618C0CC469FF64592 /* Theme.swift in Sources */,
+				1BBE749F3758FD704D1BFA0B /* ToolUIDataTableView.swift in Sources */,
+				3DD4D1D2E080C2F89C4881B7 /* ToolUIModels.swift in Sources */,
+				03176DF3878C25A0B557462C /* ToolUIOptionListView.swift in Sources */,
+				3361B14E949CB2A6E75B6962 /* ToolUIView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

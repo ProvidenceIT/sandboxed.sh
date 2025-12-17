@@ -477,6 +477,22 @@ struct ControlView: View {
                 messages.append(message)
             }
             
+        case "tool_call":
+            if let toolCallId = data["tool_call_id"] as? String,
+               let name = data["name"] as? String,
+               let args = data["args"] as? [String: Any] {
+                // Parse UI tool calls
+                if let toolUI = ToolUIContent.parse(name: name, args: args) {
+                    let message = ChatMessage(
+                        id: toolCallId,
+                        type: .toolUI(name: name),
+                        content: "",
+                        toolUI: toolUI
+                    )
+                    messages.append(message)
+                }
+            }
+            
         default:
             break
         }
@@ -496,10 +512,20 @@ private struct MessageBubble: View {
             } else if message.isThinking {
                 thinkingBubble
                 Spacer(minLength: 60)
+            } else if message.isToolUI {
+                toolUIBubble
+                Spacer(minLength: 40)
             } else {
                 assistantBubble
                 Spacer(minLength: 60)
             }
+        }
+    }
+    
+    @ViewBuilder
+    private var toolUIBubble: some View {
+        if let toolUI = message.toolUI {
+            ToolUIView(content: toolUI)
         }
     }
     
