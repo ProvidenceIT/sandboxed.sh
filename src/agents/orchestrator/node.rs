@@ -307,6 +307,7 @@ impl Agent for NodeAgent {
         );
 
         // Step 1: Estimate complexity
+        ctx.emit_phase("estimating_complexity", Some("Analyzing subtask..."), Some(&self.name));
         let complexity = self.estimate_complexity(task, ctx).await;
         total_cost += 1;
 
@@ -321,8 +322,9 @@ impl Agent for NodeAgent {
         // Step 2: Decide execution strategy
         if complexity.should_split() && ctx.can_split() {
             // Complex subtask: split further recursively
+            ctx.emit_phase("splitting_task", Some("Decomposing subtask..."), Some(&self.name));
             tracing::info!("NodeAgent '{}' splitting task into sub-subtasks", self.name);
-            
+
             match self.split_task(task, ctx).await {
                 Ok(plan) => {
                     total_cost += 2; // Splitting cost
@@ -357,10 +359,12 @@ impl Agent for NodeAgent {
 
         // Simple task or failed to split: execute directly
         // Select model
+        ctx.emit_phase("selecting_model", Some("Choosing model..."), Some(&self.name));
         let sel_result = self.model_selector.execute(task, ctx).await;
         total_cost += sel_result.cost_cents;
 
         // Execute
+        ctx.emit_phase("executing", Some("Running subtask..."), Some(&self.name));
         let result = self.task_executor.execute(task, ctx).await;
         total_cost += result.cost_cents;
 
@@ -375,6 +379,7 @@ impl Agent for NodeAgent {
         }
 
         // Verify
+        ctx.emit_phase("verifying", Some("Checking results..."), Some(&self.name));
         let verification = self.verifier.execute(task, ctx).await;
         total_cost += verification.cost_cents;
 

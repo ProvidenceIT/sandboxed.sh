@@ -38,6 +38,7 @@ import {
   Check,
   Paperclip,
   ArrowDown,
+  Cpu,
 } from "lucide-react";
 import {
   OptionList,
@@ -86,6 +87,13 @@ type ChatItem =
       kind: "system";
       id: string;
       content: string;
+    }
+  | {
+      kind: "phase";
+      id: string;
+      phase: string;
+      detail: string | null;
+      agent: string | null;
     };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -167,6 +175,50 @@ function Shimmer({ className }: { className?: string }) {
       <div className="h-4 bg-white/[0.06] rounded w-3/4 mb-2" />
       <div className="h-4 bg-white/[0.06] rounded w-1/2 mb-2" />
       <div className="h-4 bg-white/[0.06] rounded w-5/6" />
+    </div>
+  );
+}
+
+// Phase indicator - shows what the agent is doing during preparation
+function PhaseItem({
+  item,
+}: {
+  item: Extract<ChatItem, { kind: "phase" }>;
+}) {
+  const phaseLabels: Record<string, { label: string; icon: typeof Brain }> = {
+    estimating_complexity: { label: "Analyzing task", icon: Brain },
+    selecting_model: { label: "Selecting model", icon: Cpu },
+    splitting_task: { label: "Decomposing task", icon: Target },
+    executing: { label: "Executing", icon: Loader },
+    verifying: { label: "Verifying", icon: CheckCircle },
+  };
+
+  const { label, icon: Icon } = phaseLabels[item.phase] ?? { 
+    label: item.phase.replace(/_/g, ' '), 
+    icon: Brain 
+  };
+
+  return (
+    <div className="flex items-center gap-3 py-3 animate-fade-in">
+      <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-indigo-500/10">
+        <Icon className="h-4 w-4 text-indigo-400 animate-pulse" />
+      </div>
+      <div className="flex flex-col">
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-medium text-indigo-400">{label}</span>
+          {item.agent && (
+            <span className="text-[10px] font-mono text-white/30 bg-white/[0.04] px-1.5 py-0.5 rounded">
+              {item.agent}
+            </span>
+          )}
+        </div>
+        {item.detail && (
+          <span className="text-xs text-white/40">{item.detail}</span>
+        )}
+      </div>
+      <div className="ml-auto">
+        <Loader className="h-3 w-3 text-indigo-400/50 animate-spin" />
+      </div>
     </div>
   );
 }
@@ -570,11 +622,13 @@ export default function ControlClient() {
         const done = Boolean(data["done"]);
 
         setItems((prev) => {
-          const existingIdx = prev.findIndex(
+          // Remove phase items when thinking starts
+          const filtered = prev.filter((it) => it.kind !== "phase");
+          const existingIdx = filtered.findIndex(
             (it) => it.kind === "thinking" && !it.done
           );
           if (existingIdx >= 0) {
-            const updated = [...prev];
+            const updated = [...filtered];
             const existing = updated[existingIdx] as Extract<
               ChatItem,
               { kind: "thinking" }
@@ -587,7 +641,7 @@ export default function ControlClient() {
             return updated;
           } else {
             return [
-              ...prev,
+              ...filtered,
               {
                 kind: "thinking" as const,
                 id: `thinking-${Date.now()}`,
@@ -630,6 +684,29 @@ export default function ControlClient() {
               : it
           )
         );
+        return;
+      }
+
+      if (event.type === "agent_phase" && isRecord(data)) {
+        const phase = String(data["phase"] ?? "");
+        const detail = data["detail"] ? String(data["detail"]) : null;
+        const agent = data["agent"] ? String(data["agent"]) : null;
+
+        // Update or add phase item (we only keep one active phase at a time)
+        setItems((prev) => {
+          // Remove any existing phase items
+          const filtered = prev.filter((it) => it.kind !== "phase");
+          return [
+            ...filtered,
+            {
+              kind: "phase" as const,
+              id: `phase-${Date.now()}`,
+              phase,
+              detail,
+              agent,
+            },
+          ];
+        });
         return;
       }
 
@@ -945,6 +1022,10 @@ export default function ControlClient() {
                       />
                     </div>
                   );
+                }
+
+                if (item.kind === "phase") {
+                  return <PhaseItem key={item.id} item={item} />;
                 }
 
                 if (item.kind === "thinking") {

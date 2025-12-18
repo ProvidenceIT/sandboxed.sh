@@ -325,6 +325,7 @@ impl Agent for RootAgent {
         let mut total_cost = 0u64;
 
         // Step 1: Estimate complexity
+        ctx.emit_phase("estimating_complexity", Some("Analyzing task difficulty..."), Some("RootAgent"));
         let complexity = self.estimate_complexity(task, ctx).await;
         // Cost already tracked inside ComplexityEstimator; we keep a small constant for now.
         total_cost += 1;
@@ -338,6 +339,7 @@ impl Agent for RootAgent {
         // Step 2: Decide execution strategy
         if complexity.should_split() && ctx.can_split() {
             // Complex task: split and delegate
+            ctx.emit_phase("splitting_task", Some("Decomposing into subtasks..."), Some("RootAgent"));
             match self.split_task(task, ctx).await {
                 Ok(plan) => {
                     total_cost += 2; // Splitting cost
@@ -363,6 +365,8 @@ impl Agent for RootAgent {
 
         // Simple task or failed to split: execute directly
         // Use ModelSelector when we have benchmark data, otherwise use default model
+        ctx.emit_phase("selecting_model", Some("Choosing optimal model..."), Some("RootAgent"));
+        
         let has_benchmarks = if let Some(b) = &ctx.benchmarks {
             let registry = b.read().await;
             registry.benchmark_count() > 0
@@ -390,9 +394,11 @@ impl Agent for RootAgent {
             );
         }
 
+        ctx.emit_phase("executing", Some("Running task..."), Some("RootAgent"));
         let result = self.task_executor.execute(task, ctx).await;
 
         // Step 3: Verify (if verification criteria specified)
+        ctx.emit_phase("verifying", Some("Checking results..."), Some("RootAgent"));
         let verification = self.verifier.execute(task, ctx).await;
         total_cost += verification.cost_cents;
 

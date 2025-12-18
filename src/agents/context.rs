@@ -164,5 +164,16 @@ impl AgentContext {
             .map(|t| t.is_cancelled())
             .unwrap_or(false)
     }
+
+    /// Emit an agent phase event (for UI feedback during preparation).
+    pub fn emit_phase(&self, phase: &str, detail: Option<&str>, agent: Option<&str>) {
+        if let Some(ref events) = self.control_events {
+            let _ = events.send(crate::api::control::AgentEvent::AgentPhase {
+                phase: phase.to_string(),
+                detail: detail.map(|s| s.to_string()),
+                agent: agent.map(|s| s.to_string()),
+            });
+        }
+    }
 }
 

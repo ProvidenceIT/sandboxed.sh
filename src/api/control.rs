@@ -112,6 +112,15 @@ pub enum AgentEvent {
         status: MissionStatus,
         summary: Option<String>,
     },
+    /// Agent phase update (for showing preparation steps)
+    AgentPhase {
+        /// Phase name: "estimating_complexity", "selecting_model", "splitting_task", "executing", "verifying"
+        phase: String,
+        /// Optional details about what's happening
+        detail: Option<String>,
+        /// Agent name (for hierarchical display)
+        agent: Option<String>,
+    },
 }
 
 impl AgentEvent {
@@ -125,6 +134,7 @@ impl AgentEvent {
             AgentEvent::ToolResult { .. } => "tool_result",
             AgentEvent::Error { .. } => "error",
             AgentEvent::MissionStatusChanged { .. } => "mission_status_changed",
+            AgentEvent::AgentPhase { .. } => "agent_phase",
         }
     }
 }
