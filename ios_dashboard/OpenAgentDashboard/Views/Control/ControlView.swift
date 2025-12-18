@@ -8,22 +8,21 @@
 import SwiftUI
 
 struct ControlView: View {
+    @State private var messages: [ChatMessage] = []
     @State private var inputText = ""
+    @State private var runState: ControlRunState = .idle
+    @State private var queueLength = 0
+    @State private var currentMission: Mission?
+    @State private var isLoading = true
+    @State private var streamTask: Task<Void, Never>?
+    @State private var showMissionMenu = false
     @State private var shouldScrollToBottom = false
-    @State private var lastMessageCount = 0
     
     @FocusState private var isInputFocused: Bool
     
-    private let session = ControlSessionManager.shared
+    private let api = APIService.shared
     private let nav = NavigationState.shared
     private let bottomAnchorId = "bottom-anchor"
-    
-    // Convenience accessors for session state
-    private var messages: [ChatMessage] { session.messages }
-    private var runState: ControlRunState { session.runState }
-    private var queueLength: Int { session.queueLength }
-    private var currentMission: Mission? { session.currentMission }
-    private var isLoading: Bool { session.isLoading }
     
     var body: some View {
         ZStack {
@@ -68,7 +67,7 @@ struct ControlView: View {
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
                     Button {
-                        Task { await session.createNewMission() }
+                        Task { await createNewMission() }
                     } label: {
                         Label("New Mission", systemImage: "plus")
                     }
@@ -77,20 +76,20 @@ struct ControlView: View {
                         Divider()
                         
                         Button {
-                            Task { await session.setMissionStatus(.completed) }
+                            Task { await setMissionStatus(.completed) }
                         } label: {
                             Label("Mark Complete", systemImage: "checkmark.circle")
                         }
                         
                         Button(role: .destructive) {
-                            Task { await session.setMissionStatus(.failed) }
+                            Task { await setMissionStatus(.failed) }
                         } label: {
                             Label("Mark Failed", systemImage: "xmark.circle")
                         }
                         
                         if mission.status != .active {
                             Button {
-                                Task { await session.setMissionStatus(.active) }
+                                Task { await setMissionStatus(.active) }
                             } label: {
                                 Label("Reactivate", systemImage: "arrow.clockwise")
                             }
@@ -103,31 +102,26 @@ struct ControlView: View {
             }
         }
         .task {
-            // Start the session manager (idempotent)
-            session.start()
-            
             // Check if we're being opened with a specific mission from History
             if let pendingId = nav.consumePendingMission() {
-                await session.loadMission(id: pendingId)
-            } else if session.currentMission == nil {
-                await session.loadCurrentMission()
+                await loadMission(id: pendingId)
+            } else {
+                await loadCurrentMission()
             }
+            startStreaming()
         }
         .onChange(of: nav.pendingMissionId) { _, newId in
             // Handle navigation from History while Control is already visible
             if let missionId = newId {
                 nav.pendingMissionId = nil
                 Task {
-                    await session.loadMission(id: missionId)
+                    await loadMission(id: missionId)
                 }
             }
+
         }
-        .onChange(of: messages.count) { oldCount, newCount in
-            // Trigger scroll when messages are added
-            if newCount > lastMessageCount {
-                shouldScrollToBottom = true
-                lastMessageCount = newCount
-            }
+        .onDisappear {
+            streamTask?.cancel()
         }
     }
     
@@ -189,6 +183,9 @@ struct ControlView: View {
             .onTapGesture {
                 // Dismiss keyboard when tapping on messages area
                 isInputFocused = false
+            }
+            .onChange(of: messages.count) { _, _ in
+                scrollToBottom(proxy: proxy)
             }
             .onChange(of: shouldScrollToBottom) { _, shouldScroll in
                 if shouldScroll {
@@ -303,7 +300,7 @@ struct ControlView: View {
                 // Send/Stop button
                 Button {
                     if runState != .idle {
-                        Task { await session.cancelRun() }
+                        Task { await cancelRun() }
                     } else {
                         sendMessage()
                     }
@@ -329,14 +326,205 @@ struct ControlView: View {
     
     // MARK: - Actions
     
+    private func loadCurrentMission() async {
+        isLoading = true
+        defer { isLoading = false }
+
+        do {
+            if let mission = try await api.getCurrentMission() {
+                currentMission = mission
+                messages = mission.history.enumerated().map { index, entry in
+                    ChatMessage(
+                        id: "\(mission.id)-\(index)",
+                        type: entry.isUser ? .user : .assistant(success: true, costCents: 0, model: nil),
+                        content: entry.content
+                    )
+                }
+                
+                // Scroll to bottom after loading
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    shouldScrollToBottom = true
+                }
+            }
+        } catch {
+            print("Failed to load mission: \(error)")
+        }
+    }
+    
+    private func loadMission(id: String) async {
+        isLoading = true
+        defer { isLoading = false }
+
+        do {
+            let missions = try await api.listMissions()
+            if let mission = missions.first(where: { $0.id == id }) {
+                currentMission = mission
+                messages = mission.history.enumerated().map { index, entry in
+                    ChatMessage(
+                        id: "\(mission.id)-\(index)",
+                        type: entry.isUser ? .user : .assistant(success: true, costCents: 0, model: nil),
+                        content: entry.content
+                    )
+                }
+                HapticService.success()
+                
+                // Scroll to bottom after loading
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                    shouldScrollToBottom = true
+                }
+            }
+        } catch {
+            print("Failed to load mission: \(error)")
+        }
+    }
+    
+    private func createNewMission() async {
+        do {
+            let mission = try await api.createMission()
+            currentMission = mission
+            messages = []
+            HapticService.success()
+        } catch {
+            print("Failed to create mission: \(error)")
+            HapticService.error()
+        }
+    }
+    
+    private func setMissionStatus(_ status: MissionStatus) async {
+        guard let mission = currentMission else { return }
+        
+        do {
+            try await api.setMissionStatus(id: mission.id, status: status)
+            currentMission?.status = status
+            HapticService.success()
+        } catch {
+            print("Failed to set status: \(error)")
+            HapticService.error()
+        }
+    }
+    
     private func sendMessage() {
         let content = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !content.isEmpty else { return }
         
         inputText = ""
+        HapticService.lightTap()
         
         Task {
-            await session.sendMessage(content: content)
+            do {
+                let _ = try await api.sendMessage(content: content)
+            } catch {
+                print("Failed to send message: \(error)")
+                HapticService.error()
+            }
+        }
+    }
+    
+    private func cancelRun() async {
+        do {
+            try await api.cancelControl()
+            HapticService.success()
+        } catch {
+            print("Failed to cancel: \(error)")
+            HapticService.error()
+        }
+    }
+    
+    private func startStreaming() {
+        streamTask = api.streamControl { eventType, data in
+            Task { @MainActor in
+                handleStreamEvent(type: eventType, data: data)
+            }
+        }
+    }
+    
+    private func handleStreamEvent(type: String, data: [String: Any]) {
+        switch type {
+        case "status":
+            if let state = data["state"] as? String {
+                runState = ControlRunState(rawValue: state) ?? .idle
+            }
+            if let queue = data["queue_len"] as? Int {
+                queueLength = queue
+            }
+            
+        case "user_message":
+            if let content = data["content"] as? String,
+               let id = data["id"] as? String {
+                let message = ChatMessage(id: id, type: .user, content: content)
+                messages.append(message)
+            }
+            
+        case "assistant_message":
+            if let content = data["content"] as? String,
+               let id = data["id"] as? String {
+                let success = data["success"] as? Bool ?? true
+                let costCents = data["cost_cents"] as? Int ?? 0
+                let model = data["model"] as? String
+                
+                // Remove any incomplete thinking messages
+                messages.removeAll { $0.isThinking && !$0.thinkingDone }
+                
+                let message = ChatMessage(
+                    id: id,
+                    type: .assistant(success: success, costCents: costCents, model: model),
+                    content: content
+                )
+                messages.append(message)
+            }
+            
+        case "thinking":
+            if let content = data["content"] as? String {
+                let done = data["done"] as? Bool ?? false
+                
+                // Find existing thinking message or create new
+                if let index = messages.lastIndex(where: { $0.isThinking && !$0.thinkingDone }) {
+                    messages[index].content += "\n\n---\n\n" + content
+                    if done {
+                        messages[index] = ChatMessage(
+                            id: messages[index].id,
+                            type: .thinking(done: true, startTime: Date()),
+                            content: messages[index].content
+                        )
+                    }
+                } else if !done {
+                    let message = ChatMessage(
+                        id: "thinking-\(Date().timeIntervalSince1970)",
+                        type: .thinking(done: false, startTime: Date()),
+                        content: content
+                    )
+                    messages.append(message)
+                }
+            }
+            
+        case "error":
+            if let errorMessage = data["message"] as? String {
+                let message = ChatMessage(
+                    id: "error-\(Date().timeIntervalSince1970)",
+                    type: .error,
+                    content: errorMessage
+                )
+                messages.append(message)
+            }
+            
+        case "tool_call":
+            if let toolCallId = data["tool_call_id"] as? String,
+               let name = data["name"] as? String,
+               let args = data["args"] as? [String: Any] {
+                // Parse UI tool calls
+                if let toolUI = ToolUIContent.parse(name: name, args: args) {
+                    let message = ChatMessage(
+                        id: toolCallId,
+                        type: .toolUI(name: name),
+                        content: "",
+                        toolUI: toolUI
+                    )
+                    messages.append(message)
+                }
+            }
+            
+        default:
+            break
         }
     }
 }
@@ -515,7 +703,7 @@ private struct FlowLayout: Layout {
     }
 }
 
-// MARK: - Markdown Text with Image Support
+// MARK: - Markdown Text
 
 private struct MarkdownText: View {
     let content: String
@@ -525,142 +713,15 @@ private struct MarkdownText: View {
     }
     
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            ForEach(Array(parseMarkdownContent().enumerated()), id: \.offset) { _, element in
-                switch element {
-                case .text(let text):
-                    if let attributed = try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) {
-                        Text(attributed)
-                            .font(.body)
-                            .foregroundStyle(Theme.textPrimary)
-                            .tint(Theme.accent)
-                    } else {
-                        Text(text)
-                            .font(.body)
-                            .foregroundStyle(Theme.textPrimary)
-                    }
-                case .image(let alt, let url):
-                    MarkdownImageView(url: url, alt: alt)
-                }
-            }
-        }
-    }
-    
-    /// Parse markdown content into text and image elements
-    private func parseMarkdownContent() -> [MarkdownElement] {
-        var elements: [MarkdownElement] = []
-        var remaining = content
-        
-        // Regex to match markdown images: ![alt](url)
-        let imagePattern = #/!\[([^\]]*)\]\(([^)]+)\)/#
-        
-        while let match = remaining.firstMatch(of: imagePattern) {
-            // Add text before the image
-            let textBefore = String(remaining[remaining.startIndex..<match.range.lowerBound])
-            if !textBefore.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                elements.append(.text(textBefore))
-            }
-            
-            // Add the image
-            let alt = String(match.output.1)
-            let url = String(match.output.2)
-            elements.append(.image(alt: alt, url: url))
-            
-            // Continue with remaining content
-            remaining = String(remaining[match.range.upperBound...])
-        }
-        
-        // Add any remaining text
-        if !remaining.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            elements.append(.text(remaining))
-        }
-        
-        // If no elements were parsed, just return the original text
-        if elements.isEmpty && !content.isEmpty {
-            elements.append(.text(content))
-        }
-        
-        return elements
-    }
-}
-
-/// Represents a parsed markdown element
-private enum MarkdownElement {
-    case text(String)
-    case image(alt: String, url: String)
-}
-
-/// View for displaying markdown images with loading state
-private struct MarkdownImageView: View {
-    let url: String
-    let alt: String
-    
-    var body: some View {
-        if let imageURL = URL(string: url) {
-            AsyncImage(url: imageURL) { phase in
-                switch phase {
-                case .empty:
-                    HStack(spacing: 8) {
-                        ProgressView()
-                            .controlSize(.small)
-                        Text("Loading image...")
-                            .font(.caption)
-                            .foregroundStyle(Theme.textSecondary)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding()
-                    .background(Color.white.opacity(0.05))
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
-                    
-                case .success(let image):
-                    VStack(alignment: .leading, spacing: 4) {
-                        image
-                            .resizable()
-                            .aspectRatio(contentMode: .fit)
-                            .frame(maxWidth: .infinity, maxHeight: 400)
-                            .clipShape(RoundedRectangle(cornerRadius: 12))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 12)
-                                    .stroke(Theme.border, lineWidth: 0.5)
-                            )
-                        
-                        if !alt.isEmpty {
-                            Text(alt)
-                                .font(.caption)
-                                .foregroundStyle(Theme.textTertiary)
-                                .italic()
-                        }
-                    }
-                    
-                case .failure:
-                    HStack(spacing: 8) {
-                        Image(systemName: "photo.badge.exclamationmark")
-                            .foregroundStyle(Theme.error)
-                        Text("Failed to load image")
-                            .font(.caption)
-                            .foregroundStyle(Theme.textSecondary)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding()
-                    .background(Color.white.opacity(0.05))
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
-                    
-                @unknown default:
-                    EmptyView()
-                }
-            }
+        if let attributed = try? AttributedString(markdown: content, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) {
+            Text(attributed)
+                .font(.body)
+                .foregroundStyle(Theme.textPrimary)
+                .tint(Theme.accent)
         } else {
-            HStack(spacing: 8) {
-                Image(systemName: "link.badge.plus")
-                    .foregroundStyle(Theme.warning)
-                Text("Invalid image URL")
-                    .font(.caption)
-                    .foregroundStyle(Theme.textSecondary)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding()
-            .background(Color.white.opacity(0.05))
-            .clipShape(RoundedRectangle(cornerRadius: 12))
+            Text(content)
+                .font(.body)
+                .foregroundStyle(Theme.textPrimary)
         }
     }
 }

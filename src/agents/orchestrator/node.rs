@@ -123,6 +123,13 @@ Guidelines:
 - Aim for 2-4 subtasks typically
 - IMPORTANT: If subtasks have a logical order (e.g., download before analyze), specify dependencies!
 
+PREFER COMMAND-LINE APPROACHES:
+- For downloading files: use curl/wget, NOT browser automation
+- For Chrome extensions: download CRX directly via URL pattern, then unzip
+- For file analysis: use grep/find/ripgrep, NOT GUI tools
+- For web APIs: use curl/fetch_url, NOT browser clicks
+- Desktop automation is a LAST RESORT only when no CLI option exists
+
 Respond ONLY with the JSON object."#,
             task.description()
         );
@@ -228,12 +235,20 @@ Respond ONLY with the JSON object."#,
         subtask_plan: SubtaskPlan,
         parent_budget: &Budget,
         ctx: &AgentContext,
+        requested_model: Option<&str>,
     ) -> AgentResult {
         // Convert plan to tasks
         let mut tasks = match subtask_plan.into_tasks(parent_budget) {
             Ok(t) => t,
             Err(e) => return AgentResult::failure(format!("Failed to create subtasks: {}", e), 0),
         };
+
+        // Propagate requested_model to all subtasks
+        if let Some(model) = requested_model {
+            for task in &mut tasks {
+                task.analysis_mut().requested_model = Some(model.to_string());
+            }
+        }
 
         let mut results = Vec::new();
         let mut total_cost = 0u64;
@@ -362,7 +377,8 @@ Respond ONLY with the JSON object."#,
 
                     // Execute subtasks recursively with tree updates
                     let child_ctx = ctx.child_context();
-                    let result = self.execute_subtasks_with_tree(plan, task.budget(), &child_ctx, node_id, root_tree, emit_ctx).await;
+                    let requested_model = task.analysis().requested_model.as_deref();
+                    let result = self.execute_subtasks_with_tree(plan, task.budget(), &child_ctx, node_id, root_tree, emit_ctx, requested_model).await;
                     
                     return AgentResult {
                         success: result.success,
@@ -492,11 +508,19 @@ Respond ONLY with the JSON object."#,
         parent_node_id: &str,
         root_tree: &mut crate::api::control::AgentTreeNode,
         emit_ctx: &AgentContext,
+        requested_model: Option<&str>,
     ) -> AgentResult {
         let mut tasks = match subtask_plan.into_tasks(parent_budget) {
             Ok(t) => t,
             Err(e) => return AgentResult::failure(format!("Failed to create subtasks: {}", e), 0),
         };
+
+        // Propagate requested_model to all subtasks
+        if let Some(model) = requested_model {
+            for task in &mut tasks {
+                task.analysis_mut().requested_model = Some(model.to_string());
+            }
+        }
 
         let mut results = Vec::new();
         let mut total_cost = 0u64;
@@ -622,7 +646,8 @@ impl Agent for NodeAgent {
                     );
 
                     // Execute subtasks recursively
-                    let result = self.execute_subtasks(plan, task.budget(), ctx).await;
+                    let requested_model = task.analysis().requested_model.as_deref();
+                    let result = self.execute_subtasks(plan, task.budget(), ctx, requested_model).await;
                     
                     return AgentResult {
                         success: result.success,

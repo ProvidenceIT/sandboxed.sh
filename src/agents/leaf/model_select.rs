@@ -565,8 +565,40 @@ impl Agent for ModelSelector {
             }));
         }
 
-        // Get user-requested model as minimum capability floor
-        let requested_model = task.analysis().requested_model.as_deref();
+        // Get user-requested model - if specified, use it directly if available
+        let requested_model = task.analysis().requested_model.clone();
+        
+        // If user explicitly requested a model and it's available, use it directly
+        if let Some(ref req_model) = requested_model {
+            if models.iter().any(|m| &m.model_id == req_model) {
+                tracing::info!(
+                    "Using user-requested model directly: {} (not optimizing)",
+                    req_model
+                );
+                
+                // Record selection in analysis
+                {
+                    let a = task.analysis_mut();
+                    a.selected_model = Some(req_model.clone());
+                    a.estimated_cost_cents = Some(50); // Default estimate
+                }
+
+                return AgentResult::success(
+                    &format!("Using user-requested model: {}", req_model),
+                    1,
+                )
+                .with_data(json!({
+                    "model_id": req_model,
+                    "expected_cost_cents": 50,
+                    "confidence": 1.0,
+                    "reasoning": format!("User explicitly requested model: {}", req_model),
+                    "fallbacks": [],
+                    "used_historical_data": false,
+                    "used_benchmark_data": false,
+                    "task_type": format!("{:?}", task_type),
+                }));
+            }
+        }
 
         match self.select_optimal(
             &models,
@@ -575,7 +607,7 @@ impl Agent for ModelSelector {
             budget_cents,
             task_type,
             historical_stats.as_ref(),
-            requested_model,
+            requested_model.as_deref(),
             ctx,
         ).await {
             Some(rec) => {

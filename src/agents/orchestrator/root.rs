@@ -117,6 +117,13 @@ Guidelines:
 - Keep subtasks focused and specific
 - IMPORTANT: If subtasks have a logical order (e.g., download before analyze), specify dependencies!
 
+PREFER COMMAND-LINE APPROACHES:
+- For downloading files: use curl/wget, NOT browser automation
+- For Chrome extensions: download CRX directly via URL pattern, then unzip
+- For file analysis: use grep/find/ripgrep, NOT GUI tools
+- For web APIs: use curl/fetch_url, NOT browser clicks
+- Desktop automation is a LAST RESORT only when no CLI option exists
+
 Respond ONLY with the JSON object."#,
             task.description()
         );
@@ -323,6 +330,7 @@ Respond ONLY with the JSON object."#,
         child_ctx: &AgentContext,
         root_tree: &mut crate::api::control::AgentTreeNode,
         ctx: &AgentContext,
+        requested_model: Option<&str>,
     ) -> AgentResult {
         use super::NodeAgent;
         use std::sync::Arc;
@@ -338,6 +346,13 @@ Respond ONLY with the JSON object."#,
             Ok(t) => t,
             Err(e) => return AgentResult::failure(format!("Failed to create subtasks: {}", e), 0),
         };
+
+        // Propagate requested_model to all subtasks
+        if let Some(model) = requested_model {
+            for task in &mut tasks {
+                task.analysis_mut().requested_model = Some(model.to_string());
+            }
+        }
 
         let total_subtasks = tasks.len();
         let num_waves = waves.len();
@@ -581,7 +596,8 @@ impl Agent for RootAgent {
                     
                     // Execute subtasks with tree updates
                     let child_ctx = ctx.child_context();
-                    let result = self.execute_subtasks_with_tree(plan, task.budget(), &child_ctx, &mut root_tree, ctx).await;
+                    let requested_model = task.analysis().requested_model.as_deref();
+                    let result = self.execute_subtasks_with_tree(plan, task.budget(), &child_ctx, &mut root_tree, ctx, requested_model).await;
                     
                     // Update root status
                     root_tree.status = if result.success { "completed".to_string() } else { "failed".to_string() };
