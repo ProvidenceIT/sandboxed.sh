@@ -93,15 +93,28 @@ src/
 - **Expensive models**: high token cost, low failure rate
 - **Optimal**: minimizes `E[total_cost] = Σ P(retry_n) × cost_n`
 
-Default ladder: `claude-haiku-4.5` → `claude-sonnet-4` → `claude-sonnet-4.5`
+Default ladder: `gemini-3-flash` → `qwen/qwen3-235b-a22b-instruct` → `deepseek/deepseek-v3.2`
+
+### Model Preferences
+
+**NEVER use Claude models** (anthropic/claude-*) - they are prohibitively expensive.
+
+**Preferred models (in order):**
+1. `google/gemini-3-flash-preview` - Fast, cheap, good tool use
+2. `qwen/qwen3-235b-a22b-instruct` - Strong reasoning, affordable
+3. `deepseek/deepseek-v3.2` - Good value, capable
+4. `x-ai/grok-4.1-fast` - Fast alternative
+5. `mistralai/mistral-large-2512` - European provider option
+
+When implementing model selection or defaults, always prefer these models over Claude.
 
 ## Model Family System
 
-The agent automatically upgrades outdated model names to the latest versions. This prevents issues where training data suggests old model names like `claude-3.5-sonnet` instead of the newer, cheaper, and smarter `claude-sonnet-4.5`.
+The agent automatically upgrades outdated model names to the latest versions. This prevents issues where training data suggests old model names like `gemini-1.5-flash` instead of the newer `gemini-3-flash-preview`.
 
 ### How It Works
 
-1. **Model Families**: Models are grouped into families (e.g., `claude-sonnet`, `gpt-4`)
+1. **Model Families**: Models are grouped into families (e.g., `gemini-flash`, `gpt-4`, `deepseek`)
 2. **Auto-Upgrade**: When an old model is requested, it's resolved to the latest in its family
 3. **Aliases**: Common aliases like "sonnet" or "gpt4" resolve to the latest
 
@@ -116,9 +129,11 @@ The agent automatically upgrades outdated model names to the latest versions. Th
 
 | Tier | Examples | Use Case |
 |------|----------|----------|
-| **flagship** | claude-opus-4.5, o1, deepseek-r1 | Complex reasoning, important tasks |
-| **mid** | claude-sonnet-4.5, gpt-4.1, gemini-pro | Default for most tasks |
-| **fast** | claude-haiku-4.5, gpt-4.1-mini | Quick, cheap tasks |
+| **flagship** | deepseek-r1, o1, qwen3-235b | Complex reasoning, important tasks |
+| **mid** | gemini-3-flash, deepseek-v3.2, grok-4.1 | Default for most tasks |
+| **fast** | gpt-4.1-mini, gemini-flash | Quick, cheap tasks |
+
+> ⚠️ **Cost Warning**: Never use Claude models (anthropic/*) - they are 10-50x more expensive than alternatives with similar capability.
 
 ### API Endpoints
 
