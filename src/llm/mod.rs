@@ -102,7 +102,11 @@ pub struct ReasoningContent {
     
     /// Encrypted thought signature for resuming reasoning (required for Gemini 3).
     /// This MUST be preserved and sent back in subsequent requests for tool call continuations.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Supports both snake_case and camelCase for compatibility with different API formats.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        alias = "thoughtSignature"
+    )]
     pub thought_signature: Option<String>,
     
     /// Type of reasoning block (e.g., "thinking", "reasoning.text")
@@ -227,7 +231,11 @@ pub struct ToolCall {
     pub call_type: String,
     pub function: FunctionCall,
     /// Thought signature for Gemini 3 models (may be at this level instead of function level).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Supports both snake_case and camelCase for compatibility with different API formats.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        alias = "thoughtSignature"
+    )]
     pub thought_signature: Option<String>,
 }
 
@@ -240,7 +248,11 @@ pub struct FunctionCall {
     pub arguments: String,
     /// Thought signature for Gemini 3 models. Must be preserved and sent back with tool results.
     /// When present, this allows Gemini to resume its chain of thought after a tool call.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Supports both snake_case and camelCase for compatibility with different API formats.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        alias = "thoughtSignature"
+    )]
     pub thought_signature: Option<String>,
 }
 
