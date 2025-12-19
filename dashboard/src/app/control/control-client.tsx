@@ -605,21 +605,22 @@ export default function ControlClient() {
   const handleViewMission = useCallback(async (missionId: string) => {
     setViewingMissionId(missionId);
     
-    // Check if we already have items for this mission
-    if (missionItems[missionId]) {
-      setItems(missionItems[missionId]);
-      return;
-    }
-    
-    // Load mission history from API
+    // Always load fresh history from API when switching missions
+    // This ensures we don't show stale cached events
     try {
-      const mission = await loadMission(missionId);
+      const mission = await getMission(missionId);
       const historyItems = missionHistoryToItems(mission);
-      setMissionItems(prev => ({ ...prev, [missionId]: historyItems }));
       setItems(historyItems);
+      // Update cache with fresh data
+      setMissionItems(prev => ({ ...prev, [missionId]: historyItems }));
     } catch (err) {
       console.error("Failed to load mission:", err);
-      // Still set viewing ID even if load fails
+      // Fallback to cached items if API fails
+      if (missionItems[missionId]) {
+        setItems(missionItems[missionId]);
+      } else {
+        setItems([]);
+      }
     }
   }, [missionItems, missionHistoryToItems]);
 
@@ -630,12 +631,8 @@ export default function ControlClient() {
     }
   }, [currentMission, viewingMissionId]);
 
-  // Save current items to missionItems when they change
-  useEffect(() => {
-    if (viewingMissionId && items.length > 0) {
-      setMissionItems(prev => ({ ...prev, [viewingMissionId]: items }));
-    }
-  }, [items, viewingMissionId]);
+  // Note: We don't auto-cache items from SSE events because they may not have mission_id
+  // and could be from any mission. We only cache when explicitly loading from API.
 
   // Handle creating a new mission
   const handleNewMission = async () => {
