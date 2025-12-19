@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { cn } from '@/lib/utils';
 import { getCurrentMission, streamControl, type Mission, type ControlRunState } from '@/lib/api';
+import { BrainLogo } from '@/components/icons';
 import {
   LayoutDashboard,
   MessageSquare,
@@ -86,9 +87,7 @@ export function Sidebar() {
     <aside className="fixed left-0 top-0 z-40 flex h-screen w-56 flex-col glass-panel border-r border-white/[0.06]">
       {/* Header */}
       <div className="flex h-16 items-center gap-2 border-b border-white/[0.06] px-4">
-        <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-indigo-500/10">
-          <span className="text-sm font-bold text-indigo-400">O</span>
-        </div>
+        <BrainLogo size={32} />
         <div className="flex flex-col">
           <span className="text-sm font-medium text-white">OpenAgent</span>
           <span className="tag">v0.1.0</span>
@@ -147,9 +146,7 @@ export function Sidebar() {
       {/* Footer */}
       <div className="border-t border-white/[0.06] p-4">
         <div className="flex items-center gap-3">
-          <div className="flex h-8 w-8 items-center justify-center rounded-full bg-white/[0.04]">
-            <span className="text-xs font-medium text-white/60">AI</span>
-          </div>
+          <BrainLogo size={32} />
           <div className="flex-1 min-w-0">
             <p className="truncate text-xs font-medium text-white/80">Agent Status</p>
             <p className="flex items-center gap-1.5 text-[10px] text-white/40">

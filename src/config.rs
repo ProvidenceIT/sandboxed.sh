@@ -226,6 +226,9 @@ pub struct Config {
     /// Hours of inactivity after which an active mission is auto-closed (0 = disabled)
     pub stale_mission_hours: u64,
     
+    /// Maximum number of missions that can run in parallel (1 = sequential only)
+    pub max_parallel_missions: usize,
+    
     /// Development mode (disables auth; more permissive defaults)
     pub dev_mode: bool,
 
@@ -347,6 +350,12 @@ impl Config {
             .parse()
             .map_err(|e| ConfigError::InvalidValue("STALE_MISSION_HOURS".to_string(), format!("{}", e)))?;
 
+        // Maximum parallel missions (default: 1 = sequential)
+        let max_parallel_missions = std::env::var("MAX_PARALLEL_MISSIONS")
+            .unwrap_or_else(|_| "1".to_string())
+            .parse()
+            .map_err(|e| ConfigError::InvalidValue("MAX_PARALLEL_MISSIONS".to_string(), format!("{}", e)))?;
+
         let dev_mode = std::env::var("DEV_MODE")
             .ok()
             .map(|v| parse_bool(&v).map_err(|e| ConfigError::InvalidValue("DEV_MODE".to_string(), e)))
@@ -413,6 +422,7 @@ impl Config {
             port,
             max_iterations,
             stale_mission_hours,
+            max_parallel_missions,
             dev_mode,
             auth,
             console_ssh,
@@ -435,6 +445,7 @@ impl Config {
             port: 3000,
             max_iterations: 50,
             stale_mission_hours: 24,
+            max_parallel_missions: 1,
             dev_mode: true,
             auth: AuthConfig::default(),
             console_ssh: ConsoleSshConfig::default(),

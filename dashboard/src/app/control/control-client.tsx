@@ -181,11 +181,7 @@ function Shimmer({ className }: { className?: string }) {
 }
 
 // Phase indicator - shows what the agent is doing during preparation
-function PhaseItem({
-  item,
-}: {
-  item: Extract<ChatItem, { kind: "phase" }>;
-}) {
+function PhaseItem({ item }: { item: Extract<ChatItem, { kind: "phase" }> }) {
   const phaseLabels: Record<string, { label: string; icon: typeof Brain }> = {
     estimating_complexity: { label: "Analyzing task", icon: Brain },
     selecting_model: { label: "Selecting model", icon: Cpu },
@@ -194,9 +190,9 @@ function PhaseItem({
     verifying: { label: "Verifying", icon: CheckCircle },
   };
 
-  const { label, icon: Icon } = phaseLabels[item.phase] ?? { 
-    label: item.phase.replace(/_/g, ' '), 
-    icon: Brain 
+  const { label, icon: Icon } = phaseLabels[item.phase] ?? {
+    label: item.phase.replace(/_/g, " "),
+    icon: Brain,
   };
 
   return (
@@ -607,15 +603,16 @@ export default function ControlClient() {
       if (event.type === "status" && isRecord(data)) {
         reconnectAttempts = 0;
         const st = data["state"];
-        const newState = typeof st === "string" ? (st as ControlRunState) : "idle";
+        const newState =
+          typeof st === "string" ? (st as ControlRunState) : "idle";
         const q = data["queue_len"];
         setQueueLen(typeof q === "number" ? q : 0);
-        
+
         // Clear progress when idle
         if (newState === "idle") {
           setProgress(null);
         }
-        
+
         // If we reconnected and agent is already running, add a visual indicator
         setRunState((prevState) => {
           // Only show reconnect notice if we weren't already tracking this as running
@@ -623,7 +620,8 @@ export default function ControlClient() {
           if (newState === "running" && prevState === "idle") {
             setItems((prevItems) => {
               const hasActiveThinking = prevItems.some(
-                (it) => (it.kind === "thinking" && !it.done) || it.kind === "phase"
+                (it) =>
+                  (it.kind === "thinking" && !it.done) || it.kind === "phase"
               );
               // If there's no active streaming item, the user is seeing stale state
               // The "Agent is working..." indicator will show via the render logic
@@ -944,25 +942,42 @@ export default function ControlClient() {
             <span className="hidden sm:inline">New</span> Mission
           </button>
 
-          <div
-            className={cn(
-              "flex items-center gap-2 text-sm whitespace-nowrap",
-              status.className
-            )}
-          >
-            <StatusIcon
-              className={cn("h-4 w-4", runState !== "idle" && "animate-spin")}
-            />
-            <span>{status.label}</span>
-            <span className="text-white/20">•</span>
-            <span className="text-white/40">Queue: {queueLen}</span>
+          {/* Status panel */}
+          <div className="flex items-center gap-2 rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2">
+            {/* Run state indicator */}
+            <div className={cn("flex items-center gap-2", status.className)}>
+              <StatusIcon
+                className={cn(
+                  "h-3.5 w-3.5",
+                  runState !== "idle" && "animate-spin"
+                )}
+              />
+              <span className="text-sm font-medium">{status.label}</span>
+            </div>
+
+            {/* Queue count */}
+            <div className="h-4 w-px bg-white/[0.08]" />
+            <div className="flex items-center gap-1.5">
+              <span className="text-[10px] uppercase tracking-wider text-white/40">
+                Queue
+              </span>
+              <span className="text-sm font-medium text-white/70 tabular-nums">
+                {queueLen}
+              </span>
+            </div>
+
             {/* Progress indicator */}
             {progress && progress.total > 0 && (
               <>
-                <span className="text-white/20">•</span>
-                <span className="text-emerald-400 font-medium">
-                  Subtask {progress.completed + 1}/{progress.total}
-                </span>
+                <div className="h-4 w-px bg-white/[0.08]" />
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[10px] uppercase tracking-wider text-white/40">
+                    Subtask
+                  </span>
+                  <span className="text-sm font-medium text-emerald-400 tabular-nums">
+                    {progress.completed + 1}/{progress.total}
+                  </span>
+                </div>
               </>
             )}
           </div>
@@ -991,7 +1006,8 @@ export default function ControlClient() {
                       Agent is working...
                     </h2>
                     <p className="mt-2 text-sm text-white/40 max-w-sm">
-                      Processing your request. Updates will appear here as they arrive.
+                      Processing your request. Updates will appear here as they
+                      arrive.
                     </p>
                   </>
                 ) : currentMission && currentMission.status !== "active" ? (
@@ -1025,21 +1041,26 @@ export default function ControlClient() {
           ) : (
             <div className="mx-auto max-w-3xl space-y-6">
               {/* Show streaming indicator when running but no active thinking/phase */}
-              {runState === "running" && items.length > 0 && !items.some(
-                (it) => (it.kind === "thinking" && !it.done) || it.kind === "phase"
-              ) && (
-                <div className="flex justify-start gap-3 animate-fade-in">
-                  <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-indigo-500/20">
-                    <Bot className="h-4 w-4 text-indigo-400 animate-pulse" />
-                  </div>
-                  <div className="rounded-2xl rounded-bl-md bg-white/[0.03] border border-white/[0.06] px-4 py-3">
-                    <div className="flex items-center gap-2">
-                      <Loader className="h-4 w-4 text-indigo-400 animate-spin" />
-                      <span className="text-sm text-white/60">Agent is working...</span>
+              {runState === "running" &&
+                items.length > 0 &&
+                !items.some(
+                  (it) =>
+                    (it.kind === "thinking" && !it.done) || it.kind === "phase"
+                ) && (
+                  <div className="flex justify-start gap-3 animate-fade-in">
+                    <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-indigo-500/20">
+                      <Bot className="h-4 w-4 text-indigo-400 animate-pulse" />
+                    </div>
+                    <div className="rounded-2xl rounded-bl-md bg-white/[0.03] border border-white/[0.06] px-4 py-3">
+                      <div className="flex items-center gap-2">
+                        <Loader className="h-4 w-4 text-indigo-400 animate-spin" />
+                        <span className="text-sm text-white/60">
+                          Agent is working...
+                        </span>
+                      </div>
                     </div>
                   </div>
-                </div>
-              )}
+                )}
 
               {items.map((item) => {
                 if (item.kind === "user") {

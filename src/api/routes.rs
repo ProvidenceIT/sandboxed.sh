@@ -130,6 +130,11 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         .route("/api/control/missions/:id", get(control::get_mission))
         .route("/api/control/missions/:id/load", post(control::load_mission))
         .route("/api/control/missions/:id/status", post(control::set_mission_status))
+        .route("/api/control/missions/:id/cancel", post(control::cancel_mission))
+        .route("/api/control/missions/:id/parallel", post(control::start_mission_parallel))
+        // Parallel execution endpoints
+        .route("/api/control/running", get(control::list_running_missions))
+        .route("/api/control/parallel/config", get(control::get_parallel_config))
         // Memory endpoints
         .route("/api/runs", get(list_runs))
         .route("/api/runs/:id", get(get_run))

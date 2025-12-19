@@ -511,6 +511,7 @@ Use `search_memory` when you encounter a problem you might have solved before or
                         let _ = events.send(AgentEvent::Thinking {
                             content: content.clone(),
                             done: response.tool_calls.is_none(),
+                            mission_id: None,
                         });
                     }
                 }
@@ -606,6 +607,7 @@ Use `search_memory` when you encounter a problem you might have solved before or
                                 tool_call_id: tool_call.id.clone(),
                                 name: tool_name.clone(),
                                 args: args_json.clone(),
+                                mission_id: None,
                             });
                         }
 
@@ -631,7 +633,7 @@ Use `search_memory` when you encounter a problem you might have solved before or
                                             s.state = ControlRunState::WaitingForTool;
                                             let q = s.queue_len;
                                             drop(s);
-                                            let _ = events.send(AgentEvent::Status { state: ControlRunState::WaitingForTool, queue_len: q });
+                                            let _ = events.send(AgentEvent::Status { state: ControlRunState::WaitingForTool, queue_len: q, mission_id: None });
                                         }
 
                                         let recv = if let Some(token) = &ctx.cancel_token {
@@ -677,7 +679,7 @@ Use `search_memory` when you encounter a problem you might have solved before or
                                                     s.state = ControlRunState::Running;
                                                     let q = s.queue_len;
                                                     drop(s);
-                                                    let _ = events.send(AgentEvent::Status { state: ControlRunState::Running, queue_len: q });
+                                                    let _ = events.send(AgentEvent::Status { state: ControlRunState::Running, queue_len: q, mission_id: None });
                                                 }
                                                 (msg, v)
                                             }
@@ -689,7 +691,7 @@ Use `search_memory` when you encounter a problem you might have solved before or
                                                     s.state = ControlRunState::Running;
                                                     let q = s.queue_len;
                                                     drop(s);
-                                                    let _ = events.send(AgentEvent::Status { state: ControlRunState::Running, queue_len: q });
+                                                    let _ = events.send(AgentEvent::Status { state: ControlRunState::Running, queue_len: q, mission_id: None });
                                                 }
                                                 ("Error: tool result channel closed".to_string(), serde_json::Value::Null)
                                             }
@@ -727,6 +729,7 @@ Use `search_memory` when you encounter a problem you might have solved before or
                                 tool_call_id: tool_call.id.clone(),
                                 name: tool_name.clone(),
                                 result: tool_result_json.clone(),
+                                mission_id: None,
                             });
                         }
 

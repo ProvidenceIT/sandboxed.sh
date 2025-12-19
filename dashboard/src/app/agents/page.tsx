@@ -384,6 +384,10 @@ export default function AgentsPage() {
                   key={currentMission.id}
                   onClick={() => {
                     setSelectedMissionId(currentMission.id);
+                    // Clear real tree when switching missions - it will be rebuilt from SSE or fallback
+                    if (selectedMissionId !== currentMission.id) {
+                      setRealTree(null);
+                    }
                     if (demoMode !== 'off') startDemo('off');
                   }}
                   className={cn(
@@ -414,6 +418,10 @@ export default function AgentsPage() {
                 <button
                   key={mission.id}
                   onClick={() => {
+                    // Clear real tree when switching to a different mission
+                    if (selectedMissionId !== mission.id) {
+                      setRealTree(null);
+                    }
                     setSelectedMissionId(mission.id);
                     if (demoMode !== 'off') startDemo('off');
                   }}

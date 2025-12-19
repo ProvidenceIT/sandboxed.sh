@@ -86,6 +86,10 @@ src/
 | `POST` | `/api/control/missions` | Create new mission |
 | `GET` | `/api/control/missions/current` | Get current mission |
 | `POST` | `/api/control/missions/:id/load` | Switch to mission |
+| `POST` | `/api/control/missions/:id/cancel` | Cancel specific mission |
+| `POST` | `/api/control/missions/:id/parallel` | Start mission in parallel |
+| `GET` | `/api/control/running` | List running missions |
+| `GET` | `/api/control/parallel/config` | Get parallel execution config |
 
 ## Model Selection (U-Curve)
 

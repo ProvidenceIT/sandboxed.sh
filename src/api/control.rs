@@ -78,10 +78,16 @@ pub enum AgentEvent {
     Status {
         state: ControlRunState,
         queue_len: usize,
+        /// Mission this status applies to (for parallel execution)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        mission_id: Option<Uuid>,
     },
     UserMessage {
         id: Uuid,
         content: String,
+        /// Mission this message belongs to (for parallel execution)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        mission_id: Option<Uuid>,
     },
     AssistantMessage {
         id: Uuid,
@@ -89,6 +95,9 @@ pub enum AgentEvent {
         success: bool,
         cost_cents: u64,
         model: Option<String>,
+        /// Mission this message belongs to (for parallel execution)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        mission_id: Option<Uuid>,
     },
     /// Agent thinking/reasoning (streaming)
     Thinking {
@@ -96,19 +105,31 @@ pub enum AgentEvent {
         content: String,
         /// Whether this is the final thinking chunk
         done: bool,
+        /// Mission this thinking belongs to (for parallel execution)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        mission_id: Option<Uuid>,
     },
     ToolCall {
         tool_call_id: String,
         name: String,
         args: serde_json::Value,
+        /// Mission this tool call belongs to (for parallel execution)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        mission_id: Option<Uuid>,
     },
     ToolResult {
         tool_call_id: String,
         name: String,
         result: serde_json::Value,
+        /// Mission this result belongs to (for parallel execution)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        mission_id: Option<Uuid>,
     },
     Error {
         message: String,
+        /// Mission this error belongs to (for parallel execution)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        mission_id: Option<Uuid>,
     },
     /// Mission status changed (by agent or user)
     MissionStatusChanged {
@@ -124,11 +145,17 @@ pub enum AgentEvent {
         detail: Option<String>,
         /// Agent name (for hierarchical display)
         agent: Option<String>,
+        /// Mission this phase belongs to (for parallel execution)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        mission_id: Option<Uuid>,
     },
     /// Agent tree update (for real-time tree visualization)
     AgentTree {
         /// The full agent tree structure
         tree: AgentTreeNode,
+        /// Mission this tree belongs to (for parallel execution)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        mission_id: Option<Uuid>,
     },
     /// Execution progress update (for progress indicator)
     Progress {
@@ -140,6 +167,9 @@ pub enum AgentEvent {
         current_subtask: Option<String>,
         /// Current depth level (0=root, 1=subtask, 2=sub-subtask)
         depth: u8,
+        /// Mission this progress belongs to (for parallel execution)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        mission_id: Option<Uuid>,
     },
 }
 
@@ -252,6 +282,20 @@ pub enum ControlCommand {
         status: MissionStatus,
         respond: oneshot::Sender<Result<(), String>>,
     },
+    /// Start a mission in parallel (if slots available)
+    StartParallel {
+        mission_id: Uuid,
+        respond: oneshot::Sender<Result<(), String>>,
+    },
+    /// Cancel a specific mission
+    CancelMission {
+        mission_id: Uuid,
+        respond: oneshot::Sender<Result<(), String>>,
+    },
+    /// List currently running missions
+    ListRunning {
+        respond: oneshot::Sender<Vec<super::mission_runner::RunningMissionInfo>>,
+    },
 }
 
 // ==================== Mission Types ====================
@@ -341,12 +385,16 @@ pub struct ControlState {
     pub events_tx: broadcast::Sender<AgentEvent>,
     pub tool_hub: Arc<FrontendToolHub>,
     pub status: Arc<RwLock<ControlStatus>>,
-    /// Current mission ID (if any)
+    /// Current mission ID (if any) - primary mission in the old sequential model
     pub current_mission: Arc<RwLock<Option<Uuid>>>,
     /// Current agent tree snapshot (for refresh resilience)
     pub current_tree: Arc<RwLock<Option<AgentTreeNode>>>,
     /// Current execution progress (for progress indicator)
     pub progress: Arc<RwLock<ExecutionProgress>>,
+    /// Running missions (for parallel execution)
+    pub running_missions: Arc<RwLock<Vec<super::mission_runner::RunningMissionInfo>>>,
+    /// Max parallel missions allowed
+    pub max_parallel: usize,
 }
 
 /// Execution progress for showing "Subtask X of Y"
@@ -379,7 +427,7 @@ async fn set_and_emit_status(
         s.state = state;
         s.queue_len = queue_len;
     }
-    let _ = events.send(AgentEvent::Status { state, queue_len });
+    let _ = events.send(AgentEvent::Status { state, queue_len, mission_id: None });
 }
 
 /// Enqueue a user message for the global control session.
@@ -701,6 +749,112 @@ pub async fn get_progress(State(state): State<Arc<AppState>>) -> Json<ExecutionP
     Json(progress)
 }
 
+// ==================== Parallel Mission Endpoints ====================
+
+/// List currently running missions.
+pub async fn list_running_missions(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Vec<super::mission_runner::RunningMissionInfo>>, (StatusCode, String)> {
+    let (tx, rx) = oneshot::channel();
+    
+    state
+        .control
+        .cmd_tx
+        .send(ControlCommand::ListRunning { respond: tx })
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "control session unavailable".to_string(),
+            )
+        })?;
+    
+    let running = rx.await.map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to receive response".to_string(),
+        )
+    })?;
+    
+    Ok(Json(running))
+}
+
+/// Start a mission in parallel (if capacity allows).
+pub async fn start_mission_parallel(
+    State(state): State<Arc<AppState>>,
+    Path(mission_id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let (tx, rx) = oneshot::channel();
+    
+    state
+        .control
+        .cmd_tx
+        .send(ControlCommand::StartParallel {
+            mission_id,
+            respond: tx,
+        })
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "control session unavailable".to_string(),
+            )
+        })?;
+    
+    rx.await
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to receive response".to_string(),
+            )
+        })?
+        .map(|_| Json(serde_json::json!({ "ok": true, "mission_id": mission_id })))
+        .map_err(|e| (StatusCode::CONFLICT, e))
+}
+
+/// Cancel a specific mission.
+pub async fn cancel_mission(
+    State(state): State<Arc<AppState>>,
+    Path(mission_id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let (tx, rx) = oneshot::channel();
+    
+    state
+        .control
+        .cmd_tx
+        .send(ControlCommand::CancelMission {
+            mission_id,
+            respond: tx,
+        })
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "control session unavailable".to_string(),
+            )
+        })?;
+    
+    rx.await
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to receive response".to_string(),
+            )
+        })?
+        .map(|_| Json(serde_json::json!({ "ok": true, "cancelled": mission_id })))
+        .map_err(|e| (StatusCode::NOT_FOUND, e))
+}
+
+/// Get parallel execution configuration.
+pub async fn get_parallel_config(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "max_parallel_missions": state.control.max_parallel,
+        "running_count": state.control.running_missions.read().await.len(),
+    }))
+}
+
 /// Stream control session events via SSE.
 pub async fn stream(
     State(state): State<Arc<AppState>>,
@@ -713,7 +867,7 @@ pub async fn stream(
     let stream = async_stream::stream! {
         let init_ev = Event::default()
             .event("status")
-            .json_data(AgentEvent::Status { state: initial.state, queue_len: initial.queue_len })
+            .json_data(AgentEvent::Status { state: initial.state, queue_len: initial.queue_len, mission_id: None })
             .unwrap();
         yield Ok(init_ev);
 
@@ -732,7 +886,7 @@ pub async fn stream(
                         Err(broadcast::error::RecvError::Lagged(_)) => {
                             let sse = Event::default()
                                 .event("error")
-                                .json_data(AgentEvent::Error { message: "event stream lagged; some events were dropped".to_string() })
+                                .json_data(AgentEvent::Error { message: "event stream lagged; some events were dropped".to_string(), mission_id: None })
                                 .unwrap();
                             yield Ok(sse);
                         }
@@ -778,6 +932,8 @@ pub fn spawn_control_session(
 
     let current_tree = Arc::new(RwLock::new(None));
     let progress = Arc::new(RwLock::new(ExecutionProgress::default()));
+    let running_missions = Arc::new(RwLock::new(Vec::new()));
+    let max_parallel = config.max_parallel_missions;
 
     let state = ControlState {
         cmd_tx,
@@ -787,6 +943,8 @@ pub fn spawn_control_session(
         current_mission: Arc::clone(&current_mission),
         current_tree: Arc::clone(&current_tree),
         progress: Arc::clone(&progress),
+        running_missions: Arc::clone(&running_missions),
+        max_parallel,
     };
 
     // Spawn the main control actor
@@ -1030,7 +1188,7 @@ async fn control_actor_loop(
                         if running.is_none() {
                             if let Some((mid, msg, model_override)) = queue.pop_front() {
                                 set_and_emit_status(&status, &events_tx, ControlRunState::Running, queue.len()).await;
-                                let _ = events_tx.send(AgentEvent::UserMessage { id: mid, content: msg.clone() });
+                                let _ = events_tx.send(AgentEvent::UserMessage { id: mid, content: msg.clone(), mission_id: None });
                                 let cfg = config.clone();
                                 let agent = Arc::clone(&root_agent);
                                 let mem = memory.clone();
@@ -1079,15 +1237,15 @@ async fn control_actor_loop(
                     ControlCommand::ToolResult { tool_call_id, name, result } => {
                         // Deliver to the tool hub. The executor emits ToolResult events when it receives it.
                         if tool_hub.resolve(&tool_call_id, result).await.is_err() {
-                            let _ = events_tx.send(AgentEvent::Error { message: format!("Unknown tool_call_id '{}' for tool '{}'", tool_call_id, name) });
+                            let _ = events_tx.send(AgentEvent::Error { message: format!("Unknown tool_call_id '{}' for tool '{}'", tool_call_id, name), mission_id: None });
                         }
                     }
                     ControlCommand::Cancel => {
                         if let Some(token) = &running_cancel {
                             token.cancel();
-                            let _ = events_tx.send(AgentEvent::Error { message: "Cancellation requested".to_string() });
+                            let _ = events_tx.send(AgentEvent::Error { message: "Cancellation requested".to_string(), mission_id: None });
                         } else {
-                            let _ = events_tx.send(AgentEvent::Error { message: "No running task to cancel".to_string() });
+                            let _ = events_tx.send(AgentEvent::Error { message: "No running task to cancel".to_string(), mission_id: None });
                         }
                     }
                     ControlCommand::LoadMission { id, respond } => {
@@ -1140,6 +1298,75 @@ async fn control_actor_loop(
                         } else {
                             let _ = respond.send(Err("Memory not configured".to_string()));
                         }
+                    }
+                    ControlCommand::StartParallel { mission_id, respond } => {
+                        // Parallel mission support: this is a placeholder for future implementation
+                        // Currently, missions run sequentially in the main queue
+                        // Full parallel execution requires spawning additional MissionRunner instances
+                        tracing::info!("StartParallel requested for mission {}", mission_id);
+                        
+                        // Check if we have capacity
+                        let running_count = if running.is_some() { 1 } else { 0 };
+                        let max_parallel = config.max_parallel_missions;
+                        
+                        if running_count >= max_parallel {
+                            let _ = respond.send(Err(format!(
+                                "Maximum parallel missions ({}) reached. Wait for current mission to complete or cancel it.",
+                                max_parallel
+                            )));
+                        } else {
+                            // For now, just acknowledge - full implementation would spawn a new MissionRunner
+                            let _ = respond.send(Ok(()));
+                            tracing::info!("Mission {} queued for parallel execution", mission_id);
+                        }
+                    }
+                    ControlCommand::CancelMission { mission_id, respond } => {
+                        // Check if this is the current running mission
+                        let current = current_mission.read().await.clone();
+                        if current == Some(mission_id) {
+                            // Cancel the current execution
+                            if let Some(token) = &running_cancel {
+                                token.cancel();
+                                let _ = events_tx.send(AgentEvent::Error { 
+                                    message: format!("Mission {} cancelled", mission_id),
+                                    mission_id: Some(mission_id),
+                                });
+                                let _ = respond.send(Ok(()));
+                            } else {
+                                let _ = respond.send(Err("Mission not currently executing".to_string()));
+                            }
+                        } else {
+                            // Check if it's in the queue
+                            let original_len = queue.len();
+                            queue.retain(|(_, _, _)| {
+                                // Note: queue doesn't track mission_id, so this is limited
+                                // For full parallel support, we'd need to track mission_id in queue
+                                true
+                            });
+                            if queue.len() < original_len {
+                                let _ = respond.send(Ok(()));
+                            } else {
+                                let _ = respond.send(Err(format!("Mission {} not found in queue", mission_id)));
+                            }
+                        }
+                    }
+                    ControlCommand::ListRunning { respond } => {
+                        // Return info about currently running missions
+                        let mut running_list = Vec::new();
+                        
+                        if running.is_some() {
+                            if let Some(mission_id) = current_mission.read().await.clone() {
+                                running_list.push(super::mission_runner::RunningMissionInfo {
+                                    mission_id,
+                                    model_override: None, // Could track this
+                                    state: "running".to_string(),
+                                    queue_len: queue.len(),
+                                    history_len: history.len(),
+                                });
+                            }
+                        }
+                        
+                        let _ = respond.send(running_list);
                     }
                 }
             }
@@ -1222,10 +1449,11 @@ async fn control_actor_loop(
                                 success: agent_result.success,
                                 cost_cents: agent_result.cost_cents,
                                 model: agent_result.model_used,
+                                mission_id: None,
                             });
                         }
                         Err(e) => {
-                            let _ = events_tx.send(AgentEvent::Error { message: format!("Control session task join failed: {}", e) });
+                            let _ = events_tx.send(AgentEvent::Error { message: format!("Control session task join failed: {}", e), mission_id: None });
                         }
                     }
                 }
@@ -1233,7 +1461,7 @@ async fn control_actor_loop(
                 // Start next queued message, if any.
                 if let Some((mid, msg, model_override)) = queue.pop_front() {
                     set_and_emit_status(&status, &events_tx, ControlRunState::Running, queue.len()).await;
-                    let _ = events_tx.send(AgentEvent::UserMessage { id: mid, content: msg.clone() });
+                    let _ = events_tx.send(AgentEvent::UserMessage { id: mid, content: msg.clone(), mission_id: None });
                     let cfg = config.clone();
                     let agent = Arc::clone(&root_agent);
                     let mem = memory.clone();

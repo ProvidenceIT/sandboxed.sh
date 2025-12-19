@@ -20,6 +20,7 @@ mod console;
 pub mod control;
 mod fs;
 pub mod mcp;
+pub mod mission_runner;
 mod ssh_util;
 pub mod types;
 

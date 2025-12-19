@@ -190,6 +190,7 @@ impl AgentContext {
                 phase: phase.to_string(),
                 detail: detail.map(|s| s.to_string()),
                 agent: agent.map(|s| s.to_string()),
+                mission_id: None,
             });
         }
     }
@@ -208,7 +209,7 @@ impl AgentContext {
         
         // Send SSE event
         if let Some(ref events) = self.control_events {
-            let _ = events.send(crate::api::control::AgentEvent::AgentTree { tree });
+            let _ = events.send(crate::api::control::AgentEvent::AgentTree { tree, mission_id: None });
         }
     }
     
@@ -236,6 +237,7 @@ impl AgentContext {
                 completed_subtasks: completed,
                 current_subtask: current_for_event,
                 depth,
+                mission_id: None,
             });
         }
     }

@@ -4,6 +4,35 @@ This document contains brainstormed proposals for improving the agent system.
 
 ---
 
+## Implementation Status
+
+| Proposal | Status | Notes |
+|----------|--------|-------|
+| Progress Checkpoints | ❌ Not Started | Complex, needs iteration tracking changes |
+| Parallel Missions | ✅ **Partially Implemented** | Backend ready, UI pending |
+| Optimized Prompts | ✅ Implemented | See `scripts/prompts/` |
+| Bug Fixes | ✅ Done | Model override, command safety, Gemini/Kimi fixes |
+| Context Isolation | 🟡 **Prompt-Level Only** | v2 prompt available, backend changes pending |
+
+### Parallel Missions - Implementation Details
+
+**Backend (Implemented):**
+- `MAX_PARALLEL_MISSIONS` config option (default: 1)
+- `MissionRunner` abstraction in `src/api/mission_runner.rs`
+- SSE events now include optional `mission_id` field for routing
+- New API endpoints:
+  - `GET /api/control/running` - List running missions
+  - `GET /api/control/parallel/config` - Get parallel config
+  - `POST /api/control/missions/:id/parallel` - Start in parallel
+  - `POST /api/control/missions/:id/cancel` - Cancel specific mission
+
+**Pending:**
+- Dashboard UI for parallel mission management
+- Full slot-based execution (currently uses simplified model)
+- Queue reordering and priority
+
+---
+
 ## 1. Progress Checkpoints / Milestones System
 
 ### Problem
@@ -925,16 +954,196 @@ impl Tool for CleanWorkspaceTool {
 
 ---
 
-## 7. Testing Checklist
+## 7. Context Isolation & Workspace Management
+
+### Problem
+The current architecture allows context pollution across missions:
+1. **Shared `/root/context/`** - All missions read/write to the same folder
+2. **No cleanup** - Previous mission files remain and confuse new missions
+3. **No source tracking** - Agent forgets where it downloaded sources
+4. **Work folder not enforced** - Agent can analyze files outside its work folder
+
+### Real-World Failure (Dec 19, 2025)
+A Rabby Wallet security audit mission:
+- Found Vulcan anti-cheat files in `/root/context/` from a previous mission
+- Rabby CRX extraction failed silently (`rabby_wallet_extracted/` was empty)
+- Agent pivoted to analyzing Vulcan instead of Rabby
+- Produced "Vulcan Anti-Cheat Security Audit Report" instead of Rabby report
+
+### Proposed Solutions
+
+#### 7.1 Mission-Specific Context Subfolders
+
+```rust
+// Add to Mission struct
+pub struct Mission {
+    pub id: Uuid,
+    pub title: Option<String>,
+    pub status: String,
+    pub context_subfolder: Option<String>, // NEW: e.g., "rabby-audit-20251219"
+    // ...
+}
+```
+
+When creating a mission, generate a unique context path:
+```rust
+let context_subfolder = format!("{}-{}", sanitize(title), mission_id.to_string()[..8]);
+// Results in: /root/context/security-audit-rabby-3f6979b4/
+```
+
+Inject into system prompt:
+```
+Your mission context files are in: /root/context/security-audit-rabby-3f6979b4/
+Your work folder is: /root/work/security-audit-grok/
+
+Only analyze files within these two folders.
+Do NOT access /root/context/ directly.
+```
+
+#### 7.2 Mandatory Source Setup Subtask
+
+Modify RootAgent task splitting to ALWAYS start with a setup phase:
+
+```rust
+// In root.rs, when splitting tasks
+fn create_mandatory_setup_subtask(&self, task: &Task) -> Subtask {
+    Subtask {
+        id: "setup".to_string(),
+        description: format!(
+            "Setup Phase: Create working directory at {}/. \
+             Acquire all source files needed for analysis INTO this folder. \
+             Do NOT use /root/context/. \
+             Create notes/sources.md documenting what you downloaded and from where.",
+            self.get_work_folder()
+        ),
+        dependencies: vec![],
+        priority: 0, // Always first
+        is_mandatory: true,
+    }
+}
+```
+
+#### 7.3 Work Folder Enforcement in Tools
+
+Add validation to terminal/file tools:
+
+```rust
+// In tools/terminal.rs
+fn validate_path(&self, path: &str) -> Result<(), ToolError> {
+    let work_folder = self.mission_context.work_folder();
+    let context_folder = self.mission_context.context_folder();
+    
+    // Allow reads from work folder and mission-specific context
+    if path.starts_with(work_folder) || path.starts_with(context_folder) {
+        return Ok(());
+    }
+    
+    // Allow reads from common system paths
+    if path.starts_with("/usr/") || path.starts_with("/bin/") {
+        return Ok(());
+    }
+    
+    // Block access to other mission contexts
+    if path.starts_with("/root/context/") {
+        return Err(ToolError::new(format!(
+            "Access denied: {} is outside your mission context. Use {} instead.",
+            path, context_folder
+        )));
+    }
+    
+    Ok(()) // Allow other paths (might need to clone repos, etc.)
+}
+```
+
+#### 7.4 Context Cleanup on Mission Complete
+
+```rust
+// In control.rs, when mission completes
+async fn complete_mission(&mut self, mission_id: Uuid, status: &str) {
+    // ... existing completion logic ...
+    
+    // Optional: Archive and clean context folder
+    if self.config.auto_clean_context {
+        let context_path = format!("/root/context/{}", mission.context_subfolder);
+        let archive_path = format!("/root/archive/{}", mission.context_subfolder);
+        
+        // Move to archive instead of delete
+        tokio::fs::rename(&context_path, &archive_path).await.ok();
+    }
+}
+```
+
+#### 7.5 Source Manifest Requirement
+
+The setup subtask should produce a manifest:
+
+```markdown
+# Source Manifest (/root/work/security-audit-grok/notes/sources.md)
+
+## Acquired Sources
+| Source | Location | Method | Verified |
+|--------|----------|--------|----------|
+| Rabby Wallet | ./source/ | git clone github.com/RabbyHub/Rabby | ✅ Yes (package.json exists) |
+
+## Key Directories
+- `./source/src/background/` - Extension background logic
+- `./source/_raw/` - Built extension assets
+
+## Files Indexed
+- Total: 1,234 files
+- JavaScript: 456
+- TypeScript: 234
+- JSON: 89
+
+## Analysis Scope
+Only files within `/root/work/security-audit-grok/` will be analyzed.
+```
+
+### Improved Prompt Template
+
+See `scripts/prompts/security_audit_v2.md` which implements:
+1. Mandatory workspace setup BEFORE any analysis
+2. Clone sources directly INTO the work folder (not /root/context/)
+3. Explicit FORBIDDEN section blocking /root/context/ access
+4. Source manifest requirement
+5. Verification step before proceeding
+
+### Migration Path
+
+1. **Immediate (prompt-level fix)**: Use v2 prompt that clones to work folder
+2. **Short-term**: Add `context_subfolder` to Mission
+3. **Medium-term**: Add path validation to tools
+4. **Long-term**: Full context isolation with cleanup
+
+---
+
+## 8. Testing Checklist
 
 Before rerunning the security audit experiment:
 
+### Pre-Deployment
+- [ ] Deploy Gemini thought_signature fix
 - [ ] Deploy model override fix
 - [ ] Deploy system prompt improvements  
-- [ ] Add command blacklist (at minimum)
-- [ ] Clean workspace (`rm -rf /root/work/*` or archive)
-- [ ] Remove Vulcan.jar from /root/context/
-- [ ] Verify Rabby CRX is available
-- [ ] Use optimized prompt from `scripts/prompts/security_audit_rabby.md`
-- [ ] Start with 2-3 models first, not all 8
+- [ ] Deploy command blacklist
+
+### Context Cleanup
+- [ ] Clean work folder: `ssh root@95.216.112.253 'rm -rf /root/work/*'`
+- [ ] Clean context folder: `ssh root@95.216.112.253 'rm -rf /root/context/*'`
+- [ ] Or archive: `ssh root@95.216.112.253 'mv /root/context /root/archive/context-$(date +%Y%m%d) && mkdir /root/context'`
+
+### Prompt Selection
+- [ ] Use v2 prompt: `scripts/prompts/security_audit_v2.md`
+- [ ] Verify prompt instructs agent to clone INTO work folder
+- [ ] Verify prompt FORBIDS reading /root/context/
+
+### Execution
+- [ ] Start with 1-2 models first (recommend: grok, qwen)
+- [ ] Wait for first mission to complete setup phase
+- [ ] Verify sources are in `/root/work/security-audit-{model}/source/`
 - [ ] Monitor for 10 minutes before leaving unattended
+
+### Validation
+- [ ] Check that AUDIT_REPORT.md mentions "Rabby" not "Vulcan"
+- [ ] Check sources.md manifest was created
+- [ ] Verify no analysis of `/root/context/` files
