@@ -339,6 +339,16 @@ impl ModelPricing {
                     return false;
                 }
                 
+                // Blocklist: models with broken tool calling formats
+                const BROKEN_TOOL_CALLING: &[&str] = &[
+                    "deepseek/deepseek-r1-distill",  // Uses non-standard <｜tool▁calls▁begin｜> format
+                ];
+                
+                // Skip models with broken tool calling
+                if BROKEN_TOOL_CALLING.iter().any(|blocked| m.model_id.starts_with(blocked)) {
+                    return false;
+                }
+                
                 // Must match an allowed model base (exact match or with version suffix)
                 CAPABLE_MODEL_BASES.iter().any(|base| {
                     // Exact match
