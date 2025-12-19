@@ -56,6 +56,44 @@ dashboard/src/
 └── lib/              # Utilities (api, auth, settings)
 ```
 
+## Refresh Resilience Pattern
+
+The dashboard maintains state snapshots on the backend so users can refresh or navigate away without losing visual state.
+
+### Server-Side Snapshots
+
+```typescript
+// API endpoints for fetching current state
+GET /api/control/tree     → AgentTreeNode | null  // Current tree snapshot
+GET /api/control/progress → ExecutionProgress     // Current progress (subtask X/Y)
+```
+
+### Frontend Pattern
+
+1. **On mount**: Fetch snapshot first, then subscribe to SSE
+2. **On SSE event**: Update state in real-time
+3. **On idle status**: Clear state
+
+```tsx
+useEffect(() => {
+  // 1. Fetch initial snapshot for refresh resilience
+  getAgentTree().then(setTree);
+  getProgress().then(setProgress);
+  
+  // 2. Subscribe to live updates
+  const cleanup = streamControl((event) => {
+    if (event.type === 'agent_tree') setTree(event.data.tree);
+    if (event.type === 'progress') setProgress(event.data);
+    if (event.type === 'status' && event.data.state === 'idle') {
+      setTree(null);
+      setProgress(null);
+    }
+  });
+  
+  return cleanup;
+}, []);
+```
+
 ## Agent Tree Visualization
 
 Dynamic, animated tree visualization for hierarchical agent execution. Uses SVG + framer-motion for smooth animations.

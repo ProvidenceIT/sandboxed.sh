@@ -11,7 +11,7 @@ import { useEffect, useMemo, useState, useRef, useCallback } from 'react';
 import Link from 'next/link';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
-import { listMissions, getCurrentMission, streamControl, Mission, ControlRunState } from '@/lib/api';
+import { listMissions, getCurrentMission, streamControl, getAgentTree, getProgress, Mission, ControlRunState, ExecutionProgress } from '@/lib/api';
 import { ShimmerSidebarItem } from '@/components/ui/shimmer';
 import {
   AgentTreeCanvas,
@@ -50,6 +50,7 @@ export default function AgentsPage() {
   const [loading, setLoading] = useState(true);
   const [realTree, setRealTree] = useState<AgentNode | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [progress, setProgress] = useState<ExecutionProgress | null>(null);
   
   // Demo mode state
   const [demoMode, setDemoMode] = useState<DemoMode>('off');
@@ -83,8 +84,32 @@ export default function AgentsPage() {
   }, []);
 
   // Stream control events for real-time status and tree updates
+  // First fetch snapshot, then subscribe to live updates
   useEffect(() => {
     streamCleanupRef.current?.();
+    let mounted = true;
+
+    // Fetch initial snapshot for refresh resilience
+    const fetchSnapshot = async () => {
+      try {
+        const [treeSnapshot, progressSnapshot] = await Promise.all([
+          getAgentTree().catch(() => null),
+          getProgress().catch(() => null),
+        ]);
+        if (!mounted) return;
+        
+        if (treeSnapshot) {
+          setRealTree(convertTreeNode(treeSnapshot as unknown as Record<string, unknown>));
+        }
+        if (progressSnapshot) {
+          setProgress(progressSnapshot);
+        }
+      } catch (e) {
+        console.error('Failed to fetch snapshot:', e);
+      }
+    };
+    
+    fetchSnapshot();
 
     const cleanup = streamControl((event) => {
       const data: unknown = event.data;
@@ -92,9 +117,10 @@ export default function AgentsPage() {
         const st = data['state'];
         setControlState(typeof st === 'string' ? (st as ControlRunState) : 'idle');
         
-        // Clear real tree when idle
+        // Clear real tree and progress when idle
         if (st === 'idle') {
           setRealTree(null);
+          setProgress(null);
         }
       }
       
@@ -106,10 +132,21 @@ export default function AgentsPage() {
           setRealTree(converted);
         }
       }
+      
+      // Handle progress updates
+      if (event.type === 'progress' && isRecord(data)) {
+        setProgress({
+          total_subtasks: Number(data['total_subtasks'] ?? 0),
+          completed_subtasks: Number(data['completed_subtasks'] ?? 0),
+          current_subtask: data['current_subtask'] as string | null,
+          current_depth: Number(data['depth'] ?? 0),
+        });
+      }
     });
 
     streamCleanupRef.current = cleanup;
     return () => {
+      mounted = false;
       streamCleanupRef.current?.();
       streamCleanupRef.current = null;
     };

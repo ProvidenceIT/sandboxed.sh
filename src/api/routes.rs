@@ -51,6 +51,8 @@ pub struct AppState {
     pub mcp: Arc<McpRegistry>,
     /// Benchmark registry for task-aware model selection
     pub benchmarks: crate::budget::SharedBenchmarkRegistry,
+    /// Model resolver for auto-upgrading outdated model names
+    pub resolver: crate::budget::SharedModelResolver,
 }
 
 /// Start the HTTP server.
@@ -76,10 +78,13 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
 
     // Load benchmark registry for task-aware model selection
     let benchmarks = crate::budget::load_benchmarks(&config.working_dir.to_string_lossy());
+    
+    // Load model resolver for auto-upgrading outdated model names
+    let resolver = crate::budget::load_resolver(&config.working_dir.to_string_lossy());
 
     // Spawn the single global control session actor.
     let control_state =
-        control::spawn_control_session(config.clone(), Arc::clone(&root_agent), memory.clone(), Arc::clone(&benchmarks));
+        control::spawn_control_session(config.clone(), Arc::clone(&root_agent), memory.clone(), Arc::clone(&benchmarks), Arc::clone(&resolver));
 
     let state = Arc::new(AppState {
         config: config.clone(),
@@ -89,6 +94,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         control: control_state,
         mcp,
         benchmarks,
+        resolver,
     });
 
     let public_routes = Router::new()
@@ -114,6 +120,9 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         .route("/api/control/tool_result", post(control::post_tool_result))
         .route("/api/control/stream", get(control::stream))
         .route("/api/control/cancel", post(control::post_cancel))
+        // State snapshots (for refresh resilience)
+        .route("/api/control/tree", get(control::get_tree))
+        .route("/api/control/progress", get(control::get_progress))
         // Mission management endpoints
         .route("/api/control/missions", get(control::list_missions))
         .route("/api/control/missions", post(control::create_mission))
@@ -145,6 +154,10 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         // Tools management endpoints
         .route("/api/tools", get(mcp_api::list_tools))
         .route("/api/tools/:name/toggle", post(mcp_api::toggle_tool))
+        // Model management endpoints
+        .route("/api/models", get(list_models))
+        .route("/api/models/refresh", post(refresh_models))
+        .route("/api/models/families", get(list_model_families))
         .layer(middleware::from_fn_with_state(
             Arc::clone(&state),
             auth::require_auth,
@@ -346,6 +359,7 @@ async fn run_agent_task(
         state.memory.clone(),
     );
     ctx.benchmarks = Some(Arc::clone(&state.benchmarks));
+    ctx.resolver = Some(Arc::clone(&state.resolver));
 
     // Create a run in memory if available
     let memory_run_id = if let Some(ref mem) = state.memory {
@@ -713,4 +727,127 @@ async fn search_memory(
         "query": params.q,
         "results": results
     })))
+}
+
+// ============================================================================
+// Model Management Endpoints
+// ============================================================================
+
+/// List all model families with their latest versions.
+async fn list_model_families(
+    State(state): State<Arc<AppState>>,
+) -> Json<serde_json::Value> {
+    let resolver = state.resolver.read().await;
+    let families = resolver.families();
+    
+    let family_list: Vec<serde_json::Value> = families
+        .iter()
+        .map(|(name, family)| {
+            serde_json::json!({
+                "name": name,
+                "latest": family.latest,
+                "members": family.members,
+                "tier": family.tier
+            })
+        })
+        .collect();
+    
+    Json(serde_json::json!({
+        "families": family_list,
+        "count": family_list.len()
+    }))
+}
+
+/// List available models with optional filtering.
+#[derive(Debug, Deserialize)]
+pub struct ListModelsQuery {
+    /// Filter by tier: "flagship", "mid", "fast"
+    tier: Option<String>,
+    /// Only show latest version of each family
+    latest_only: Option<bool>,
+}
+
+async fn list_models(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<ListModelsQuery>,
+) -> Json<serde_json::Value> {
+    let resolver = state.resolver.read().await;
+    
+    let models: Vec<&str> = if let Some(tier) = &params.tier {
+        resolver.models_by_tier(tier)
+    } else if params.latest_only.unwrap_or(false) {
+        resolver.latest_models()
+    } else {
+        // Return all latest models by default
+        resolver.latest_models()
+    };
+    
+    Json(serde_json::json!({
+        "models": models,
+        "count": models.len()
+    }))
+}
+
+/// Response for model refresh endpoint.
+#[derive(serde::Serialize)]
+struct RefreshModelsResponse {
+    success: bool,
+    message: String,
+    families_count: usize,
+    aliases_count: usize,
+}
+
+/// Refresh model data by reloading from disk.
+/// 
+/// This reloads the models_with_benchmarks.json file to pick up any updates.
+/// To fully refresh from OpenRouter API and benchmarks, run the merge_benchmarks.py script.
+async fn refresh_models(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<RefreshModelsResponse>, (StatusCode, String)> {
+    let working_dir = state.config.working_dir.to_string_lossy().to_string();
+    let path = format!("{}/models_with_benchmarks.json", working_dir);
+    
+    // Reload resolver from disk
+    match crate::budget::ModelResolver::load_from_file(&path) {
+        Ok(new_resolver) => {
+            let families_count = new_resolver.families().len();
+            
+            // Update the shared resolver
+            {
+                let mut resolver = state.resolver.write().await;
+                *resolver = new_resolver;
+            }
+            
+            // Also reload benchmarks from disk
+            match crate::budget::BenchmarkRegistry::load_from_file(&path) {
+                Ok(new_benchmarks) => {
+                    let benchmark_count = new_benchmarks.benchmark_count();
+                    let mut benchmarks = state.benchmarks.write().await;
+                    *benchmarks = new_benchmarks;
+                    tracing::info!(
+                        "Refreshed model resolver: {} families, {} benchmarks",
+                        families_count,
+                        benchmark_count
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to reload benchmarks: {}", e);
+                }
+            }
+            
+            Ok(Json(RefreshModelsResponse {
+                success: true,
+                message: format!("Model data refreshed from {}", path),
+                families_count,
+                aliases_count: 0,
+            }))
+        }
+        Err(e) => {
+            tracing::error!("Failed to reload model data: {}", e);
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to reload model data: {}", e),
+            ))
+        }
+    }
 }

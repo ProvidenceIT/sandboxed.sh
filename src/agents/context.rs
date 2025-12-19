@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::budget::{ModelPricing, SharedBenchmarkRegistry};
+use crate::budget::{ModelPricing, SharedBenchmarkRegistry, SharedModelResolver};
 use crate::config::Config;
 use crate::llm::LlmClient;
 use crate::memory::MemorySystem;
@@ -61,8 +61,17 @@ pub struct AgentContext {
     /// Benchmark registry for task-aware model selection.
     pub benchmarks: Option<SharedBenchmarkRegistry>,
 
+    /// Model resolver for auto-upgrading outdated model names.
+    pub resolver: Option<SharedModelResolver>,
+
     /// Mission control for allowing the agent to complete/fail missions.
     pub mission_control: Option<MissionControl>,
+
+    /// Snapshot of current agent tree (for refresh resilience on frontend).
+    pub tree_snapshot: Option<Arc<tokio::sync::RwLock<Option<crate::api::control::AgentTreeNode>>>>,
+    
+    /// Current execution progress (for progress indicator).
+    pub progress_snapshot: Option<Arc<tokio::sync::RwLock<crate::api::control::ExecutionProgress>>>,
 }
 
 impl AgentContext {
@@ -88,7 +97,10 @@ impl AgentContext {
             control_status: None,
             cancel_token: None,
             benchmarks: None,
+            resolver: None,
             mission_control: None,
+            tree_snapshot: None,
+            progress_snapshot: None,
         }
     }
     
@@ -115,7 +127,10 @@ impl AgentContext {
             control_status: None,
             cancel_token: None,
             benchmarks: None,
+            resolver: None,
             mission_control: None,
+            tree_snapshot: None,
+            progress_snapshot: None,
         }
     }
 
@@ -138,7 +153,10 @@ impl AgentContext {
             control_status: self.control_status.clone(),
             cancel_token: self.cancel_token.clone(),
             benchmarks: self.benchmarks.clone(),
+            resolver: self.resolver.clone(),
             mission_control: self.mission_control.clone(),
+            tree_snapshot: self.tree_snapshot.clone(),
+            progress_snapshot: self.progress_snapshot.clone(),
         }
     }
 
@@ -177,9 +195,48 @@ impl AgentContext {
     }
 
     /// Emit an agent tree update event (for real-time tree visualization).
+    /// Also saves the tree to the snapshot for refresh resilience.
     pub fn emit_tree(&self, tree: crate::api::control::AgentTreeNode) {
+        // Save to snapshot for refresh resilience
+        if let Some(ref snapshot) = self.tree_snapshot {
+            let tree_clone = tree.clone();
+            let snapshot = Arc::clone(snapshot);
+            tokio::spawn(async move {
+                *snapshot.write().await = Some(tree_clone);
+            });
+        }
+        
+        // Send SSE event
         if let Some(ref events) = self.control_events {
             let _ = events.send(crate::api::control::AgentEvent::AgentTree { tree });
+        }
+    }
+    
+    /// Update execution progress and emit event.
+    pub fn emit_progress(&self, total: usize, completed: usize, current: Option<String>, depth: u8) {
+        // Clone current for use in multiple places
+        let current_for_snapshot = current.clone();
+        let current_for_event = current;
+        
+        if let Some(ref snapshot) = self.progress_snapshot {
+            let snapshot = Arc::clone(snapshot);
+            tokio::spawn(async move {
+                let mut p = snapshot.write().await;
+                p.total_subtasks = total;
+                p.completed_subtasks = completed;
+                p.current_subtask = current_for_snapshot;
+                p.current_depth = depth;
+            });
+        }
+        
+        // Send SSE event for progress
+        if let Some(ref events) = self.control_events {
+            let _ = events.send(crate::api::control::AgentEvent::Progress {
+                total_subtasks: total,
+                completed_subtasks: completed,
+                current_subtask: current_for_event,
+                depth,
+            });
         }
     }
 }

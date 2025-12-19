@@ -34,6 +34,9 @@ src/
 │   ├── orchestrator/ # RootAgent, NodeAgent
 │   └── leaf/         # ComplexityEstimator, ModelSelector, TaskExecutor, Verifier
 ├── budget/           # Cost tracking, pricing, smart retry
+│   ├── benchmarks.rs # Model capability scores from llm-stats.com
+│   ├── pricing.rs    # OpenRouter pricing + model allowlist
+│   └── resolver.rs   # Model family auto-upgrade system
 ├── memory/           # Supabase + pgvector persistence + context building
 │   ├── supabase.rs   # Database client
 │   ├── context.rs    # ContextBuilder, SessionContext, MemoryContext
@@ -66,6 +69,23 @@ src/
 | `GET` | `/api/health` | Health check |
 | `GET` | `/api/runs` | List archived runs |
 | `GET/POST/DELETE` | `/api/mcp/*` | MCP management |
+| `GET` | `/api/models` | List available models |
+| `GET` | `/api/models/families` | List model families |
+| `POST` | `/api/models/refresh` | Reload model data |
+
+### Control Session Endpoints
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `POST` | `/api/control/message` | Send message to agent |
+| `GET` | `/api/control/stream` | SSE event stream |
+| `POST` | `/api/control/cancel` | Cancel current execution |
+| `GET` | `/api/control/tree` | Get agent tree snapshot (refresh resilience) |
+| `GET` | `/api/control/progress` | Get execution progress ("Subtask X/Y") |
+| `GET` | `/api/control/missions` | List all missions |
+| `POST` | `/api/control/missions` | Create new mission |
+| `GET` | `/api/control/missions/current` | Get current mission |
+| `POST` | `/api/control/missions/:id/load` | Switch to mission |
 
 ## Model Selection (U-Curve)
 
@@ -73,7 +93,50 @@ src/
 - **Expensive models**: high token cost, low failure rate
 - **Optimal**: minimizes `E[total_cost] = Σ P(retry_n) × cost_n`
 
-Default ladder: `claude-haiku-4.5` → `claude-3.5-sonnet` → `claude-sonnet-4.5`
+Default ladder: `claude-haiku-4.5` → `claude-sonnet-4` → `claude-sonnet-4.5`
+
+## Model Family System
+
+The agent automatically upgrades outdated model names to the latest versions. This prevents issues where training data suggests old model names like `claude-3.5-sonnet` instead of the newer, cheaper, and smarter `claude-sonnet-4.5`.
+
+### How It Works
+
+1. **Model Families**: Models are grouped into families (e.g., `claude-sonnet`, `gpt-4`)
+2. **Auto-Upgrade**: When an old model is requested, it's resolved to the latest in its family
+3. **Aliases**: Common aliases like "sonnet" or "gpt4" resolve to the latest
+
+### Model Data Sources
+
+| File | Purpose | Updated By |
+|------|---------|------------|
+| `models_with_benchmarks.json` | Families, aliases, benchmark scores | `scripts/merge_benchmarks.py` |
+| `src/budget/pricing.rs` | Model allowlist (CAPABLE_MODEL_BASES) | Manual (keep in sync) |
+
+### Model Tiers
+
+| Tier | Examples | Use Case |
+|------|----------|----------|
+| **flagship** | claude-opus-4.5, o1, deepseek-r1 | Complex reasoning, important tasks |
+| **mid** | claude-sonnet-4.5, gpt-4.1, gemini-pro | Default for most tasks |
+| **fast** | claude-haiku-4.5, gpt-4.1-mini | Quick, cheap tasks |
+
+### API Endpoints
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET` | `/api/models` | List available models |
+| `GET` | `/api/models/families` | List model families |
+| `POST` | `/api/models/refresh` | Reload model data from disk |
+
+### Updating Model Data
+
+```bash
+# Regenerate models_with_benchmarks.json with latest from OpenRouter + benchmarks
+python scripts/merge_benchmarks.py
+
+# Then update CAPABLE_MODEL_BASES in src/budget/pricing.rs if needed
+# And call POST /api/models/refresh to reload without restart
+```
 
 ## Smart Retry
 

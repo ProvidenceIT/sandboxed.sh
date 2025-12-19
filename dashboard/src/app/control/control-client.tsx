@@ -15,6 +15,7 @@ import {
   setMissionStatus,
   getCurrentMission,
   uploadFile,
+  getProgress,
   type ControlRunState,
   type Mission,
   type MissionStatus,
@@ -353,6 +354,14 @@ export default function ControlClient() {
   const [runState, setRunState] = useState<ControlRunState>("idle");
   const [queueLen, setQueueLen] = useState(0);
 
+  // Progress state (for "Subtask X of Y" indicator)
+  const [progress, setProgress] = useState<{
+    total: number;
+    completed: number;
+    current: string | null;
+    depth: number;
+  } | null>(null);
+
   // Mission state
   const [currentMission, setCurrentMission] = useState<Mission | null>(null);
   const [showStatusMenu, setShowStatusMenu] = useState(false);
@@ -578,6 +587,20 @@ export default function ControlClient() {
     const maxReconnectDelay = 30000;
     const baseDelay = 1000;
 
+    // Fetch initial progress for refresh resilience
+    getProgress()
+      .then((p) => {
+        if (mounted && p.total_subtasks > 0) {
+          setProgress({
+            total: p.total_subtasks,
+            completed: p.completed_subtasks,
+            current: p.current_subtask,
+            depth: p.current_depth,
+          });
+        }
+      })
+      .catch(() => {}); // Ignore errors
+
     const handleEvent = (event: { type: string; data: unknown }) => {
       const data: unknown = event.data;
 
@@ -587,6 +610,11 @@ export default function ControlClient() {
         const newState = typeof st === "string" ? (st as ControlRunState) : "idle";
         const q = data["queue_len"];
         setQueueLen(typeof q === "number" ? q : 0);
+        
+        // Clear progress when idle
+        if (newState === "idle") {
+          setProgress(null);
+        }
         
         // If we reconnected and agent is already running, add a visual indicator
         setRunState((prevState) => {
@@ -745,6 +773,16 @@ export default function ControlClient() {
           ]);
           toast.error(msg);
         }
+      }
+
+      // Handle progress updates
+      if (event.type === "progress" && isRecord(data)) {
+        setProgress({
+          total: Number(data["total_subtasks"] ?? 0),
+          completed: Number(data["completed_subtasks"] ?? 0),
+          current: data["current_subtask"] as string | null,
+          depth: Number(data["depth"] ?? 0),
+        });
       }
     };
 
@@ -918,6 +956,15 @@ export default function ControlClient() {
             <span>{status.label}</span>
             <span className="text-white/20">•</span>
             <span className="text-white/40">Queue: {queueLen}</span>
+            {/* Progress indicator */}
+            {progress && progress.total > 0 && (
+              <>
+                <span className="text-white/20">•</span>
+                <span className="text-emerald-400 font-medium">
+                  Subtask {progress.completed + 1}/{progress.total}
+                </span>
+              </>
+            )}
           </div>
         </div>
       </div>

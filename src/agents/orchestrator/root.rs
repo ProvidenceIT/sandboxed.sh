@@ -142,6 +142,106 @@ Respond ONLY with the JSON object."#,
         self.parse_subtask_plan(&content, task.id())
     }
 
+    /// Synthesize a final output from subtask results.
+    ///
+    /// # Purpose
+    /// When a task is split into subtasks, this method produces a coherent final
+    /// response by asking the LLM to synthesize all subtask outputs into a single
+    /// answer that addresses the original request.
+    ///
+    /// # Fallback
+    /// If LLM synthesis fails, falls back to concatenating subtask outputs.
+    async fn synthesize_final_output(
+        &self,
+        original_task: &str,
+        results: &[AgentResult],
+        ctx: &AgentContext,
+    ) -> String {
+        // Collect successful outputs
+        let subtask_outputs: Vec<String> = results
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.success)
+            .map(|(i, r)| format!("## Subtask {} Output\n{}", i + 1, r.output))
+            .collect();
+
+        if subtask_outputs.is_empty() {
+            return "All subtasks failed - no output to synthesize.".to_string();
+        }
+
+        // If only one subtask, just return its output directly
+        if subtask_outputs.len() == 1 {
+            return results
+                .iter()
+                .find(|r| r.success)
+                .map(|r| r.output.clone())
+                .unwrap_or_default();
+        }
+
+        let combined_outputs = subtask_outputs.join("\n\n---\n\n");
+
+        let prompt = format!(
+            r#"You have completed a multi-step task. Below are the outputs from each step.
+
+## Original Request
+{original_task}
+
+## Subtask Outputs
+{combined_outputs}
+
+## Your Task
+Synthesize these outputs into a single, coherent response that directly answers the original request.
+
+Guidelines:
+- Combine findings into a unified narrative or report
+- Remove redundancy between subtask outputs
+- Maintain the format the user requested (e.g., if they asked for a markdown report, provide one)
+- If subtasks produced code or files, list them clearly
+- Be comprehensive but concise
+- Do NOT mention "subtasks" or the internal execution structure - respond as if you did the work yourself"#
+        );
+
+        let messages = vec![
+            crate::llm::ChatMessage::new(
+                crate::llm::Role::System,
+                "You are a helpful assistant that synthesizes work outputs into coherent responses.",
+            ),
+            crate::llm::ChatMessage::new(crate::llm::Role::User, prompt),
+        ];
+
+        // Use a fast model for synthesis to minimize cost
+        match ctx
+            .llm
+            .chat_completion("openai/gpt-4.1-mini", &messages, None)
+            .await
+        {
+            Ok(response) => response.content.unwrap_or_else(|| {
+                // Fallback: concatenate outputs if synthesis returned empty
+                self.fallback_concatenate_outputs(results)
+            }),
+            Err(e) => {
+                tracing::warn!("Synthesis LLM call failed, using fallback: {}", e);
+                self.fallback_concatenate_outputs(results)
+            }
+        }
+    }
+
+    /// Fallback method: concatenate subtask outputs with headers.
+    fn fallback_concatenate_outputs(&self, results: &[AgentResult]) -> String {
+        let outputs: Vec<String> = results
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.success && !r.output.is_empty())
+            .map(|(i, r)| format!("## Part {}\n\n{}", i + 1, r.output))
+            .collect();
+
+        if outputs.is_empty() {
+            "Task completed but no output was generated.".to_string()
+        } else {
+            outputs.join("\n\n---\n\n")
+        }
+    }
+
     /// Extract JSON from LLM response (handles markdown code blocks).
     fn extract_json(response: &str) -> String {
         let trimmed = response.trim();
@@ -288,24 +388,24 @@ Respond ONLY with the JSON object."#,
         let successes = results.iter().filter(|r| r.success).count();
         let total = results.len();
 
+        // Concatenate outputs (fallback aggregation for non-tree path)
+        let combined_output = self.fallback_concatenate_outputs(&results);
+
         if successes == total {
-            AgentResult::success(
-                format!("All {} subtasks completed successfully", total),
-                total_cost,
-            )
-            .with_data(json!({
-                "subtasks_total": total,
-                "subtasks_succeeded": successes,
-                "recursive_execution": true,
-                "results": results.iter().map(|r| json!({
-                    "success": r.success,
-                    "output": &r.output,
-                    "data": &r.data,
-                })).collect::<Vec<_>>(),
-            }))
+            AgentResult::success(combined_output, total_cost)
+                .with_data(json!({
+                    "subtasks_total": total,
+                    "subtasks_succeeded": successes,
+                    "recursive_execution": true,
+                    "results": results.iter().map(|r| json!({
+                        "success": r.success,
+                        "output": &r.output,
+                        "data": &r.data,
+                    })).collect::<Vec<_>>(),
+                }))
         } else {
             AgentResult::failure(
-                format!("{}/{} subtasks succeeded", successes, total),
+                format!("{}/{} subtasks succeeded\n\n{}", successes, total, combined_output),
                 total_cost,
             )
             .with_data(json!({
@@ -323,6 +423,9 @@ Respond ONLY with the JSON object."#,
 
     /// Execute subtasks with tree updates for visualization.
     /// Uses wave-based parallel execution for independent tasks.
+    ///
+    /// # Parameters
+    /// - `original_task_description`: The user's original request, used for synthesizing the final output
     async fn execute_subtasks_with_tree(
         &self,
         subtask_plan: SubtaskPlan,
@@ -331,6 +434,7 @@ Respond ONLY with the JSON object."#,
         root_tree: &mut crate::api::control::AgentTreeNode,
         ctx: &AgentContext,
         requested_model: Option<&str>,
+        original_task_description: &str,
     ) -> AgentResult {
         use super::NodeAgent;
         use std::sync::Arc;
@@ -446,6 +550,18 @@ Respond ONLY with the JSON object."#,
                 }
                 all_results[idx] = Some(result);
             }
+            
+            // Emit progress update after each wave
+            let completed = all_results.iter().filter(|r| r.is_some()).count();
+            let current_subtask = if wave_idx + 1 < num_waves {
+                // Next wave's first task description
+                waves.get(wave_idx + 1).and_then(|w| w.first()).map(|&idx| {
+                    tasks.get(idx).map(|t| t.description().chars().take(50).collect::<String>())
+                }).flatten()
+            } else {
+                None
+            };
+            ctx.emit_progress(total_subtasks, completed, current_subtask, 1);
         }
 
         // Collect results in order
@@ -454,9 +570,10 @@ Respond ONLY with the JSON object."#,
         // Update the original tree from our Arc<Mutex> version
         *root_tree = tree.lock().await.clone();
 
-        // Update verifier to running
+        // Update verifier to running (repurposed as "synthesizer" for complex tasks)
         if let Some(node) = root_tree.children.iter_mut().find(|n| n.id == "verifier") {
             node.status = "running".to_string();
+            node.description = "Synthesizing final output...".to_string();
         }
         ctx.emit_tree(root_tree.clone());
 
@@ -464,7 +581,14 @@ Respond ONLY with the JSON object."#,
         let successes = results.iter().filter(|r| r.success).count();
         let total = results.len();
 
-        // Update verifier to completed
+        // Synthesize final output from all subtask results
+        let synthesized_output = if successes > 0 {
+            self.synthesize_final_output(original_task_description, &results, ctx).await
+        } else {
+            format!("{}/{} subtasks succeeded ({} waves)", successes, total, num_waves)
+        };
+
+        // Update verifier/synthesizer to completed
         if let Some(node) = root_tree.children.iter_mut().find(|n| n.id == "verifier") {
             node.status = if successes == total { "completed".to_string() } else { "failed".to_string() };
             node.budget_spent = 5;
@@ -472,24 +596,21 @@ Respond ONLY with the JSON object."#,
         ctx.emit_tree(root_tree.clone());
 
         if successes == total {
-            AgentResult::success(
-                format!("All {} subtasks completed successfully ({} waves)", total, num_waves),
-                total_cost,
-            )
-            .with_data(json!({
-                "subtasks_total": total,
-                "subtasks_succeeded": successes,
-                "recursive_execution": true,
-                "parallel_waves": num_waves,
-                "results": results.iter().map(|r| json!({
-                    "success": r.success,
-                    "output": &r.output,
-                    "data": &r.data,
-                })).collect::<Vec<_>>(),
-            }))
+            AgentResult::success(synthesized_output, total_cost)
+                .with_data(json!({
+                    "subtasks_total": total,
+                    "subtasks_succeeded": successes,
+                    "recursive_execution": true,
+                    "parallel_waves": num_waves,
+                    "results": results.iter().map(|r| json!({
+                        "success": r.success,
+                        "output": &r.output,
+                        "data": &r.data,
+                    })).collect::<Vec<_>>(),
+                }))
         } else {
             AgentResult::failure(
-                format!("{}/{} subtasks succeeded ({} waves)", successes, total, num_waves),
+                format!("{}/{} subtasks succeeded ({} waves)\n\n{}", successes, total, num_waves, synthesized_output),
                 total_cost,
             )
             .with_data(json!({
@@ -597,7 +718,8 @@ impl Agent for RootAgent {
                     // Execute subtasks with tree updates
                     let child_ctx = ctx.child_context();
                     let requested_model = task.analysis().requested_model.as_deref();
-                    let result = self.execute_subtasks_with_tree(plan, task.budget(), &child_ctx, &mut root_tree, ctx, requested_model).await;
+                    let original_task_desc = task.description();
+                    let result = self.execute_subtasks_with_tree(plan, task.budget(), &child_ctx, &mut root_tree, ctx, requested_model, original_task_desc).await;
                     
                     // Update root status
                     root_tree.status = if result.success { "completed".to_string() } else { "failed".to_string() };
@@ -638,11 +760,26 @@ impl Agent for RootAgent {
         let selected_model = if has_benchmarks {
             let sel_result = self.model_selector.execute(task, ctx).await;
             total_cost += sel_result.cost_cents;
+            // Model already resolved by ModelSelector
             task.analysis().selected_model.clone().unwrap_or_else(|| ctx.config.default_model.clone())
         } else {
+            // No benchmarks - resolve default model to latest version
+            let default_model = if let Some(resolver) = &ctx.resolver {
+                let resolver = resolver.read().await;
+                let resolved = resolver.resolve(&ctx.config.default_model);
+                if resolved.upgraded {
+                    tracing::info!(
+                        "RootAgent: default model auto-upgraded: {} → {}",
+                        resolved.original, resolved.resolved
+                    );
+                }
+                resolved.resolved
+            } else {
+                ctx.config.default_model.clone()
+            };
             let a = task.analysis_mut();
-            a.selected_model = Some(ctx.config.default_model.clone());
-            ctx.config.default_model.clone()
+            a.selected_model = Some(default_model.clone());
+            default_model
         };
 
         // Update model selector node

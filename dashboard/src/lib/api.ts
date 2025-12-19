@@ -387,6 +387,40 @@ export async function cancelControl(): Promise<void> {
   if (!res.ok) throw new Error("Failed to cancel control session");
 }
 
+// Agent tree snapshot (for refresh resilience)
+export interface AgentTreeNode {
+  id: string;
+  node_type: string;
+  name: string;
+  description: string;
+  status: string;
+  budget_allocated: number;
+  budget_spent: number;
+  complexity?: number;
+  selected_model?: string;
+  children: AgentTreeNode[];
+}
+
+export async function getAgentTree(): Promise<AgentTreeNode | null> {
+  const res = await apiFetch("/api/control/tree");
+  if (!res.ok) throw new Error("Failed to fetch agent tree");
+  return res.json();
+}
+
+// Execution progress
+export interface ExecutionProgress {
+  total_subtasks: number;
+  completed_subtasks: number;
+  current_subtask: string | null;
+  current_depth: number;
+}
+
+export async function getProgress(): Promise<ExecutionProgress> {
+  const res = await apiFetch("/api/control/progress");
+  if (!res.ok) throw new Error("Failed to fetch progress");
+  return res.json();
+}
+
 export function streamControl(
   onEvent: (event: { type: string; data: unknown }) => void
 ): () => void {

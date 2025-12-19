@@ -126,6 +126,17 @@ pub enum AgentEvent {
         /// The full agent tree structure
         tree: AgentTreeNode,
     },
+    /// Execution progress update (for progress indicator)
+    Progress {
+        /// Total number of subtasks
+        total_subtasks: usize,
+        /// Number of completed subtasks
+        completed_subtasks: usize,
+        /// Currently executing subtask description (if any)
+        current_subtask: Option<String>,
+        /// Current depth level (0=root, 1=subtask, 2=sub-subtask)
+        depth: u8,
+    },
 }
 
 /// A node in the agent tree (for visualization)
@@ -202,6 +213,7 @@ impl AgentEvent {
             AgentEvent::MissionStatusChanged { .. } => "mission_status_changed",
             AgentEvent::AgentPhase { .. } => "agent_phase",
             AgentEvent::AgentTree { .. } => "agent_tree",
+            AgentEvent::Progress { .. } => "progress",
         }
     }
 }
@@ -314,6 +326,23 @@ pub struct ControlState {
     pub status: Arc<RwLock<ControlStatus>>,
     /// Current mission ID (if any)
     pub current_mission: Arc<RwLock<Option<Uuid>>>,
+    /// Current agent tree snapshot (for refresh resilience)
+    pub current_tree: Arc<RwLock<Option<AgentTreeNode>>>,
+    /// Current execution progress (for progress indicator)
+    pub progress: Arc<RwLock<ExecutionProgress>>,
+}
+
+/// Execution progress for showing "Subtask X of Y"
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct ExecutionProgress {
+    /// Total number of subtasks
+    pub total_subtasks: usize,
+    /// Number of completed subtasks
+    pub completed_subtasks: usize,
+    /// Currently executing subtask description (if any)
+    pub current_subtask: Option<String>,
+    /// Current depth level (0=root, 1=subtask, 2=sub-subtask)
+    pub current_depth: u8,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -559,6 +588,23 @@ pub async fn get_current_mission(
     }
 }
 
+/// Get current agent tree snapshot (for refresh resilience).
+/// Returns the last emitted tree state, or null if no tree is active.
+pub async fn get_tree(
+    State(state): State<Arc<AppState>>,
+) -> Json<Option<AgentTreeNode>> {
+    let tree = state.control.current_tree.read().await.clone();
+    Json(tree)
+}
+
+/// Get current execution progress (for progress indicator).
+pub async fn get_progress(
+    State(state): State<Arc<AppState>>,
+) -> Json<ExecutionProgress> {
+    let progress = state.control.progress.read().await.clone();
+    Json(progress)
+}
+
 /// Stream control session events via SSE.
 pub async fn stream(
     State(state): State<Arc<AppState>>,
@@ -619,6 +665,7 @@ pub fn spawn_control_session(
     root_agent: AgentRef,
     memory: Option<MemorySystem>,
     benchmarks: crate::budget::SharedBenchmarkRegistry,
+    resolver: crate::budget::SharedModelResolver,
 ) -> ControlState {
     let (cmd_tx, cmd_rx) = mpsc::channel::<ControlCommand>(256);
     let (events_tx, _events_rx) = broadcast::channel::<AgentEvent>(1024);
@@ -632,12 +679,17 @@ pub fn spawn_control_session(
     // Channel for agent-initiated mission control commands
     let (mission_cmd_tx, mission_cmd_rx) = mpsc::channel::<crate::tools::mission::MissionControlCommand>(64);
 
+    let current_tree = Arc::new(RwLock::new(None));
+    let progress = Arc::new(RwLock::new(ExecutionProgress::default()));
+
     let state = ControlState {
         cmd_tx,
         events_tx: events_tx.clone(),
         tool_hub: Arc::clone(&tool_hub),
         status: Arc::clone(&status),
         current_mission: Arc::clone(&current_mission),
+        current_tree: Arc::clone(&current_tree),
+        progress: Arc::clone(&progress),
     };
 
     tokio::spawn(control_actor_loop(
@@ -645,6 +697,7 @@ pub fn spawn_control_session(
         root_agent,
         memory,
         benchmarks,
+        resolver,
         cmd_rx,
         mission_cmd_rx,
         mission_cmd_tx,
@@ -652,6 +705,8 @@ pub fn spawn_control_session(
         tool_hub,
         status,
         current_mission,
+        current_tree,
+        progress,
     ));
 
     state
@@ -662,6 +717,7 @@ async fn control_actor_loop(
     root_agent: AgentRef,
     memory: Option<MemorySystem>,
     benchmarks: crate::budget::SharedBenchmarkRegistry,
+    resolver: crate::budget::SharedModelResolver,
     mut cmd_rx: mpsc::Receiver<ControlCommand>,
     mut mission_cmd_rx: mpsc::Receiver<crate::tools::mission::MissionControlCommand>,
     mission_cmd_tx: mpsc::Sender<crate::tools::mission::MissionControlCommand>,
@@ -669,6 +725,8 @@ async fn control_actor_loop(
     tool_hub: Arc<FrontendToolHub>,
     status: Arc<RwLock<ControlStatus>>,
     current_mission: Arc<RwLock<Option<Uuid>>>,
+    current_tree: Arc<RwLock<Option<AgentTreeNode>>>,
+    progress: Arc<RwLock<ExecutionProgress>>,
 ) {
     let mut queue: VecDeque<(Uuid, String)> = VecDeque::new();
     let mut history: Vec<(String, String)> = Vec::new(); // (role, content) pairs (user/assistant)
@@ -809,6 +867,7 @@ async fn control_actor_loop(
                                 let agent = Arc::clone(&root_agent);
                                 let mem = memory.clone();
                                 let bench = Arc::clone(&benchmarks);
+                                let res = Arc::clone(&resolver);
                                 let events = events_tx.clone();
                                 let tools_hub = Arc::clone(&tool_hub);
                                 let status_ref = Arc::clone(&status);
@@ -819,6 +878,8 @@ async fn control_actor_loop(
                                     current_mission_id: Arc::clone(&current_mission),
                                     cmd_tx: mission_cmd_tx.clone(),
                                 };
+                                let tree_ref = Arc::clone(&current_tree);
+                                let progress_ref = Arc::clone(&progress);
                                 running_cancel = Some(cancel.clone());
                                 running = Some(tokio::spawn(async move {
                                     let result = run_single_control_turn(
@@ -826,6 +887,7 @@ async fn control_actor_loop(
                                         agent,
                                         mem,
                                         bench,
+                                        res,
                                         pricing,
                                         events,
                                         tools_hub,
@@ -834,6 +896,8 @@ async fn control_actor_loop(
                                         hist_snapshot,
                                         msg.clone(),
                                         Some(mission_ctrl),
+                                        tree_ref,
+                                        progress_ref,
                                     )
                                     .await;
                                     (mid, msg, result)
@@ -1005,6 +1069,7 @@ async fn control_actor_loop(
                     let agent = Arc::clone(&root_agent);
                     let mem = memory.clone();
                     let bench = Arc::clone(&benchmarks);
+                    let res = Arc::clone(&resolver);
                     let events = events_tx.clone();
                     let tools_hub = Arc::clone(&tool_hub);
                     let status_ref = Arc::clone(&status);
@@ -1015,6 +1080,8 @@ async fn control_actor_loop(
                         current_mission_id: Arc::clone(&current_mission),
                         cmd_tx: mission_cmd_tx.clone(),
                     };
+                    let tree_ref = Arc::clone(&current_tree);
+                    let progress_ref = Arc::clone(&progress);
                     running_cancel = Some(cancel.clone());
                     running = Some(tokio::spawn(async move {
                         let result = run_single_control_turn(
@@ -1022,6 +1089,7 @@ async fn control_actor_loop(
                             agent,
                             mem,
                             bench,
+                            res,
                             pricing,
                             events,
                             tools_hub,
@@ -1030,6 +1098,8 @@ async fn control_actor_loop(
                             hist_snapshot,
                             msg.clone(),
                             Some(mission_ctrl),
+                            tree_ref,
+                            progress_ref,
                         )
                         .await;
                         (mid, msg, result)
@@ -1047,6 +1117,7 @@ async fn run_single_control_turn(
     root_agent: AgentRef,
     memory: Option<MemorySystem>,
     benchmarks: crate::budget::SharedBenchmarkRegistry,
+    resolver: crate::budget::SharedModelResolver,
     pricing: Arc<ModelPricing>,
     events_tx: broadcast::Sender<AgentEvent>,
     tool_hub: Arc<FrontendToolHub>,
@@ -1055,6 +1126,8 @@ async fn run_single_control_turn(
     history: Vec<(String, String)>,
     user_message: String,
     mission_control: Option<crate::tools::mission::MissionControl>,
+    tree_snapshot: Arc<RwLock<Option<AgentTreeNode>>>,
+    progress_snapshot: Arc<RwLock<ExecutionProgress>>,
 ) -> crate::agents::AgentResult {
     // Build a task prompt that includes conversation context with size limits.
     // Uses ContextBuilder with config-driven limits to prevent context overflow.
@@ -1101,6 +1174,9 @@ async fn run_single_control_turn(
     ctx.control_status = Some(status);
     ctx.cancel_token = Some(cancel);
     ctx.benchmarks = Some(benchmarks);
+    ctx.resolver = Some(resolver);
+    ctx.tree_snapshot = Some(tree_snapshot);
+    ctx.progress_snapshot = Some(progress_snapshot);
 
     let result = root_agent.execute(&mut task, &ctx).await;
     result
