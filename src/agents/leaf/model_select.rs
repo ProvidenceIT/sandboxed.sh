@@ -540,8 +540,20 @@ impl Agent for ModelSelector {
         let models = ctx.pricing.models_by_cost_filtered(true).await;
         
         if models.is_empty() {
-            // Fall back to configured default model
-            let default_model = ctx.config.default_model.clone();
+            // Fall back to configured default model (after resolving to latest)
+            let default_model = if let Some(resolver) = &ctx.resolver {
+                let resolver = resolver.read().await;
+                let resolved = resolver.resolve(&ctx.config.default_model);
+                if resolved.upgraded {
+                    tracing::info!(
+                        "Default model auto-upgraded: {} → {}",
+                        resolved.original, resolved.resolved
+                    );
+                }
+                resolved.resolved
+            } else {
+                ctx.config.default_model.clone()
+            };
             
             // Record on task analysis
             {
@@ -565,15 +577,43 @@ impl Agent for ModelSelector {
             }));
         }
 
-        // Get user-requested model - if specified, use it directly if available
+        // Get user-requested model - if specified, resolve to latest version and use it
         let requested_model = task.analysis().requested_model.clone();
         
-        // If user explicitly requested a model and it's available, use it directly
-        if let Some(ref req_model) = requested_model {
+        // Auto-upgrade outdated model names using the resolver
+        let (resolved_model, was_upgraded) = if let Some(ref req_model) = requested_model {
+            if let Some(resolver) = &ctx.resolver {
+                let resolver = resolver.read().await;
+                let resolved = resolver.resolve(req_model);
+                if resolved.upgraded {
+                    tracing::info!(
+                        "Model auto-upgraded: {} → {} ({})",
+                        resolved.original,
+                        resolved.resolved,
+                        resolved.reason.as_deref().unwrap_or("family upgrade")
+                    );
+                }
+                (Some(resolved.resolved), resolved.upgraded)
+            } else {
+                (Some(req_model.clone()), false)
+            }
+        } else {
+            (None, false)
+        };
+        
+        // If user explicitly requested a model (possibly upgraded) and it's available, use it directly
+        if let Some(ref req_model) = resolved_model {
             if models.iter().any(|m| &m.model_id == req_model) {
+                let upgrade_note = if was_upgraded {
+                    format!(" (auto-upgraded from {})", requested_model.as_deref().unwrap_or("unknown"))
+                } else {
+                    String::new()
+                };
+                
                 tracing::info!(
-                    "Using user-requested model directly: {} (not optimizing)",
-                    req_model
+                    "Using requested model directly: {}{}",
+                    req_model,
+                    upgrade_note
                 );
                 
                 // Record selection in analysis
@@ -584,17 +624,19 @@ impl Agent for ModelSelector {
                 }
 
                 return AgentResult::success(
-                    &format!("Using user-requested model: {}", req_model),
+                    &format!("Using requested model: {}{}", req_model, upgrade_note),
                     1,
                 )
                 .with_data(json!({
                     "model_id": req_model,
                     "expected_cost_cents": 50,
                     "confidence": 1.0,
-                    "reasoning": format!("User explicitly requested model: {}", req_model),
+                    "reasoning": format!("User requested model: {}{}", req_model, upgrade_note),
                     "fallbacks": [],
                     "used_historical_data": false,
                     "used_benchmark_data": false,
+                    "was_upgraded": was_upgraded,
+                    "original_model": requested_model,
                     "task_type": format!("{:?}", task_type),
                 }));
             }
@@ -607,7 +649,7 @@ impl Agent for ModelSelector {
             budget_cents,
             task_type,
             historical_stats.as_ref(),
-            requested_model.as_deref(),
+            resolved_model.as_deref(),
             ctx,
         ).await {
             Some(rec) => {

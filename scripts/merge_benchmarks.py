@@ -6,7 +6,8 @@ This script:
 1. Fetches all models from OpenRouter API
 2. Fetches benchmark metadata from ZeroEval API
 3. For key benchmarks in each category, fetches model scores
-4. Creates a merged JSON with benchmark scores per category
+4. Auto-detects model families and tracks latest versions
+5. Creates a merged JSON with benchmark scores per category
 
 Categories tracked:
 - code: Coding benchmarks (SWE-bench, HumanEval, etc.)
@@ -14,13 +15,20 @@ Categories tracked:
 - reasoning: Reasoning benchmarks (GPQA, MMLU, etc.)
 - tool_calling: Tool/function calling benchmarks
 - long_context: Long context benchmarks
+
+Model families tracked:
+- claude-sonnet, claude-haiku, claude-opus (Anthropic)
+- gpt-4, gpt-4-mini (OpenAI)
+- gemini-pro, gemini-flash (Google)
+- And more...
 """
 
 import json
+import re
 import time
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
 from collections import defaultdict
@@ -54,6 +62,55 @@ KEY_BENCHMARKS = {
         "ifeval", "arena-hard", "alpaca-eval-2", "mt-bench", "chatbot-arena"
     ]
 }
+
+# Model family patterns with tier classification
+# Format: (regex_pattern, family_name, tier)
+# Tier: "flagship" (best), "mid" (balanced), "fast" (cheap/fast)
+MODEL_FAMILY_PATTERNS = [
+    # Anthropic Claude
+    (r"^anthropic/claude-opus-(\d+\.?\d*)$", "claude-opus", "flagship"),
+    (r"^anthropic/claude-(\d+\.?\d*)-opus$", "claude-opus", "flagship"),
+    (r"^anthropic/claude-sonnet-(\d+\.?\d*)$", "claude-sonnet", "mid"),
+    (r"^anthropic/claude-(\d+\.?\d*)-sonnet$", "claude-sonnet", "mid"),
+    (r"^anthropic/claude-haiku-(\d+\.?\d*)$", "claude-haiku", "fast"),
+    (r"^anthropic/claude-(\d+\.?\d*)-haiku$", "claude-haiku", "fast"),
+    
+    # OpenAI GPT
+    (r"^openai/gpt-4\.1$", "gpt-4", "mid"),
+    (r"^openai/gpt-4o$", "gpt-4", "mid"),
+    (r"^openai/gpt-4-turbo", "gpt-4", "mid"),
+    (r"^openai/gpt-4\.1-mini$", "gpt-4-mini", "fast"),
+    (r"^openai/gpt-4o-mini$", "gpt-4-mini", "fast"),
+    (r"^openai/o1$", "o1", "flagship"),
+    (r"^openai/o1-preview", "o1", "flagship"),
+    (r"^openai/o1-mini", "o1-mini", "mid"),
+    (r"^openai/o3-mini", "o3-mini", "mid"),
+    
+    # Google Gemini
+    (r"^google/gemini-(\d+\.?\d*)-pro", "gemini-pro", "mid"),
+    (r"^google/gemini-pro", "gemini-pro", "mid"),
+    (r"^google/gemini-(\d+\.?\d*)-flash(?!-lite)", "gemini-flash", "fast"),
+    (r"^google/gemini-flash", "gemini-flash", "fast"),
+    
+    # DeepSeek
+    (r"^deepseek/deepseek-chat", "deepseek-chat", "mid"),
+    (r"^deepseek/deepseek-coder", "deepseek-coder", "mid"),
+    (r"^deepseek/deepseek-r1$", "deepseek-r1", "flagship"),
+    
+    # Mistral
+    (r"^mistralai/mistral-large", "mistral-large", "mid"),
+    (r"^mistralai/mistral-medium", "mistral-medium", "mid"),
+    (r"^mistralai/mistral-small", "mistral-small", "fast"),
+    
+    # Meta Llama
+    (r"^meta-llama/llama-3\.3-70b", "llama-3-70b", "mid"),
+    (r"^meta-llama/llama-3\.2-90b", "llama-3-90b", "mid"),
+    (r"^meta-llama/llama-3\.1-405b", "llama-3-405b", "flagship"),
+    
+    # Qwen
+    (r"^qwen/qwen-2\.5-72b", "qwen-72b", "mid"),
+    (r"^qwen/qwq-32b", "qwq", "mid"),
+]
 
 HEADERS = {
     "Accept": "application/json",
@@ -121,6 +178,75 @@ def normalize_model_id(model_id: str) -> str:
     return "-".join(filtered)
 
 
+def extract_version(model_id: str) -> Tuple[float, str]:
+    """
+    Extract version number from model ID for sorting.
+    Returns (version_float, original_id) for sorting.
+    Higher version = newer model.
+    """
+    # Try to find version patterns like 4.5, 3.7, 2.5, etc.
+    patterns = [
+        r"-(\d+\.?\d*)-",  # e.g., claude-3.5-sonnet
+        r"-(\d+\.?\d*)$",  # e.g., gemini-2.5-pro
+        r"(\d+\.?\d*)$",   # e.g., claude-sonnet-4.5
+        r"/[a-z]+-(\d+\.?\d*)",  # e.g., gpt-4.1
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, model_id)
+        if match:
+            try:
+                return (float(match.group(1)), model_id)
+            except ValueError:
+                pass
+    
+    # Fallback: use model name length as proxy (longer names often newer)
+    return (0.0, model_id)
+
+
+def infer_model_families(models: List[dict]) -> Dict[str, dict]:
+    """
+    Infer model families from OpenRouter model list.
+    
+    Returns a dict like:
+    {
+        "claude-sonnet": {
+            "latest": "anthropic/claude-sonnet-4.5",
+            "members": ["anthropic/claude-sonnet-4.5", ...],
+            "tier": "mid"
+        }
+    }
+    """
+    families: Dict[str, List[Tuple[str, float]]] = defaultdict(list)
+    family_tiers: Dict[str, str] = {}
+    
+    for model in models:
+        model_id = model.get("id", "")
+        
+        for pattern, family_name, tier in MODEL_FAMILY_PATTERNS:
+            if re.match(pattern, model_id):
+                version, _ = extract_version(model_id)
+                families[family_name].append((model_id, version))
+                family_tiers[family_name] = tier
+                break
+    
+    # Sort each family by version (descending) and build result
+    result = {}
+    for family_name, members in families.items():
+        # Sort by version descending (highest first = latest)
+        sorted_members = sorted(members, key=lambda x: x[1], reverse=True)
+        member_ids = [m[0] for m in sorted_members]
+        
+        if member_ids:
+            result[family_name] = {
+                "latest": member_ids[0],
+                "members": member_ids,
+                "tier": family_tiers.get(family_name, "mid")
+            }
+    
+    return result
+
+
 def build_model_score_map(benchmarks_data: Dict[str, dict]) -> Dict[str, dict]:
     """
     Build a map from normalized model names to their benchmark scores.
@@ -182,6 +308,52 @@ def calculate_category_averages(scores: dict) -> dict:
     return averages
 
 
+def generate_aliases(families: Dict[str, dict]) -> Dict[str, str]:
+    """
+    Generate common aliases that map to the latest model in a family.
+    
+    This helps resolve outdated model names like "claude-3.5-sonnet" 
+    to the latest "anthropic/claude-sonnet-4.5".
+    """
+    aliases = {}
+    
+    for family_name, family_info in families.items():
+        latest = family_info["latest"]
+        members = family_info["members"]
+        
+        # Add all members as aliases to latest
+        for member in members:
+            if member != latest:
+                aliases[member] = latest
+                
+                # Also add short forms
+                if "/" in member:
+                    short = member.split("/")[-1]
+                    aliases[short] = latest
+        
+        # Add family name as alias
+        aliases[family_name] = latest
+        
+        # Add common variations
+        if family_name == "claude-sonnet":
+            aliases["sonnet"] = latest
+            aliases["claude sonnet"] = latest
+        elif family_name == "claude-haiku":
+            aliases["haiku"] = latest
+            aliases["claude haiku"] = latest
+        elif family_name == "claude-opus":
+            aliases["opus"] = latest
+            aliases["claude opus"] = latest
+        elif family_name == "gpt-4":
+            aliases["gpt4"] = latest
+            aliases["gpt-4o"] = latest
+        elif family_name == "gpt-4-mini":
+            aliases["gpt4-mini"] = latest
+            aliases["gpt-4o-mini"] = latest
+    
+    return aliases
+
+
 def main():
     print("=" * 60)
     print("OpenRouter + ZeroEval Benchmark Merger")
@@ -199,7 +371,18 @@ def main():
         json.dump({"data": openrouter_models}, f)
     print(f"Saved raw OpenRouter models to {or_path}")
     
-    # Step 2: Fetch all benchmark metadata
+    # Step 2: Infer model families
+    print("\nInferring model families...")
+    families = infer_model_families(openrouter_models)
+    print(f"  Found {len(families)} model families:")
+    for name, info in sorted(families.items()):
+        print(f"    - {name}: {info['latest']} ({len(info['members'])} members, tier={info['tier']})")
+    
+    # Generate aliases
+    aliases = generate_aliases(families)
+    print(f"  Generated {len(aliases)} aliases for auto-upgrade")
+    
+    # Step 3: Fetch all benchmark metadata
     all_benchmarks = fetch_all_benchmarks()
     if not all_benchmarks:
         print("Failed to fetch benchmarks, exiting.")
@@ -214,7 +397,7 @@ def main():
     # Build benchmark ID lookup
     benchmark_lookup = {b["benchmark_id"]: b for b in all_benchmarks}
     
-    # Step 3: Fetch scores for key benchmarks in each category
+    # Step 4: Fetch scores for key benchmarks in each category
     print("\nFetching benchmark scores by category...")
     benchmarks_data = {}
     
@@ -245,12 +428,12 @@ def main():
             
             time.sleep(0.2)  # Rate limiting
     
-    # Step 4: Build model score map
+    # Step 5: Build model score map
     print("\nBuilding model score map...")
     model_scores = build_model_score_map(benchmarks_data)
     print(f"  Found scores for {len(model_scores)} unique model IDs")
     
-    # Step 5: Merge with OpenRouter models
+    # Step 6: Merge with OpenRouter models
     print("\nMerging with OpenRouter models...")
     merged_models = []
     matched_count = 0
@@ -281,12 +464,14 @@ def main():
     
     print(f"  Matched {matched_count}/{len(openrouter_models)} models with benchmarks")
     
-    # Step 6: Save merged data
+    # Step 7: Save merged data with families
     output = {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "total_models": len(merged_models),
         "models_with_benchmarks": matched_count,
         "categories": list(KEY_BENCHMARKS.keys()),
+        "families": families,
+        "aliases": aliases,
         "models": merged_models
     }
     
@@ -295,13 +480,20 @@ def main():
         json.dump(output, f, indent=2)
     print(f"\n✓ Saved merged data to {output_path}")
     
-    # Step 7: Create summary
+    # Step 8: Create summary
     print("\n" + "=" * 60)
     print("Summary")
     print("=" * 60)
     print(f"Total OpenRouter models: {len(openrouter_models)}")
     print(f"Models with benchmark data: {matched_count}")
+    print(f"Model families detected: {len(families)}")
+    print(f"Aliases generated: {len(aliases)}")
     print(f"Categories tracked: {', '.join(KEY_BENCHMARKS.keys())}")
+    
+    # Show family info
+    print("\nModel families (latest versions):")
+    for name, info in sorted(families.items()):
+        print(f"  - {name}: {info['latest']}")
     
     # Show some example matches
     print("\nExample matched models:")

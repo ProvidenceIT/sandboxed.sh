@@ -12,36 +12,36 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use crate::agents::{
-    Agent, AgentContext, AgentId, AgentRef, AgentResult, AgentType, Complexity, OrchestratorAgent,
     leaf::{ComplexityEstimator, ModelSelector, TaskExecutor, Verifier},
+    Agent, AgentContext, AgentId, AgentRef, AgentResult, AgentType, Complexity, OrchestratorAgent,
 };
 use crate::budget::Budget;
 use crate::llm::{ChatMessage, Role};
-use crate::task::{Task, Subtask, SubtaskPlan, VerificationCriteria};
+use crate::task::{Subtask, SubtaskPlan, Task, VerificationCriteria};
 
 /// Node agent - intermediate orchestrator.
-/// 
+///
 /// # Purpose
 /// Handles subtasks that may still be complex enough
 /// to warrant further splitting. Now with full recursive
 /// splitting capabilities like RootAgent.
-/// 
+///
 /// # Recursive Splitting
 /// NodeAgent can estimate complexity of its subtasks and
 /// recursively split them if they're still too complex,
 /// respecting the `max_split_depth` in context.
 pub struct NodeAgent {
     id: AgentId,
-    
+
     /// Name for identification in logs
     name: String,
-    
+
     // Child agents - full pipeline for recursive splitting
     complexity_estimator: Arc<ComplexityEstimator>,
     model_selector: Arc<ModelSelector>,
     task_executor: Arc<TaskExecutor>,
     verifier: Arc<Verifier>,
-    
+
     // Child node agents (for further splitting)
     child_nodes: Vec<Arc<NodeAgent>>,
 }
@@ -79,22 +79,25 @@ impl NodeAgent {
     /// Estimate complexity of a task.
     async fn estimate_complexity(&self, task: &mut Task, ctx: &AgentContext) -> Complexity {
         let result = self.complexity_estimator.execute(task, ctx).await;
-        
+
         if let Some(data) = result.data {
             let score = data["score"].as_f64().unwrap_or(0.5);
             let reasoning = data["reasoning"].as_str().unwrap_or("").to_string();
             let estimated_tokens = data["estimated_tokens"].as_u64().unwrap_or(2000);
             let should_split = data["should_split"].as_bool().unwrap_or(false);
-            
-            Complexity::new(score, reasoning, estimated_tokens)
-                .with_split(should_split)
+
+            Complexity::new(score, reasoning, estimated_tokens).with_split(should_split)
         } else {
             Complexity::moderate("Could not estimate complexity")
         }
     }
 
     /// Split a complex task into subtasks.
-    async fn split_task(&self, task: &Task, ctx: &AgentContext) -> Result<SubtaskPlan, AgentResult> {
+    async fn split_task(
+        &self,
+        task: &Task,
+        ctx: &AgentContext,
+    ) -> Result<SubtaskPlan, AgentResult> {
         let prompt = format!(
             r#"You are a task planner. Break down this task into smaller, manageable subtasks.
 
@@ -135,11 +138,15 @@ Respond ONLY with the JSON object."#,
         );
 
         let messages = vec![
-            ChatMessage::new(Role::System, "You are a precise task planner. Respond only with JSON."),
+            ChatMessage::new(
+                Role::System,
+                "You are a precise task planner. Respond only with JSON.",
+            ),
             ChatMessage::new(Role::User, prompt),
         ];
 
-        let response = ctx.llm
+        let response = ctx
+            .llm
             .chat_completion("openai/gpt-4.1-mini", &messages, None)
             .await
             .map_err(|e| AgentResult::failure(format!("LLM error: {}", e), 1))?;
@@ -151,7 +158,7 @@ Respond ONLY with the JSON object."#,
     /// Extract JSON from LLM response (handles markdown code blocks).
     fn extract_json(response: &str) -> String {
         let trimmed = response.trim();
-        
+
         // Check for markdown code block
         if trimmed.starts_with("```") {
             // Find the end of the opening fence
@@ -163,7 +170,7 @@ Respond ONLY with the JSON object."#,
                 }
             }
         }
-        
+
         // Try to find JSON object in the response
         if let Some(start) = trimmed.find('{') {
             if let Some(end) = trimmed.rfind('}') {
@@ -172,7 +179,7 @@ Respond ONLY with the JSON object."#,
                 }
             }
         }
-        
+
         // Return as-is if no extraction needed
         trimmed.to_string()
     }
@@ -184,8 +191,16 @@ Respond ONLY with the JSON object."#,
         parent_id: crate::task::TaskId,
     ) -> Result<SubtaskPlan, AgentResult> {
         let extracted = Self::extract_json(response);
-        let json: serde_json::Value = serde_json::from_str(&extracted)
-            .map_err(|e| AgentResult::failure(format!("Failed to parse subtasks: {} (raw: {}...)", e, response.chars().take(100).collect::<String>()), 0))?;
+        let json: serde_json::Value = serde_json::from_str(&extracted).map_err(|e| {
+            AgentResult::failure(
+                format!(
+                    "Failed to parse subtasks: {} (raw: {}...)",
+                    e,
+                    response.chars().take(100).collect::<String>()
+                ),
+                0,
+            )
+        })?;
 
         let reasoning = json["reasoning"]
             .as_str()
@@ -200,7 +215,7 @@ Respond ONLY with the JSON object."#,
                         let desc = s["description"].as_str().unwrap_or("").to_string();
                         let verification = s["verification"].as_str().unwrap_or("");
                         let weight = s["weight"].as_f64().unwrap_or(1.0);
-                        
+
                         // Parse dependencies array
                         let dependencies: Vec<usize> = s["dependencies"]
                             .as_array()
@@ -210,12 +225,9 @@ Respond ONLY with the JSON object."#,
                                     .collect()
                             })
                             .unwrap_or_default();
-                        
-                        Subtask::new(
-                            desc,
-                            VerificationCriteria::llm_based(verification),
-                            weight,
-                        ).with_dependencies(dependencies)
+
+                        Subtask::new(desc, VerificationCriteria::llm_based(verification), weight)
+                            .with_dependencies(dependencies)
                     })
                     .collect()
             })
@@ -266,7 +278,7 @@ Respond ONLY with the JSON object."#,
 
             // Create a child NodeAgent for this subtask (recursive)
             let child_node = NodeAgent::new(format!("{}-sub", self.name));
-            
+
             // Execute through the child node (which may split further)
             let result = child_node.execute(task, &child_ctx).await;
             total_cost += result.cost_cents;
@@ -278,19 +290,21 @@ Respond ONLY with the JSON object."#,
         let successes = results.iter().filter(|r| r.success).count();
         let total = results.len();
 
+        // Concatenate successful outputs for meaningful aggregation
+        let combined_output = Self::concatenate_outputs(&results);
+
         if successes == total {
-            AgentResult::success(
-                format!("All {} subtasks completed successfully", total),
-                total_cost,
-            )
-            .with_data(json!({
+            AgentResult::success(combined_output, total_cost).with_data(json!({
                 "subtasks_total": total,
                 "subtasks_succeeded": successes,
                 "results": results.iter().map(|r| &r.output).collect::<Vec<_>>(),
             }))
         } else {
             AgentResult::failure(
-                format!("{}/{} subtasks succeeded", successes, total),
+                format!(
+                    "{}/{} subtasks succeeded\n\n{}",
+                    successes, total, combined_output
+                ),
                 total_cost,
             )
             .with_data(json!({
@@ -301,6 +315,31 @@ Respond ONLY with the JSON object."#,
                     "output": &r.output,
                 })).collect::<Vec<_>>(),
             }))
+        }
+    }
+
+    /// Concatenate subtask outputs into a single string.
+    /// Used for intermediate aggregation (RootAgent handles final synthesis).
+    fn concatenate_outputs(results: &[AgentResult]) -> String {
+        let outputs: Vec<String> = results
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.success && !r.output.is_empty())
+            .map(|(i, r)| {
+                if results.len() == 1 {
+                    r.output.clone()
+                } else {
+                    format!("### Part {}\n{}", i + 1, r.output)
+                }
+            })
+            .collect();
+
+        if outputs.is_empty() {
+            "No output generated.".to_string()
+        } else if outputs.len() == 1 {
+            outputs.into_iter().next().unwrap()
+        } else {
+            outputs.join("\n\n")
         }
     }
 
@@ -315,7 +354,7 @@ Respond ONLY with the JSON object."#,
         emit_ctx: &AgentContext,
     ) -> AgentResult {
         use crate::api::control::AgentTreeNode;
-        
+
         let mut total_cost = 0u64;
 
         tracing::info!(
@@ -326,7 +365,11 @@ Respond ONLY with the JSON object."#,
         );
 
         // Step 1: Estimate complexity
-        ctx.emit_phase("estimating_complexity", Some("Analyzing subtask..."), Some(&self.name));
+        ctx.emit_phase(
+            "estimating_complexity",
+            Some("Analyzing subtask..."),
+            Some(&self.name),
+        );
         let complexity = self.estimate_complexity(task, ctx).await;
         total_cost += 1;
 
@@ -346,15 +389,21 @@ Respond ONLY with the JSON object."#,
 
         // Step 2: Decide execution strategy
         if complexity.should_split() && ctx.can_split() {
-            ctx.emit_phase("splitting_task", Some("Decomposing subtask..."), Some(&self.name));
+            ctx.emit_phase(
+                "splitting_task",
+                Some("Decomposing subtask..."),
+                Some(&self.name),
+            );
             tracing::info!("NodeAgent '{}' splitting task into sub-subtasks", self.name);
 
             match self.split_task(task, ctx).await {
                 Ok(plan) => {
                     total_cost += 2;
-                    
+
                     // Add child nodes to this node in the tree
-                    if let Some(parent_node) = root_tree.children.iter_mut().find(|n| n.id == node_id) {
+                    if let Some(parent_node) =
+                        root_tree.children.iter_mut().find(|n| n.id == node_id)
+                    {
                         for (i, subtask) in plan.subtasks().iter().enumerate() {
                             let child_node = AgentTreeNode::new(
                                 &format!("{}-sub-{}", node_id, i + 1),
@@ -367,7 +416,7 @@ Respond ONLY with the JSON object."#,
                         }
                     }
                     emit_ctx.emit_tree(root_tree.clone());
-                    
+
                     let subtask_count = plan.subtasks().len();
                     tracing::info!(
                         "NodeAgent '{}' created {} sub-subtasks",
@@ -378,8 +427,18 @@ Respond ONLY with the JSON object."#,
                     // Execute subtasks recursively with tree updates
                     let child_ctx = ctx.child_context();
                     let requested_model = task.analysis().requested_model.as_deref();
-                    let result = self.execute_subtasks_with_tree(plan, task.budget(), &child_ctx, node_id, root_tree, emit_ctx, requested_model).await;
-                    
+                    let result = self
+                        .execute_subtasks_with_tree(
+                            plan,
+                            task.budget(),
+                            &child_ctx,
+                            node_id,
+                            root_tree,
+                            emit_ctx,
+                            requested_model,
+                        )
+                        .await;
+
                     return AgentResult {
                         success: result.success,
                         output: result.output,
@@ -407,7 +466,7 @@ Respond ONLY with the JSON object."#,
                     "Task Executor",
                     "Execute subtask",
                 )
-                .with_status("running")
+                .with_status("running"),
             );
             parent_node.children.push(
                 AgentTreeNode::new(
@@ -416,13 +475,17 @@ Respond ONLY with the JSON object."#,
                     "Verifier",
                     "Verify result",
                 )
-                .with_status("pending")
+                .with_status("pending"),
             );
         }
         emit_ctx.emit_tree(root_tree.clone());
 
         // Select model
-        ctx.emit_phase("selecting_model", Some("Choosing model..."), Some(&self.name));
+        ctx.emit_phase(
+            "selecting_model",
+            Some("Choosing model..."),
+            Some(&self.name),
+        );
         let sel_result = self.model_selector.execute(task, ctx).await;
         total_cost += sel_result.cost_cents;
 
@@ -433,8 +496,16 @@ Respond ONLY with the JSON object."#,
 
         // Update executor status
         if let Some(parent_node) = root_tree.children.iter_mut().find(|n| n.id == node_id) {
-            if let Some(exec_node) = parent_node.children.iter_mut().find(|n| n.id == format!("{}-executor", node_id)) {
-                exec_node.status = if result.success { "completed".to_string() } else { "failed".to_string() };
+            if let Some(exec_node) = parent_node
+                .children
+                .iter_mut()
+                .find(|n| n.id == format!("{}-executor", node_id))
+            {
+                exec_node.status = if result.success {
+                    "completed".to_string()
+                } else {
+                    "failed".to_string()
+                };
                 exec_node.budget_spent = result.cost_cents;
             }
         }
@@ -444,18 +515,21 @@ Respond ONLY with the JSON object."#,
         task.set_last_output(result.output.clone());
 
         if !result.success {
-            return AgentResult::failure(result.output, total_cost)
-                .with_data(json!({
-                    "node_name": self.name,
-                    "complexity": complexity.score(),
-                    "was_split": false,
-                    "execution": result.data,
-                }));
+            return AgentResult::failure(result.output, total_cost).with_data(json!({
+                "node_name": self.name,
+                "complexity": complexity.score(),
+                "was_split": false,
+                "execution": result.data,
+            }));
         }
 
         // Verify
         if let Some(parent_node) = root_tree.children.iter_mut().find(|n| n.id == node_id) {
-            if let Some(ver_node) = parent_node.children.iter_mut().find(|n| n.id == format!("{}-verifier", node_id)) {
+            if let Some(ver_node) = parent_node
+                .children
+                .iter_mut()
+                .find(|n| n.id == format!("{}-verifier", node_id))
+            {
                 ver_node.status = "running".to_string();
             }
         }
@@ -467,8 +541,16 @@ Respond ONLY with the JSON object."#,
 
         // Update verifier status
         if let Some(parent_node) = root_tree.children.iter_mut().find(|n| n.id == node_id) {
-            if let Some(ver_node) = parent_node.children.iter_mut().find(|n| n.id == format!("{}-verifier", node_id)) {
-                ver_node.status = if verification.success { "completed".to_string() } else { "failed".to_string() };
+            if let Some(ver_node) = parent_node
+                .children
+                .iter_mut()
+                .find(|n| n.id == format!("{}-verifier", node_id))
+            {
+                ver_node.status = if verification.success {
+                    "completed".to_string()
+                } else {
+                    "failed".to_string()
+                };
                 ver_node.budget_spent = verification.cost_cents;
             }
         }
@@ -531,10 +613,16 @@ Respond ONLY with the JSON object."#,
 
         for (i, task) in tasks.iter_mut().enumerate() {
             let subtask_id = format!("{}-sub-{}", parent_node_id, i + 1);
-            
+
             // Update subtask status to running
-            if let Some(parent_node) = root_tree.children.iter_mut().find(|n| n.id == parent_node_id) {
-                if let Some(child_node) = parent_node.children.iter_mut().find(|n| n.id == subtask_id) {
+            if let Some(parent_node) = root_tree
+                .children
+                .iter_mut()
+                .find(|n| n.id == parent_node_id)
+            {
+                if let Some(child_node) =
+                    parent_node.children.iter_mut().find(|n| n.id == subtask_id)
+                {
                     child_node.status = "running".to_string();
                 }
             }
@@ -552,9 +640,19 @@ Respond ONLY with the JSON object."#,
             total_cost += result.cost_cents;
 
             // Update subtask status
-            if let Some(parent_node) = root_tree.children.iter_mut().find(|n| n.id == parent_node_id) {
-                if let Some(child_node) = parent_node.children.iter_mut().find(|n| n.id == subtask_id) {
-                    child_node.status = if result.success { "completed".to_string() } else { "failed".to_string() };
+            if let Some(parent_node) = root_tree
+                .children
+                .iter_mut()
+                .find(|n| n.id == parent_node_id)
+            {
+                if let Some(child_node) =
+                    parent_node.children.iter_mut().find(|n| n.id == subtask_id)
+                {
+                    child_node.status = if result.success {
+                        "completed".to_string()
+                    } else {
+                        "failed".to_string()
+                    };
                     child_node.budget_spent = result.cost_cents;
                 }
             }
@@ -566,18 +664,20 @@ Respond ONLY with the JSON object."#,
         let successes = results.iter().filter(|r| r.success).count();
         let total = results.len();
 
+        // Concatenate successful outputs for meaningful aggregation
+        let combined_output = Self::concatenate_outputs(&results);
+
         if successes == total {
-            AgentResult::success(
-                format!("All {} sub-subtasks completed successfully", total),
-                total_cost,
-            )
-            .with_data(json!({
+            AgentResult::success(combined_output, total_cost).with_data(json!({
                 "subtasks_total": total,
                 "subtasks_succeeded": successes,
             }))
         } else {
             AgentResult::failure(
-                format!("{}/{} sub-subtasks succeeded", successes, total),
+                format!(
+                    "{}/{} sub-subtasks succeeded\n\n{}",
+                    successes, total, combined_output
+                ),
                 total_cost,
             )
             .with_data(json!({
@@ -619,7 +719,11 @@ impl Agent for NodeAgent {
         );
 
         // Step 1: Estimate complexity
-        ctx.emit_phase("estimating_complexity", Some("Analyzing subtask..."), Some(&self.name));
+        ctx.emit_phase(
+            "estimating_complexity",
+            Some("Analyzing subtask..."),
+            Some(&self.name),
+        );
         let complexity = self.estimate_complexity(task, ctx).await;
         total_cost += 1;
 
@@ -634,13 +738,17 @@ impl Agent for NodeAgent {
         // Step 2: Decide execution strategy
         if complexity.should_split() && ctx.can_split() {
             // Complex subtask: split further recursively
-            ctx.emit_phase("splitting_task", Some("Decomposing subtask..."), Some(&self.name));
+            ctx.emit_phase(
+                "splitting_task",
+                Some("Decomposing subtask..."),
+                Some(&self.name),
+            );
             tracing::info!("NodeAgent '{}' splitting task into sub-subtasks", self.name);
 
             match self.split_task(task, ctx).await {
                 Ok(plan) => {
                     total_cost += 2; // Splitting cost
-                    
+
                     let subtask_count = plan.subtasks().len();
                     tracing::info!(
                         "NodeAgent '{}' created {} sub-subtasks",
@@ -650,8 +758,10 @@ impl Agent for NodeAgent {
 
                     // Execute subtasks recursively
                     let requested_model = task.analysis().requested_model.as_deref();
-                    let result = self.execute_subtasks(plan, task.budget(), ctx, requested_model).await;
-                    
+                    let result = self
+                        .execute_subtasks(plan, task.budget(), ctx, requested_model)
+                        .await;
+
                     return AgentResult {
                         success: result.success,
                         output: result.output,
@@ -672,7 +782,11 @@ impl Agent for NodeAgent {
 
         // Simple task or failed to split: execute directly
         // Select model
-        ctx.emit_phase("selecting_model", Some("Choosing model..."), Some(&self.name));
+        ctx.emit_phase(
+            "selecting_model",
+            Some("Choosing model..."),
+            Some(&self.name),
+        );
         let sel_result = self.model_selector.execute(task, ctx).await;
         total_cost += sel_result.cost_cents;
 
@@ -685,13 +799,12 @@ impl Agent for NodeAgent {
         task.set_last_output(result.output.clone());
 
         if !result.success {
-            return AgentResult::failure(result.output, total_cost)
-                .with_data(json!({
-                    "node_name": self.name,
-                    "complexity": complexity.score(),
-                    "was_split": false,
-                    "execution": result.data,
-                }));
+            return AgentResult::failure(result.output, total_cost).with_data(json!({
+                "node_name": self.name,
+                "complexity": complexity.score(),
+                "was_split": false,
+                "execution": result.data,
+            }));
         }
 
         // Verify
@@ -747,7 +860,9 @@ impl OrchestratorAgent for NodeAgent {
 
     fn find_child(&self, agent_type: AgentType) -> Option<AgentRef> {
         match agent_type {
-            AgentType::ComplexityEstimator => Some(Arc::clone(&self.complexity_estimator) as AgentRef),
+            AgentType::ComplexityEstimator => {
+                Some(Arc::clone(&self.complexity_estimator) as AgentRef)
+            }
             AgentType::ModelSelector => Some(Arc::clone(&self.model_selector) as AgentRef),
             AgentType::TaskExecutor => Some(Arc::clone(&self.task_executor) as AgentRef),
             AgentType::Verifier => Some(Arc::clone(&self.verifier) as AgentRef),
@@ -772,4 +887,3 @@ impl OrchestratorAgent for NodeAgent {
         results
     }
 }
-

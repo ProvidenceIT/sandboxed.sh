@@ -1,7 +1,7 @@
 {
-  "generated_at": "2025-12-17T03:37:04Z",
-  "total_models": 349,
-  "models_with_benchmarks": 156,
+  "generated_at": "2025-12-19T04:29:38Z",
+  "total_models": 350,
+  "models_with_benchmarks": 158,
   "categories": [
     "code",
     "math",
@@ -10,7 +10,322 @@
     "long_context",
     "general"
   ],
+  "families": {
+    "gemini-flash": {
+      "latest": "google/gemini-3-flash-preview",
+      "members": [
+        "google/gemini-3-flash-preview",
+        "google/gemini-2.5-flash-image",
+        "google/gemini-2.5-flash-preview-09-2025",
+        "google/gemini-2.5-flash-image-preview",
+        "google/gemini-2.5-flash",
+        "google/gemini-2.0-flash-001",
+        "google/gemini-2.0-flash-exp:free"
+      ],
+      "tier": "fast"
+    },
+    "mistral-small": {
+      "latest": "mistralai/mistral-small-24b-instruct-2501",
+      "members": [
+        "mistralai/mistral-small-24b-instruct-2501",
+        "mistralai/mistral-small-3.2-24b-instruct",
+        "mistralai/mistral-small-3.1-24b-instruct:free",
+        "mistralai/mistral-small-3.1-24b-instruct",
+        "mistralai/mistral-small-creative"
+      ],
+      "tier": "fast"
+    },
+    "mistral-large": {
+      "latest": "mistralai/mistral-large-2512",
+      "members": [
+        "mistralai/mistral-large-2512",
+        "mistralai/mistral-large-2411",
+        "mistralai/mistral-large-2407",
+        "mistralai/mistral-large"
+      ],
+      "tier": "mid"
+    },
+    "claude-opus": {
+      "latest": "anthropic/claude-opus-4.5",
+      "members": [
+        "anthropic/claude-opus-4.5",
+        "anthropic/claude-opus-4.1",
+        "anthropic/claude-opus-4",
+        "anthropic/claude-3-opus"
+      ],
+      "tier": "flagship"
+    },
+    "gemini-pro": {
+      "latest": "google/gemini-3-pro-image-preview",
+      "members": [
+        "google/gemini-3-pro-image-preview",
+        "google/gemini-3-pro-preview",
+        "google/gemini-2.5-pro",
+        "google/gemini-2.5-pro-preview",
+        "google/gemini-2.5-pro-preview-05-06"
+      ],
+      "tier": "mid"
+    },
+    "claude-haiku": {
+      "latest": "anthropic/claude-haiku-4.5",
+      "members": [
+        "anthropic/claude-haiku-4.5",
+        "anthropic/claude-3.5-haiku",
+        "anthropic/claude-3-haiku"
+      ],
+      "tier": "fast"
+    },
+    "claude-sonnet": {
+      "latest": "anthropic/claude-sonnet-4.5",
+      "members": [
+        "anthropic/claude-sonnet-4.5",
+        "anthropic/claude-sonnet-4",
+        "anthropic/claude-3.7-sonnet",
+        "anthropic/claude-3.5-sonnet"
+      ],
+      "tier": "mid"
+    },
+    "deepseek-chat": {
+      "latest": "deepseek/deepseek-chat-v3-0324",
+      "members": [
+        "deepseek/deepseek-chat-v3-0324",
+        "deepseek/deepseek-chat-v3.1",
+        "deepseek/deepseek-chat"
+      ],
+      "tier": "mid"
+    },
+    "mistral-medium": {
+      "latest": "mistralai/mistral-medium-3.1",
+      "members": [
+        "mistralai/mistral-medium-3.1",
+        "mistralai/mistral-medium-3"
+      ],
+      "tier": "mid"
+    },
+    "gpt-4": {
+      "latest": "openai/gpt-4.1",
+      "members": [
+        "openai/gpt-4.1",
+        "openai/gpt-4o",
+        "openai/gpt-4-turbo",
+        "openai/gpt-4-turbo-preview"
+      ],
+      "tier": "mid"
+    },
+    "gpt-4-mini": {
+      "latest": "openai/gpt-4.1-mini",
+      "members": [
+        "openai/gpt-4.1-mini",
+        "openai/gpt-4o-mini"
+      ],
+      "tier": "fast"
+    },
+    "qwq": {
+      "latest": "qwen/qwq-32b",
+      "members": [
+        "qwen/qwq-32b"
+      ],
+      "tier": "mid"
+    },
+    "o3-mini": {
+      "latest": "openai/o3-mini-high",
+      "members": [
+        "openai/o3-mini-high",
+        "openai/o3-mini"
+      ],
+      "tier": "mid"
+    },
+    "deepseek-r1": {
+      "latest": "deepseek/deepseek-r1",
+      "members": [
+        "deepseek/deepseek-r1"
+      ],
+      "tier": "flagship"
+    },
+    "o1": {
+      "latest": "openai/o1",
+      "members": [
+        "openai/o1"
+      ],
+      "tier": "flagship"
+    },
+    "llama-3-70b": {
+      "latest": "meta-llama/llama-3.3-70b-instruct:free",
+      "members": [
+        "meta-llama/llama-3.3-70b-instruct:free",
+        "meta-llama/llama-3.3-70b-instruct"
+      ],
+      "tier": "mid"
+    },
+    "llama-3-90b": {
+      "latest": "meta-llama/llama-3.2-90b-vision-instruct",
+      "members": [
+        "meta-llama/llama-3.2-90b-vision-instruct"
+      ],
+      "tier": "mid"
+    },
+    "qwen-72b": {
+      "latest": "qwen/qwen-2.5-72b-instruct",
+      "members": [
+        "qwen/qwen-2.5-72b-instruct"
+      ],
+      "tier": "mid"
+    },
+    "llama-3-405b": {
+      "latest": "meta-llama/llama-3.1-405b",
+      "members": [
+        "meta-llama/llama-3.1-405b",
+        "meta-llama/llama-3.1-405b-instruct:free",
+        "meta-llama/llama-3.1-405b-instruct"
+      ],
+      "tier": "flagship"
+    }
+  },
+  "aliases": {
+    "google/gemini-2.5-flash-image": "google/gemini-3-flash-preview",
+    "gemini-2.5-flash-image": "google/gemini-3-flash-preview",
+    "google/gemini-2.5-flash-preview-09-2025": "google/gemini-3-flash-preview",
+    "gemini-2.5-flash-preview-09-2025": "google/gemini-3-flash-preview",
+    "google/gemini-2.5-flash-image-preview": "google/gemini-3-flash-preview",
+    "gemini-2.5-flash-image-preview": "google/gemini-3-flash-preview",
+    "google/gemini-2.5-flash": "google/gemini-3-flash-preview",
+    "gemini-2.5-flash": "google/gemini-3-flash-preview",
+    "google/gemini-2.0-flash-001": "google/gemini-3-flash-preview",
+    "gemini-2.0-flash-001": "google/gemini-3-flash-preview",
+    "google/gemini-2.0-flash-exp:free": "google/gemini-3-flash-preview",
+    "gemini-2.0-flash-exp:free": "google/gemini-3-flash-preview",
+    "gemini-flash": "google/gemini-3-flash-preview",
+    "mistralai/mistral-small-3.2-24b-instruct": "mistralai/mistral-small-24b-instruct-2501",
+    "mistral-small-3.2-24b-instruct": "mistralai/mistral-small-24b-instruct-2501",
+    "mistralai/mistral-small-3.1-24b-instruct:free": "mistralai/mistral-small-24b-instruct-2501",
+    "mistral-small-3.1-24b-instruct:free": "mistralai/mistral-small-24b-instruct-2501",
+    "mistralai/mistral-small-3.1-24b-instruct": "mistralai/mistral-small-24b-instruct-2501",
+    "mistral-small-3.1-24b-instruct": "mistralai/mistral-small-24b-instruct-2501",
+    "mistralai/mistral-small-creative": "mistralai/mistral-small-24b-instruct-2501",
+    "mistral-small-creative": "mistralai/mistral-small-24b-instruct-2501",
+    "mistral-small": "mistralai/mistral-small-24b-instruct-2501",
+    "mistralai/mistral-large-2411": "mistralai/mistral-large-2512",
+    "mistral-large-2411": "mistralai/mistral-large-2512",
+    "mistralai/mistral-large-2407": "mistralai/mistral-large-2512",
+    "mistral-large-2407": "mistralai/mistral-large-2512",
+    "mistralai/mistral-large": "mistralai/mistral-large-2512",
+    "mistral-large": "mistralai/mistral-large-2512",
+    "anthropic/claude-opus-4.1": "anthropic/claude-opus-4.5",
+    "claude-opus-4.1": "anthropic/claude-opus-4.5",
+    "anthropic/claude-opus-4": "anthropic/claude-opus-4.5",
+    "claude-opus-4": "anthropic/claude-opus-4.5",
+    "anthropic/claude-3-opus": "anthropic/claude-opus-4.5",
+    "claude-3-opus": "anthropic/claude-opus-4.5",
+    "claude-opus": "anthropic/claude-opus-4.5",
+    "opus": "anthropic/claude-opus-4.5",
+    "claude opus": "anthropic/claude-opus-4.5",
+    "google/gemini-3-pro-preview": "google/gemini-3-pro-image-preview",
+    "gemini-3-pro-preview": "google/gemini-3-pro-image-preview",
+    "google/gemini-2.5-pro": "google/gemini-3-pro-image-preview",
+    "gemini-2.5-pro": "google/gemini-3-pro-image-preview",
+    "google/gemini-2.5-pro-preview": "google/gemini-3-pro-image-preview",
+    "gemini-2.5-pro-preview": "google/gemini-3-pro-image-preview",
+    "google/gemini-2.5-pro-preview-05-06": "google/gemini-3-pro-image-preview",
+    "gemini-2.5-pro-preview-05-06": "google/gemini-3-pro-image-preview",
+    "gemini-pro": "google/gemini-3-pro-image-preview",
+    "anthropic/claude-3.5-haiku": "anthropic/claude-haiku-4.5",
+    "claude-3.5-haiku": "anthropic/claude-haiku-4.5",
+    "anthropic/claude-3-haiku": "anthropic/claude-haiku-4.5",
+    "claude-3-haiku": "anthropic/claude-haiku-4.5",
+    "claude-haiku": "anthropic/claude-haiku-4.5",
+    "haiku": "anthropic/claude-haiku-4.5",
+    "claude haiku": "anthropic/claude-haiku-4.5",
+    "anthropic/claude-sonnet-4": "anthropic/claude-sonnet-4.5",
+    "claude-sonnet-4": "anthropic/claude-sonnet-4.5",
+    "anthropic/claude-3.7-sonnet": "anthropic/claude-sonnet-4.5",
+    "claude-3.7-sonnet": "anthropic/claude-sonnet-4.5",
+    "anthropic/claude-3.5-sonnet": "anthropic/claude-sonnet-4.5",
+    "claude-3.5-sonnet": "anthropic/claude-sonnet-4.5",
+    "claude-sonnet": "anthropic/claude-sonnet-4.5",
+    "sonnet": "anthropic/claude-sonnet-4.5",
+    "claude sonnet": "anthropic/claude-sonnet-4.5",
+    "deepseek/deepseek-chat-v3.1": "deepseek/deepseek-chat-v3-0324",
+    "deepseek-chat-v3.1": "deepseek/deepseek-chat-v3-0324",
+    "deepseek/deepseek-chat": "deepseek/deepseek-chat-v3-0324",
+    "deepseek-chat": "deepseek/deepseek-chat-v3-0324",
+    "mistralai/mistral-medium-3": "mistralai/mistral-medium-3.1",
+    "mistral-medium-3": "mistralai/mistral-medium-3.1",
+    "mistral-medium": "mistralai/mistral-medium-3.1",
+    "openai/gpt-4o": "openai/gpt-4.1",
+    "gpt-4o": "openai/gpt-4.1",
+    "openai/gpt-4-turbo": "openai/gpt-4.1",
+    "gpt-4-turbo": "openai/gpt-4.1",
+    "openai/gpt-4-turbo-preview": "openai/gpt-4.1",
+    "gpt-4-turbo-preview": "openai/gpt-4.1",
+    "gpt-4": "openai/gpt-4.1",
+    "gpt4": "openai/gpt-4.1",
+    "openai/gpt-4o-mini": "openai/gpt-4.1-mini",
+    "gpt-4o-mini": "openai/gpt-4.1-mini",
+    "gpt-4-mini": "openai/gpt-4.1-mini",
+    "gpt4-mini": "openai/gpt-4.1-mini",
+    "qwq": "qwen/qwq-32b",
+    "openai/o3-mini": "openai/o3-mini-high",
+    "o3-mini": "openai/o3-mini-high",
+    "deepseek-r1": "deepseek/deepseek-r1",
+    "o1": "openai/o1",
+    "meta-llama/llama-3.3-70b-instruct": "meta-llama/llama-3.3-70b-instruct:free",
+    "llama-3.3-70b-instruct": "meta-llama/llama-3.3-70b-instruct:free",
+    "llama-3-70b": "meta-llama/llama-3.3-70b-instruct:free",
+    "llama-3-90b": "meta-llama/llama-3.2-90b-vision-instruct",
+    "qwen-72b": "qwen/qwen-2.5-72b-instruct",
+    "meta-llama/llama-3.1-405b-instruct:free": "meta-llama/llama-3.1-405b",
+    "llama-3.1-405b-instruct:free": "meta-llama/llama-3.1-405b",
+    "meta-llama/llama-3.1-405b-instruct": "meta-llama/llama-3.1-405b",
+    "llama-3.1-405b-instruct": "meta-llama/llama-3.1-405b",
+    "llama-3-405b": "meta-llama/llama-3.1-405b"
+  },
   "models": [
+    {
+      "id": "google/gemini-3-flash-preview",
+      "name": "Google: Gemini 3 Flash Preview",
+      "context_length": 1048576,
+      "architecture": {
+        "modality": "text+image->text",
+        "input_modalities": [
+          "text",
+          "image",
+          "file",
+          "audio",
+          "video"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "tokenizer": "Gemini",
+        "instruct_type": null
+      },
+      "pricing": {
+        "prompt": "0.0000005",
+        "completion": "0.000003",
+        "request": "0",
+        "image": "0",
+        "audio": "0.000001",
+        "web_search": "0",
+        "internal_reasoning": "0",
+        "input_cache_read": "0.00000005"
+      },
+      "benchmarks": {
+        "code": {
+          "swe-bench-verified": 0.78
+        },
+        "math": {
+          "aime-2025": 0.997
+        },
+        "reasoning": {
+          "gpqa": 0.904
+        }
+      },
+      "category_scores": {
+        "code": 0.78,
+        "math": 0.997,
+        "reasoning": 0.904
+      }
+    },
     {
       "id": "mistralai/mistral-small-creative",
       "name": "Mistral: Mistral Small Creative",
@@ -130,6 +445,47 @@
       "pricing": {
         "prompt": "0",
         "completion": "0",
+        "request": "0",
+        "image": "0",
+        "web_search": "0",
+        "internal_reasoning": "0"
+      },
+      "benchmarks": {
+        "code": {
+          "swe-bench-verified": 0.388
+        },
+        "math": {
+          "aime-2025": 0.992
+        },
+        "reasoning": {
+          "gpqa": 0.75,
+          "mmlu-pro": 0.783
+        }
+      },
+      "category_scores": {
+        "code": 0.388,
+        "math": 0.992,
+        "reasoning": 0.7665
+      }
+    },
+    {
+      "id": "nvidia/nemotron-3-nano-30b-a3b",
+      "name": "NVIDIA: Nemotron 3 Nano 30B A3B",
+      "context_length": 262144,
+      "architecture": {
+        "modality": "text->text",
+        "input_modalities": [
+          "text"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "tokenizer": "Other",
+        "instruct_type": null
+      },
+      "pricing": {
+        "prompt": "0.00000006",
+        "completion": "0.00000024",
         "request": "0",
         "image": "0",
         "web_search": "0",
@@ -515,35 +871,6 @@
       }
     },
     {
-      "id": "amazon/nova-2-lite-v1:free",
-      "name": "Amazon: Nova 2 Lite (free)",
-      "context_length": 1000000,
-      "architecture": {
-        "modality": "text+image->text",
-        "input_modalities": [
-          "text",
-          "image",
-          "video",
-          "file"
-        ],
-        "output_modalities": [
-          "text"
-        ],
-        "tokenizer": "Nova",
-        "instruct_type": null
-      },
-      "pricing": {
-        "prompt": "0",
-        "completion": "0",
-        "request": "0",
-        "image": "0",
-        "web_search": "0",
-        "internal_reasoning": "0"
-      },
-      "benchmarks": null,
-      "category_scores": null
-    },
-    {
       "id": "amazon/nova-2-lite-v1",
       "name": "Amazon: Nova 2 Lite",
       "context_length": 1000000,
@@ -792,7 +1119,7 @@
         "image": "0",
         "web_search": "0",
         "internal_reasoning": "0",
-        "input_cache_read": "0.00000019",
+        "input_cache_read": "0.00000011",
         "input_cache_write": "0"
       },
       "benchmarks": {
@@ -5895,8 +6222,8 @@
         "instruct_type": null
       },
       "pricing": {
-        "prompt": "0.00000005",
-        "completion": "0.0000002",
+        "prompt": "0.00000002",
+        "completion": "0.0000001",
         "request": "0",
         "image": "0",
         "web_search": "0",
@@ -9596,47 +9923,6 @@
       "category_scores": null
     },
     {
-      "id": "mistralai/ministral-3b",
-      "name": "Mistral: Ministral 3B",
-      "context_length": 131072,
-      "architecture": {
-        "modality": "text->text",
-        "input_modalities": [
-          "text"
-        ],
-        "output_modalities": [
-          "text"
-        ],
-        "tokenizer": "Mistral",
-        "instruct_type": null
-      },
-      "pricing": {
-        "prompt": "0.00000004",
-        "completion": "0.00000004",
-        "request": "0",
-        "image": "0",
-        "web_search": "0",
-        "internal_reasoning": "0"
-      },
-      "benchmarks": {
-        "code": {
-          "livecodebench": 0.548
-        },
-        "math": {
-          "aime-2025": 0.721,
-          "aime-2024": 0.775
-        },
-        "reasoning": {
-          "gpqa": 0.534
-        }
-      },
-      "category_scores": {
-        "code": 0.548,
-        "math": 0.748,
-        "reasoning": 0.534
-      }
-    },
-    {
       "id": "mistralai/ministral-8b",
       "name": "Mistral: Ministral 8B",
       "context_length": 131072,
@@ -9680,6 +9966,47 @@
         "math": 0.545,
         "reasoning": 0.7015,
         "general": 0.7695
+      }
+    },
+    {
+      "id": "mistralai/ministral-3b",
+      "name": "Mistral: Ministral 3B",
+      "context_length": 131072,
+      "architecture": {
+        "modality": "text->text",
+        "input_modalities": [
+          "text"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "tokenizer": "Mistral",
+        "instruct_type": null
+      },
+      "pricing": {
+        "prompt": "0.00000004",
+        "completion": "0.00000004",
+        "request": "0",
+        "image": "0",
+        "web_search": "0",
+        "internal_reasoning": "0"
+      },
+      "benchmarks": {
+        "code": {
+          "livecodebench": 0.548
+        },
+        "math": {
+          "aime-2025": 0.721,
+          "aime-2024": 0.775
+        },
+        "reasoning": {
+          "gpqa": 0.534
+        }
+      },
+      "category_scores": {
+        "code": 0.548,
+        "math": 0.748,
+        "reasoning": 0.534
       }
     },
     {
@@ -9775,8 +10102,8 @@
       }
     },
     {
-      "id": "inflection/inflection-3-productivity",
-      "name": "Inflection: Inflection 3 Productivity",
+      "id": "inflection/inflection-3-pi",
+      "name": "Inflection: Inflection 3 Pi",
       "context_length": 8000,
       "architecture": {
         "modality": "text->text",
@@ -9801,8 +10128,8 @@
       "category_scores": null
     },
     {
-      "id": "inflection/inflection-3-pi",
-      "name": "Inflection: Inflection 3 Pi",
+      "id": "inflection/inflection-3-productivity",
+      "name": "Inflection: Inflection 3 Productivity",
       "context_length": 8000,
       "architecture": {
         "modality": "text->text",
@@ -9873,6 +10200,59 @@
         "completion": "0.0000004",
         "request": "0",
         "image": "0.0005058",
+        "web_search": "0",
+        "internal_reasoning": "0"
+      },
+      "benchmarks": null,
+      "category_scores": null
+    },
+    {
+      "id": "meta-llama/llama-3.2-11b-vision-instruct",
+      "name": "Meta: Llama 3.2 11B Vision Instruct",
+      "context_length": 131072,
+      "architecture": {
+        "modality": "text+image->text",
+        "input_modalities": [
+          "text",
+          "image"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "tokenizer": "Llama3",
+        "instruct_type": "llama3"
+      },
+      "pricing": {
+        "prompt": "0.000000049",
+        "completion": "0.000000049",
+        "request": "0",
+        "image": "0.00007948",
+        "web_search": "0",
+        "internal_reasoning": "0"
+      },
+      "benchmarks": null,
+      "category_scores": null
+    },
+    {
+      "id": "meta-llama/llama-3.2-1b-instruct",
+      "name": "Meta: Llama 3.2 1B Instruct",
+      "context_length": 60000,
+      "architecture": {
+        "modality": "text->text",
+        "input_modalities": [
+          "text"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "tokenizer": "Llama3",
+        "instruct_type": "llama3"
+      },
+      "pricing": {
+        "prompt": "0.000000027",
+        "completion": "0.0000002",
+        "request": "0",
+        "image": "0",
         "web_search": "0",
         "internal_reasoning": "0"
       },
@@ -9980,59 +10360,6 @@
         "long_context": 0.633,
         "general": 0.774
       }
-    },
-    {
-      "id": "meta-llama/llama-3.2-1b-instruct",
-      "name": "Meta: Llama 3.2 1B Instruct",
-      "context_length": 60000,
-      "architecture": {
-        "modality": "text->text",
-        "input_modalities": [
-          "text"
-        ],
-        "output_modalities": [
-          "text"
-        ],
-        "tokenizer": "Llama3",
-        "instruct_type": "llama3"
-      },
-      "pricing": {
-        "prompt": "0.000000027",
-        "completion": "0.0000002",
-        "request": "0",
-        "image": "0",
-        "web_search": "0",
-        "internal_reasoning": "0"
-      },
-      "benchmarks": null,
-      "category_scores": null
-    },
-    {
-      "id": "meta-llama/llama-3.2-11b-vision-instruct",
-      "name": "Meta: Llama 3.2 11B Vision Instruct",
-      "context_length": 131072,
-      "architecture": {
-        "modality": "text+image->text",
-        "input_modalities": [
-          "text",
-          "image"
-        ],
-        "output_modalities": [
-          "text"
-        ],
-        "tokenizer": "Llama3",
-        "instruct_type": "llama3"
-      },
-      "pricing": {
-        "prompt": "0.000000049",
-        "completion": "0.000000049",
-        "request": "0",
-        "image": "0.00007948",
-        "web_search": "0",
-        "internal_reasoning": "0"
-      },
-      "benchmarks": null,
-      "category_scores": null
     },
     {
       "id": "qwen/qwen-2.5-72b-instruct",
@@ -10157,32 +10484,6 @@
       }
     },
     {
-      "id": "cohere/command-r-plus-08-2024",
-      "name": "Cohere: Command R+ (08-2024)",
-      "context_length": 128000,
-      "architecture": {
-        "modality": "text->text",
-        "input_modalities": [
-          "text"
-        ],
-        "output_modalities": [
-          "text"
-        ],
-        "tokenizer": "Cohere",
-        "instruct_type": null
-      },
-      "pricing": {
-        "prompt": "0.0000025",
-        "completion": "0.00001",
-        "request": "0",
-        "image": "0",
-        "web_search": "0",
-        "internal_reasoning": "0"
-      },
-      "benchmarks": null,
-      "category_scores": null
-    },
-    {
       "id": "cohere/command-r-08-2024",
       "name": "Cohere: Command R (08-2024)",
       "context_length": 128000,
@@ -10209,9 +10510,9 @@
       "category_scores": null
     },
     {
-      "id": "sao10k/l3.1-euryale-70b",
-      "name": "Sao10K: Llama 3.1 Euryale 70B v2.2",
-      "context_length": 32768,
+      "id": "cohere/command-r-plus-08-2024",
+      "name": "Cohere: Command R+ (08-2024)",
+      "context_length": 128000,
       "architecture": {
         "modality": "text->text",
         "input_modalities": [
@@ -10220,12 +10521,12 @@
         "output_modalities": [
           "text"
         ],
-        "tokenizer": "Llama3",
-        "instruct_type": "llama3"
+        "tokenizer": "Cohere",
+        "instruct_type": null
       },
       "pricing": {
-        "prompt": "0.00000065",
-        "completion": "0.00000075",
+        "prompt": "0.0000025",
+        "completion": "0.00001",
         "request": "0",
         "image": "0",
         "web_search": "0",
@@ -10282,6 +10583,32 @@
         "completion": "0.0000002",
         "request": "0",
         "image": "0.0001445",
+        "web_search": "0",
+        "internal_reasoning": "0"
+      },
+      "benchmarks": null,
+      "category_scores": null
+    },
+    {
+      "id": "sao10k/l3.1-euryale-70b",
+      "name": "Sao10K: Llama 3.1 Euryale 70B v2.2",
+      "context_length": 32768,
+      "architecture": {
+        "modality": "text->text",
+        "input_modalities": [
+          "text"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "tokenizer": "Llama3",
+        "instruct_type": "llama3"
+      },
+      "pricing": {
+        "prompt": "0.00000065",
+        "completion": "0.00000075",
+        "request": "0",
+        "image": "0",
         "web_search": "0",
         "internal_reasoning": "0"
       },
@@ -10652,53 +10979,6 @@
       }
     },
     {
-      "id": "meta-llama/llama-3.1-70b-instruct",
-      "name": "Meta: Llama 3.1 70B Instruct",
-      "context_length": 131072,
-      "architecture": {
-        "modality": "text->text",
-        "input_modalities": [
-          "text"
-        ],
-        "output_modalities": [
-          "text"
-        ],
-        "tokenizer": "Llama3",
-        "instruct_type": "llama3"
-      },
-      "pricing": {
-        "prompt": "0.0000004",
-        "completion": "0.0000004",
-        "request": "0",
-        "image": "0",
-        "web_search": "0",
-        "internal_reasoning": "0"
-      },
-      "benchmarks": {
-        "code": {
-          "humaneval": 0.805
-        },
-        "reasoning": {
-          "gpqa": 0.417,
-          "mmlu-pro": 0.664,
-          "mmlu": 0.836
-        },
-        "tool_calling": {
-          "bfcl": 0.848,
-          "nexus": 0.567
-        },
-        "general": {
-          "ifeval": 0.875
-        }
-      },
-      "category_scores": {
-        "code": 0.805,
-        "reasoning": 0.639,
-        "tool_calling": 0.7075,
-        "general": 0.875
-      }
-    },
-    {
       "id": "meta-llama/llama-3.1-8b-instruct",
       "name": "Meta: Llama 3.1 8B Instruct",
       "context_length": 131072,
@@ -10743,6 +11023,53 @@
         "reasoning": 0.4937,
         "tool_calling": 0.573,
         "general": 0.804
+      }
+    },
+    {
+      "id": "meta-llama/llama-3.1-70b-instruct",
+      "name": "Meta: Llama 3.1 70B Instruct",
+      "context_length": 131072,
+      "architecture": {
+        "modality": "text->text",
+        "input_modalities": [
+          "text"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "tokenizer": "Llama3",
+        "instruct_type": "llama3"
+      },
+      "pricing": {
+        "prompt": "0.0000004",
+        "completion": "0.0000004",
+        "request": "0",
+        "image": "0",
+        "web_search": "0",
+        "internal_reasoning": "0"
+      },
+      "benchmarks": {
+        "code": {
+          "humaneval": 0.805
+        },
+        "reasoning": {
+          "gpqa": 0.417,
+          "mmlu-pro": 0.664,
+          "mmlu": 0.836
+        },
+        "tool_calling": {
+          "bfcl": 0.848,
+          "nexus": 0.567
+        },
+        "general": {
+          "ifeval": 0.875
+        }
+      },
+      "category_scores": {
+        "code": 0.805,
+        "reasoning": 0.639,
+        "tool_calling": 0.7075,
+        "general": 0.875
       }
     },
     {
@@ -11037,32 +11364,6 @@
       "category_scores": null
     },
     {
-      "id": "mistralai/mistral-7b-instruct-v0.3",
-      "name": "Mistral: Mistral 7B Instruct v0.3",
-      "context_length": 32768,
-      "architecture": {
-        "modality": "text->text",
-        "input_modalities": [
-          "text"
-        ],
-        "output_modalities": [
-          "text"
-        ],
-        "tokenizer": "Mistral",
-        "instruct_type": "mistral"
-      },
-      "pricing": {
-        "prompt": "0.0000002",
-        "completion": "0.0000002",
-        "request": "0",
-        "image": "0",
-        "web_search": "0",
-        "internal_reasoning": "0"
-      },
-      "benchmarks": null,
-      "category_scores": null
-    },
-    {
       "id": "nousresearch/hermes-2-pro-llama-3-8b",
       "name": "NousResearch: Hermes 2 Pro - Llama-3 8B",
       "context_length": 8192,
@@ -11080,6 +11381,32 @@
       "pricing": {
         "prompt": "0.000000025",
         "completion": "0.00000008",
+        "request": "0",
+        "image": "0",
+        "web_search": "0",
+        "internal_reasoning": "0"
+      },
+      "benchmarks": null,
+      "category_scores": null
+    },
+    {
+      "id": "mistralai/mistral-7b-instruct-v0.3",
+      "name": "Mistral: Mistral 7B Instruct v0.3",
+      "context_length": 32768,
+      "architecture": {
+        "modality": "text->text",
+        "input_modalities": [
+          "text"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "tokenizer": "Mistral",
+        "instruct_type": "mistral"
+      },
+      "pricing": {
+        "prompt": "0.0000002",
+        "completion": "0.0000002",
         "request": "0",
         "image": "0",
         "web_search": "0",
@@ -11141,6 +11468,32 @@
       "category_scores": null
     },
     {
+      "id": "meta-llama/llama-guard-2-8b",
+      "name": "Meta: LlamaGuard 2 8B",
+      "context_length": 8192,
+      "architecture": {
+        "modality": "text->text",
+        "input_modalities": [
+          "text"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "tokenizer": "Llama3",
+        "instruct_type": "none"
+      },
+      "pricing": {
+        "prompt": "0.0000002",
+        "completion": "0.0000002",
+        "request": "0",
+        "image": "0",
+        "web_search": "0",
+        "internal_reasoning": "0"
+      },
+      "benchmarks": null,
+      "category_scores": null
+    },
+    {
       "id": "openai/gpt-4o-2024-05-13",
       "name": "OpenAI: GPT-4o (2024-05-13)",
       "context_length": 128000,
@@ -11183,32 +11536,6 @@
         "math": 0.766,
         "reasoning": 0.7163
       }
-    },
-    {
-      "id": "meta-llama/llama-guard-2-8b",
-      "name": "Meta: LlamaGuard 2 8B",
-      "context_length": 8192,
-      "architecture": {
-        "modality": "text->text",
-        "input_modalities": [
-          "text"
-        ],
-        "output_modalities": [
-          "text"
-        ],
-        "tokenizer": "Llama3",
-        "instruct_type": "none"
-      },
-      "pricing": {
-        "prompt": "0.0000002",
-        "completion": "0.0000002",
-        "request": "0",
-        "image": "0",
-        "web_search": "0",
-        "internal_reasoning": "0"
-      },
-      "benchmarks": null,
-      "category_scores": null
     },
     {
       "id": "openai/gpt-4o",
@@ -11289,32 +11616,6 @@
       "category_scores": null
     },
     {
-      "id": "meta-llama/llama-3-8b-instruct",
-      "name": "Meta: Llama 3 8B Instruct",
-      "context_length": 8192,
-      "architecture": {
-        "modality": "text->text",
-        "input_modalities": [
-          "text"
-        ],
-        "output_modalities": [
-          "text"
-        ],
-        "tokenizer": "Llama3",
-        "instruct_type": "llama3"
-      },
-      "pricing": {
-        "prompt": "0.00000003",
-        "completion": "0.00000006",
-        "request": "0",
-        "image": "0",
-        "web_search": "0",
-        "internal_reasoning": "0"
-      },
-      "benchmarks": null,
-      "category_scores": null
-    },
-    {
       "id": "meta-llama/llama-3-70b-instruct",
       "name": "Meta: Llama 3 70B Instruct",
       "context_length": 8192,
@@ -11332,6 +11633,32 @@
       "pricing": {
         "prompt": "0.0000003",
         "completion": "0.0000004",
+        "request": "0",
+        "image": "0",
+        "web_search": "0",
+        "internal_reasoning": "0"
+      },
+      "benchmarks": null,
+      "category_scores": null
+    },
+    {
+      "id": "meta-llama/llama-3-8b-instruct",
+      "name": "Meta: Llama 3 8B Instruct",
+      "context_length": 8192,
+      "architecture": {
+        "modality": "text->text",
+        "input_modalities": [
+          "text"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "tokenizer": "Llama3",
+        "instruct_type": "llama3"
+      },
+      "pricing": {
+        "prompt": "0.00000003",
+        "completion": "0.00000006",
         "request": "0",
         "image": "0",
         "web_search": "0",

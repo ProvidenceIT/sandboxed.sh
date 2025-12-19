@@ -6,16 +6,19 @@
 //! - Allocation: algorithms for distributing budget across subtasks
 //! - Retry: smart retry strategies for budget overflow
 //! - Benchmarks: model capability scores for task-aware selection
+//! - Resolver: auto-upgrade outdated model names to latest equivalents
 
 mod budget;
 mod pricing;
 mod allocation;
 mod retry;
 pub mod benchmarks;
+pub mod resolver;
 
 pub use budget::{Budget, BudgetError};
 pub use pricing::{ModelPricing, PricingInfo};
 pub use allocation::{AllocationStrategy, allocate_budget};
 pub use retry::{ExecutionSignals, FailureAnalysis, FailureMode, RetryRecommendation, RetryConfig};
 pub use benchmarks::{TaskType, BenchmarkRegistry, SharedBenchmarkRegistry, load_benchmarks};
+pub use resolver::{ModelResolver, ModelFamily, ResolvedModel, SharedModelResolver, load_resolver};
 

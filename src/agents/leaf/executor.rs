@@ -523,13 +523,11 @@ Use `search_memory` when you encounter a problem you might have solved before or
             if let Some(tool_calls) = &response.tool_calls {
                 if !tool_calls.is_empty() {
                     // Add assistant message with tool calls
-                    // Preserve reasoning_details for models that require it (Gemini 3, Claude 3.7+)
                     messages.push(ChatMessage {
                         role: Role::Assistant,
                         content: response.content.clone().map(MessageContent::text),
                         tool_calls: Some(tool_calls.clone()),
                         tool_call_id: None,
-                        reasoning_details: response.reasoning_details.clone(),
                     });
 
                     // Check for repetitive actions
@@ -717,7 +715,6 @@ Use `search_memory` when you encounter a problem you might have solved before or
                             content: Some(message_content),
                             tool_calls: None,
                             tool_call_id: Some(tool_call.id.clone()),
-                            reasoning_details: None,
                         });
                     }
 
@@ -859,11 +856,25 @@ impl Agent for TaskExecutor {
 
     async fn execute(&self, task: &mut Task, ctx: &AgentContext) -> AgentResult {
         // Use model selected during planning, otherwise fall back to default.
-        let selected = task
-            .analysis()
-            .selected_model
-            .clone()
-            .unwrap_or_else(|| ctx.config.default_model.clone());
+        // If falling back to default, resolve it to latest version first.
+        let selected = if let Some(model) = task.analysis().selected_model.clone() {
+            model
+        } else {
+            // Resolve default model to latest version
+            if let Some(resolver) = &ctx.resolver {
+                let resolver = resolver.read().await;
+                let resolved = resolver.resolve(&ctx.config.default_model);
+                if resolved.upgraded {
+                    tracing::info!(
+                        "Executor: default model auto-upgraded: {} → {}",
+                        resolved.original, resolved.resolved
+                    );
+                }
+                resolved.resolved
+            } else {
+                ctx.config.default_model.clone()
+            }
+        };
         let model = selected.as_str();
 
         let result = self.run_loop(task, model, ctx).await;
@@ -909,11 +920,26 @@ impl Agent for TaskExecutor {
 impl TaskExecutor {
     /// Execute a task and return detailed execution result for retry analysis.
     pub async fn execute_with_signals(&self, task: &mut Task, ctx: &AgentContext) -> (AgentResult, ExecutionSignals) {
-        let selected = task
-            .analysis()
-            .selected_model
-            .clone()
-            .unwrap_or_else(|| ctx.config.default_model.clone());
+        // Use model selected during planning, otherwise fall back to default.
+        // If falling back to default, resolve it to latest version first.
+        let selected = if let Some(model) = task.analysis().selected_model.clone() {
+            model
+        } else {
+            // Resolve default model to latest version
+            if let Some(resolver) = &ctx.resolver {
+                let resolver = resolver.read().await;
+                let resolved = resolver.resolve(&ctx.config.default_model);
+                if resolved.upgraded {
+                    tracing::info!(
+                        "Executor: default model auto-upgraded: {} → {}",
+                        resolved.original, resolved.resolved
+                    );
+                }
+                resolved.resolved
+            } else {
+                ctx.config.default_model.clone()
+            }
+        };
         let model = selected.as_str();
 
         let result = self.run_loop(task, model, ctx).await;

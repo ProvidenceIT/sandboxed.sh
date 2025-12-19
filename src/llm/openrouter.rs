@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
 
 use super::error::{classify_http_status, LlmError, LlmErrorKind, RetryConfig};
-use super::{ChatMessage, ChatOptions, ChatResponse, LlmClient, TokenUsage, ToolCall, ToolDefinition};
+use super::{
+    ChatMessage, ChatOptions, ChatResponse, LlmClient, TokenUsage, ToolCall, ToolDefinition,
+};
 
 const OPENROUTER_API_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
 
@@ -65,10 +67,7 @@ impl OpenRouterClient {
     }
 
     /// Execute a single request without retry.
-    async fn execute_request(
-        &self,
-        request: &OpenRouterRequest,
-    ) -> Result<ChatResponse, LlmError> {
+    async fn execute_request(&self, request: &OpenRouterRequest) -> Result<ChatResponse, LlmError> {
         let response = match self
             .client
             .post(OPENROUTER_API_URL)
@@ -119,7 +118,6 @@ impl OpenRouterClient {
                 .usage
                 .map(|u| TokenUsage::new(u.prompt_tokens, u.completion_tokens)),
             model: parsed.model.or_else(|| Some(request.model.clone())),
-            reasoning_details: choice.message.reasoning_details,
         })
     }
 
@@ -153,8 +151,8 @@ impl OpenRouterClient {
                     return Ok(response);
                 }
                 Err(error) => {
-                    let should_retry =
-                        self.retry_config.should_retry(&error) && attempt < self.retry_config.max_retries;
+                    let should_retry = self.retry_config.should_retry(&error)
+                        && attempt < self.retry_config.max_retries;
 
                     if should_retry {
                         let delay = error.suggested_delay(attempt);
@@ -280,10 +278,6 @@ struct OpenRouterChoice {
 struct OpenRouterMessage {
     content: Option<String>,
     tool_calls: Option<Vec<ToolCall>>,
-    /// Reasoning details for models that support extended thinking (Gemini 3, Claude 3.7+, etc.)
-    /// Must be preserved and passed back in subsequent requests for tool calling to work.
-    #[serde(default)]
-    reasoning_details: Option<serde_json::Value>,
 }
 
 /// Usage data (OpenAI-compatible).
@@ -294,4 +288,3 @@ struct OpenRouterUsage {
     #[serde(rename = "total_tokens")]
     _total_tokens: u64,
 }
-
