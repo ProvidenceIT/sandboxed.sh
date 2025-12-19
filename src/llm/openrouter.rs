@@ -112,11 +112,36 @@ impl OpenRouterClient {
             .ok_or_else(|| LlmError::parse_error("No choices in response".to_string()))?;
 
         // Log if we received reasoning blocks (for debugging thinking models)
-        if choice.message.reasoning.is_some() {
+        if let Some(ref reasoning) = choice.message.reasoning {
+            let has_thought_sig = reasoning.iter().any(|r| r.thought_signature.is_some());
             tracing::debug!(
-                "Received {} reasoning blocks from model",
-                choice.message.reasoning.as_ref().map_or(0, |r| r.len())
+                "Received {} reasoning blocks from model (has_thought_signature: {})",
+                reasoning.len(),
+                has_thought_sig
             );
+            // Log thought_signature details for debugging Gemini issues
+            for (i, r) in reasoning.iter().enumerate() {
+                if r.thought_signature.is_some() {
+                    tracing::debug!("Reasoning block {} has thought_signature", i);
+                }
+            }
+        }
+        
+        // Log if tool calls have thought_signatures attached (Gemini format)
+        if let Some(ref tool_calls) = choice.message.tool_calls {
+            for tc in tool_calls {
+                // Check both ToolCall level and FunctionCall level
+                let has_tc_sig = tc.thought_signature.is_some();
+                let has_fn_sig = tc.function.thought_signature.is_some();
+                if has_tc_sig || has_fn_sig {
+                    tracing::debug!(
+                        "Tool call '{}' has thought_signature (tool_call: {}, function: {})",
+                        tc.function.name,
+                        has_tc_sig,
+                        has_fn_sig
+                    );
+                }
+            }
         }
 
         Ok(ChatResponse {
@@ -290,7 +315,8 @@ struct OpenRouterMessage {
     tool_calls: Option<Vec<ToolCall>>,
     /// Reasoning blocks from "thinking" models (Gemini 3, etc.)
     /// Contains thought_signature that must be preserved for tool call continuations.
-    #[serde(default)]
+    /// OpenRouter uses `reasoning` or `reasoning_details` depending on the model/provider.
+    #[serde(default, alias = "reasoning_details")]
     reasoning: Option<Vec<ReasoningContent>>,
 }
 

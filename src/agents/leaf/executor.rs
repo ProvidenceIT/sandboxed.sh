@@ -525,6 +525,30 @@ Use `search_memory` when you encounter a problem you might have solved before or
                     // Add assistant message with tool calls
                     // IMPORTANT: Preserve reasoning blocks for "thinking" models (Gemini 3, etc.)
                     // These contain thought_signature that must be sent back for continuations.
+                    
+                    // Debug: Log if we have reasoning/thought_signature to preserve
+                    if let Some(ref reasoning) = response.reasoning {
+                        let has_sig = reasoning.iter().any(|r| r.thought_signature.is_some());
+                        tracing::debug!(
+                            "Preserving {} reasoning blocks (has_thought_signature: {})",
+                            reasoning.len(),
+                            has_sig
+                        );
+                    }
+                    // Also check for thought_signature in tool_calls themselves (Gemini format)
+                    for tc in tool_calls {
+                        let has_tc_sig = tc.thought_signature.is_some();
+                        let has_fn_sig = tc.function.thought_signature.is_some();
+                        if has_tc_sig || has_fn_sig {
+                            tracing::debug!(
+                                "Tool call '{}' has thought_signature (tool_call: {}, function: {})",
+                                tc.function.name,
+                                has_tc_sig,
+                                has_fn_sig
+                            );
+                        }
+                    }
+                    
                     messages.push(ChatMessage {
                         role: Role::Assistant,
                         content: response.content.clone().map(MessageContent::text),

@@ -88,17 +88,34 @@ pub enum MessageContent {
 /// the model to resume its chain of thought.
 /// 
 /// Reference: https://openrouter.ai/docs/use-cases/reasoning-tokens
+/// Reference: https://ai.google.dev/gemini-api/docs/thought-signatures
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReasoningContent {
-    /// The reasoning/thinking content (may be redacted or empty for some models)
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// The reasoning/thinking content (may be redacted or empty for some models).
+    /// OpenRouter uses both `content` and `text` fields depending on the model.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "text"
+    )]
     pub content: Option<String>,
-    /// Encrypted thought signature for resuming reasoning (required for Gemini)
+    
+    /// Encrypted thought signature for resuming reasoning (required for Gemini 3).
+    /// This MUST be preserved and sent back in subsequent requests for tool call continuations.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thought_signature: Option<String>,
-    /// Type of reasoning block (typically "thinking")
+    
+    /// Type of reasoning block (e.g., "thinking", "reasoning.text")
     #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
     pub reasoning_type: Option<String>,
+    
+    /// Format of the reasoning content (e.g., "unknown")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+    
+    /// Index of the reasoning block (for ordered reasoning)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub index: Option<u32>,
 }
 
 impl ReasoningContent {
@@ -209,6 +226,9 @@ pub struct ToolCall {
     #[serde(rename = "type")]
     pub call_type: String,
     pub function: FunctionCall,
+    /// Thought signature for Gemini 3 models (may be at this level instead of function level).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thought_signature: Option<String>,
 }
 
 /// Function call details.
@@ -218,6 +238,10 @@ pub struct FunctionCall {
     /// Arguments as a JSON string. May be empty or missing for no-argument functions.
     #[serde(default)]
     pub arguments: String,
+    /// Thought signature for Gemini 3 models. Must be preserved and sent back with tool results.
+    /// When present, this allows Gemini to resume its chain of thought after a tool call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thought_signature: Option<String>,
 }
 
 /// Tool definition for the LLM.
