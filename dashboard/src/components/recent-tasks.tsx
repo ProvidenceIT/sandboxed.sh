@@ -88,7 +88,7 @@ export function RecentTasks() {
                     className={cn(
                       "h-4 w-4",
                       color,
-                      (mission.status === "running" || mission.status === "active") && "animate-spin"
+                      mission.status === "active" && "animate-spin"
                     )}
                   />
                   <span className="max-w-[180px] truncate text-sm text-white/80">
