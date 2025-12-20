@@ -368,6 +368,11 @@ export default function ControlClient() {
   const [currentMission, setCurrentMission] = useState<Mission | null>(null);
   const [showStatusMenu, setShowStatusMenu] = useState(false);
   const [missionLoading, setMissionLoading] = useState(false);
+  
+  // New mission dialog state
+  const [showNewMissionDialog, setShowNewMissionDialog] = useState(false);
+  const [newMissionModel, setNewMissionModel] = useState("");
+  const newMissionDialogRef = useRef<HTMLDivElement>(null);
 
   // Parallel missions state
   const [runningMissions, setRunningMissions] = useState<RunningMissionInfo[]>([]);
@@ -393,11 +398,21 @@ export default function ControlClient() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const viewingMissionIdRef = useRef<string | null>(null);
+  const runningMissionsRef = useRef<RunningMissionInfo[]>([]);
+  const currentMissionRef = useRef<Mission | null>(null);
   
-  // Keep ref in sync with state
+  // Keep refs in sync with state
   useEffect(() => {
     viewingMissionIdRef.current = viewingMissionId;
   }, [viewingMissionId]);
+  
+  useEffect(() => {
+    runningMissionsRef.current = runningMissions;
+  }, [runningMissions]);
+  
+  useEffect(() => {
+    currentMissionRef.current = currentMission;
+  }, [currentMission]);
 
   // Smart auto-scroll
   const { containerRef, endRef, isAtBottom, scrollToBottom } =
@@ -441,6 +456,12 @@ export default function ControlClient() {
         !statusMenuRef.current.contains(event.target as Node)
       ) {
         setShowStatusMenu(false);
+      }
+      if (
+        newMissionDialogRef.current &&
+        !newMissionDialogRef.current.contains(event.target as Node)
+      ) {
+        setShowNewMissionDialog(false);
       }
     };
     document.addEventListener("mousedown", handleClickOutside);
@@ -635,11 +656,12 @@ export default function ControlClient() {
   // and could be from any mission. We only cache when explicitly loading from API.
 
   // Handle creating a new mission
-  const handleNewMission = async () => {
+  const handleNewMission = async (modelOverride?: string) => {
     try {
       setMissionLoading(true);
-      const mission = await createMission();
+      const mission = await createMission(undefined, modelOverride);
       setCurrentMission(mission);
+      setViewingMissionId(mission.id); // Also update viewing to the new mission
       setItems([]);
       router.replace(`/control?mission=${mission.id}`, { scroll: false });
       toast.success("New mission created");
@@ -692,19 +714,30 @@ export default function ControlClient() {
       const data: unknown = event.data;
 
       // Filter events by mission_id - only show events for the mission we're viewing
-      if (isRecord(data) && data["mission_id"]) {
-        const eventMissionId = String(data["mission_id"]);
-        const viewingId = viewingMissionIdRef.current;
-        
-        // If we're viewing a specific mission and this event is for a different one,
-        // store it for that mission but don't display it
-        if (viewingId && eventMissionId !== viewingId) {
-          // Store event for the other mission (so it's there when we switch)
-          // For now, we'll just ignore non-status events for other missions
-          // Status events should still update the running missions indicator
+      const viewingId = viewingMissionIdRef.current;
+      const eventMissionId = isRecord(data) && data["mission_id"] ? String(data["mission_id"]) : null;
+      const runningList = runningMissionsRef.current;
+      const currentMissionId = currentMissionRef.current?.id;
+      
+      // Check if we're viewing a parallel mission (one that's in the running list but not the current main mission)
+      const isViewingParallelMission = viewingId && runningList.some(
+        rm => rm.mission_id === viewingId && currentMissionId !== viewingId
+      );
+      
+      // If viewing a parallel mission, only show events from that specific mission
+      // Events without mission_id are from the main session - skip them when viewing parallel
+      if (isViewingParallelMission) {
+        if (!eventMissionId || eventMissionId !== viewingId) {
+          // Allow status events through for state updates, but not content events
           if (event.type !== "status") {
             return;
           }
+        }
+      } else if (eventMissionId && viewingId && eventMissionId !== viewingId) {
+        // We're viewing the main session but got an event from a different mission
+        // Skip non-status events from other missions
+        if (event.type !== "status") {
+          return;
         }
       }
 
@@ -1041,14 +1074,56 @@ export default function ControlClient() {
             </div>
           )}
 
-          <button
-            onClick={handleNewMission}
-            disabled={missionLoading}
-            className="flex items-center gap-2 rounded-lg bg-indigo-500/20 px-3 py-2 text-sm font-medium text-indigo-400 hover:bg-indigo-500/30 transition-colors disabled:opacity-50"
-          >
-            <Plus className="h-4 w-4" />
-            <span className="hidden sm:inline">New</span> Mission
-          </button>
+          <div className="relative" ref={newMissionDialogRef}>
+            <button
+              onClick={() => setShowNewMissionDialog(!showNewMissionDialog)}
+              disabled={missionLoading}
+              className="flex items-center gap-2 rounded-lg bg-indigo-500/20 px-3 py-2 text-sm font-medium text-indigo-400 hover:bg-indigo-500/30 transition-colors disabled:opacity-50"
+            >
+              <Plus className="h-4 w-4" />
+              <span className="hidden sm:inline">New</span> Mission
+            </button>
+            {showNewMissionDialog && (
+              <div className="absolute right-0 top-full mt-1 w-72 rounded-lg border border-white/[0.06] bg-[#1a1a1a] p-4 shadow-xl z-10">
+                <h3 className="text-sm font-medium text-white mb-3">Create New Mission</h3>
+                <div className="space-y-3">
+                  <div>
+                    <label className="block text-xs text-white/50 mb-1">Model Override (optional)</label>
+                    <input
+                      type="text"
+                      value={newMissionModel}
+                      onChange={(e) => setNewMissionModel(e.target.value)}
+                      placeholder="e.g., deepseek/deepseek-v3.2"
+                      className="w-full rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-sm text-white placeholder-white/30 focus:border-indigo-500/50 focus:outline-none"
+                    />
+                    <p className="text-xs text-white/30 mt-1">Leave empty to use default model</p>
+                  </div>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => {
+                        setShowNewMissionDialog(false);
+                        setNewMissionModel("");
+                      }}
+                      className="flex-1 rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-sm text-white/70 hover:bg-white/[0.04] transition-colors"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={() => {
+                        handleNewMission(newMissionModel || undefined);
+                        setShowNewMissionDialog(false);
+                        setNewMissionModel("");
+                      }}
+                      disabled={missionLoading}
+                      className="flex-1 rounded-lg bg-indigo-500 px-3 py-2 text-sm font-medium text-white hover:bg-indigo-600 transition-colors disabled:opacity-50"
+                    >
+                      Create
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
 
           {/* Parallel missions indicator */}
           {runningMissions.length > 0 && (

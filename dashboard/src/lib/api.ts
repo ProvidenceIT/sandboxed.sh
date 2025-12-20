@@ -309,8 +309,16 @@ export async function getCurrentMission(): Promise<Mission | null> {
 }
 
 // Create a new mission
-export async function createMission(): Promise<Mission> {
-  const res = await apiFetch("/api/control/missions", { method: "POST" });
+export async function createMission(title?: string, modelOverride?: string): Promise<Mission> {
+  const body: { title?: string; model_override?: string } = {};
+  if (title) body.title = title;
+  if (modelOverride) body.model_override = modelOverride;
+  
+  const res = await apiFetch("/api/control/missions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: Object.keys(body).length > 0 ? JSON.stringify(body) : undefined,
+  });
   if (!res.ok) throw new Error("Failed to create mission");
   return res.json();
 }
