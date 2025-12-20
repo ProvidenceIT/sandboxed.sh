@@ -222,11 +222,11 @@ impl Tool for BrowserScreenshot {
     }
 
     fn description(&self) -> &str {
-        "Take a screenshot of the current browser page. If cloud storage is configured, \
-        automatically uploads and returns markdown you can include in your response. \
-        Otherwise returns the local file path.\n\n\
-        IMPORTANT: When a 'markdown' field is returned, you MUST include it in your response \
-        for the user to see the image!"
+        "Take a screenshot of the current browser page.\n\n\
+        Two modes:\n\
+        - return_image=true: YOU can see the screenshot (for navigation/verification)\n\
+        - upload=true: Screenshot is uploaded and you get markdown to SHARE with the user\n\n\
+        IMPORTANT: When sharing with user, you MUST include the 'markdown' value in your response!"
     }
 
     fn parameters_schema(&self) -> Value {
@@ -235,11 +235,19 @@ impl Tool for BrowserScreenshot {
             "properties": {
                 "description": {
                     "type": "string",
-                    "description": "Description of what the screenshot shows (used in alt text)"
+                    "description": "Description of what the screenshot shows (used in alt text). Default: 'screenshot'"
                 },
                 "full_page": {
                     "type": "boolean",
                     "description": "Capture the full scrollable page (default: false, captures viewport only)"
+                },
+                "return_image": {
+                    "type": "boolean",
+                    "description": "If true, the screenshot will be included in your context so YOU can see it (requires vision model). Use this to verify page content before responding. Default: false"
+                },
+                "upload": {
+                    "type": "boolean",
+                    "description": "If true, uploads screenshot and returns markdown for sharing with the user. Default: true"
                 }
             }
         })
@@ -248,6 +256,8 @@ impl Tool for BrowserScreenshot {
     async fn execute(&self, args: Value, workspace: &Path) -> anyhow::Result<String> {
         let description = args["description"].as_str().unwrap_or("screenshot");
         let full_page = args["full_page"].as_bool().unwrap_or(false);
+        let return_image = args["return_image"].as_bool().unwrap_or(false);
+        let upload = args["upload"].as_bool().unwrap_or(true);
         let filename = format!("screenshot_{}.png", chrono::Utc::now().format("%Y%m%d_%H%M%S"));
 
         // Take the screenshot
@@ -266,40 +276,59 @@ impl Tool for BrowserScreenshot {
         let file_path = temp_dir.join(&filename);
         std::fs::write(&file_path, &screenshot)?;
 
-        // Try to upload to Supabase if configured
-        if let Some((supabase_url, service_role_key)) = get_supabase_config() {
-            match upload_to_supabase(&screenshot, &supabase_url, &service_role_key).await {
-                Ok(public_url) => {
-                    tracing::info!(
-                        local_path = %file_path.display(),
-                        public_url = %public_url,
-                        size = screenshot.len(),
-                        "Screenshot uploaded to Supabase"
-                    );
-                    
-                    let markdown = format!("![{}]({})", description, public_url);
-                    return Ok(json!({
-                        "success": true,
-                        "url": public_url,
-                        "markdown": markdown,
-                        "local_path": file_path.display().to_string(),
-                        "size_bytes": screenshot.len(),
-                        "message": "Screenshot uploaded! Include the 'markdown' value in your response for the user to see it."
-                    }).to_string());
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to upload screenshot to Supabase: {}", e);
-                    // Fall through to return local path
+        // Try to upload to Supabase if requested and configured
+        let mut public_url: Option<String> = None;
+        let mut markdown: Option<String> = None;
+        
+        if upload {
+            if let Some((supabase_url, service_role_key)) = get_supabase_config() {
+                match upload_to_supabase(&screenshot, &supabase_url, &service_role_key).await {
+                    Ok(url) => {
+                        tracing::info!(
+                            local_path = %file_path.display(),
+                            public_url = %url,
+                            size = screenshot.len(),
+                            "Screenshot uploaded to Supabase"
+                        );
+                        markdown = Some(format!("![{}]({})", description, url));
+                        public_url = Some(url);
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to upload screenshot to Supabase: {}", e);
+                    }
                 }
             }
         }
 
-        // No Supabase or upload failed - return local path
-        Ok(format!(
-            "Screenshot saved to: {}\nSize: {} bytes\n\nNote: Cloud storage not configured. Use upload_image tool to share this image.",
-            file_path.display(),
-            screenshot.len()
-        ))
+        // Build response
+        let mut result = json!({
+            "success": true,
+            "local_path": file_path.display().to_string(),
+            "size_bytes": screenshot.len()
+        });
+        
+        if let Some(url) = &public_url {
+            result["url"] = json!(url);
+        }
+        if let Some(md) = &markdown {
+            result["markdown"] = json!(md);
+            result["message"] = json!("Screenshot uploaded! Include the 'markdown' value in your response for the user to see it.");
+        }
+        
+        // Add vision marker if return_image is true (so agent can SEE the screenshot)
+        // Format: [VISION_IMAGE:url] - parsed by executor to include image in context
+        let vision_marker = if return_image {
+            if let Some(url) = &public_url {
+                format!("\n\n[VISION_IMAGE:{}]", url)
+            } else {
+                // Can't do vision without a URL - need to upload first
+                "\n\nNote: return_image requires upload=true to work (need URL for vision)".to_string()
+            }
+        } else {
+            String::new()
+        };
+        
+        Ok(format!("{}{}", result.to_string(), vision_marker))
     }
 }
 
