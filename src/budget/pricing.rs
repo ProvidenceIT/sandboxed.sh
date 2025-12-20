@@ -342,6 +342,7 @@ impl ModelPricing {
                 // Blocklist: models with broken tool calling formats
                 const BROKEN_TOOL_CALLING: &[&str] = &[
                     "deepseek/deepseek-r1-distill",  // Uses non-standard <｜tool▁calls▁begin｜> format
+                    "mistralai/mistral-large-2512",  // Produces malformed function names (prose instead of identifiers)
                 ];
                 
                 // Skip models with broken tool calling
