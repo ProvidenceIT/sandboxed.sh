@@ -60,6 +60,33 @@ pub struct TaskExecutor {
     id: AgentId,
 }
 
+/// Categorize a tool name into a broader approach category.
+/// Used for tracking repeated failures of similar approaches.
+fn categorize_tool(tool_name: &str) -> String {
+    match tool_name {
+        // Static analysis tools
+        name if name.contains("slither") || name.contains("mythril") || 
+                name.contains("solhint") || name.contains("echidna") => "static_analysis".to_string(),
+        
+        // Code execution/compilation
+        "run_command" => "shell_command".to_string(),
+        name if name.contains("compile") || name.contains("build") => "compilation".to_string(),
+        
+        // File operations
+        "read_file" | "write_file" | "list_directory" | "search_files" => "file_ops".to_string(),
+        
+        // Network/API calls
+        name if name.contains("browser") || name.contains("http") || 
+                name.contains("fetch") || name.contains("curl") => "network".to_string(),
+        
+        // Git operations
+        name if name.contains("git") || name.contains("clone") => "git".to_string(),
+        
+        // Default: use the tool name itself
+        _ => tool_name.to_string(),
+    }
+}
+
 impl TaskExecutor {
     /// Create a new task executor.
     pub fn new() -> Self {
@@ -669,6 +696,15 @@ If you cannot perform the requested analysis, use `complete_mission(blocked, rea
         let mut has_error_messages = false;
         let mut iterations_completed = 0u32;
         
+        // Track consecutive empty/reasoning-only responses (P0 fix for agent stalls)
+        let mut empty_response_count: u32 = 0;
+        const EMPTY_RESPONSE_WARNING_THRESHOLD: u32 = 2;
+        const EMPTY_RESPONSE_FORCE_COMPLETE_THRESHOLD: u32 = 4;
+        
+        // Track failed tool attempts by category (P3 fix for approach looping)
+        let mut failed_tool_attempts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+        const TOOL_FAILURE_THRESHOLD: u32 = 3;
+        
         // Track uploaded images that need to be included in the response
         // When upload_image succeeds, we store the (url, markdown) so we can warn
         // the agent if they try to complete without including the images.
@@ -812,10 +848,15 @@ If you cannot perform the requested analysis, use `complete_mission(blocked, rea
                 };
             }
 
-            // Call LLM
-            let response = match ctx.llm.chat_completion(model, &messages, Some(&tool_schemas)).await {
-                Ok(r) => r,
-                Err(e) => {
+            // Call LLM with timeout (P2 fix: detect hangs)
+            const LLM_TIMEOUT_SECS: u64 = 300; // 5 minutes max per LLM call
+            let llm_future = ctx.llm.chat_completion(model, &messages, Some(&tool_schemas));
+            let response = match tokio::time::timeout(
+                std::time::Duration::from_secs(LLM_TIMEOUT_SECS),
+                llm_future
+            ).await {
+                Ok(Ok(r)) => r,
+                Ok(Err(e)) => {
                     has_error_messages = true;
                     let error_msg = format!("LLM error: {}", e);
                     let signals = ExecutionSignals {
@@ -834,6 +875,43 @@ If you cannot perform the requested analysis, use `complete_mission(blocked, rea
                     };
                     return ExecutionLoopResult {
                         output: error_msg,
+                        cost_cents: total_cost_cents,
+                        tool_log,
+                        usage,
+                        signals,
+                        success: false,
+                    };
+                }
+                Err(_timeout) => {
+                    // P2 FIX: LLM call timed out - return with partial results
+                    has_error_messages = true;
+                    tracing::error!(
+                        "LLM call timed out after {} seconds at iteration {}",
+                        LLM_TIMEOUT_SECS,
+                        iterations_completed
+                    );
+                    let signals = ExecutionSignals {
+                        iterations: iterations_completed,
+                        max_iterations: ctx.max_iterations as u32,
+                        successful_tool_calls,
+                        failed_tool_calls,
+                        files_modified,
+                        repetitive_actions,
+                        has_error_messages,
+                        partial_progress: files_modified || successful_tool_calls > 0,
+                        cost_spent_cents: total_cost_cents,
+                        budget_total_cents: task.budget().total_cents(),
+                        final_output: format!(
+                            "LLM call timed out after {} seconds. Partial results may be in working directory.",
+                            LLM_TIMEOUT_SECS
+                        ),
+                        model_used: model.to_string(),
+                    };
+                    return ExecutionLoopResult {
+                        output: format!(
+                            "Agent stalled: LLM call timed out after {} seconds. Check working directory for partial results.",
+                            LLM_TIMEOUT_SECS
+                        ),
                         cost_cents: total_cost_cents,
                         tool_log,
                         usage,
@@ -1116,7 +1194,28 @@ If you cannot perform the requested analysis, use `complete_mission(blocked, rea
                                     Err(e) => {
                                         failed_tool_calls += 1;
                                         has_error_messages = true;
-                                        let s = format!("Error: {}", e);
+                                        
+                                        // P3 FIX: Track failed approaches by tool category
+                                        let tool_category = categorize_tool(&tool_name);
+                                        let count = failed_tool_attempts.entry(tool_category.clone()).or_insert(0);
+                                        *count += 1;
+                                        
+                                        let s = if *count >= TOOL_FAILURE_THRESHOLD {
+                                            tracing::warn!(
+                                                "Tool category '{}' has failed {} times - suggesting pivot",
+                                                tool_category,
+                                                *count
+                                            );
+                                            format!(
+                                                "Error: {}\n\n[SYSTEM NOTE: The '{}' approach has failed {} times. \
+                                                Consider: 1) Try a completely different tool/approach, \
+                                                2) Analyze what you DO have and produce partial results, \
+                                                3) Call complete_mission(blocked) if fundamentally stuck]",
+                                                e, tool_category, *count
+                                            )
+                                        } else {
+                                            format!("Error: {}", e)
+                                        };
                                         (s.clone(), serde_json::Value::String(s))
                                     }
                                 }
@@ -1256,9 +1355,85 @@ If you cannot perform the requested analysis, use `complete_mission(blocked, rea
                         }
                     }
 
+                    // Reset empty response counter on successful tool execution
+                    empty_response_count = 0;
                     continue;
                 }
             }
+
+            // P0 FIX: Handle reasoning-only responses (no tool calls, no/empty content)
+            // This prevents the agent from stalling when the LLM returns only thinking
+            let has_reasoning = response.reasoning.as_ref().map(|r| !r.is_empty()).unwrap_or(false);
+            let has_content = response.content.as_ref().map(|c| !c.trim().is_empty()).unwrap_or(false);
+            let has_tool_calls = response.tool_calls.as_ref().map(|tc| !tc.is_empty()).unwrap_or(false);
+            
+            if !has_tool_calls && !has_content {
+                empty_response_count += 1;
+                tracing::warn!(
+                    "Empty/reasoning-only response #{} (has_reasoning: {}, iteration: {})",
+                    empty_response_count,
+                    has_reasoning,
+                    iterations_completed
+                );
+                
+                // Force completion if too many empty responses
+                if empty_response_count >= EMPTY_RESPONSE_FORCE_COMPLETE_THRESHOLD {
+                    tracing::error!(
+                        "Force completing: {} consecutive empty/reasoning-only responses",
+                        empty_response_count
+                    );
+                    has_error_messages = true;
+                    let signals = ExecutionSignals {
+                        iterations: iterations_completed,
+                        max_iterations: ctx.max_iterations as u32,
+                        successful_tool_calls,
+                        failed_tool_calls,
+                        files_modified,
+                        repetitive_actions,
+                        has_error_messages,
+                        partial_progress: files_modified || successful_tool_calls > 0,
+                        cost_spent_cents: total_cost_cents,
+                        budget_total_cents: task.budget().total_cents(),
+                        final_output: format!(
+                            "Agent stalled: {} consecutive responses without action. Partial results may be in working directory.",
+                            empty_response_count
+                        ),
+                        model_used: model.to_string(),
+                    };
+                    return ExecutionLoopResult {
+                        output: format!(
+                            "Agent stalled after {} responses without taking action. Check working directory for partial results.",
+                            empty_response_count
+                        ),
+                        cost_cents: total_cost_cents,
+                        tool_log,
+                        usage,
+                        signals,
+                        success: false,
+                    };
+                }
+                
+                // Inject a prompt to get the model to take action
+                if empty_response_count >= EMPTY_RESPONSE_WARNING_THRESHOLD {
+                    messages.push(ChatMessage::new(
+                        Role::User,
+                        format!(
+                            "[SYSTEM WARNING] You've returned {} responses without taking any action (only thinking/reasoning).\n\n\
+                            You MUST now do ONE of:\n\
+                            1. Call a tool to continue working on the task\n\
+                            2. Provide a complete final response summarizing your work\n\
+                            3. Call complete_mission with status='completed' if done, or status='blocked' if stuck\n\n\
+                            DO NOT respond with only thinking - take concrete action NOW.",
+                            empty_response_count
+                        )
+                    ));
+                }
+                
+                continue; // Retry - let the model try again with the warning
+            }
+            
+            // If we reach here with content, it's the final response
+            // (no need to reset empty_response_count since we're returning)
 
             // No tool calls - final response
             if let Some(content) = response.content.filter(|c| !c.trim().is_empty()) {

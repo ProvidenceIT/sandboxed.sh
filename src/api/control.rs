@@ -1947,6 +1947,46 @@ async fn control_actor_loop(
                             // Persist to mission
                             persist_mission_history(&memory, &current_mission, &history).await;
 
+                            // P1 FIX: Auto-complete mission if agent execution ended without explicit complete_mission call.
+                            // This prevents missions from staying "active" forever after max iterations, stalls, etc.
+                            // Only auto-complete if:
+                            // 1. There's a current mission
+                            // 2. The execution finished (success or failure)
+                            // 3. The output indicates terminal state (max iterations, stall, budget exhausted)
+                            let should_auto_complete = agent_result.output.contains("Max iterations") ||
+                                agent_result.output.contains("Agent stalled") ||
+                                agent_result.output.contains("Budget exhausted") ||
+                                agent_result.output.contains("infinite loop") ||
+                                agent_result.output.contains("Cancelled");
+                            
+                            if should_auto_complete {
+                                if let Some(mem) = &memory {
+                                    if let Some(mission_id) = current_mission.read().await.clone() {
+                                        let status = if agent_result.success { "completed" } else { "failed" };
+                                        tracing::info!(
+                                            "Auto-completing mission {} with status '{}' (terminal output detected)",
+                                            mission_id, status
+                                        );
+                                        if let Err(e) = mem.supabase.update_mission_status(mission_id, status).await {
+                                            tracing::warn!("Failed to auto-complete mission: {}", e);
+                                        } else {
+                                            // Emit status change event
+                                            let new_status = if agent_result.success {
+                                                MissionStatus::Completed
+                                            } else {
+                                                MissionStatus::Failed
+                                            };
+                                            let _ = events_tx.send(AgentEvent::MissionStatusChanged {
+                                                mission_id,
+                                                status: new_status,
+                                                summary: Some(format!("Auto-completed: {}", 
+                                                    agent_result.output.chars().take(100).collect::<String>())),
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+
                             let _ = events_tx.send(AgentEvent::AssistantMessage {
                                 id: Uuid::new_v4(),
                                 content: agent_result.output.clone(),
