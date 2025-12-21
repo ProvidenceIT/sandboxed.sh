@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "Proxy Auth Extension",
+  "version": "1.0",
+  "description": "Handles proxy authentication",
+  "permissions": [
+    "proxy",
+    "webRequest",
+    "webRequestAuthProvider"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  }
+}

@@ -1,18 +1,20 @@
 //! Browser automation tools using Chrome DevTools Protocol (CDP).
 //!
-//! These tools connect to a Chrome/Chromium browser running with remote debugging enabled.
-//! Start Chrome with: `google-chrome --remote-debugging-port=9222`
+//! These tools can either connect to an existing Chrome instance or launch one automatically.
 //!
 //! Environment variables:
-//! - `BROWSER_CDP_URL`: CDP WebSocket URL (default: `http://127.0.0.1:9222`)
+//! - `BROWSER_CDP_URL`: CDP WebSocket URL for connecting to existing Chrome (default: `http://127.0.0.1:9222`)
 //! - `BROWSER_ENABLED`: Set to `true` to enable browser tools (default: false)
+//! - `BROWSER_PROXY`: Proxy URL with optional auth (format: `user:pass@host:port` or `host:port`)
+//! - `BROWSER_HEADLESS`: Set to `true` for headless mode (default: true)
+//! - `BROWSER_LAUNCH`: Set to `true` to launch Chrome instead of connecting to existing (default: false)
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use chromiumoxide::browser::Browser;
+use chromiumoxide::browser::{Browser, BrowserConfig};
 use chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotFormat;
 use chromiumoxide::page::ScreenshotParams;
 use chromiumoxide::Page;
@@ -25,6 +27,175 @@ use super::Tool;
 /// Default CDP endpoint
 const DEFAULT_CDP_URL: &str = "http://127.0.0.1:9222";
 
+/// Parsed proxy configuration
+#[derive(Debug, Clone)]
+struct ProxyConfig {
+    host: String,
+    port: u16,
+    username: Option<String>,
+    password: Option<String>,
+    scheme: String, // "http", "https", or "socks5"
+}
+
+impl ProxyConfig {
+    /// Parse proxy URL from environment variable
+    /// Formats supported:
+    /// - `host:port` (no auth, defaults to http)
+    /// - `user:pass@host:port` (with auth)
+    /// - `socks5://host:port` (explicit scheme)
+    /// - `socks5://user:pass@host:port`
+    fn from_env() -> Option<Self> {
+        let proxy_str = std::env::var("BROWSER_PROXY").ok()?;
+        let proxy_str = proxy_str.trim();
+        if proxy_str.is_empty() {
+            return None;
+        }
+
+        // Parse scheme prefix
+        let (scheme, rest) = if proxy_str.starts_with("socks5://") {
+            ("socks5".to_string(), &proxy_str[9..])
+        } else if proxy_str.starts_with("http://") {
+            ("http".to_string(), &proxy_str[7..])
+        } else if proxy_str.starts_with("https://") {
+            ("https".to_string(), &proxy_str[8..])
+        } else {
+            ("http".to_string(), proxy_str)
+        };
+
+        // Check for auth credentials (user:pass@host:port)
+        if let Some(at_pos) = rest.rfind('@') {
+            let auth = &rest[..at_pos];
+            let host_port = &rest[at_pos + 1..];
+
+            // Parse auth (user:pass)
+            let (username, password) = if let Some(colon_pos) = auth.find(':') {
+                (
+                    Some(auth[..colon_pos].to_string()),
+                    Some(auth[colon_pos + 1..].to_string()),
+                )
+            } else {
+                (Some(auth.to_string()), None)
+            };
+
+            // Parse host:port
+            if let Some(colon_pos) = host_port.rfind(':') {
+                let host = host_port[..colon_pos].to_string();
+                let port: u16 = host_port[colon_pos + 1..].parse().ok()?;
+                return Some(Self {
+                    host,
+                    port,
+                    username,
+                    password,
+                    scheme,
+                });
+            }
+        } else {
+            // No auth, just host:port
+            if let Some(colon_pos) = rest.rfind(':') {
+                let host = rest[..colon_pos].to_string();
+                let port: u16 = rest[colon_pos + 1..].parse().ok()?;
+                return Some(Self {
+                    host,
+                    port,
+                    username: None,
+                    password: None,
+                    scheme,
+                });
+            }
+        }
+
+        None
+    }
+
+    /// Create the proxy extension directory with configured credentials
+    fn create_extension(&self) -> anyhow::Result<PathBuf> {
+        let ext_dir = std::env::temp_dir().join("open_agent_proxy_ext");
+        std::fs::create_dir_all(&ext_dir)?;
+
+        // Write manifest.json
+        let manifest = r#"{
+  "manifest_version": 3,
+  "name": "Proxy Auth Extension",
+  "version": "1.0",
+  "description": "Handles proxy authentication",
+  "permissions": [
+    "proxy",
+    "webRequest",
+    "webRequestAuthProvider"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  }
+}"#;
+        std::fs::write(ext_dir.join("manifest.json"), manifest)?;
+
+        // Write background.js with actual credentials
+        let background_js = format!(
+            r#"// Proxy configuration
+const PROXY_HOST = "{}";
+const PROXY_PORT = {};
+const PROXY_USER = "{}";
+const PROXY_PASS = "{}";
+const PROXY_SCHEME = "{}";
+
+// Configure proxy settings
+const proxyConfig = {{
+  mode: "fixed_servers",
+  rules: {{
+    singleProxy: {{
+      scheme: PROXY_SCHEME === "socks5" ? "socks5" : "http",
+      host: PROXY_HOST,
+      port: PROXY_PORT
+    }},
+    bypassList: ["localhost", "127.0.0.1"]
+  }}
+}};
+
+chrome.proxy.settings.set(
+  {{ value: proxyConfig, scope: "regular" }},
+  () => console.log("Proxy configured:", PROXY_HOST + ":" + PROXY_PORT)
+);
+
+// Handle proxy authentication (HTTP/HTTPS proxies only)
+chrome.webRequest.onAuthRequired.addListener(
+  (details, callback) => {{
+    console.log("Auth required for:", details.challenger);
+    callback({{
+      authCredentials: {{
+        username: PROXY_USER,
+        password: PROXY_PASS
+      }}
+    }});
+  }},
+  {{ urls: ["<all_urls>"] }},
+  ["asyncBlocking"]
+);
+
+console.log("Proxy extension loaded - scheme:", PROXY_SCHEME, "host:", PROXY_HOST);
+"#,
+            self.host,
+            self.port,
+            self.username.as_deref().unwrap_or(""),
+            self.password.as_deref().unwrap_or(""),
+            self.scheme
+        );
+        std::fs::write(ext_dir.join("background.js"), background_js)?;
+
+        Ok(ext_dir)
+    }
+
+    /// Get Chrome proxy argument
+    fn chrome_arg(&self) -> String {
+        format!(
+            "--proxy-server={}://{}:{}",
+            self.scheme, self.host, self.port
+        )
+    }
+}
+
 /// Shared browser state (lazy initialization)
 static BROWSER_STATE: std::sync::LazyLock<Arc<Mutex<Option<BrowserSession>>>> =
     std::sync::LazyLock::new(|| Arc::new(Mutex::new(None)));
@@ -34,6 +205,8 @@ struct BrowserSession {
     #[allow(dead_code)]
     browser: Browser,
     page: Page,
+    #[allow(dead_code)]
+    proxy_ext_dir: Option<PathBuf>, // Keep reference to prevent cleanup
 }
 
 /// Get or create a browser session
@@ -42,34 +215,143 @@ async fn get_browser_session() -> anyhow::Result<Arc<Mutex<Option<BrowserSession
     let mut guard = state.lock().await;
 
     if guard.is_none() {
-        let cdp_url = std::env::var("BROWSER_CDP_URL").unwrap_or_else(|_| DEFAULT_CDP_URL.to_string());
-        
-        // Connect to existing Chrome with remote debugging
-        let (browser, mut handler) = Browser::connect(&cdp_url).await.map_err(|e| {
-            anyhow::anyhow!(
-                "Failed to connect to Chrome at {}. Make sure Chrome is running with --remote-debugging-port=9222. Error: {}",
-                cdp_url,
-                e
-            )
-        })?;
+        let should_launch = std::env::var("BROWSER_LAUNCH")
+            .map(|v| v.to_lowercase() == "true" || v == "1")
+            .unwrap_or(false);
 
-        // Spawn handler in background
-        tokio::spawn(async move {
-            while let Some(event) = handler.next().await {
-                if let Err(e) = event {
-                    tracing::warn!("Browser event error: {}", e);
+        let proxy_config = ProxyConfig::from_env();
+
+        let (browser, proxy_ext_dir) = if should_launch || proxy_config.is_some() {
+            // Launch Chrome with custom configuration
+            let (browser_instance, mut handler, ext_dir) = launch_browser(proxy_config).await?;
+
+            // Spawn handler in background
+            tokio::spawn(async move {
+                while let Some(event) = handler.next().await {
+                    if let Err(e) = event {
+                        tracing::warn!("Browser event error: {}", e);
+                    }
                 }
-            }
-        });
+            });
+
+            (browser_instance, ext_dir)
+        } else {
+            // Connect to existing Chrome
+            let cdp_url = std::env::var("BROWSER_CDP_URL")
+                .unwrap_or_else(|_| DEFAULT_CDP_URL.to_string());
+
+            tracing::info!("Connecting to existing Chrome at {}", cdp_url);
+
+            let (browser_instance, mut handler) = Browser::connect(&cdp_url).await.map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to connect to Chrome at {}. Make sure Chrome is running with --remote-debugging-port=9222. Error: {}",
+                    cdp_url,
+                    e
+                )
+            })?;
+
+            // Spawn handler in background
+            tokio::spawn(async move {
+                while let Some(event) = handler.next().await {
+                    if let Err(e) = event {
+                        tracing::warn!("Browser event error: {}", e);
+                    }
+                }
+            });
+
+            (browser_instance, None)
+        };
 
         // Get or create a page
         let page = browser.new_page("about:blank").await?;
 
-        *guard = Some(BrowserSession { browser, page });
+        *guard = Some(BrowserSession {
+            browser,
+            page,
+            proxy_ext_dir,
+        });
     }
 
     drop(guard);
     Ok(state)
+}
+
+/// Launch a new Chrome instance with optional proxy configuration
+async fn launch_browser(
+    proxy_config: Option<ProxyConfig>,
+) -> anyhow::Result<(Browser, chromiumoxide::Handler, Option<PathBuf>)> {
+    let headless = std::env::var("BROWSER_HEADLESS")
+        .map(|v| v.to_lowercase() != "false" && v != "0")
+        .unwrap_or(true);
+
+    let mut config_builder = BrowserConfig::builder();
+
+    // Configure headless mode
+    if headless {
+        config_builder = config_builder.arg("--headless=new");
+    } else {
+        config_builder = config_builder.with_head();
+    }
+
+    // Add common Chrome arguments for stability
+    config_builder = config_builder
+        .arg("--no-sandbox")
+        .arg("--disable-setuid-sandbox")
+        .arg("--disable-dev-shm-usage")
+        .arg("--disable-gpu")
+        .arg("--no-first-run")
+        .arg("--no-default-browser-check")
+        .arg("--disable-background-networking")
+        .arg("--disable-sync")
+        .arg("--disable-translate");
+
+    // Configure proxy if provided
+    let proxy_ext_dir = if let Some(ref proxy) = proxy_config {
+        tracing::info!(
+            "Configuring browser proxy: {}://{}:{} (auth: {})",
+            proxy.scheme,
+            proxy.host,
+            proxy.port,
+            proxy.username.is_some()
+        );
+
+        // Add proxy server argument
+        config_builder = config_builder.arg(&proxy.chrome_arg());
+
+        // If auth is needed, create and load the proxy extension
+        if proxy.username.is_some() {
+            let ext_dir = proxy.create_extension()?;
+            tracing::info!("Created proxy auth extension at: {:?}", ext_dir);
+
+            // Load unpacked extension
+            config_builder = config_builder
+                .arg(format!("--load-extension={}", ext_dir.display()))
+                .arg("--disable-extensions-except=".to_string() + &ext_dir.display().to_string());
+
+            Some(ext_dir)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let config = config_builder
+        .build()
+        .map_err(|e| anyhow::anyhow!("Failed to build browser config: {}", e))?;
+
+    tracing::info!("Launching Chrome browser...");
+
+    let (browser, handler) = Browser::launch(config).await.map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to launch Chrome. Make sure chromium/google-chrome is installed. Error: {}",
+            e
+        )
+    })?;
+
+    tracing::info!("Chrome browser launched successfully");
+
+    Ok((browser, handler, proxy_ext_dir))
 }
 
 /// Get the current page, creating a new session if needed
