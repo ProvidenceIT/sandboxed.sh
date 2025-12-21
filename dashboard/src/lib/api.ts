@@ -460,6 +460,13 @@ export async function getAgentTree(): Promise<AgentTreeNode | null> {
   return res.json();
 }
 
+// Get tree for a specific mission (either live from memory or saved from database)
+export async function getMissionTree(missionId: string): Promise<AgentTreeNode | null> {
+  const res = await apiFetch(`/api/control/missions/${missionId}/tree`);
+  if (!res.ok) throw new Error("Failed to fetch mission tree");
+  return res.json();
+}
+
 // Execution progress
 export interface ExecutionProgress {
   total_subtasks: number;

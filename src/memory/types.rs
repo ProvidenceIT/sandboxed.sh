@@ -325,6 +325,9 @@ pub struct DbMission {
     pub model_override: Option<String>,
     /// Conversation history as JSON array of {role, content} objects
     pub history: serde_json::Value,
+    /// Final agent tree snapshot (saved when mission completes)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_tree: Option<serde_json::Value>,
     pub created_at: String,
     pub updated_at: String,
 }

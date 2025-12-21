@@ -765,6 +765,46 @@ pub async fn get_tree(State(state): State<Arc<AppState>>) -> Json<Option<AgentTr
     Json(tree)
 }
 
+/// Get tree for a specific mission.
+/// For currently running mission, returns the live tree from memory.
+/// For completed missions, returns the saved final_tree from the database.
+pub async fn get_mission_tree(
+    State(state): State<Arc<AppState>>,
+    Path(mission_id): Path<Uuid>,
+) -> Result<Json<Option<AgentTreeNode>>, (StatusCode, String)> {
+    // Check if this is the current active mission
+    let current_id = state.control.current_mission.read().await.clone();
+    if current_id == Some(mission_id) {
+        // Return live tree from memory
+        let tree = state.control.current_tree.read().await.clone();
+        return Ok(Json(tree));
+    }
+    
+    // Otherwise, fetch from database
+    let mem = state.memory.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Memory not configured".to_string(),
+        )
+    })?;
+    
+    let db_mission = mem
+        .supabase
+        .get_mission(mission_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    
+    match db_mission {
+        Some(m) => {
+            // Parse final_tree from JSON if it exists
+            let tree: Option<AgentTreeNode> = m.final_tree
+                .and_then(|v| serde_json::from_value(v).ok());
+            Ok(Json(tree))
+        }
+        None => Err((StatusCode::NOT_FOUND, "Mission not found".to_string())),
+    }
+}
+
 /// Get current execution progress (for progress indicator).
 pub async fn get_progress(State(state): State<Arc<AppState>>) -> Json<ExecutionProgress> {
     let progress = state.control.progress.read().await.clone();
@@ -1355,6 +1395,18 @@ async fn control_actor_loop(
                     }
                     ControlCommand::SetMissionStatus { id, status: new_status, respond } => {
                         if let Some(mem) = &memory {
+                            // Save the final tree before updating status (if this is the current mission)
+                            let current_id = current_mission.read().await.clone();
+                            if current_id == Some(id) {
+                                if let Some(tree) = current_tree.read().await.clone() {
+                                    if let Ok(tree_json) = serde_json::to_value(&tree) {
+                                        if let Err(e) = mem.supabase.update_mission_tree(id, &tree_json).await {
+                                            tracing::warn!("Failed to save mission tree: {}", e);
+                                        }
+                                    }
+                                }
+                            }
+                            
                             let result = mem.supabase.update_mission_status(id, &new_status.to_string()).await
                                 .map_err(|e| e.to_string());
                             if result.is_ok() {
@@ -1507,6 +1559,17 @@ async fn control_actor_loop(
                                 let success = matches!(status, crate::tools::mission::MissionStatusValue::Completed);
 
                                 if let Some(mem) = &memory {
+                                    // Save the final tree before updating status
+                                    if let Some(tree) = current_tree.read().await.clone() {
+                                        if let Ok(tree_json) = serde_json::to_value(&tree) {
+                                            if let Err(e) = mem.supabase.update_mission_tree(id, &tree_json).await {
+                                                tracing::warn!("Failed to save mission tree: {}", e);
+                                            } else {
+                                                tracing::info!("Saved final tree for mission {}", id);
+                                            }
+                                        }
+                                    }
+                                    
                                     if let Ok(()) = mem.supabase.update_mission_status(id, &new_status.to_string()).await {
                                         // Generate and store mission summary
                                         if let Some(ref summary_text) = summary {

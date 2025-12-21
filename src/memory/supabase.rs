@@ -663,6 +663,30 @@ impl SupabaseClient {
         Ok(())
     }
     
+    /// Save the final agent tree for a mission (when it completes).
+    pub async fn update_mission_tree(&self, id: Uuid, tree: &serde_json::Value) -> anyhow::Result<()> {
+        let body = serde_json::json!({
+            "final_tree": tree,
+            "updated_at": chrono::Utc::now().to_rfc3339()
+        });
+        
+        let resp = self.client
+            .patch(format!("{}/missions?id=eq.{}", self.rest_url(), id))
+            .header("apikey", &self.service_role_key)
+            .header("Authorization", format!("Bearer {}", self.service_role_key))
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await?;
+        
+        if !resp.status().is_success() {
+            let text = resp.text().await?;
+            anyhow::bail!("Failed to update mission tree: {}", text);
+        }
+        
+        Ok(())
+    }
+    
     // ==================== User Facts ====================
     
     /// Insert a user fact into memory.
@@ -857,6 +881,58 @@ impl SupabaseClient {
         if !resp.status().is_success() {
             let text = resp.text().await?;
             anyhow::bail!("Failed to get mission summaries for mission {}: {}", mission_id, text);
+        }
+        
+        Ok(resp.json().await?)
+    }
+    
+    // ==================== Learned Model Selection ====================
+    
+    /// Get learned model performance statistics.
+    /// 
+    /// Fetches from the `model_performance` view which aggregates task_outcomes.
+    pub async fn get_learned_model_stats(&self) -> anyhow::Result<Vec<crate::budget::LearnedModelStats>> {
+        let resp = self.client
+            .get(format!("{}/model_performance", self.rest_url()))
+            .header("apikey", &self.service_role_key)
+            .header("Authorization", format!("Bearer {}", self.service_role_key))
+            .send()
+            .await?;
+        
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await?;
+            // View might not exist yet - return empty instead of error
+            if status.as_u16() == 404 || text.contains("does not exist") {
+                tracing::debug!("model_performance view not found, returning empty stats");
+                return Ok(vec![]);
+            }
+            anyhow::bail!("Failed to get learned model stats: {} - {}", status, text);
+        }
+        
+        Ok(resp.json().await?)
+    }
+    
+    /// Get learned budget estimates.
+    /// 
+    /// Fetches from the `budget_estimates` view which aggregates task_outcomes.
+    pub async fn get_learned_budget_estimates(&self) -> anyhow::Result<Vec<crate::budget::LearnedBudgetEstimate>> {
+        let resp = self.client
+            .get(format!("{}/budget_estimates", self.rest_url()))
+            .header("apikey", &self.service_role_key)
+            .header("Authorization", format!("Bearer {}", self.service_role_key))
+            .send()
+            .await?;
+        
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await?;
+            // View might not exist yet - return empty instead of error
+            if status.as_u16() == 404 || text.contains("does not exist") {
+                tracing::debug!("budget_estimates view not found, returning empty estimates");
+                return Ok(vec![]);
+            }
+            anyhow::bail!("Failed to get learned budget estimates: {} - {}", status, text);
         }
         
         Ok(resp.json().await?)

@@ -128,6 +128,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         .route("/api/control/missions", post(control::create_mission))
         .route("/api/control/missions/current", get(control::get_current_mission))
         .route("/api/control/missions/:id", get(control::get_mission))
+        .route("/api/control/missions/:id/tree", get(control::get_mission_tree))
         .route("/api/control/missions/:id/load", post(control::load_mission))
         .route("/api/control/missions/:id/status", post(control::set_mission_status))
         .route("/api/control/missions/:id/cancel", post(control::cancel_mission))
@@ -163,6 +164,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         .route("/api/models", get(list_models))
         .route("/api/models/refresh", post(refresh_models))
         .route("/api/models/families", get(list_model_families))
+        .route("/api/models/performance", get(get_model_performance))
         .layer(middleware::from_fn_with_state(
             Arc::clone(&state),
             auth::require_auth,
@@ -858,4 +860,67 @@ async fn refresh_models(
             ))
         }
     }
+}
+
+/// Response for model performance endpoint.
+#[derive(serde::Serialize)]
+struct ModelPerformanceResponse {
+    learned_stats: Vec<crate::budget::LearnedModelStats>,
+    budget_estimates: Vec<crate::budget::LearnedBudgetEstimate>,
+    best_models_by_task: std::collections::HashMap<String, String>,
+}
+
+/// Get learned model performance statistics.
+///
+/// Returns aggregated performance data from historical task outcomes,
+/// used for self-improving model selection.
+async fn get_model_performance(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ModelPerformanceResponse>, (StatusCode, String)> {
+    let memory = match &state.memory {
+        Some(m) => m,
+        None => {
+            return Ok(Json(ModelPerformanceResponse {
+                learned_stats: vec![],
+                budget_estimates: vec![],
+                best_models_by_task: std::collections::HashMap::new(),
+            }));
+        }
+    };
+
+    // Fetch learned stats from database
+    let learned_stats = memory
+        .supabase
+        .get_learned_model_stats()
+        .await
+        .map_err(|e| {
+            tracing::warn!("Failed to get learned model stats: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to get learned stats: {}", e),
+            )
+        })?;
+
+    let budget_estimates = memory
+        .supabase
+        .get_learned_budget_estimates()
+        .await
+        .map_err(|e| {
+            tracing::warn!("Failed to get learned budget estimates: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to get budget estimates: {}", e),
+            )
+        })?;
+
+    // Compute best models per task type
+    let config = crate::budget::LearnedSelectionConfig::default();
+    let best_models_by_task =
+        crate::budget::learned::get_best_models_by_task_type(&learned_stats, &config);
+
+    Ok(Json(ModelPerformanceResponse {
+        learned_stats,
+        budget_estimates,
+        best_models_by_task,
+    }))
 }

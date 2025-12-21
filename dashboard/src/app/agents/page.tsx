@@ -11,7 +11,7 @@ import { useEffect, useMemo, useState, useRef, useCallback } from 'react';
 import Link from 'next/link';
 import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
-import { listMissions, getCurrentMission, streamControl, getAgentTree, getProgress, Mission, ControlRunState, ExecutionProgress } from '@/lib/api';
+import { listMissions, getCurrentMission, streamControl, getAgentTree, getProgress, getMissionTree, Mission, ControlRunState, ExecutionProgress } from '@/lib/api';
 import { ShimmerSidebarItem } from '@/components/ui/shimmer';
 import {
   AgentTreeCanvas,
@@ -271,6 +271,21 @@ export default function AgentsPage() {
     };
   }, [selectedMission, controlState]);
 
+  // Load tree for a specific mission
+  const loadMissionTree = useCallback(async (missionId: string) => {
+    try {
+      const tree = await getMissionTree(missionId);
+      if (tree) {
+        setRealTree(convertTreeNode(tree as unknown as Record<string, unknown>));
+      } else {
+        setRealTree(null);
+      }
+    } catch (e) {
+      console.error('Failed to load mission tree:', e);
+      setRealTree(null);
+    }
+  }, [convertTreeNode]);
+
   // Demo mode handlers
   const startDemo = useCallback((mode: DemoMode) => {
     // Cleanup previous demo
@@ -319,6 +334,16 @@ export default function AgentsPage() {
       setDemoRunning(true);
     }
   }, [demoRunning, demoTree]);
+
+  // Load tree when selected mission changes (e.g., on initial page load)
+  // Track which mission's tree we last loaded to avoid redundant fetches
+  const lastLoadedMissionRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (selectedMissionId && selectedMissionId !== lastLoadedMissionRef.current) {
+      lastLoadedMissionRef.current = selectedMissionId;
+      loadMissionTree(selectedMissionId);
+    }
+  }, [selectedMissionId, loadMissionTree]);
   
   // Cleanup on unmount
   useEffect(() => {
@@ -384,9 +409,9 @@ export default function AgentsPage() {
                   key={currentMission.id}
                   onClick={() => {
                     setSelectedMissionId(currentMission.id);
-                    // Clear real tree when switching missions - it will be rebuilt from SSE or fallback
+                    // Load tree for this mission (either live or saved)
                     if (selectedMissionId !== currentMission.id) {
-                      setRealTree(null);
+                      loadMissionTree(currentMission.id);
                     }
                     if (demoMode !== 'off') startDemo('off');
                   }}
@@ -418,9 +443,9 @@ export default function AgentsPage() {
                 <button
                   key={mission.id}
                   onClick={() => {
-                    // Clear real tree when switching to a different mission
+                    // Load tree for this mission (either live or saved from database)
                     if (selectedMissionId !== mission.id) {
-                      setRealTree(null);
+                      loadMissionTree(mission.id);
                     }
                     setSelectedMissionId(mission.id);
                     if (demoMode !== 'off') startDemo('off');
