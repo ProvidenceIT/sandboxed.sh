@@ -76,6 +76,9 @@ MODEL_FAMILY_PATTERNS = [
     (r"^anthropic/claude-(\d+\.?\d*)-haiku$", "claude-haiku", "fast"),
     
     # OpenAI GPT
+    (r"^openai/gpt-5\.2-pro$", "gpt-5-pro", "flagship"),
+    (r"^openai/gpt-5\.2$", "gpt-5", "mid"),
+    (r"^openai/gpt-5\.2-chat$", "gpt-5", "mid"),
     (r"^openai/gpt-4\.1$", "gpt-4", "mid"),
     (r"^openai/gpt-4o$", "gpt-4", "mid"),
     (r"^openai/gpt-4-turbo", "gpt-4", "mid"),
@@ -110,6 +113,8 @@ MODEL_FAMILY_PATTERNS = [
     # Qwen
     (r"^qwen/qwen-2\.5-72b", "qwen-72b", "mid"),
     (r"^qwen/qwq-32b", "qwq", "mid"),
+    (r"^qwen/qwen3-next-80b.*thinking", "qwen3-thinking", "flagship"),
+    (r"^qwen/qwen3-235b.*instruct", "qwen3-instruct", "mid"),
 ]
 
 HEADERS = {

@@ -43,10 +43,11 @@ headers: { 'Authorization': `Bearer ${token}` }
 ```
 dashboard/src/
 ├── app/              # Next.js App Router pages
+│   ├── control/      # Mission control panel (chat interface)
+│   ├── history/      # Agents page - mission history + tree modal
 │   ├── console/      # SSH terminal + file explorer
-│   ├── control/      # Task control panel
-│   ├── agents/       # Agent tree visualization
 │   ├── modules/      # MCP module management
+│   ├── files/        # File explorer
 │   └── settings/     # Configuration
 ├── components/
 │   ├── ui/           # Generic UI components
@@ -55,6 +56,17 @@ dashboard/src/
 ├── hooks/            # React hooks
 └── lib/              # Utilities (api, auth, settings)
 ```
+
+## Navigation Structure
+
+| Nav Item | Route | Description |
+|----------|-------|-------------|
+| Overview | `/` | Global stats and recent missions |
+| Mission | `/control` | Active mission chat interface |
+| Agents | `/history` | Mission history with tree visualization modal |
+| Console | `/console` | SSH terminal access |
+| Modules | `/modules` | MCP server management |
+| Settings | `/settings` | Configuration |
 
 ## Refresh Resilience Pattern
 
@@ -96,7 +108,11 @@ useEffect(() => {
 
 ## Agent Tree Visualization
 
-Dynamic, animated tree visualization for hierarchical agent execution. Uses SVG + framer-motion for smooth animations.
+Dynamic, animated tree visualization for hierarchical agent execution. Uses SVG + framer-motion for smooth animations. 
+
+The tree is accessed via a **modal** from the Agents page (formerly History):
+- Click the tree icon on any mission row to open the full-screen modal
+- Modal shows the agent execution tree with pan/zoom controls
 
 ### Component Structure
 
@@ -114,48 +130,45 @@ components/agent-tree/
 ```tsx
 import { 
   AgentTreeCanvas, 
-  generateComplexTree, 
-  simulateTreeUpdates,
   type AgentNode 
 } from '@/components/agent-tree';
 
-// With real data from backend
+// Full mode (in Control page panel)
 <AgentTreeCanvas 
   tree={agentTree} 
   selectedNodeId={selectedId}
   onSelectNode={(node) => setSelectedId(node?.id ?? null)} 
 />
 
-// Demo mode (for testing without API)
-const [tree, setTree] = useState(generateComplexTree());
-useEffect(() => simulateTreeUpdates(tree, setTree), []);
-<AgentTreeCanvas tree={tree} />
+// Compact mode (in History page preview, side panels)
+<AgentTreeCanvas tree={agentTree} compact className="w-full h-full" />
 ```
+
+### Props
+
+| Prop | Type | Description |
+|------|------|-------------|
+| `tree` | `AgentNode \| null` | Tree data to visualize |
+| `onSelectNode` | `(node: AgentNode \| null) => void` | Node selection callback |
+| `selectedNodeId` | `string \| null` | Currently selected node ID |
+| `compact` | `boolean` | Compact mode - hides minimap and details panel |
+| `className` | `string` | Additional CSS classes |
 
 ### Node Display
 
 Each node shows:
 - **Icon**: Agent type (Bot, Brain, Cpu, Zap, Target, GitBranch)
 - **Name**: Truncated agent name
-- **Model**: LLM model used (e.g., `claude-sonnet-4.5`)
+- **Model**: LLM model used (e.g., `gemini-3-flash`)
 - **Status**: Running (pulse), Completed (✓), Failed (✗), Pending (clock)
 - **Budget**: Spent / Allocated (e.g., `$0.35 / $9.00`)
-
-### Demo Modes
-
-Three demo tree generators for testing:
-- `generateSimpleTree()` – Basic orchestrator (5 nodes)
-- `generateComplexTree()` – Subtask decomposition (10-15 nodes)
-- `generateDeepTree(depth)` – Recursive nesting (50+ nodes)
-
-Use `simulateTreeUpdates(tree, setTree)` to simulate live status changes.
 
 ### Interactions
 
 - **Pan**: Click and drag to move the tree
 - **Zoom**: Mouse wheel or +/- buttons
-- **Select**: Click a node to show details panel
-- **Reset**: Reset view button restores initial position
+- **Select**: Click a node to show details panel (full mode only)
+- **Fit**: Reset view button fits tree to viewport
 
 ## Environment Variables
 

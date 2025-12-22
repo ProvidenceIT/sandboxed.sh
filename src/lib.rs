@@ -4,33 +4,33 @@
 //!
 //! This library provides:
 //! - An HTTP API for task submission and monitoring
-//! - A hierarchical agent tree for complex task handling
+//! - A simple agent architecture for direct task execution
 //! - Tool-based execution for autonomous code editing
 //! - Integration with OpenRouter for LLM access
 //!
-//! ## Architecture (v2: Hierarchical Agent Tree)
+//! ## Architecture (v3: SimpleAgent)
 //!
 //! ```text
-//!                    ┌─────────────┐
-//!                    │  RootAgent  │
-//!                    └──────┬──────┘
-//!         ┌─────────────────┼─────────────────┐
-//!         ▼                 ▼                 ▼
-//! ┌───────────────┐ ┌─────────────┐ ┌─────────────┐
-//! │ Complexity    │ │   Model     │ │    Task     │
-//! │ Estimator     │ │  Selector   │ │  Executor   │
-//! └───────────────┘ └─────────────┘ └─────────────┘
+//!        ┌──────────────────────────────────┐
+//!        │          SimpleAgent             │
+//!        │  (direct execution, no overhead) │
+//!        └────────────────┬─────────────────┘
+//!                         │
+//!                         ▼
+//!                ┌─────────────────┐
+//!                │  TaskExecutor   │
+//!                │ (tool loop)     │
+//!                └─────────────────┘
 //! ```
 //!
 //! ## Task Flow
 //! 1. Receive task via API
-//! 2. Estimate complexity (should we split?)
-//! 3. Select optimal model (U-curve cost optimization)
-//! 4. Execute (directly or via subtasks)
-//! 5. Verify completion (programmatic + LLM hybrid)
+//! 2. Resolve model (user override or config default)
+//! 3. Execute via TaskExecutor (tool loop)
+//! 4. Return result (mission completion via complete_mission tool)
 //!
 //! ## Modules
-//! - `agents`: Hierarchical agent tree (Root, Node, Leaf agents)
+//! - `agents`: SimpleAgent and TaskExecutor
 //! - `task`: Task, subtask, and verification types
 //! - `budget`: Cost tracking and model pricing
 

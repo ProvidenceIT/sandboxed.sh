@@ -19,7 +19,7 @@ use serde_json::json;
 use std::path::Path;
 
 use crate::agents::{
-    Agent, AgentContext, AgentId, AgentResult, AgentType, LeafAgent, LeafCapability,
+    Agent, AgentContext, AgentId, AgentResult, AgentType, LeafAgent, LeafCapability, TerminalReason,
 };
 use crate::api::control::{AgentEvent, ControlRunState};
 use crate::budget::ExecutionSignals;
@@ -43,6 +43,8 @@ pub struct ExecutionLoopResult {
     pub signals: ExecutionSignals,
     /// Whether execution succeeded
     pub success: bool,
+    /// Why execution terminated (if not successful completion)
+    pub terminal_reason: Option<TerminalReason>,
 }
 
 /// Agent that executes tasks using tools.
@@ -58,6 +60,33 @@ pub struct ExecutionLoopResult {
 /// - Stops if budget is exhausted
 pub struct TaskExecutor {
     id: AgentId,
+}
+
+/// Categorize a tool name into a broader approach category.
+/// Used for tracking repeated failures of similar approaches.
+fn categorize_tool(tool_name: &str) -> String {
+    match tool_name {
+        // Static analysis tools
+        name if name.contains("slither") || name.contains("mythril") || 
+                name.contains("solhint") || name.contains("echidna") => "static_analysis".to_string(),
+        
+        // Code execution/compilation
+        "run_command" => "shell_command".to_string(),
+        name if name.contains("compile") || name.contains("build") => "compilation".to_string(),
+        
+        // File operations
+        "read_file" | "write_file" | "list_directory" | "search_files" => "file_ops".to_string(),
+        
+        // Network/API calls
+        name if name.contains("browser") || name.contains("http") || 
+                name.contains("fetch") || name.contains("curl") => "network".to_string(),
+        
+        // Git operations
+        name if name.contains("git") || name.contains("clone") => "git".to_string(),
+        
+        // Default: use the tool name itself
+        _ => tool_name.to_string(),
+    }
 }
 
 impl TaskExecutor {
@@ -558,7 +587,54 @@ Use `search_memory` when you encounter a problem you might have solved before or
 4. **Explicit completion** — Use complete_mission tool when the goal is fully achieved
 5. **Failure acknowledgment** — If you cannot complete, explain why and call complete_mission with failed status
 6. **No silent exits** — Every execution should end with either a deliverable or an explanation
-7. **Large files in chunks** — If writing files >2000 chars, verify content isn't truncated"#,
+7. **Large files in chunks** — If writing files >2000 chars, verify content isn't truncated
+
+## ⚠️ CRITICAL: Blocker Detection (STOP if these occur!)
+
+**If you encounter ANY blocker, STOP IMMEDIATELY and report it. DO NOT produce placeholder content.**
+
+### Type Mismatch Blockers
+| Requested | But Target Is | Action |
+|-----------|---------------|--------|
+| Solidity/Smart Contract audit | C++/Rust/Go project | STOP → `complete_mission(blocked, "Target is C++/Rust/Go, not Solidity")` |
+| Python analysis | Java/JavaScript project | STOP → `complete_mission(blocked, "Target is Java/JS, not Python")` |
+| Web scraping | Desktop app | STOP → `complete_mission(blocked, "Target is desktop app, not website")` |
+
+**How to detect project types:**
+- **Solidity**: `.sol` files, `hardhat.config.js`, `truffle-config.js`, `foundry.toml`
+- **C++ (Bitcoin forks)**: `configure.ac`, `Makefile.am`, `src/*.cpp`, `src/*.h`
+- **Rust**: `Cargo.toml`, `src/*.rs`
+- **Go**: `go.mod`, `*.go` files
+
+### Access/Resource Blockers
+| Blocker | Action |
+|---------|--------|
+| Can't clone/access repository | STOP → report exact error |
+| Can't fetch contract bytecode | STOP → report RPC error and address |
+| Required tool won't install | STOP → report installation error |
+| Source code not available | TRY bytecode analysis first, then report if still blocked |
+
+### Smart Contract Audit Specific
+**When auditing contracts WITHOUT source code:**
+1. FIRST try fetching bytecode: `cast code <address> --rpc-url <rpc>`
+2. THEN decompile: Use `heimdall`, `panoramix`, `dedaub`
+3. ONLY report "blocked" if bytecode analysis also fails
+
+**Chain RPCs:**
+- Ethereum: `https://eth.llamarpc.com`
+- BSC: `https://bsc-dataseed.binance.org`
+- Polygon: `https://polygon-rpc.com`
+- Merlin: `https://rpc.merlinchain.io`
+
+## 🚫 NEVER DO THESE
+
+1. **NEVER create "example" or "illustrative" content** as substitute for real analysis
+2. **NEVER analyze unrelated code** (e.g., library code instead of target contracts)
+3. **NEVER produce generic filler** (e.g., "SQL injection" in a smart contract audit)
+4. **NEVER frame placeholder content as real analysis**
+5. **NEVER mark "completed" if you analyzed substitute targets**
+
+If you cannot perform the requested analysis, use `complete_mission(blocked, reason)` and explain clearly what blocked you."#,
             session_metadata = session_metadata,
             memory_context = memory_context,
             working_dir = working_dir,
@@ -621,6 +697,15 @@ Use `search_memory` when you encounter a problem you might have solved before or
         const LOOP_FORCE_COMPLETE_THRESHOLD: u32 = 5;
         let mut has_error_messages = false;
         let mut iterations_completed = 0u32;
+        
+        // Track consecutive empty/reasoning-only responses (P0 fix for agent stalls)
+        let mut empty_response_count: u32 = 0;
+        const EMPTY_RESPONSE_WARNING_THRESHOLD: u32 = 2;
+        const EMPTY_RESPONSE_FORCE_COMPLETE_THRESHOLD: u32 = 4;
+        
+        // Track failed tool attempts by category (P3 fix for approach looping)
+        let mut failed_tool_attempts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+        const TOOL_FAILURE_THRESHOLD: u32 = 3;
         
         // Track uploaded images that need to be included in the response
         // When upload_image succeeds, we store the (url, markdown) so we can warn
@@ -701,8 +786,25 @@ Use `search_memory` when you encounter a problem you might have solved before or
             tracing::info!("Browser tools available: {:?}", browser_tools);
         }
         
-        tracing::info!("Discovered {} built-in tools, {} MCP tools", builtin_count, mcp_tool_schemas.len());
-        tool_schemas.extend(mcp_tool_schemas);
+        // Filter out MCP tools that conflict with built-in tools (built-in takes precedence)
+        let builtin_names: std::collections::HashSet<_> = tool_schemas.iter().map(|t| t.function.name.as_str()).collect();
+        let mcp_count_before = mcp_tool_schemas.len();
+        let filtered_mcp: Vec<_> = mcp_tool_schemas
+            .into_iter()
+            .filter(|t| {
+                if builtin_names.contains(t.function.name.as_str()) {
+                    tracing::debug!("Skipping MCP tool '{}' - conflicts with built-in tool", t.function.name);
+                    false
+                } else {
+                    true
+                }
+            })
+            .collect();
+        let mcp_skipped = mcp_count_before - filtered_mcp.len();
+        
+        tracing::info!("Discovered {} built-in tools, {} MCP tools ({} skipped due to conflicts)", 
+            builtin_count, filtered_mcp.len(), mcp_skipped);
+        tool_schemas.extend(filtered_mcp);
 
         // Agent loop
         for iteration in 0..ctx.max_iterations {
@@ -734,6 +836,7 @@ Use `search_memory` when you encounter a problem you might have solved before or
                         usage,
                         signals,
                         success: false,
+                        terminal_reason: Some(TerminalReason::Cancelled),
                     };
                 }
             }
@@ -762,13 +865,19 @@ Use `search_memory` when you encounter a problem you might have solved before or
                     usage,
                     signals,
                     success: false,
+                    terminal_reason: Some(TerminalReason::BudgetExhausted),
                 };
             }
 
-            // Call LLM
-            let response = match ctx.llm.chat_completion(model, &messages, Some(&tool_schemas)).await {
-                Ok(r) => r,
-                Err(e) => {
+            // Call LLM with timeout (P2 fix: detect hangs)
+            const LLM_TIMEOUT_SECS: u64 = 300; // 5 minutes max per LLM call
+            let llm_future = ctx.llm.chat_completion(model, &messages, Some(&tool_schemas));
+            let response = match tokio::time::timeout(
+                std::time::Duration::from_secs(LLM_TIMEOUT_SECS),
+                llm_future
+            ).await {
+                Ok(Ok(r)) => r,
+                Ok(Err(e)) => {
                     has_error_messages = true;
                     let error_msg = format!("LLM error: {}", e);
                     let signals = ExecutionSignals {
@@ -792,6 +901,45 @@ Use `search_memory` when you encounter a problem you might have solved before or
                         usage,
                         signals,
                         success: false,
+                        terminal_reason: Some(TerminalReason::LlmError),
+                    };
+                }
+                Err(_timeout) => {
+                    // P2 FIX: LLM call timed out - return with partial results
+                    has_error_messages = true;
+                    tracing::error!(
+                        "LLM call timed out after {} seconds at iteration {}",
+                        LLM_TIMEOUT_SECS,
+                        iterations_completed
+                    );
+                    let signals = ExecutionSignals {
+                        iterations: iterations_completed,
+                        max_iterations: ctx.max_iterations as u32,
+                        successful_tool_calls,
+                        failed_tool_calls,
+                        files_modified,
+                        repetitive_actions,
+                        has_error_messages,
+                        partial_progress: files_modified || successful_tool_calls > 0,
+                        cost_spent_cents: total_cost_cents,
+                        budget_total_cents: task.budget().total_cents(),
+                        final_output: format!(
+                            "LLM call timed out after {} seconds. Partial results may be in working directory.",
+                            LLM_TIMEOUT_SECS
+                        ),
+                        model_used: model.to_string(),
+                    };
+                    return ExecutionLoopResult {
+                        output: format!(
+                            "Agent stalled: LLM call timed out after {} seconds. Check working directory for partial results.",
+                            LLM_TIMEOUT_SECS
+                        ),
+                        cost_cents: total_cost_cents,
+                        tool_log,
+                        usage,
+                        signals,
+                        success: false,
+                        terminal_reason: Some(TerminalReason::Stalled),
                     };
                 }
             };
@@ -907,6 +1055,7 @@ Use `search_memory` when you encounter a problem you might have solved before or
                                 usage,
                                 signals,
                                 success: false,
+                                terminal_reason: Some(TerminalReason::InfiniteLoop),
                             };
                         }
                         
@@ -999,6 +1148,7 @@ Use `search_memory` when you encounter a problem you might have solved before or
                                                         usage,
                                                         signals,
                                                         success: false,
+                                                        terminal_reason: Some(TerminalReason::Cancelled),
                                                     };
                                                 }
                                             }
@@ -1069,7 +1219,28 @@ Use `search_memory` when you encounter a problem you might have solved before or
                                     Err(e) => {
                                         failed_tool_calls += 1;
                                         has_error_messages = true;
-                                        let s = format!("Error: {}", e);
+                                        
+                                        // P3 FIX: Track failed approaches by tool category
+                                        let tool_category = categorize_tool(&tool_name);
+                                        let count = failed_tool_attempts.entry(tool_category.clone()).or_insert(0);
+                                        *count += 1;
+                                        
+                                        let s = if *count >= TOOL_FAILURE_THRESHOLD {
+                                            tracing::warn!(
+                                                "Tool category '{}' has failed {} times - suggesting pivot",
+                                                tool_category,
+                                                *count
+                                            );
+                                            format!(
+                                                "Error: {}\n\n[SYSTEM NOTE: The '{}' approach has failed {} times. \
+                                                Consider: 1) Try a completely different tool/approach, \
+                                                2) Analyze what you DO have and produce partial results, \
+                                                3) Call complete_mission(blocked) if fundamentally stuck]",
+                                                e, tool_category, *count
+                                            )
+                                        } else {
+                                            format!("Error: {}", e)
+                                        };
                                         (s.clone(), serde_json::Value::String(s))
                                     }
                                 }
@@ -1205,13 +1376,91 @@ Use `search_memory` when you encounter a problem you might have solved before or
                                 usage,
                                 signals,
                                 success: true,
+                                terminal_reason: None,
                             };
                         }
                     }
 
+                    // Reset empty response counter on successful tool execution
+                    empty_response_count = 0;
                     continue;
                 }
             }
+
+            // P0 FIX: Handle reasoning-only responses (no tool calls, no/empty content)
+            // This prevents the agent from stalling when the LLM returns only thinking
+            let has_reasoning = response.reasoning.as_ref().map(|r| !r.is_empty()).unwrap_or(false);
+            let has_content = response.content.as_ref().map(|c| !c.trim().is_empty()).unwrap_or(false);
+            let has_tool_calls = response.tool_calls.as_ref().map(|tc| !tc.is_empty()).unwrap_or(false);
+            
+            if !has_tool_calls && !has_content {
+                empty_response_count += 1;
+                tracing::warn!(
+                    "Empty/reasoning-only response #{} (has_reasoning: {}, iteration: {})",
+                    empty_response_count,
+                    has_reasoning,
+                    iterations_completed
+                );
+                
+                // Force completion if too many empty responses
+                if empty_response_count >= EMPTY_RESPONSE_FORCE_COMPLETE_THRESHOLD {
+                    tracing::error!(
+                        "Force completing: {} consecutive empty/reasoning-only responses",
+                        empty_response_count
+                    );
+                    has_error_messages = true;
+                    let signals = ExecutionSignals {
+                        iterations: iterations_completed,
+                        max_iterations: ctx.max_iterations as u32,
+                        successful_tool_calls,
+                        failed_tool_calls,
+                        files_modified,
+                        repetitive_actions,
+                        has_error_messages,
+                        partial_progress: files_modified || successful_tool_calls > 0,
+                        cost_spent_cents: total_cost_cents,
+                        budget_total_cents: task.budget().total_cents(),
+                        final_output: format!(
+                            "Agent stalled: {} consecutive responses without action. Partial results may be in working directory.",
+                            empty_response_count
+                        ),
+                        model_used: model.to_string(),
+                    };
+                    return ExecutionLoopResult {
+                        output: format!(
+                            "Agent stalled after {} responses without taking action. Check working directory for partial results.",
+                            empty_response_count
+                        ),
+                        cost_cents: total_cost_cents,
+                        tool_log,
+                        usage,
+                        signals,
+                        success: false,
+                        terminal_reason: Some(TerminalReason::Stalled),
+                    };
+                }
+                
+                // Inject a prompt to get the model to take action
+                if empty_response_count >= EMPTY_RESPONSE_WARNING_THRESHOLD {
+                    messages.push(ChatMessage::new(
+                        Role::User,
+                        format!(
+                            "[SYSTEM WARNING] You've returned {} responses without taking any action (only thinking/reasoning).\n\n\
+                            You MUST now do ONE of:\n\
+                            1. Call a tool to continue working on the task\n\
+                            2. Provide a complete final response summarizing your work\n\
+                            3. Call complete_mission with status='completed' if done, or status='blocked' if stuck\n\n\
+                            DO NOT respond with only thinking - take concrete action NOW.",
+                            empty_response_count
+                        )
+                    ));
+                }
+                
+                continue; // Retry - let the model try again with the warning
+            }
+            
+            // If we reach here with content, it's the final response
+            // (no need to reset empty_response_count since we're returning)
 
             // No tool calls - final response
             if let Some(content) = response.content.filter(|c| !c.trim().is_empty()) {
@@ -1236,6 +1485,7 @@ Use `search_memory` when you encounter a problem you might have solved before or
                     usage,
                     signals,
                     success: true,
+                    terminal_reason: None,
                 };
             }
 
@@ -1262,6 +1512,7 @@ Use `search_memory` when you encounter a problem you might have solved before or
                 usage,
                 signals,
                 success: false,
+                terminal_reason: Some(TerminalReason::LlmError),
             };
         }
 
@@ -1287,6 +1538,7 @@ Use `search_memory` when you encounter a problem you might have solved before or
             usage,
             signals,
             success: false,
+            terminal_reason: Some(TerminalReason::MaxIterations),
         }
     }
 }
@@ -1349,6 +1601,11 @@ impl Agent for TaskExecutor {
         } else {
             AgentResult::failure(&result.output, result.cost_cents)
         };
+
+        // Propagate terminal reason from execution loop
+        if let Some(reason) = result.terminal_reason {
+            agent_result = agent_result.with_terminal_reason(reason);
+        }
 
         agent_result = agent_result
             .with_model(model)
@@ -1414,6 +1671,11 @@ impl TaskExecutor {
         } else {
             AgentResult::failure(&result.output, result.cost_cents)
         };
+
+        // Propagate terminal reason from execution loop
+        if let Some(reason) = result.terminal_reason {
+            agent_result = agent_result.with_terminal_reason(reason);
+        }
 
         agent_result = agent_result
             .with_model(model)

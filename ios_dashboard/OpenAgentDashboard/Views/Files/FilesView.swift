@@ -22,6 +22,9 @@ struct FilesView: View {
     @State private var newFolderName = ""
     @State private var isImporting = false
     
+    // Track pending path fetch to prevent race conditions
+    @State private var fetchingPath: String?
+    
     private let api = APIService.shared
     
     private var sortedEntries: [FileEntry] {
@@ -360,16 +363,32 @@ struct FilesView: View {
     // MARK: - Actions
     
     private func loadDirectory() async {
+        let pathToLoad = currentPath
+        fetchingPath = pathToLoad
+        
         isLoading = true
         errorMessage = nil
         
         do {
-            entries = try await api.listDirectory(path: currentPath)
+            let result = try await api.listDirectory(path: pathToLoad)
+            
+            // Race condition guard: only update if this is still the path we want
+            guard fetchingPath == pathToLoad else {
+                return // Navigation changed, discard this response
+            }
+            
+            entries = result
         } catch {
+            // Race condition guard
+            guard fetchingPath == pathToLoad else { return }
+            
             errorMessage = error.localizedDescription
         }
         
-        isLoading = false
+        // Only clear loading if this is still the current fetch
+        if fetchingPath == pathToLoad {
+            isLoading = false
+        }
     }
     
     private func navigateTo(_ path: String) {

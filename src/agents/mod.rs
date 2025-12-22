@@ -1,29 +1,33 @@
-//! Agents module - the hierarchical agent tree.
+//! Agents module - task execution system.
 //!
 //! # Agent Types
-//! - **RootAgent**: Top-level orchestrator, receives tasks from API
-//! - **NodeAgent**: Intermediate orchestrator, delegates to children
-//! - **LeafAgent**: Specialized agents that do actual work
+//! - **SimpleAgent**: Unified agent that directly executes tasks
+//! - **TaskExecutor**: Core execution loop with tools (used by SimpleAgent)
 //!
-//! # Leaf Agent Specializations
-//! - `ComplexityEstimator`: Estimates task difficulty
-//! - `ModelSelector`: Chooses optimal model for cost/capability
-//! - `TaskExecutor`: Executes tasks using tools
-//! - `Verifier`: Validates task completion
+//! # Legacy Types (deprecated, will be removed)
+//! - **RootAgent**: Complex orchestrator (replaced by SimpleAgent)
+//! - **NodeAgent**: Recursive splitter (removed - lost context)
+//! - **ComplexityEstimator**: LLM-based estimation (unreliable)
+//! - **ModelSelector**: U-curve optimization (over-engineered)
+//! - **Verifier**: LLM self-verification (rubber-stamped everything)
 //!
 //! # Design Principles
-//! - Agents communicate synchronously (parent calls child, child returns)
-//! - Designed for future async message passing migration
-//! - All operations return `Result` with meaningful errors
+//! - Direct execution without orchestration overhead
+//! - User controls task granularity (no auto-splitting)
+//! - Blocker detection via system prompt rules
+//! - Mission completion via complete_mission tool
 
 mod types;
 mod context;
 mod tree;
 pub mod tuning;
-pub mod orchestrator;
+pub mod orchestrator;  // TODO: Remove after migration
 pub mod leaf;
+mod simple;
 
-pub use types::{AgentId, AgentType, AgentResult, AgentError, Complexity};
+pub use simple::SimpleAgent;
+
+pub use types::{AgentId, AgentType, AgentResult, AgentError, Complexity, TerminalReason};
 pub use context::AgentContext;
 pub use tree::{AgentTree, AgentRef};
 pub use tuning::TuningParams;

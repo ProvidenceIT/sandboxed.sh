@@ -19,6 +19,8 @@ enum StatusType {
     case connected
     case disconnected
     case connecting
+    case interrupted
+    case blocked
     
     var color: Color {
         switch self {
@@ -32,6 +34,8 @@ enum StatusType {
             return Theme.error
         case .cancelled, .disconnected:
             return Theme.textTertiary
+        case .interrupted, .blocked:
+            return Theme.warning
         }
     }
     
@@ -52,6 +56,8 @@ enum StatusType {
         case .connected: return "Connected"
         case .disconnected: return "Disconnected"
         case .connecting: return "Connecting"
+        case .interrupted: return "Interrupted"
+        case .blocked: return "Blocked"
         }
     }
     
@@ -66,6 +72,8 @@ enum StatusType {
         case .idle: return "moon.fill"
         case .connected: return "wifi"
         case .disconnected: return "wifi.slash"
+        case .interrupted: return "pause.circle.fill"
+        case .blocked: return "exclamationmark.triangle.fill"
         }
     }
     

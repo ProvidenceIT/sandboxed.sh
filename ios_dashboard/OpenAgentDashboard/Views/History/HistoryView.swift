@@ -22,15 +22,17 @@ struct HistoryView: View {
     enum StatusFilter: String, CaseIterable {
         case all = "All"
         case active = "Active"
+        case interrupted = "Interrupted"
         case completed = "Completed"
         case failed = "Failed"
         
-        var missionStatus: MissionStatus? {
+        var missionStatuses: [MissionStatus]? {
             switch self {
             case .all: return nil
-            case .active: return .active
-            case .completed: return .completed
-            case .failed: return .failed
+            case .active: return [.active]
+            case .interrupted: return [.interrupted, .blocked]
+            case .completed: return [.completed]
+            case .failed: return [.failed, .notFeasible]
             }
         }
     }
@@ -38,7 +40,7 @@ struct HistoryView: View {
     private var filteredMissions: [Mission] {
         missions.filter { mission in
             // Filter by status
-            if let statusFilter = selectedFilter.missionStatus, mission.status != statusFilter {
+            if let statuses = selectedFilter.missionStatuses, !statuses.contains(mission.status) {
                 return false
             }
             
@@ -257,11 +259,11 @@ private struct MissionRow: View {
     var body: some View {
         HStack(spacing: 14) {
             // Icon
-            Image(systemName: "target")
+            Image(systemName: mission.canResume ? "play.circle" : "target")
                 .font(.title3)
-                .foregroundStyle(Theme.accent)
+                .foregroundStyle(mission.canResume ? Theme.warning : Theme.accent)
                 .frame(width: 40, height: 40)
-                .background(Theme.accent.opacity(0.15))
+                .background((mission.canResume ? Theme.warning : Theme.accent).opacity(0.15))
                 .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             
             // Content
@@ -274,9 +276,23 @@ private struct MissionRow: View {
                 HStack(spacing: 8) {
                     StatusBadge(status: mission.status.statusType, compact: true)
                     
+                    if mission.canResume {
+                        Text("Resumable")
+                            .font(.caption2.weight(.medium))
+                            .foregroundStyle(Theme.warning)
+                    }
+                    
                     Text("\(mission.history.count) messages")
                         .font(.caption)
                         .foregroundStyle(Theme.textTertiary)
+                    
+                    if let model = mission.displayModel {
+                        Text("•")
+                            .foregroundStyle(Theme.textMuted)
+                        Text(model)
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(Theme.textTertiary)
+                    }
                 }
             }
             
@@ -300,7 +316,7 @@ private struct MissionRow: View {
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(Theme.border, lineWidth: 0.5)
+                .stroke(mission.canResume ? Theme.warning.opacity(0.3) : Theme.border, lineWidth: mission.canResume ? 1 : 0.5)
         )
     }
 }

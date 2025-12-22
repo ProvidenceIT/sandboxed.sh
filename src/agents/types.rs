@@ -60,6 +60,25 @@ impl AgentType {
     }
 }
 
+/// Reason why agent execution terminated (for non-successful completions).
+/// 
+/// Used to determine whether auto-complete should trigger, avoiding substring matching.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TerminalReason {
+    /// Agent hit the maximum iteration limit
+    MaxIterations,
+    /// Agent was cancelled by user
+    Cancelled,
+    /// Budget was exhausted
+    BudgetExhausted,
+    /// Agent stalled (no progress, timeouts)
+    Stalled,
+    /// Agent got stuck in an infinite loop
+    InfiniteLoop,
+    /// LLM API error
+    LlmError,
+}
+
 /// Result of an agent executing a task.
 /// 
 /// # Invariants
@@ -81,6 +100,11 @@ pub struct AgentResult {
     
     /// Detailed result data (type-specific)
     pub data: Option<serde_json::Value>,
+    
+    /// If execution ended due to a terminal condition (not normal completion),
+    /// this indicates why. Used by auto-complete logic to avoid substring matching.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal_reason: Option<TerminalReason>,
 }
 
 impl AgentResult {
@@ -92,6 +116,7 @@ impl AgentResult {
             cost_cents,
             model_used: None,
             data: None,
+            terminal_reason: None,
         }
     }
 
@@ -103,6 +128,7 @@ impl AgentResult {
             cost_cents,
             model_used: None,
             data: None,
+            terminal_reason: None,
         }
     }
 
@@ -115,6 +141,12 @@ impl AgentResult {
     /// Add additional data to the result.
     pub fn with_data(mut self, data: serde_json::Value) -> Self {
         self.data = Some(data);
+        self
+    }
+    
+    /// Set the terminal reason (why execution ended abnormally).
+    pub fn with_terminal_reason(mut self, reason: TerminalReason) -> Self {
+        self.terminal_reason = Some(reason);
         self
     }
 }

@@ -1,18 +1,13 @@
 //! Leaf agents - specialized agents that do actual work.
 //!
-//! # Leaf Agent Types
-//! - `ComplexityEstimator`: Estimates task complexity (0-1 score)
-//! - `ModelSelector`: Selects optimal model for task/budget
+//! # Active Leaf Agent
 //! - `TaskExecutor`: Executes tasks using tools (main worker)
-//! - `Verifier`: Validates task completion
+//!
+//! # Removed Agents (superseded by SimpleAgent)
+//! - `ComplexityEstimator`: Was unreliable (LLM-based estimation)
+//! - `ModelSelector`: Was over-engineered (U-curve optimization)
+//! - `Verifier`: Was ineffective (rubber-stamped everything)
 
-mod complexity;
-mod model_select;
 mod executor;
-mod verifier;
 
-pub use complexity::{ComplexityEstimator, ComplexityPromptVariant};
-pub use model_select::ModelSelector;
 pub use executor::{TaskExecutor, ExecutionLoopResult};
-pub use verifier::Verifier;
-

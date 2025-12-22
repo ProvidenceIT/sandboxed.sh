@@ -238,7 +238,10 @@ impl ModelPricing {
             // Flagship tier
             "openai/o1",
             "openai/o1-preview",
+            "openai/gpt-5.2-pro",
             // Mid tier
+            "openai/gpt-5.2",
+            "openai/gpt-5.2-chat",
             "openai/gpt-4.1",
             "openai/gpt-4o",
             "openai/gpt-4-turbo",

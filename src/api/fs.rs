@@ -220,6 +220,16 @@ pub async fn upload(
             format!("{}/{}", q.path, file_name)
         };
 
+        // Ensure the target directory exists (mkdir -p is idempotent)
+        let target_dir = if q.path.ends_with('/') {
+            q.path.trim_end_matches('/').to_string()
+        } else {
+            q.path.clone()
+        };
+        ssh_exec(&cfg, key_file.path(), "mkdir", &["-p".into(), target_dir])
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create directory: {}", e)))?;
+
         let batch = format!("put -p \"{}\" \"{}\"\n", tmp.to_string_lossy(), remote_path);
         sftp_batch(&cfg, key_file.path(), &batch)
             .await

@@ -748,3 +748,61 @@ export async function uploadFile(
 
   return res.json();
 }
+
+// ==================== Models ====================
+
+export interface ModelsResponse {
+  models: string[];
+  count: number;
+}
+
+// List available models
+export async function listModels(tier?: string): Promise<ModelsResponse> {
+  const params = tier ? `?tier=${encodeURIComponent(tier)}` : "";
+  const res = await apiFetch(`/api/models${params}`);
+  if (!res.ok) throw new Error("Failed to fetch models");
+  return res.json();
+}
+
+// Friendly display names for models
+const MODEL_DISPLAY_NAMES: Record<string, string> = {
+  // OpenAI - simplified (newest first)
+  "openai/gpt-5.2-pro": "gpt-5.2-pro",
+  "openai/gpt-5.2": "gpt-5.2",
+  "openai/gpt-5.2-chat": "gpt-5.2",
+  "openai/gpt-4.1-mini": "gpt-4-mini",
+  "openai/gpt-4.1": "gpt-4",
+  "openai/o1": "o1",
+  "openai/o3-mini-high": "o3-mini",
+  // Anthropic - simplified
+  "anthropic/claude-sonnet-4.5": "4.5-sonnet",
+  "anthropic/claude-opus-4.5": "4.5-opus",
+  "anthropic/claude-haiku-4.5": "4.5-haiku",
+  // Google
+  "google/gemini-3-flash-preview": "gemini-3-flash",
+  "google/gemini-3-pro-image-preview": "gemini-3-pro",
+  // DeepSeek
+  "deepseek/deepseek-r1": "deepseek-r1",
+  "deepseek/deepseek-chat-v3-0324": "deepseek-v3",
+  // Qwen
+  "qwen/qwq-32b": "qwq-32b",
+  "qwen/qwen-2.5-72b-instruct": "qwen-72b",
+  "qwen/qwen3-next-80b-a3b-thinking": "qwen3-thinking",
+  // Mistral
+  "mistralai/mistral-small-24b-instruct-2501": "mistral-small",
+  "mistralai/mistral-medium-3.1": "mistral-medium",
+  "mistralai/mistral-large-2512": "mistral-large",
+  // Meta
+  "meta-llama/llama-3.1-405b": "llama-405b",
+  "meta-llama/llama-3.2-90b-vision-instruct": "llama-90b-vision",
+  "meta-llama/llama-3.3-70b-instruct:free": "llama-70b (free)",
+};
+
+// Get display name for a model
+export function getModelDisplayName(modelId: string): string {
+  if (MODEL_DISPLAY_NAMES[modelId]) {
+    return MODEL_DISPLAY_NAMES[modelId];
+  }
+  // Fallback: strip provider prefix
+  return modelId.includes("/") ? modelId.split("/").pop()! : modelId;
+}

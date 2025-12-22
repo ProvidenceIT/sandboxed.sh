@@ -21,8 +21,8 @@ use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
-use crate::agents::orchestrator::RootAgent;
-use crate::agents::{AgentContext, AgentRef, TuningParams};
+use crate::agents::SimpleAgent;
+use crate::agents::{AgentContext, AgentRef};
 use crate::budget::ModelPricing;
 use crate::config::Config;
 use crate::llm::OpenRouterClient;
@@ -41,7 +41,7 @@ use super::types::*;
 pub struct AppState {
     pub config: Config,
     pub tasks: RwLock<HashMap<Uuid, TaskState>>,
-    /// The hierarchical root agent
+    /// The agent used for task execution
     pub root_agent: AgentRef,
     /// Memory system (optional)
     pub memory: Option<MemorySystem>,
@@ -57,11 +57,8 @@ pub struct AppState {
 
 /// Start the HTTP server.
 pub async fn serve(config: Config) -> anyhow::Result<()> {
-    // Load empirically tuned parameters (if present in working directory)
-    let tuning = TuningParams::load_from_working_dir(&config.working_dir).await;
-
-    // Create the root agent (hierarchical)
-    let root_agent: AgentRef = Arc::new(RootAgent::new_with_tuning(&tuning));
+    // Create the simple agent (replaces complex RootAgent hierarchy)
+    let root_agent: AgentRef = Arc::new(SimpleAgent::new());
 
     // Initialize memory system (optional - needs Supabase config)
     let memory = memory::init_memory(&config.memory, &config.api_key).await;

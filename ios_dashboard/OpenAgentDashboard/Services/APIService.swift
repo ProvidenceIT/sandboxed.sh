@@ -98,6 +98,32 @@ final class APIService {
         let _: EmptyResponse = try await post("/api/control/missions/\(id)/status", body: StatusRequest(status: status.rawValue))
     }
     
+    func resumeMission(id: String) async throws -> Mission {
+        try await post("/api/control/missions/\(id)/resume", body: EmptyBody())
+    }
+    
+    func cancelMission(id: String) async throws {
+        let _: EmptyResponse = try await post("/api/control/missions/\(id)/cancel", body: EmptyBody())
+    }
+    
+    // MARK: - Parallel Missions
+    
+    func getRunningMissions() async throws -> [RunningMissionInfo] {
+        try await get("/api/control/running")
+    }
+    
+    func startMissionParallel(id: String, content: String, model: String? = nil) async throws {
+        struct ParallelRequest: Encodable {
+            let content: String
+            let model: String?
+        }
+        let _: EmptyResponse = try await post("/api/control/missions/\(id)/parallel", body: ParallelRequest(content: content, model: model))
+    }
+    
+    func getParallelConfig() async throws -> ParallelConfig {
+        try await get("/api/control/parallel/config")
+    }
+    
     // MARK: - Control
     
     func sendMessage(content: String) async throws -> (id: String, queued: Bool) {

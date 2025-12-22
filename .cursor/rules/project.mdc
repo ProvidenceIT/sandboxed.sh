@@ -1,5 +1,5 @@
 ---
-description: Core Open Agent architecture - hierarchical agent system with full machine access
+description: Core Open Agent architecture - SimpleAgent system with full machine access
 alwaysApply: true
 ---
 
@@ -13,26 +13,30 @@ Minimal autonomous coding agent in Rust with **full machine access** (not sandbo
 |-----------|----------|---------|
 | Backend (Rust) | `src/` | HTTP API + agent system |
 | Dashboard (Next.js) | `dashboard/` | Web UI (Bun, not npm) |
+| iOS Dashboard | `ios_dashboard/` | Native iOS app (Swift/SwiftUI) |
 | MCP configs | `.open_agent/mcp/config.json` | Model Context Protocol servers |
 | Tuning | `.open_agent/tuning.json` | Calibration data |
 
 ## Architecture
 
 ```
-RootAgent (orchestrator)
-├── ComplexityEstimator (leaf) → estimates task difficulty 0-1
-├── ModelSelector (leaf) → U-curve cost optimization
-├── TaskExecutor (leaf) → runs tools in a loop
-└── Verifier (leaf) → hybrid programmatic + LLM verification
+SimpleAgent
+    └── TaskExecutor → runs tools in a loop with auto-upgrade
 ```
+
+The agent system was simplified from a complex hierarchical orchestrator to a single `SimpleAgent` that:
+- Automatically upgrades outdated model names via `ModelResolver`
+- Uses `TaskExecutor` for tool-based execution
+- Supports model overrides per mission/message
+- Handles parallel mission execution
 
 ### Module Map
 
 ```
 src/
-├── agents/           # Hierarchical agent system
-│   ├── orchestrator/ # RootAgent, NodeAgent
-│   └── leaf/         # ComplexityEstimator, ModelSelector, TaskExecutor, Verifier
+├── agents/           # Agent system
+│   ├── simple.rs     # SimpleAgent (main entry point)
+│   └── leaf/         # TaskExecutor
 ├── budget/           # Cost tracking, pricing, smart retry
 │   ├── benchmarks.rs # Model capability scores from llm-stats.com
 │   ├── pricing.rs    # OpenRouter pricing + model allowlist
@@ -79,18 +83,43 @@ src/
 | Method | Path | Purpose |
 |--------|------|---------|
 | `POST` | `/api/control/message` | Send message to agent |
+| `POST` | `/api/control/tool_result` | Submit frontend tool result |
 | `GET` | `/api/control/stream` | SSE event stream |
 | `POST` | `/api/control/cancel` | Cancel current execution |
 | `GET` | `/api/control/tree` | Get agent tree snapshot (refresh resilience) |
 | `GET` | `/api/control/progress` | Get execution progress ("Subtask X/Y") |
+
+### Mission Endpoints
+
+| Method | Path | Purpose |
+|--------|------|---------|
 | `GET` | `/api/control/missions` | List all missions |
-| `POST` | `/api/control/missions` | Create new mission |
-| `GET` | `/api/control/missions/current` | Get current mission |
+| `POST` | `/api/control/missions` | Create new mission (optional: title, model_override) |
+| `GET` | `/api/control/missions/current` | Get current active mission |
+| `GET` | `/api/control/missions/:id` | Get specific mission |
+| `GET` | `/api/control/missions/:id/tree` | Get mission's agent tree |
 | `POST` | `/api/control/missions/:id/load` | Switch to mission |
+| `POST` | `/api/control/missions/:id/status` | Set mission status |
 | `POST` | `/api/control/missions/:id/cancel` | Cancel specific mission |
+| `POST` | `/api/control/missions/:id/resume` | Resume interrupted mission |
 | `POST` | `/api/control/missions/:id/parallel` | Start mission in parallel |
+
+### Parallel Execution Endpoints
+
+| Method | Path | Purpose |
+|--------|------|---------|
 | `GET` | `/api/control/running` | List running missions |
 | `GET` | `/api/control/parallel/config` | Get parallel execution config |
+
+### Mission Statuses
+
+Missions can be in one of these states:
+- `active` - Currently being worked on
+- `completed` - Successfully finished
+- `failed` - Failed with errors
+- `interrupted` - Stopped due to server shutdown/cancellation (resumable)
+- `blocked` - Blocked by external factors (resumable)
+- `not_feasible` - Cannot be completed as specified
 
 ## Model Selection (U-Curve)
 

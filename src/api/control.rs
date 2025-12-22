@@ -1740,7 +1740,7 @@ async fn control_actor_loop(
                                     .map(|e| (e.role.clone(), e.content.clone()))
                                     .collect();
                                 *current_mission.write().await = Some(mission_id);
-                                
+
                                 // Update mission status back to active
                                 if let Some(mem) = &memory {
                                     let _ = mem.supabase.update_mission_status(mission_id, "active").await;
@@ -1946,6 +1946,56 @@ async fn control_actor_loop(
 
                             // Persist to mission
                             persist_mission_history(&memory, &current_mission, &history).await;
+
+                            // P1 FIX: Auto-complete mission if agent execution ended in a terminal state
+                            // without an explicit complete_mission call.
+                            // This prevents missions from staying "active" forever after max iterations, stalls, etc.
+                            //
+                            // We use terminal_reason (structured enum) instead of substring matching to avoid
+                            // false positives when agent output legitimately contains words like "infinite loop".
+                            // We also check the current mission status from DB to handle:
+                            // - Explicit complete_mission calls (which update DB status)
+                            // - Parallel missions (each has its own DB status)
+                            if agent_result.terminal_reason.is_some() {
+                                if let Some(mem) = &memory {
+                                    if let Some(mission_id) = current_mission.read().await.clone() {
+                                        // Check current mission status from DB - only auto-complete if still "active"
+                                        let current_status = mem.supabase.get_mission(mission_id).await
+                                            .ok()
+                                            .flatten()
+                                            .map(|m| m.status);
+                                        
+                                        if current_status.as_deref() == Some("active") {
+                                            let status = if agent_result.success { "completed" } else { "failed" };
+                                            tracing::info!(
+                                                "Auto-completing mission {} with status '{}' (terminal_reason: {:?})",
+                                                mission_id, status, agent_result.terminal_reason
+                                            );
+                                            if let Err(e) = mem.supabase.update_mission_status(mission_id, status).await {
+                                                tracing::warn!("Failed to auto-complete mission: {}", e);
+                                            } else {
+                                                // Emit status change event
+                                                let new_status = if agent_result.success {
+                                                    MissionStatus::Completed
+                                                } else {
+                                                    MissionStatus::Failed
+                                                };
+                                                let _ = events_tx.send(AgentEvent::MissionStatusChanged {
+                                                    mission_id,
+                                                    status: new_status,
+                                                    summary: Some(format!("Auto-completed: {}", 
+                                                        agent_result.output.chars().take(100).collect::<String>())),
+                                                });
+                                            }
+                                        } else {
+                                            tracing::debug!(
+                                                "Skipping auto-complete: mission {} already has status {:?}",
+                                                mission_id, current_status
+                                            );
+                                        }
+                                    }
+                                }
+                            }
 
                             let _ = events_tx.send(AgentEvent::AssistantMessage {
                                 id: Uuid::new_v4(),

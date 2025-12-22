@@ -94,6 +94,8 @@ interface AgentTreeCanvasProps {
   onSelectNode?: (node: AgentNode | null) => void;
   selectedNodeId?: string | null;
   className?: string;
+  /** Compact mode for embedded panels - hides minimap and details panel */
+  compact?: boolean;
 }
 
 /**
@@ -527,6 +529,7 @@ export function AgentTreeCanvas({
   onSelectNode,
   selectedNodeId,
   className,
+  compact = false,
 }: AgentTreeCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [dimensions, setDimensions] = useState({ width: 800, height: 600 });
@@ -566,8 +569,8 @@ export function AgentTreeCanvas({
   useEffect(() => {
     if (layout.width > 0 && layout.height > 0 && dimensions.width > 0 && dimensions.height > 0) {
       // Calculate zoom to fit the tree in view with some padding
-      const paddingX = 80;
-      const paddingY = 80;
+      const paddingX = compact ? 40 : 80;
+      const paddingY = compact ? 40 : 80;
       const availableWidth = dimensions.width - paddingX;
       const availableHeight = dimensions.height - paddingY;
       
@@ -575,8 +578,8 @@ export function AgentTreeCanvas({
       const scaleY = availableHeight / layout.height;
       
       // Use the smaller scale to fit both dimensions
-      // Cap between 0.4 (minimum readable) and 1 (don't zoom in past 100%)
-      const MIN_ZOOM = 0.4;
+      // Cap between 0.3/0.4 (minimum readable) and 1 (don't zoom in past 100%)
+      const MIN_ZOOM = compact ? 0.3 : 0.4;
       const fitZoom = Math.max(MIN_ZOOM, Math.min(1, Math.min(scaleX, scaleY)));
       
       // Calculate pan to center horizontally, start from top with padding
@@ -587,12 +590,12 @@ export function AgentTreeCanvas({
       const scaledHeight = layout.height * fitZoom;
       const centerY = scaledHeight < availableHeight 
         ? (dimensions.height - scaledHeight) / 2 
-        : 30; // Start near top if tree is too tall
+        : compact ? 20 : 30; // Start near top if tree is too tall
       
       setZoom(fitZoom);
       setPan({ x: centerX, y: centerY });
     }
-  }, [layout.width, layout.height, dimensions.width, dimensions.height]);
+  }, [layout.width, layout.height, dimensions.width, dimensions.height, compact]);
   
   // Pan handlers
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
@@ -690,34 +693,40 @@ export function AgentTreeCanvas({
         </g>
       </svg>
       
-      {/* Mini-map */}
-      <TreeMiniMap tree={tree} />
+      {/* Mini-map - hidden in compact mode */}
+      {!compact && <TreeMiniMap tree={tree} />}
       
       {/* Zoom controls */}
-      <div className="absolute bottom-4 right-4 flex gap-2">
+      <div className={cn("absolute flex gap-1", compact ? "bottom-2 right-2" : "bottom-4 right-4 gap-2")}>
         <button
           onClick={() => setZoom(z => Math.min(2, z * 1.15))}
-          className="w-8 h-8 rounded-lg bg-black/40 backdrop-blur-sm border border-white/[0.06] text-white/60 hover:text-white hover:bg-white/[0.04] transition-colors flex items-center justify-center"
+          className={cn(
+            "rounded-lg bg-black/40 backdrop-blur-sm border border-white/[0.06] text-white/60 hover:text-white hover:bg-white/[0.04] transition-colors flex items-center justify-center",
+            compact ? "w-6 h-6 text-xs" : "w-8 h-8"
+          )}
         >
           +
         </button>
         <button
           onClick={() => setZoom(z => Math.max(0.3, z / 1.15))}
-          className="w-8 h-8 rounded-lg bg-black/40 backdrop-blur-sm border border-white/[0.06] text-white/60 hover:text-white hover:bg-white/[0.04] transition-colors flex items-center justify-center"
+          className={cn(
+            "rounded-lg bg-black/40 backdrop-blur-sm border border-white/[0.06] text-white/60 hover:text-white hover:bg-white/[0.04] transition-colors flex items-center justify-center",
+            compact ? "w-6 h-6 text-xs" : "w-8 h-8"
+          )}
         >
           −
         </button>
         <button
           onClick={() => {
             // Fit to view with minimum zoom for readability
-            const paddingX = 80;
-            const paddingY = 80;
+            const paddingX = compact ? 40 : 80;
+            const paddingY = compact ? 40 : 80;
             const availableWidth = dimensions.width - paddingX;
             const availableHeight = dimensions.height - paddingY;
             
             const scaleX = availableWidth / layout.width;
             const scaleY = availableHeight / layout.height;
-            const MIN_ZOOM = 0.4;
+            const MIN_ZOOM = compact ? 0.3 : 0.4;
             const fitZoom = Math.max(MIN_ZOOM, Math.min(1, Math.min(scaleX, scaleY)));
             
             const scaledWidth = layout.width * fitZoom;
@@ -726,26 +735,31 @@ export function AgentTreeCanvas({
             const scaledHeight = layout.height * fitZoom;
             const centerY = scaledHeight < availableHeight 
               ? (dimensions.height - scaledHeight) / 2 
-              : 30;
+              : 20;
             
             setZoom(fitZoom);
             setPan({ x: centerX, y: centerY });
           }}
-          className="px-2 h-8 rounded-lg bg-black/40 backdrop-blur-sm border border-white/[0.06] text-white/60 hover:text-white hover:bg-white/[0.04] transition-colors text-xs"
+          className={cn(
+            "rounded-lg bg-black/40 backdrop-blur-sm border border-white/[0.06] text-white/60 hover:text-white hover:bg-white/[0.04] transition-colors text-xs",
+            compact ? "px-1.5 h-6" : "px-2 h-8"
+          )}
         >
           Fit
         </button>
       </div>
       
-      {/* Node details panel */}
-      <AnimatePresence>
-        {selectedNode && (
-          <NodeDetailsPanel 
-            node={selectedNode} 
-            onClose={() => onSelectNode?.(null)} 
-          />
-        )}
-      </AnimatePresence>
+      {/* Node details panel - hidden in compact mode */}
+      {!compact && (
+        <AnimatePresence>
+          {selectedNode && (
+            <NodeDetailsPanel 
+              node={selectedNode} 
+              onClose={() => onSelectNode?.(null)} 
+            />
+          )}
+        </AnimatePresence>
+      )}
     </div>
   );
 }

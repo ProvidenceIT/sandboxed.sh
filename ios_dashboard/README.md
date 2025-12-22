@@ -5,9 +5,26 @@ Native iOS dashboard for Open Agent with **Liquid Glass** design language.
 ## Features
 
 - **Control** - Chat interface with the AI agent, real-time streaming
-- **History** - View past missions, tasks, and runs
+- **History** - View past missions with filtering (active, interrupted, completed, failed)
 - **Terminal** - SSH console via WebSocket
 - **Files** - Remote file explorer with upload/download
+
+### Mission Management
+
+- Create new missions with optional model override
+- Resume interrupted or blocked missions
+- Mark missions as completed/failed
+- View mission status (active, completed, failed, interrupted, blocked, not_feasible)
+- Model override display per mission
+
+### Parallel Missions
+
+- View all running missions in a compact horizontal bar
+- Switch between parallel missions with a single tap
+- Real-time status indicators (running, stalled, severely stalled)
+- Cancel running missions directly from the bar
+- Automatic polling for running mission updates (every 3s)
+- SSE event filtering by mission_id to prevent cross-contamination
 
 ## Design System
 
@@ -77,6 +94,12 @@ ios_dashboard/
 │   │   ├── Terminal/           # SSH console
 │   │   ├── Files/              # File explorer
 │   │   └── Components/         # Reusable UI
+│   │       ├── GlassButton.swift
+│   │       ├── GlassCard.swift
+│   │       ├── StatusBadge.swift
+│   │       ├── LoadingView.swift
+│   │       ├── RunningMissionsBar.swift   # Parallel missions UI
+│   │       └── ToolUI/         # Tool UI components
 │   └── Assets.xcassets/
 └── OpenAgentDashboard.xcodeproj/
 ```

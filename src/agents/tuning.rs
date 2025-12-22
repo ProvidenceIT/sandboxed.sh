@@ -1,49 +1,24 @@
-//! Empirical tuning parameters for agent heuristics.
+//! Tuning parameters (legacy).
 //!
-//! This module exists to support **trial-and-error calibration**:
-//! we run tasks, compare predicted vs actual usage/cost, and update parameters.
-//!
-//! The core agent logic should remain correct even if tuning values are absent
-//! (defaults apply).
+//! This module is kept for backwards compatibility but is largely unused
+//! since SimpleAgent doesn't require tuning.
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-use crate::agents::leaf::ComplexityPromptVariant;
-
-/// Top-level tuning parameters.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Top-level tuning parameters (legacy).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TuningParams {
-    pub complexity: ComplexityTuning,
-    pub model_selector: ModelSelectorTuning,
-}
-
-impl Default for TuningParams {
-    fn default() -> Self {
-        Self {
-            complexity: ComplexityTuning::default(),
-            model_selector: ModelSelectorTuning::default(),
-        }
-    }
+    // Empty - SimpleAgent doesn't use tuning
 }
 
 impl TuningParams {
     /// Load tuning parameters from the working directory, if present.
-    ///
-    /// # Path
-    /// `{working_dir}/.open_agent/tuning.json`
-    pub async fn load_from_working_dir(working_dir: &Path) -> Self {
-        let path = working_dir.join(".open_agent").join("tuning.json");
-        match tokio::fs::read_to_string(&path).await {
-            Ok(s) => serde_json::from_str::<TuningParams>(&s).unwrap_or_default(),
-            Err(_) => TuningParams::default(),
-        }
+    pub async fn load_from_working_dir(_working_dir: &Path) -> Self {
+        Self::default()
     }
 
     /// Save tuning parameters to the working directory.
-    ///
-    /// # Postcondition
-    /// If successful, subsequent `load_from_working_dir` returns an equivalent value.
     pub async fn save_to_working_dir(&self, working_dir: &Path) -> anyhow::Result<PathBuf> {
         let dir = working_dir.join(".open_agent");
         tokio::fs::create_dir_all(&dir).await?;
@@ -53,44 +28,3 @@ impl TuningParams {
         Ok(path)
     }
 }
-
-/// Tuning parameters for ComplexityEstimator.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ComplexityTuning {
-    pub prompt_variant: ComplexityPromptVariant,
-    pub split_threshold: f64,
-    pub token_multiplier: f64,
-}
-
-impl Default for ComplexityTuning {
-    fn default() -> Self {
-        Self {
-            prompt_variant: ComplexityPromptVariant::CalibratedV2,
-            split_threshold: 0.60,
-            token_multiplier: 1.00,
-        }
-    }
-}
-
-/// Tuning parameters for ModelSelector.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ModelSelectorTuning {
-    /// Retry multiplier cost penalty for failures.
-    pub retry_multiplier: f64,
-    /// Token inefficiency scaling for weaker models.
-    pub inefficiency_scale: f64,
-    /// Cap for failure probability.
-    pub max_failure_probability: f64,
-}
-
-impl Default for ModelSelectorTuning {
-    fn default() -> Self {
-        Self {
-            retry_multiplier: 1.5,
-            inefficiency_scale: 0.5,
-            max_failure_probability: 0.9,
-        }
-    }
-}
-
-

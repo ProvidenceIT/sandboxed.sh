@@ -20,6 +20,8 @@ import {
   getProgress,
   getRunningMissions,
   cancelMission,
+  listModels,
+  getModelDisplayName,
   type ControlRunState,
   type Mission,
   type MissionStatus,
@@ -403,6 +405,9 @@ export default function ControlClient() {
   >([]);
   const [uploadQueue, setUploadQueue] = useState<string[]>([]);
 
+  // Model selection state
+  const [availableModels, setAvailableModels] = useState<string[]>([]);
+
   // Check if the mission we're viewing is actually running (not just any mission)
   const viewingMissionIsRunning = useMemo(() => {
     if (!viewingMissionId) return runState !== "idle";
@@ -489,6 +494,31 @@ export default function ControlClient() {
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
+  // Handle file upload - wrapped in useCallback to avoid stale closures
+  const handleFileUpload = useCallback(async (file: File) => {
+    setUploadQueue((prev) => [...prev, file.name]);
+
+    try {
+      // Upload to mission-specific context folder if we have a mission
+      const contextPath = currentMission?.id 
+        ? `/root/context/${currentMission.id}/`
+        : "/root/context/";
+      const result = await uploadFile(file, contextPath);
+      toast.success(`Uploaded ${result.name}`);
+
+      // Add a message about the upload
+      setInput((prev) => {
+        const uploadNote = `[Uploaded: ${result.name}]`;
+        return prev ? `${prev}\n${uploadNote}` : uploadNote;
+      });
+    } catch (error) {
+      console.error("Upload failed:", error);
+      toast.error(`Failed to upload ${file.name}`);
+    } finally {
+      setUploadQueue((prev) => prev.filter((name) => name !== file.name));
+    }
+  }, [currentMission?.id]);
+
   // Handle paste to upload files
   useEffect(() => {
     const textarea = textareaRef.current;
@@ -519,28 +549,7 @@ export default function ControlClient() {
 
     textarea.addEventListener("paste", handlePaste);
     return () => textarea.removeEventListener("paste", handlePaste);
-  }, []);
-
-  // Handle file upload
-  const handleFileUpload = async (file: File) => {
-    setUploadQueue((prev) => [...prev, file.name]);
-
-    try {
-      const result = await uploadFile(file, "/root/context/");
-      toast.success(`Uploaded ${result.name} to /root/context/`);
-
-      // Add a message about the upload
-      setInput((prev) => {
-        const uploadNote = `[Uploaded: ${result.name}]`;
-        return prev ? `${prev}\n${uploadNote}` : uploadNote;
-      });
-    } catch (error) {
-      console.error("Upload failed:", error);
-      toast.error(`Failed to upload ${file.name}`);
-    } finally {
-      setUploadQueue((prev) => prev.filter((name) => name !== file.name));
-    }
-  };
+  }, [handleFileUpload]);
 
   // Handle file input change
   const handleFileChange = async (
@@ -629,6 +638,17 @@ export default function ControlClient() {
     return () => clearInterval(interval);
   }, []);
 
+  // Fetch available models for mission creation
+  useEffect(() => {
+    listModels()
+      .then((data) => {
+        setAvailableModels(data.models);
+      })
+      .catch((err) => {
+        console.error("Failed to fetch models:", err);
+      });
+  }, []);
+
   // Handle cancelling a parallel mission
   const handleCancelMission = async (missionId: string) => {
     try {
@@ -643,21 +663,37 @@ export default function ControlClient() {
     }
   };
 
+  // Track the mission ID being fetched to prevent race conditions
+  const fetchingMissionIdRef = useRef<string | null>(null);
+
   // Handle switching which mission we're viewing
   const handleViewMission = useCallback(
     async (missionId: string) => {
       setViewingMissionId(missionId);
+      fetchingMissionIdRef.current = missionId;
 
       // Always load fresh history from API when switching missions
       // This ensures we don't show stale cached events
       try {
         const mission = await getMission(missionId);
+        
+        // Race condition guard: only update if this is still the mission we want
+        if (fetchingMissionIdRef.current !== missionId) {
+          return; // Another mission was requested, discard this response
+        }
+        
         const historyItems = missionHistoryToItems(mission);
         setItems(historyItems);
         // Update cache with fresh data
         setMissionItems((prev) => ({ ...prev, [missionId]: historyItems }));
       } catch (err) {
         console.error("Failed to load mission:", err);
+        
+        // Race condition guard: only update if this is still the mission we want
+        if (fetchingMissionIdRef.current !== missionId) {
+          return;
+        }
+        
         // Fallback to cached items if API fails
         if (missionItems[missionId]) {
           setItems(missionItems[missionId]);
@@ -1141,27 +1177,41 @@ export default function ControlClient() {
               <span className="hidden sm:inline">New</span> Mission
             </button>
             {showNewMissionDialog && (
-              <div className="absolute right-0 top-full mt-1 w-72 rounded-lg border border-white/[0.06] bg-[#1a1a1a] p-4 shadow-xl z-10">
+              <div className="absolute right-0 top-full mt-1 w-80 rounded-lg border border-white/[0.06] bg-[#1a1a1a] p-4 shadow-xl z-10">
                 <h3 className="text-sm font-medium text-white mb-3">
                   Create New Mission
                 </h3>
                 <div className="space-y-3">
                   <div>
-                    <label className="block text-xs text-white/50 mb-1">
-                      Model Override (optional)
+                    <label className="block text-xs text-white/50 mb-1.5">
+                      Model
                     </label>
-                    <input
-                      type="text"
+                    <select
                       value={newMissionModel}
                       onChange={(e) => setNewMissionModel(e.target.value)}
-                      placeholder="e.g., deepseek/deepseek-v3.2"
-                      className="w-full rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-sm text-white placeholder-white/30 focus:border-indigo-500/50 focus:outline-none"
-                    />
-                    <p className="text-xs text-white/30 mt-1">
-                      Leave empty to use default model
+                      className="w-full rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2.5 text-sm text-white focus:border-indigo-500/50 focus:outline-none appearance-none cursor-pointer"
+                      style={{
+                        backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e")`,
+                        backgroundPosition: "right 0.5rem center",
+                        backgroundRepeat: "no-repeat",
+                        backgroundSize: "1.5em 1.5em",
+                        paddingRight: "2.5rem",
+                      }}
+                    >
+                      <option value="" className="bg-[#1a1a1a]">
+                        Auto (default)
+                      </option>
+                      {availableModels.map((model) => (
+                        <option key={model} value={model} className="bg-[#1a1a1a]">
+                          {getModelDisplayName(model)}
+                        </option>
+                      ))}
+                    </select>
+                    <p className="text-xs text-white/30 mt-1.5">
+                      Auto uses the configured default model
                     </p>
                   </div>
-                  <div className="flex gap-2">
+                  <div className="flex gap-2 pt-1">
                     <button
                       onClick={() => {
                         setShowNewMissionDialog(false);
@@ -1410,7 +1460,7 @@ export default function ControlClient() {
                       it&apos;s busy
                     </p>
                     <p className="mt-1 text-xs text-white/30">
-                      Tip: Paste files directly to upload to /root/context/
+                      Tip: Paste files directly to upload to context folder
                     </p>
                   </>
                 )}

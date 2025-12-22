@@ -1,8 +1,4 @@
-//! Orchestrator agents - Root and Node agents that manage the tree.
-
-mod root;
-mod node;
-
-pub use root::RootAgent;
-pub use node::NodeAgent;
-
+//! Orchestrator agents (legacy - removed).
+//!
+//! The orchestrator agents (RootAgent, NodeAgent) have been superseded by SimpleAgent.
+//! This module is kept empty for now; will be removed in a future cleanup.
