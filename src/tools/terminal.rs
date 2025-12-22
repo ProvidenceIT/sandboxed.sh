@@ -185,6 +185,11 @@ impl Tool for RunCommand {
 
         result.push_str(&format!("Exit code: {}\n", exit_code));
 
+        // Add hint when non-zero exit but output exists (common with tools that warn but succeed)
+        if exit_code != 0 && !stdout.is_empty() {
+            result.push_str("Note: Non-zero exit code but output was produced. The command may have succeeded with warnings - verify output files exist.\n");
+        }
+
         if !stdout.is_empty() {
             result.push_str("\n--- stdout ---\n");
             result.push_str(&stdout);
