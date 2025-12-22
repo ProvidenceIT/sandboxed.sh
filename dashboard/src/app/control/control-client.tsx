@@ -21,6 +21,7 @@ import {
   getRunningMissions,
   cancelMission,
   listModels,
+  getModelDisplayName,
   type ControlRunState,
   type Mission,
   type MissionStatus,
@@ -1202,7 +1203,7 @@ export default function ControlClient() {
                       </option>
                       {availableModels.map((model) => (
                         <option key={model} value={model} className="bg-[#1a1a1a]">
-                          {model.includes("/") ? model.split("/").pop() : model}
+                          {getModelDisplayName(model)}
                         </option>
                       ))}
                     </select>
