@@ -786,8 +786,25 @@ If you cannot perform the requested analysis, use `complete_mission(blocked, rea
             tracing::info!("Browser tools available: {:?}", browser_tools);
         }
         
-        tracing::info!("Discovered {} built-in tools, {} MCP tools", builtin_count, mcp_tool_schemas.len());
-        tool_schemas.extend(mcp_tool_schemas);
+        // Filter out MCP tools that conflict with built-in tools (built-in takes precedence)
+        let builtin_names: std::collections::HashSet<_> = tool_schemas.iter().map(|t| t.function.name.as_str()).collect();
+        let mcp_count_before = mcp_tool_schemas.len();
+        let filtered_mcp: Vec<_> = mcp_tool_schemas
+            .into_iter()
+            .filter(|t| {
+                if builtin_names.contains(t.function.name.as_str()) {
+                    tracing::debug!("Skipping MCP tool '{}' - conflicts with built-in tool", t.function.name);
+                    false
+                } else {
+                    true
+                }
+            })
+            .collect();
+        let mcp_skipped = mcp_count_before - filtered_mcp.len();
+        
+        tracing::info!("Discovered {} built-in tools, {} MCP tools ({} skipped due to conflicts)", 
+            builtin_count, filtered_mcp.len(), mcp_skipped);
+        tool_schemas.extend(filtered_mcp);
 
         // Agent loop
         for iteration in 0..ctx.max_iterations {
