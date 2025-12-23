@@ -1145,17 +1145,17 @@ export default function ControlClient() {
                     <XCircle className="h-4 w-4 text-red-400" />
                     Mark Failed
                   </button>
-                  {currentMission.status === "interrupted" && (
+                  {(currentMission.status === "interrupted" || currentMission.status === "blocked") && (
                     <button
                       onClick={handleResumeMission}
                       disabled={missionLoading}
                       className="flex w-full items-center gap-2 px-3 py-2 text-sm text-white/70 hover:bg-white/[0.04] disabled:opacity-50"
                     >
                       <PlayCircle className="h-4 w-4 text-emerald-400" />
-                      Resume Mission
+                      {currentMission.status === "blocked" ? "Continue Mission" : "Resume Mission"}
                     </button>
                   )}
-                  {currentMission.status !== "active" && currentMission.status !== "interrupted" && (
+                  {currentMission.status !== "active" && currentMission.status !== "interrupted" && currentMission.status !== "blocked" && (
                     <button
                       onClick={() => handleSetStatus("active")}
                       className="flex w-full items-center gap-2 px-3 py-2 text-sm text-white/70 hover:bg-white/[0.04]"

@@ -1070,6 +1070,14 @@ If you cannot perform the requested analysis, use `complete_mission(blocked, rea
                                 })
                                 .unwrap_or_default();
                             
+                            // Calculate remaining attempts before termination
+                            let remaining = LOOP_FORCE_COMPLETE_THRESHOLD - repetition_count;
+                            let termination_warning = if remaining <= 1 {
+                                "The next repeated call WILL TERMINATE this task.".to_string()
+                            } else {
+                                format!("You have {} more attempts before this task is terminated.", remaining)
+                            };
+                            
                             messages.push(ChatMessage::new(
                                 Role::User,
                                 format!(
@@ -1079,8 +1087,8 @@ If you cannot perform the requested analysis, use `complete_mission(blocked, rea
                                     1. If the path doesn't exist, try `find` or `ls` to locate the correct path\n\
                                     2. If you've gathered enough info, call complete_mission with your findings\n\
                                     3. Try a completely different approach\n\n\
-                                    The next repeated call will terminate this task.",
-                                    repetition_count, last_result_hint
+                                    {}",
+                                    repetition_count, last_result_hint, termination_warning
                                 )
                             ));
                         }
