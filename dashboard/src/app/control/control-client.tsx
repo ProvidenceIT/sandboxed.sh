@@ -17,15 +17,22 @@ import {
   resumeMission,
   getCurrentMission,
   uploadFile,
+  uploadFileChunked,
+  downloadFromUrl,
+  formatBytes,
   getProgress,
   getRunningMissions,
   cancelMission,
   listModels,
   getModelDisplayName,
+  filterAndSortModels,
+  getModelCategory,
+  getHealth,
   type ControlRunState,
   type Mission,
   type MissionStatus,
   type RunningMissionInfo,
+  type UploadProgress,
 } from "@/lib/api";
 import {
   Send,
@@ -50,6 +57,15 @@ import {
   Layers,
   RefreshCw,
   PlayCircle,
+  Link2,
+  X,
+  Wrench,
+  Terminal,
+  FileText,
+  Search,
+  Globe,
+  Code,
+  FolderOpen,
 } from "lucide-react";
 import {
   OptionList,
@@ -93,6 +109,9 @@ type ChatItem =
       name: string;
       args: unknown;
       result?: unknown;
+      isUiTool: boolean;
+      startTime: number;
+      endTime?: number;
     }
   | {
       kind: "system";
@@ -323,6 +342,191 @@ function ThinkingItem({
   );
 }
 
+// Get icon for tool based on its name
+function getToolIcon(toolName: string) {
+  const name = toolName.toLowerCase();
+  if (name.includes("bash") || name.includes("shell") || name.includes("terminal") || name.includes("exec")) {
+    return Terminal;
+  }
+  if (name.includes("read") || name.includes("file") || name.includes("write")) {
+    return FileText;
+  }
+  if (name.includes("search") || name.includes("grep") || name.includes("find")) {
+    return Search;
+  }
+  if (name.includes("browser") || name.includes("web") || name.includes("http") || name.includes("url")) {
+    return Globe;
+  }
+  if (name.includes("code") || name.includes("edit") || name.includes("patch")) {
+    return Code;
+  }
+  if (name.includes("list") || name.includes("dir") || name.includes("ls")) {
+    return FolderOpen;
+  }
+  return Wrench;
+}
+
+// Format tool arguments for display
+function formatToolArgs(args: unknown): string {
+  if (args === null || args === undefined) return "";
+  if (typeof args === "string") return args;
+  try {
+    return JSON.stringify(args, null, 2);
+  } catch {
+    return String(args);
+  }
+}
+
+// Truncate text for preview
+function truncateText(text: string, maxLength: number = 100): string {
+  if (text.length <= maxLength) return text;
+  return text.slice(0, maxLength) + "...";
+}
+
+// Tool call item component with collapsible UI
+function ToolCallItem({
+  item,
+}: {
+  item: Extract<ChatItem, { kind: "tool" }>;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const isDone = item.result !== undefined;
+  const ToolIcon = getToolIcon(item.name);
+
+  // Update elapsed time while tool is running
+  useEffect(() => {
+    if (isDone) return;
+    const interval = setInterval(() => {
+      setElapsedSeconds(Math.floor((Date.now() - item.startTime) / 1000));
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [isDone, item.startTime]);
+
+  const formatDuration = (seconds: number) => {
+    if (seconds < 60) return `${seconds}s`;
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins}m${secs > 0 ? ` ${secs}s` : ""}`;
+  };
+
+  // Use endTime for completed tools, otherwise use elapsed time for running tools
+  const duration = isDone && item.endTime
+    ? formatDuration(Math.floor((item.endTime - item.startTime) / 1000))
+    : formatDuration(elapsedSeconds);
+
+  const argsStr = formatToolArgs(item.args);
+  const resultStr = item.result !== undefined ? formatToolArgs(item.result) : null;
+  
+  // Determine result status
+  const isError = resultStr !== null && (
+    resultStr.toLowerCase().includes("error") ||
+    resultStr.toLowerCase().includes("failed") ||
+    resultStr.toLowerCase().includes("exception")
+  );
+
+  // Get a preview of the args for the collapsed state
+  const argsPreview = truncateText(
+    typeof item.args === "object" && item.args !== null
+      ? Object.keys(item.args as Record<string, unknown>).slice(0, 2).join(", ")
+      : argsStr,
+    50
+  );
+
+  return (
+    <div className="my-2">
+      {/* Compact header */}
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className={cn(
+          "flex items-center gap-1.5 px-2.5 py-1 rounded-full",
+          "bg-white/[0.04] border border-white/[0.06]",
+          "text-white/40 hover:text-white/60 hover:bg-white/[0.06]",
+          "transition-all duration-200",
+          !isDone && "border-amber-500/20",
+          isDone && !isError && "border-emerald-500/20",
+          isDone && isError && "border-red-500/20"
+        )}
+      >
+        <ToolIcon
+          className={cn(
+            "h-3 w-3",
+            !isDone && "animate-pulse text-amber-400",
+            isDone && !isError && "text-emerald-400",
+            isDone && isError && "text-red-400"
+          )}
+        />
+        <span className="text-xs font-mono text-indigo-400">{item.name}</span>
+        {argsPreview && (
+          <span className="text-xs text-white/30 truncate max-w-[150px]">
+            ({argsPreview})
+          </span>
+        )}
+        <span className="text-xs text-white/30 ml-1">
+          {isDone ? `${duration}` : `${duration}...`}
+        </span>
+        {isDone && !isError && <CheckCircle className="h-3 w-3 text-emerald-400" />}
+        {isDone && isError && <XCircle className="h-3 w-3 text-red-400" />}
+        {!isDone && <Loader className="h-3 w-3 animate-spin text-amber-400" />}
+        <ChevronDown
+          className={cn(
+            "h-3 w-3 transition-transform duration-200 ml-1",
+            expanded ? "rotate-0" : "-rotate-90"
+          )}
+        />
+      </button>
+
+      {/* Expandable content with animation */}
+      <div
+        className={cn(
+          "overflow-hidden transition-all duration-200 ease-out",
+          expanded ? "max-h-[500px] opacity-100 mt-2" : "max-h-0 opacity-0"
+        )}
+      >
+        <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] p-3 space-y-3">
+          {/* Arguments */}
+          {argsStr && (
+            <div>
+              <div className="text-[10px] uppercase tracking-wider text-white/30 mb-1">
+                Arguments
+              </div>
+              <pre className="text-xs text-white/50 whitespace-pre-wrap overflow-x-auto max-h-40 overflow-y-auto bg-black/20 rounded p-2 font-mono">
+                {argsStr}
+              </pre>
+            </div>
+          )}
+
+          {/* Result */}
+          {resultStr !== null && (
+            <div>
+              <div className={cn(
+                "text-[10px] uppercase tracking-wider mb-1",
+                isError ? "text-red-400/70" : "text-emerald-400/70"
+              )}>
+                {isError ? "Error" : "Result"}
+              </div>
+              <pre className={cn(
+                "text-xs whitespace-pre-wrap overflow-x-auto max-h-40 overflow-y-auto rounded p-2 font-mono",
+                isError ? "text-red-400/80 bg-red-500/10" : "text-white/50 bg-black/20"
+              )}>
+                {resultStr}
+              </pre>
+            </div>
+          )}
+
+          {/* Still running indicator */}
+          {!isDone && (
+            <div className="flex items-center gap-2 text-xs text-amber-400/70">
+              <Loader className="h-3 w-3 animate-spin" />
+              <span>Running for {duration}...</span>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // Attachment preview component
 function AttachmentPreview({
   file,
@@ -404,9 +608,19 @@ export default function ControlClient() {
     { file: File; uploading: boolean }[]
   >([]);
   const [uploadQueue, setUploadQueue] = useState<string[]>([]);
+  const [uploadProgress, setUploadProgress] = useState<{
+    fileName: string;
+    progress: UploadProgress;
+  } | null>(null);
+  const [showUrlInput, setShowUrlInput] = useState(false);
+  const [urlInput, setUrlInput] = useState("");
+  const [urlDownloading, setUrlDownloading] = useState(false);
 
   // Model selection state
   const [availableModels, setAvailableModels] = useState<string[]>([]);
+
+  // Server configuration (fetched from health endpoint)
+  const [maxIterations, setMaxIterations] = useState<number>(50); // Default fallback
 
   // Check if the mission we're viewing is actually running (not just any mission)
   const viewingMissionIsRunning = useMemo(() => {
@@ -497,13 +711,25 @@ export default function ControlClient() {
   // Handle file upload - wrapped in useCallback to avoid stale closures
   const handleFileUpload = useCallback(async (file: File) => {
     setUploadQueue((prev) => [...prev, file.name]);
+    setUploadProgress({ fileName: file.name, progress: { loaded: 0, total: file.size, percentage: 0 } });
 
     try {
       // Upload to mission-specific context folder if we have a mission
       const contextPath = currentMission?.id 
         ? `/root/context/${currentMission.id}/`
         : "/root/context/";
-      const result = await uploadFile(file, contextPath);
+      
+      // Use chunked upload for files > 10MB, regular for smaller
+      const useChunked = file.size > 10 * 1024 * 1024;
+      
+      const result = useChunked 
+        ? await uploadFileChunked(file, contextPath, (progress) => {
+            setUploadProgress({ fileName: file.name, progress });
+          })
+        : await uploadFile(file, contextPath, (progress) => {
+            setUploadProgress({ fileName: file.name, progress });
+          });
+      
       toast.success(`Uploaded ${result.name}`);
 
       // Add a message about the upload
@@ -516,8 +742,38 @@ export default function ControlClient() {
       toast.error(`Failed to upload ${file.name}`);
     } finally {
       setUploadQueue((prev) => prev.filter((name) => name !== file.name));
+      setUploadProgress(null);
     }
   }, [currentMission?.id]);
+
+  // Handle URL download
+  const handleUrlDownload = useCallback(async () => {
+    if (!urlInput.trim()) return;
+    
+    setUrlDownloading(true);
+    try {
+      const contextPath = currentMission?.id 
+        ? `/root/context/${currentMission.id}/`
+        : "/root/context/";
+      
+      const result = await downloadFromUrl(urlInput.trim(), contextPath);
+      toast.success(`Downloaded ${result.name}`);
+      
+      // Add a message about the download
+      setInput((prev) => {
+        const uploadNote = `[Downloaded: ${result.name}]`;
+        return prev ? `${prev}\n${uploadNote}` : uploadNote;
+      });
+      
+      setUrlInput("");
+      setShowUrlInput(false);
+    } catch (error) {
+      console.error("URL download failed:", error);
+      toast.error(`Failed to download from URL`);
+    } finally {
+      setUrlDownloading(false);
+    }
+  }, [urlInput, currentMission?.id]);
 
   // Handle paste to upload files
   useEffect(() => {
@@ -642,10 +898,23 @@ export default function ControlClient() {
   useEffect(() => {
     listModels()
       .then((data) => {
-        setAvailableModels(data.models);
+        setAvailableModels(filterAndSortModels(data.models));
       })
       .catch((err) => {
         console.error("Failed to fetch models:", err);
+      });
+  }, []);
+
+  // Fetch server configuration (max_iterations) from health endpoint
+  useEffect(() => {
+    getHealth()
+      .then((data) => {
+        if (data.max_iterations) {
+          setMaxIterations(data.max_iterations);
+        }
+      })
+      .catch((err) => {
+        console.error("Failed to fetch health:", err);
       });
   }, []);
 
@@ -753,13 +1022,13 @@ export default function ControlClient() {
 
   // Handle resuming an interrupted mission
   const handleResumeMission = async () => {
-    if (!currentMission || currentMission.status !== "interrupted") return;
+    if (!currentMission || !["interrupted", "blocked"].includes(currentMission.status)) return;
     try {
       setMissionLoading(true);
       const resumed = await resumeMission(currentMission.id);
       setCurrentMission(resumed);
       setShowStatusMenu(false);
-      toast.success("Mission resumed");
+      toast.success(currentMission.status === "blocked" ? "Continuing mission" : "Mission resumed");
     } catch (err) {
       console.error("Failed to resume mission:", err);
       toast.error("Failed to resume mission");
@@ -924,7 +1193,7 @@ export default function ControlClient() {
 
       if (event.type === "tool_call" && isRecord(data)) {
         const name = String(data["name"] ?? "");
-        if (!name.startsWith("ui_")) return;
+        const isUiTool = name.startsWith("ui_");
 
         setItems((prev) => [
           ...prev,
@@ -934,20 +1203,20 @@ export default function ControlClient() {
             toolCallId: String(data["tool_call_id"] ?? ""),
             name,
             args: data["args"],
+            isUiTool,
+            startTime: Date.now(),
           },
         ]);
         return;
       }
 
       if (event.type === "tool_result" && isRecord(data)) {
-        const name = String(data["name"] ?? "");
-        if (!name.startsWith("ui_")) return;
-
         const toolCallId = String(data["tool_call_id"] ?? "");
+        const endTime = Date.now();
         setItems((prev) =>
           prev.map((it) =>
             it.kind === "tool" && it.toolCallId === toolCallId
-              ? { ...it, result: data["result"] }
+              ? { ...it, result: data["result"], endTime }
               : it
           )
         );
@@ -1143,17 +1412,17 @@ export default function ControlClient() {
                     <XCircle className="h-4 w-4 text-red-400" />
                     Mark Failed
                   </button>
-                  {currentMission.status === "interrupted" && (
+                  {(currentMission.status === "interrupted" || currentMission.status === "blocked") && (
                     <button
                       onClick={handleResumeMission}
                       disabled={missionLoading}
                       className="flex w-full items-center gap-2 px-3 py-2 text-sm text-white/70 hover:bg-white/[0.04] disabled:opacity-50"
                     >
                       <PlayCircle className="h-4 w-4 text-emerald-400" />
-                      Resume Mission
+                      {currentMission.status === "blocked" ? "Continue Mission" : "Resume Mission"}
                     </button>
                   )}
-                  {currentMission.status !== "active" && currentMission.status !== "interrupted" && (
+                  {currentMission.status !== "active" && currentMission.status !== "interrupted" && currentMission.status !== "blocked" && (
                     <button
                       onClick={() => handleSetStatus("active")}
                       className="flex w-full items-center gap-2 px-3 py-2 text-sm text-white/70 hover:bg-white/[0.04]"
@@ -1201,11 +1470,25 @@ export default function ControlClient() {
                       <option value="" className="bg-[#1a1a1a]">
                         Auto (default)
                       </option>
-                      {availableModels.map((model) => (
-                        <option key={model} value={model} className="bg-[#1a1a1a]">
-                          {getModelDisplayName(model)}
-                        </option>
-                      ))}
+                      {/* Group models by category */}
+                      {(() => {
+                        const grouped = availableModels.reduce((acc, model) => {
+                          const cat = getModelCategory(model);
+                          if (!acc[cat]) acc[cat] = [];
+                          acc[cat].push(model);
+                          return acc;
+                        }, {} as Record<string, string[]>);
+                        
+                        return Object.entries(grouped).map(([category, models]) => (
+                          <optgroup key={category} label={category} className="bg-[#1a1a1a]">
+                            {models.map((model) => (
+                              <option key={model} value={model} className="bg-[#1a1a1a]">
+                                {getModelDisplayName(model)}
+                              </option>
+                            ))}
+                          </optgroup>
+                        ));
+                      })()}
                     </select>
                     <p className="text-xs text-white/30 mt-1.5">
                       Auto uses the configured default model
@@ -1439,16 +1722,36 @@ export default function ControlClient() {
                 ) : currentMission && currentMission.status !== "active" ? (
                   <>
                     <h2 className="text-lg font-medium text-white">
-                      {currentMission.status === "interrupted" ? "Mission Interrupted" : "No conversation history"}
+                      {currentMission.status === "interrupted" 
+                        ? "Mission Interrupted" 
+                        : currentMission.status === "blocked"
+                        ? "Iteration Limit Reached"
+                        : "No conversation history"}
                     </h2>
                     <p className="mt-2 text-sm text-white/40 max-w-sm">
                       {currentMission.status === "interrupted" ? (
                         <>This mission was interrupted (server shutdown or cancellation). Click the <strong className="text-amber-400">Resume</strong> button in the mission menu to continue where you left off.</>
+                      ) : currentMission.status === "blocked" ? (
+                        <>The agent reached its iteration limit ({maxIterations}). You can continue the mission to give it more iterations.</>
                       ) : (
                         <>This mission was {currentMission.status} without any messages.
                         {currentMission.status === "completed" && " You can reactivate it to continue."}</>
                       )}
                     </p>
+                    {currentMission.status === "blocked" && (
+                      <button
+                        onClick={handleResumeMission}
+                        disabled={missionLoading}
+                        className="mt-4 inline-flex items-center gap-2 rounded-lg bg-indigo-500 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-600 transition-colors disabled:opacity-50"
+                      >
+                        {missionLoading ? (
+                          <Loader className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <PlayCircle className="h-4 w-4" />
+                        )}
+                        Continue Mission
+                      </button>
+                    )}
                   </>
                 ) : (
                   <>
@@ -1576,146 +1879,139 @@ export default function ControlClient() {
                 }
 
                 if (item.kind === "tool") {
-                  if (item.name === "ui_optionList") {
-                    const toolCallId = item.toolCallId;
-                    const rawArgs: Record<string, unknown> = isRecord(item.args)
-                      ? item.args
-                      : {};
+                  // UI tools get special interactive rendering
+                  if (item.isUiTool) {
+                    if (item.name === "ui_optionList") {
+                      const toolCallId = item.toolCallId;
+                      const rawArgs: Record<string, unknown> = isRecord(item.args)
+                        ? item.args
+                        : {};
 
-                    let optionList: ReturnType<
-                      typeof parseSerializableOptionList
-                    > | null = null;
-                    let parseErr: string | null = null;
-                    try {
-                      optionList = parseSerializableOptionList({
-                        ...rawArgs,
-                        id:
-                          typeof rawArgs["id"] === "string" && rawArgs["id"]
-                            ? (rawArgs["id"] as string)
-                            : `option-list-${toolCallId}`,
-                      });
-                    } catch (e) {
-                      parseErr =
-                        e instanceof Error
-                          ? e.message
-                          : "Invalid option list payload";
+                      let optionList: ReturnType<
+                        typeof parseSerializableOptionList
+                      > | null = null;
+                      let parseErr: string | null = null;
+                      try {
+                        optionList = parseSerializableOptionList({
+                          ...rawArgs,
+                          id:
+                            typeof rawArgs["id"] === "string" && rawArgs["id"]
+                              ? (rawArgs["id"] as string)
+                              : `option-list-${toolCallId}`,
+                        });
+                      } catch (e) {
+                        parseErr =
+                          e instanceof Error
+                            ? e.message
+                            : "Invalid option list payload";
+                      }
+
+                      const confirmed = item.result as
+                        | OptionListSelection
+                        | undefined;
+
+                      return (
+                        <div key={item.id} className="flex justify-start gap-3">
+                          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-indigo-500/20">
+                            <Bot className="h-4 w-4 text-indigo-400" />
+                          </div>
+                          <div className="max-w-[80%] rounded-2xl rounded-bl-md bg-white/[0.03] border border-white/[0.06] px-4 py-3">
+                            <div className="mb-2 text-xs text-white/40">
+                              Tool:{" "}
+                              <span className="font-mono text-indigo-400">
+                                {item.name}
+                              </span>
+                            </div>
+
+                            {parseErr || !optionList ? (
+                              <div className="rounded-lg bg-red-500/10 border border-red-500/20 p-3 text-sm text-red-400">
+                                {parseErr ?? "Failed to render OptionList"}
+                              </div>
+                            ) : (
+                              <OptionListErrorBoundary>
+                                <OptionList
+                                  {...optionList}
+                                  value={undefined}
+                                  confirmed={confirmed}
+                                  onConfirm={async (selection) => {
+                                    setItems((prev) =>
+                                      prev.map((it) =>
+                                        it.kind === "tool" &&
+                                        it.toolCallId === toolCallId
+                                          ? { ...it, result: selection }
+                                          : it
+                                      )
+                                    );
+                                    await postControlToolResult({
+                                      tool_call_id: toolCallId,
+                                      name: item.name,
+                                      result: selection,
+                                    });
+                                  }}
+                                  onCancel={async () => {
+                                    setItems((prev) =>
+                                      prev.map((it) =>
+                                        it.kind === "tool" &&
+                                        it.toolCallId === toolCallId
+                                          ? { ...it, result: null }
+                                          : it
+                                      )
+                                    );
+                                    await postControlToolResult({
+                                      tool_call_id: toolCallId,
+                                      name: item.name,
+                                      result: null,
+                                    });
+                                  }}
+                                />
+                              </OptionListErrorBoundary>
+                            )}
+                          </div>
+                        </div>
+                      );
                     }
 
-                    const confirmed = item.result as
-                      | OptionListSelection
-                      | undefined;
+                    if (item.name === "ui_dataTable") {
+                      const rawArgs: Record<string, unknown> = isRecord(item.args)
+                        ? item.args
+                        : {};
+                      const dataTable = parseSerializableDataTable(rawArgs);
 
-                    return (
-                      <div key={item.id} className="flex justify-start gap-3">
-                        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-indigo-500/20">
-                          <Bot className="h-4 w-4 text-indigo-400" />
-                        </div>
-                        <div className="max-w-[80%] rounded-2xl rounded-bl-md bg-white/[0.03] border border-white/[0.06] px-4 py-3">
-                          <div className="mb-2 text-xs text-white/40">
-                            Tool:{" "}
-                            <span className="font-mono text-indigo-400">
-                              {item.name}
-                            </span>
+                      return (
+                        <div key={item.id} className="flex justify-start gap-3">
+                          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-indigo-500/20">
+                            <Bot className="h-4 w-4 text-indigo-400" />
                           </div>
-
-                          {parseErr || !optionList ? (
-                            <div className="rounded-lg bg-red-500/10 border border-red-500/20 p-3 text-sm text-red-400">
-                              {parseErr ?? "Failed to render OptionList"}
+                          <div className="max-w-[90%] rounded-2xl rounded-bl-md bg-white/[0.03] border border-white/[0.06] px-4 py-3">
+                            <div className="mb-2 text-xs text-white/40">
+                              Tool:{" "}
+                              <span className="font-mono text-indigo-400">
+                                {item.name}
+                              </span>
                             </div>
-                          ) : (
-                            <OptionListErrorBoundary>
-                              <OptionList
-                                {...optionList}
-                                value={undefined}
-                                confirmed={confirmed}
-                                onConfirm={async (selection) => {
-                                  setItems((prev) =>
-                                    prev.map((it) =>
-                                      it.kind === "tool" &&
-                                      it.toolCallId === toolCallId
-                                        ? { ...it, result: selection }
-                                        : it
-                                    )
-                                  );
-                                  await postControlToolResult({
-                                    tool_call_id: toolCallId,
-                                    name: item.name,
-                                    result: selection,
-                                  });
-                                }}
-                                onCancel={async () => {
-                                  setItems((prev) =>
-                                    prev.map((it) =>
-                                      it.kind === "tool" &&
-                                      it.toolCallId === toolCallId
-                                        ? { ...it, result: null }
-                                        : it
-                                    )
-                                  );
-                                  await postControlToolResult({
-                                    tool_call_id: toolCallId,
-                                    name: item.name,
-                                    result: null,
-                                  });
-                                }}
+                            {dataTable ? (
+                              <DataTable
+                                id={dataTable.id}
+                                title={dataTable.title}
+                                columns={dataTable.columns}
+                                rows={dataTable.rows}
                               />
-                            </OptionListErrorBoundary>
-                          )}
-                        </div>
-                      </div>
-                    );
-                  }
-
-                  if (item.name === "ui_dataTable") {
-                    const rawArgs: Record<string, unknown> = isRecord(item.args)
-                      ? item.args
-                      : {};
-                    const dataTable = parseSerializableDataTable(rawArgs);
-
-                    return (
-                      <div key={item.id} className="flex justify-start gap-3">
-                        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-indigo-500/20">
-                          <Bot className="h-4 w-4 text-indigo-400" />
-                        </div>
-                        <div className="max-w-[90%] rounded-2xl rounded-bl-md bg-white/[0.03] border border-white/[0.06] px-4 py-3">
-                          <div className="mb-2 text-xs text-white/40">
-                            Tool:{" "}
-                            <span className="font-mono text-indigo-400">
-                              {item.name}
-                            </span>
+                            ) : (
+                              <div className="rounded-lg bg-red-500/10 border border-red-500/20 p-3 text-sm text-red-400">
+                                Failed to render DataTable
+                              </div>
+                            )}
                           </div>
-                          {dataTable ? (
-                            <DataTable
-                              id={dataTable.id}
-                              title={dataTable.title}
-                              columns={dataTable.columns}
-                              rows={dataTable.rows}
-                            />
-                          ) : (
-                            <div className="rounded-lg bg-red-500/10 border border-red-500/20 p-3 text-sm text-red-400">
-                              Failed to render DataTable
-                            </div>
-                          )}
                         </div>
-                      </div>
-                    );
+                      );
+                    }
+
+                    // Unknown UI tool - still show with ToolCallItem
+                    return <ToolCallItem key={item.id} item={item} />;
                   }
 
-                  return (
-                    <div key={item.id} className="flex justify-start gap-3">
-                      <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-indigo-500/20">
-                        <Bot className="h-4 w-4 text-indigo-400" />
-                      </div>
-                      <div className="max-w-[80%] rounded-2xl rounded-bl-md bg-white/[0.03] border border-white/[0.06] px-4 py-3">
-                        <p className="text-sm text-white/60">
-                          Unsupported Tool:{" "}
-                          <span className="font-mono text-indigo-400">
-                            {item.name}
-                          </span>
-                        </p>
-                      </div>
-                    </div>
-                  );
+                  // Non-UI tools use the collapsible ToolCallItem component
+                  return <ToolCallItem key={item.id} item={item} />;
                 }
 
                 // system
@@ -1732,6 +2028,32 @@ export default function ControlClient() {
                   </div>
                 );
               })}
+              
+              {/* Continue banner for blocked missions */}
+              {currentMission?.status === "blocked" && items.length > 0 && (
+                <div className="flex justify-center py-4">
+                  <div className="flex items-center gap-3 rounded-xl bg-amber-500/10 border border-amber-500/20 px-5 py-3">
+                    <Clock className="h-5 w-5 text-amber-400" />
+                    <div className="text-sm">
+                      <span className="text-amber-400 font-medium">Iteration limit reached</span>
+                      <span className="text-white/50 ml-1">— Agent used all {maxIterations} iterations</span>
+                    </div>
+                    <button
+                      onClick={handleResumeMission}
+                      disabled={missionLoading}
+                      className="ml-2 inline-flex items-center gap-1.5 rounded-lg bg-amber-500 px-3 py-1.5 text-sm font-medium text-black hover:bg-amber-400 transition-colors disabled:opacity-50"
+                    >
+                      {missionLoading ? (
+                        <Loader className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <PlayCircle className="h-3.5 w-3.5" />
+                      )}
+                      Continue
+                    </button>
+                  </div>
+                </div>
+              )}
+              
               <div ref={endRef} />
             </div>
           )}
@@ -1750,8 +2072,32 @@ export default function ControlClient() {
 
         {/* Input */}
         <div className="border-t border-white/[0.06] bg-white/[0.01] p-4">
-          {/* Upload queue */}
-          {uploadQueue.length > 0 && (
+          {/* Upload progress */}
+          {uploadProgress && (
+            <div className="mx-auto max-w-3xl mb-3">
+              <div className="flex items-center gap-3 rounded-lg border border-white/[0.06] bg-white/[0.02] px-4 py-3">
+                <Loader className="h-4 w-4 animate-spin text-indigo-400" />
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center justify-between text-sm mb-1">
+                    <span className="text-white/70 truncate">{uploadProgress.fileName}</span>
+                    <span className="text-white/50 ml-2 shrink-0">
+                      {formatBytes(uploadProgress.progress.loaded)} / {formatBytes(uploadProgress.progress.total)}
+                    </span>
+                  </div>
+                  <div className="h-1.5 bg-white/[0.06] rounded-full overflow-hidden">
+                    <div 
+                      className="h-full bg-indigo-500 rounded-full transition-all duration-300"
+                      style={{ width: `${uploadProgress.progress.percentage}%` }}
+                    />
+                  </div>
+                </div>
+                <span className="text-sm text-white/50 shrink-0">{uploadProgress.progress.percentage}%</span>
+              </div>
+            </div>
+          )}
+
+          {/* Upload queue (for files waiting) */}
+          {uploadQueue.length > 0 && !uploadProgress && (
             <div className="mx-auto max-w-3xl mb-3 flex flex-wrap gap-2">
               {uploadQueue.map((name) => (
                 <AttachmentPreview
@@ -1763,18 +2109,78 @@ export default function ControlClient() {
             </div>
           )}
 
+          {/* URL Input */}
+          {showUrlInput && (
+            <div className="mx-auto max-w-3xl mb-3">
+              <div className="flex items-center gap-2 rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2">
+                <Link2 className="h-4 w-4 text-white/40 shrink-0" />
+                <input
+                  type="url"
+                  value={urlInput}
+                  onChange={(e) => setUrlInput(e.target.value)}
+                  placeholder="Paste URL to download (Dropbox, Google Drive, direct link...)"
+                  className="flex-1 bg-transparent text-sm text-white placeholder:text-white/30 focus:outline-none"
+                  autoFocus
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      handleUrlDownload();
+                    } else if (e.key === "Escape") {
+                      setShowUrlInput(false);
+                      setUrlInput("");
+                    }
+                  }}
+                />
+                {urlDownloading ? (
+                  <Loader className="h-4 w-4 animate-spin text-indigo-400" />
+                ) : (
+                  <>
+                    <button
+                      type="button"
+                      onClick={handleUrlDownload}
+                      disabled={!urlInput.trim()}
+                      className="text-sm text-indigo-400 hover:text-indigo-300 disabled:text-white/20 disabled:cursor-not-allowed"
+                    >
+                      Download
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { setShowUrlInput(false); setUrlInput(""); }}
+                      className="text-white/40 hover:text-white/70"
+                    >
+                      <X className="h-4 w-4" />
+                    </button>
+                  </>
+                )}
+              </div>
+              <p className="text-xs text-white/30 mt-1.5 px-1">
+                Server will download the file directly — faster for large files
+              </p>
+            </div>
+          )}
+
           <form
             onSubmit={handleSubmit}
             className="mx-auto flex max-w-3xl gap-3 items-end"
           >
-            <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              className="p-3 rounded-xl border border-white/[0.06] bg-white/[0.02] text-white/40 hover:text-white/70 hover:bg-white/[0.04] transition-colors shrink-0"
-              title="Attach files"
-            >
-              <Paperclip className="h-5 w-5" />
-            </button>
+            <div className="flex gap-1">
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                className="p-3 rounded-xl border border-white/[0.06] bg-white/[0.02] text-white/40 hover:text-white/70 hover:bg-white/[0.04] transition-colors shrink-0"
+                title="Attach files"
+              >
+                <Paperclip className="h-5 w-5" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowUrlInput(!showUrlInput)}
+                className={`p-3 rounded-xl border border-white/[0.06] bg-white/[0.02] text-white/40 hover:text-white/70 hover:bg-white/[0.04] transition-colors shrink-0 ${showUrlInput ? 'text-indigo-400 border-indigo-500/30' : ''}`}
+                title="Download from URL"
+              >
+                <Link2 className="h-5 w-5" />
+              </button>
+            </div>
 
             <textarea
               ref={textareaRef}

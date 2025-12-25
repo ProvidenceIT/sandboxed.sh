@@ -693,8 +693,9 @@ If you cannot perform the requested analysis, use `complete_mission(blocked, rea
         let mut last_tool_calls: Vec<String> = Vec::new();
         let mut repetitive_actions = false;
         let mut repetition_count: u32 = 0;
-        const LOOP_WARNING_THRESHOLD: u32 = 3;
-        const LOOP_FORCE_COMPLETE_THRESHOLD: u32 = 5;
+        const LOOP_WARNING_THRESHOLD: u32 = 2;  // Warn early
+        const LOOP_FORCE_COMPLETE_THRESHOLD: u32 = 4;  // Stop faster
+        let mut last_tool_result: Option<String> = None;
         let mut has_error_messages = false;
         let mut iterations_completed = 0u32;
         
@@ -1060,10 +1061,35 @@ If you cannot perform the requested analysis, use `complete_mission(blocked, rea
                         }
                         
                         // Inject a warning message after threshold to try to break the loop
-                        if repetition_count == LOOP_WARNING_THRESHOLD {
+                        if repetition_count >= LOOP_WARNING_THRESHOLD {
+                            let last_result_hint = last_tool_result
+                                .as_ref()
+                                .map(|r| {
+                                    let preview: String = r.chars().take(200).collect();
+                                    format!("\n\nLast result was: {}", preview)
+                                })
+                                .unwrap_or_default();
+                            
+                            // Calculate remaining attempts before termination
+                            let remaining = LOOP_FORCE_COMPLETE_THRESHOLD - repetition_count;
+                            let termination_warning = if remaining <= 1 {
+                                "The next repeated call WILL TERMINATE this task.".to_string()
+                            } else {
+                                format!("You have {} more attempts before this task is terminated.", remaining)
+                            };
+                            
                             messages.push(ChatMessage::new(
                                 Role::User,
-                                "[SYSTEM WARNING] You are repeating the same tool call multiple times. This suggests you may be stuck in a loop. Please either:\n1. Try a different approach\n2. Summarize your findings and complete the task\n3. If you've already found what you need, call complete_mission\n\nDo NOT repeat the same command again.".to_string()
+                                format!(
+                                    "[CRITICAL SYSTEM WARNING] You have repeated the EXACT SAME tool call {} times. \
+                                    This is an infinite loop and you MUST stop.{}\n\n\
+                                    DO NOT call the same command again. Instead:\n\
+                                    1. If the path doesn't exist, try `find` or `ls` to locate the correct path\n\
+                                    2. If you've gathered enough info, call complete_mission with your findings\n\
+                                    3. Try a completely different approach\n\n\
+                                    {}",
+                                    repetition_count, last_result_hint, termination_warning
+                                )
                             ));
                         }
                     } else {
@@ -1273,6 +1299,9 @@ If you cannot perform the requested analysis, use `complete_mission(blocked, rea
                         } else {
                             tool_message_content
                         };
+                        
+                        // Track last tool result for loop detection warnings
+                        last_tool_result = Some(truncated_content.clone());
 
                         // Check for vision image marker [VISION_IMAGE:url] and create multimodal content
                         let message_content = if let Some(captures) = extract_vision_image_url(&truncated_content) {
@@ -1303,21 +1332,56 @@ If you cannot perform the requested analysis, use `complete_mission(blocked, rea
                     // with actual content, but then returns empty on the next iteration.
                     let called_complete_mission = tool_calls.iter().any(|tc| tc.function.name == "complete_mission");
                     if called_complete_mission {
+                        let content_text = response.content.as_deref().unwrap_or("");
+                        
+                        // Get summary from complete_mission args if available
+                        let summary_text = tool_calls.iter()
+                            .find(|tc| tc.function.name == "complete_mission")
+                            .and_then(|tc| serde_json::from_str::<serde_json::Value>(&tc.function.arguments).ok())
+                            .and_then(|args| args.get("summary").and_then(|s| s.as_str()).map(|s| s.to_string()))
+                            .unwrap_or_default();
+                        
+                        let combined_text = format!("{} {}", content_text, summary_text);
+                        
+                        // P1 FIX: Check for hallucinated Supabase URLs that weren't actually uploaded
+                        // LLMs sometimes generate plausible-looking URLs without actually uploading
+                        let supabase_url_pattern = regex::Regex::new(r"https://[a-z]+\.supabase\.co/storage/v1/object/public/images/[a-f0-9-]+\.png")
+                            .unwrap();
+                        let uploaded_urls: std::collections::HashSet<_> = pending_uploads.iter().map(|(url, _)| url.as_str()).collect();
+                        
+                        let hallucinated_urls: Vec<_> = supabase_url_pattern
+                            .find_iter(&combined_text)
+                            .map(|m| m.as_str())
+                            .filter(|url| !uploaded_urls.contains(url))
+                            .collect();
+                        
+                        if !hallucinated_urls.is_empty() {
+                            tracing::warn!(
+                                "Detected {} hallucinated image URL(s) in response: {:?}",
+                                hallucinated_urls.len(),
+                                hallucinated_urls
+                            );
+                            
+                            let warning = format!(
+                                "⚠️ ERROR: You referenced {} image URL(s) that were NOT actually uploaded!\n\n\
+                                These URLs don't exist:\n{}\n\n\
+                                You must use browser_screenshot or upload_image to create REAL images, \
+                                then include the ACTUAL URL returned by those tools. \
+                                Do NOT make up URLs.",
+                                hallucinated_urls.len(),
+                                hallucinated_urls.iter().map(|u| format!("  - {}", u)).collect::<Vec<_>>().join("\n")
+                            );
+                            
+                            messages.push(ChatMessage::new(Role::User, warning));
+                            continue;
+                        }
+                        
                         // Check for missing uploaded images before completing
                         if !pending_uploads.is_empty() {
-                            let content_text = response.content.as_deref().unwrap_or("");
-                            
-                            // Get summary from complete_mission args if available
-                            let summary_text = tool_calls.iter()
-                                .find(|tc| tc.function.name == "complete_mission")
-                                .and_then(|tc| serde_json::from_str::<serde_json::Value>(&tc.function.arguments).ok())
-                                .and_then(|args| args.get("summary").and_then(|s| s.as_str()).map(|s| s.to_string()))
-                                .unwrap_or_default();
-                            
                             // Check which uploads are missing from the response
                             let missing_uploads: Vec<_> = pending_uploads.iter()
                                 .filter(|(url, markdown)| {
-                                    !content_text.contains(url) && 
+                                    !content_text.contains(url) &&
                                     !content_text.contains(markdown) &&
                                     !summary_text.contains(url) &&
                                     !summary_text.contains(markdown)

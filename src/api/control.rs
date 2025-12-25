@@ -23,7 +23,7 @@ use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::agents::{AgentContext, AgentRef};
+use crate::agents::{AgentContext, AgentRef, TerminalReason};
 use crate::budget::{Budget, ModelPricing};
 use crate::config::Config;
 use crate::llm::OpenRouterClient;
@@ -583,7 +583,7 @@ pub async fn list_missions(
                 history,
                 created_at: m.created_at.clone(),
                 updated_at: m.updated_at.clone(),
-                interrupted_at: if status == MissionStatus::Interrupted { Some(m.updated_at) } else { None },
+                interrupted_at: if matches!(status, MissionStatus::Interrupted | MissionStatus::Blocked) { Some(m.updated_at) } else { None },
                 resumable: matches!(status, MissionStatus::Interrupted | MissionStatus::Blocked),
             }
         })
@@ -630,7 +630,7 @@ pub async fn get_mission(
         history,
         created_at: db_mission.created_at.clone(),
         updated_at: db_mission.updated_at.clone(),
-        interrupted_at: if status == MissionStatus::Interrupted { Some(db_mission.updated_at) } else { None },
+        interrupted_at: if matches!(status, MissionStatus::Interrupted | MissionStatus::Blocked) { Some(db_mission.updated_at) } else { None },
         resumable: matches!(status, MissionStatus::Interrupted | MissionStatus::Blocked),
     }))
 }
@@ -1281,6 +1281,8 @@ async fn control_actor_loop(
             "completed" => MissionStatus::Completed,
             "failed" => MissionStatus::Failed,
             "interrupted" => MissionStatus::Interrupted,
+            "blocked" => MissionStatus::Blocked,
+            "not_feasible" => MissionStatus::NotFeasible,
             _ => MissionStatus::Active,
         };
 
@@ -1292,7 +1294,7 @@ async fn control_actor_loop(
             history,
             created_at: db_mission.created_at.clone(),
             updated_at: db_mission.updated_at.clone(),
-            interrupted_at: if status == MissionStatus::Interrupted { Some(db_mission.updated_at) } else { None },
+            interrupted_at: if matches!(status, MissionStatus::Interrupted | MissionStatus::Blocked) { Some(db_mission.updated_at) } else { None },
             resumable: matches!(status, MissionStatus::Interrupted | MissionStatus::Blocked),
         })
     }
@@ -1328,7 +1330,7 @@ async fn control_actor_loop(
         })
     }
 
-    // Helper to build resume context for an interrupted mission
+    // Helper to build resume context for an interrupted or blocked mission
     async fn resume_mission_impl(
         memory: &Option<MemorySystem>,
         config: &Config,
@@ -1336,8 +1338,8 @@ async fn control_actor_loop(
     ) -> Result<(Mission, String), String> {
         let mission = load_mission_from_db(memory, mission_id).await?;
         
-        // Check if mission can be resumed
-        if mission.status != MissionStatus::Interrupted {
+        // Check if mission can be resumed (interrupted or blocked)
+        if !matches!(mission.status, MissionStatus::Interrupted | MissionStatus::Blocked) {
             return Err(format!(
                 "Mission {} cannot be resumed (status: {})",
                 mission_id, mission.status
@@ -1347,14 +1349,19 @@ async fn control_actor_loop(
         // Build resume context
         let mut resume_parts = Vec::new();
         
-        // Add interruption notice
+        // Add resumption notice based on status
+        let resume_reason = match mission.status {
+            MissionStatus::Blocked => "reached its iteration limit",
+            _ => "was interrupted",
+        };
+        
         if let Some(interrupted_at) = &mission.interrupted_at {
             resume_parts.push(format!(
-                "**MISSION RESUMED**\nThis mission was interrupted at {} and is now being continued.",
-                interrupted_at
+                "**MISSION RESUMED**\nThis mission {} at {} and is now being continued.",
+                resume_reason, interrupted_at
             ));
         } else {
-            resume_parts.push("**MISSION RESUMED**\nThis mission was interrupted and is now being continued.".to_string());
+            resume_parts.push(format!("**MISSION RESUMED**\nThis mission {} and is now being continued.", resume_reason));
         }
         
         // Add history summary
@@ -1966,7 +1973,20 @@ async fn control_actor_loop(
                                             .map(|m| m.status);
                                         
                                         if current_status.as_deref() == Some("active") {
-                                            let status = if agent_result.success { "completed" } else { "failed" };
+                                            // Determine status based on terminal reason
+                                            // MaxIterations -> blocked (resumable) instead of failed
+                                            let (status, new_status) = match agent_result.terminal_reason {
+                                                Some(TerminalReason::MaxIterations) => {
+                                                    ("blocked", MissionStatus::Blocked)
+                                                }
+                                                _ if agent_result.success => {
+                                                    ("completed", MissionStatus::Completed)
+                                                }
+                                                _ => {
+                                                    ("failed", MissionStatus::Failed)
+                                                }
+                                            };
+                                            
                                             tracing::info!(
                                                 "Auto-completing mission {} with status '{}' (terminal_reason: {:?})",
                                                 mission_id, status, agent_result.terminal_reason
@@ -1975,11 +1995,6 @@ async fn control_actor_loop(
                                                 tracing::warn!("Failed to auto-complete mission: {}", e);
                                             } else {
                                                 // Emit status change event
-                                                let new_status = if agent_result.success {
-                                                    MissionStatus::Completed
-                                                } else {
-                                                    MissionStatus::Failed
-                                                };
                                                 let _ = events_tx.send(AgentEvent::MissionStatusChanged {
                                                     mission_id,
                                                     status: new_status,

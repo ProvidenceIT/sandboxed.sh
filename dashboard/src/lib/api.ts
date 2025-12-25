@@ -38,6 +38,7 @@ export interface HealthResponse {
   version: string;
   dev_mode: boolean;
   auth_required: boolean;
+  max_iterations: number;
 }
 
 export interface LoginResponse {
@@ -726,27 +727,221 @@ export interface UploadResult {
   name: string;
 }
 
-// Upload a file to the remote filesystem
-export async function uploadFile(
-  file: File,
-  remotePath: string = "/root/context/"
-): Promise<UploadResult> {
-  const formData = new FormData();
-  formData.append("file", file);
+export interface UploadProgress {
+  loaded: number;
+  total: number;
+  percentage: number;
+}
 
-  const url = apiUrl(`/api/fs/upload?path=${encodeURIComponent(remotePath)}`);
-  const res = await fetch(url, {
+// Upload a file to the remote filesystem with progress tracking
+export function uploadFile(
+  file: File,
+  remotePath: string = "/root/context/",
+  onProgress?: (progress: UploadProgress) => void
+): Promise<UploadResult> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const url = apiUrl(`/api/fs/upload?path=${encodeURIComponent(remotePath)}`);
+    
+    // Track upload progress
+    xhr.upload.addEventListener("progress", (event) => {
+      if (event.lengthComputable && onProgress) {
+        onProgress({
+          loaded: event.loaded,
+          total: event.total,
+          percentage: Math.round((event.loaded / event.total) * 100),
+        });
+      }
+    });
+    
+    xhr.addEventListener("load", () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try {
+          resolve(JSON.parse(xhr.responseText));
+        } catch {
+          reject(new Error("Invalid response from server"));
+        }
+      } else {
+        reject(new Error(`Upload failed: ${xhr.responseText || xhr.statusText}`));
+      }
+    });
+    
+    xhr.addEventListener("error", () => {
+      reject(new Error("Network error during upload"));
+    });
+    
+    xhr.addEventListener("abort", () => {
+      reject(new Error("Upload cancelled"));
+    });
+    
+    xhr.open("POST", url);
+    
+    // Add auth header using the same method as other API calls
+    const headers = authHeader();
+    if (headers.Authorization) {
+      xhr.setRequestHeader("Authorization", headers.Authorization);
+    }
+    
+    const formData = new FormData();
+    formData.append("file", file);
+    xhr.send(formData);
+  });
+}
+
+// Upload a file in chunks with resume capability
+const CHUNK_SIZE = 5 * 1024 * 1024; // 5MB chunks
+
+export interface ChunkedUploadProgress extends UploadProgress {
+  chunkIndex: number;
+  totalChunks: number;
+}
+
+export async function uploadFileChunked(
+  file: File,
+  remotePath: string = "/root/context/",
+  onProgress?: (progress: ChunkedUploadProgress) => void
+): Promise<UploadResult> {
+  const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+  const uploadId = `${file.name}-${file.size}-${Date.now()}`;
+  
+  // For small files, use regular upload
+  if (totalChunks <= 1) {
+    return uploadFile(file, remotePath, onProgress ? (p) => onProgress({
+      ...p,
+      chunkIndex: 0,
+      totalChunks: 1,
+    }) : undefined);
+  }
+  
+  let uploadedBytes = 0;
+  
+  for (let i = 0; i < totalChunks; i++) {
+    const start = i * CHUNK_SIZE;
+    const end = Math.min(start + CHUNK_SIZE, file.size);
+    const chunk = file.slice(start, end);
+    
+    const chunkFile = new File([chunk], file.name, { type: file.type });
+    
+    // Upload chunk with retry
+    let retries = 3;
+    while (retries > 0) {
+      try {
+        await uploadChunk(chunkFile, remotePath, uploadId, i, totalChunks);
+        uploadedBytes += chunk.size;
+        
+        if (onProgress) {
+          onProgress({
+            loaded: uploadedBytes,
+            total: file.size,
+            percentage: Math.round((uploadedBytes / file.size) * 100),
+            chunkIndex: i + 1,
+            totalChunks,
+          });
+        }
+        break;
+      } catch (err) {
+        retries--;
+        if (retries === 0) throw err;
+        await new Promise(r => setTimeout(r, 1000)); // Wait 1s before retry
+      }
+    }
+  }
+  
+  // Finalize the upload
+  return finalizeChunkedUpload(remotePath, uploadId, file.name, totalChunks);
+}
+
+async function uploadChunk(
+  chunk: File,
+  remotePath: string,
+  uploadId: string,
+  chunkIndex: number,
+  totalChunks: number
+): Promise<void> {
+  const formData = new FormData();
+  formData.append("file", chunk);
+  
+  const params = new URLSearchParams({
+    path: remotePath,
+    upload_id: uploadId,
+    chunk_index: String(chunkIndex),
+    total_chunks: String(totalChunks),
+  });
+  
+  const res = await fetch(apiUrl(`/api/fs/upload-chunk?${params}`), {
     method: "POST",
     headers: authHeader(),
     body: formData,
   });
-
+  
   if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Failed to upload file: ${text}`);
+    throw new Error(`Chunk upload failed: ${await res.text()}`);
   }
+}
 
+async function finalizeChunkedUpload(
+  remotePath: string,
+  uploadId: string,
+  fileName: string,
+  totalChunks: number
+): Promise<UploadResult> {
+  const res = await apiFetch("/api/fs/upload-finalize", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      path: remotePath,
+      upload_id: uploadId,
+      file_name: fileName,
+      total_chunks: totalChunks,
+    }),
+  });
+  
+  if (!res.ok) {
+    throw new Error(`Failed to finalize upload: ${await res.text()}`);
+  }
+  
   return res.json();
+}
+
+// Download file from URL to server filesystem
+export async function downloadFromUrl(
+  url: string,
+  remotePath: string = "/root/context/",
+  fileName?: string
+): Promise<UploadResult> {
+  const res = await apiFetch("/api/fs/download-url", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      url,
+      path: remotePath,
+      file_name: fileName,
+    }),
+  });
+  
+  if (!res.ok) {
+    throw new Error(`Failed to download from URL: ${await res.text()}`);
+  }
+  
+  return res.json();
+}
+
+// Format bytes for display (handles up to petabyte scale)
+export function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return "-";
+  if (bytes === 0) return "0 B";
+  if (bytes < 1024) return `${bytes} B`;
+  
+  const units = ["KB", "MB", "GB", "TB", "PB"] as const;
+  let value = bytes / 1024;
+  let unitIndex = 0;
+  
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex++;
+  }
+  
+  return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[unitIndex]}`;
 }
 
 // ==================== Models ====================
@@ -805,4 +1000,43 @@ export function getModelDisplayName(modelId: string): string {
   }
   // Fallback: strip provider prefix
   return modelId.includes("/") ? modelId.split("/").pop()! : modelId;
+}
+
+// Model categories for sorting
+const MODEL_CATEGORIES: Record<string, { order: number; label: string }> = {
+  "google": { order: 1, label: "Google" },
+  "deepseek": { order: 2, label: "DeepSeek" },
+  "qwen": { order: 3, label: "Qwen" },
+  "anthropic": { order: 4, label: "Anthropic" },
+  "mistralai": { order: 5, label: "Mistral" },
+  "openai": { order: 6, label: "OpenAI" },
+};
+
+// Models to exclude from the dropdown
+const EXCLUDED_MODEL_PATTERNS = [
+  /^meta-llama\//,      // All Llama models
+  /^openai\/o[0-9]/,    // OpenAI o-series (o1, o3, o4, etc.)
+];
+
+// Filter and sort models for the dropdown
+export function filterAndSortModels(models: string[]): string[] {
+  return models
+    // Filter out excluded models
+    .filter(model => !EXCLUDED_MODEL_PATTERNS.some(pattern => pattern.test(model)))
+    // Sort by category then alphabetically within category
+    .sort((a, b) => {
+      const providerA = a.split("/")[0];
+      const providerB = b.split("/")[0];
+      const catA = MODEL_CATEGORIES[providerA]?.order ?? 99;
+      const catB = MODEL_CATEGORIES[providerB]?.order ?? 99;
+      if (catA !== catB) return catA - catB;
+      // Within same category, sort by display name
+      return getModelDisplayName(a).localeCompare(getModelDisplayName(b));
+    });
+}
+
+// Get the category label for a model
+export function getModelCategory(modelId: string): string {
+  const provider = modelId.split("/")[0];
+  return MODEL_CATEGORIES[provider]?.label ?? "Other";
 }

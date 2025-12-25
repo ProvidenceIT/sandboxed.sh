@@ -100,9 +100,10 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         // WebSocket console uses subprotocol-based auth (browser can't set Authorization header)
         .route("/api/console/ws", get(console::console_ws));
 
-    // File upload route with increased body limit (10GB)
+    // File upload routes with increased body limit (10GB)
     let upload_route = Router::new()
         .route("/api/fs/upload", post(fs::upload))
+        .route("/api/fs/upload-chunk", post(fs::upload_chunk))
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024 * 1024));
 
     let protected_routes = Router::new()
@@ -144,6 +145,8 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         .route("/api/fs/list", get(fs::list))
         .route("/api/fs/download", get(fs::download))
         .merge(upload_route)
+        .route("/api/fs/upload-finalize", post(fs::upload_finalize))
+        .route("/api/fs/download-url", post(fs::download_from_url))
         .route("/api/fs/mkdir", post(fs::mkdir))
         .route("/api/fs/rm", post(fs::rm))
         // MCP management endpoints
@@ -247,6 +250,7 @@ async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
         version: env!("CARGO_PKG_VERSION").to_string(),
         dev_mode: state.config.dev_mode,
         auth_required: state.config.auth.auth_required(state.config.dev_mode),
+        max_iterations: state.config.max_iterations,
     })
 }
 
