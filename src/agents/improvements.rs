@@ -46,7 +46,15 @@ impl Default for ExecutionThresholds {
 impl ExecutionThresholds {
     /// Load thresholds from environment variables, falling back to defaults.
     pub fn from_env() -> Self {
-        let mut thresholds = Self::default();
+        Self::from_env_with_config_default(15000)
+    }
+
+    /// Load thresholds from environment variables, using config value as default for max_tool_result_chars.
+    pub fn from_env_with_config_default(config_max_tool_result_chars: usize) -> Self {
+        let mut thresholds = Self {
+            max_tool_result_chars: config_max_tool_result_chars,
+            ..Self::default()
+        };
 
         if let Ok(v) = std::env::var("LOOP_WARNING_THRESHOLD") {
             if let Ok(n) = v.parse() {

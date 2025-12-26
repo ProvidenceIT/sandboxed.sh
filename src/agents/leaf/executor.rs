@@ -680,8 +680,10 @@ If you cannot perform the requested analysis, use `complete_mission(blocked, rea
         let mut has_error_messages = false;
         let mut iterations_completed = 0u32;
 
-        // Load configurable thresholds from environment
-        let thresholds = ExecutionThresholds::from_env();
+        // Load configurable thresholds from environment, using config value as default for truncation
+        let thresholds = ExecutionThresholds::from_env_with_config_default(
+            ctx.config.context.max_tool_result_chars,
+        );
 
         // Track consecutive empty/reasoning-only responses (P0 fix for agent stalls)
         let mut empty_response_count: u32 = 0;
@@ -715,8 +717,8 @@ If you cannot perform the requested analysis, use `complete_mission(blocked, rea
             tracing::info!("Injected memory context into system prompt");
         }
         
-        // Get tool result truncation limit from config
-        let max_tool_result_chars = ctx.config.context.max_tool_result_chars;
+        // Get tool result truncation limit from thresholds (env var override) or config
+        let max_tool_result_chars = thresholds.max_tool_result_chars;
 
         // Get MCP tool descriptions and schemas
         let (mcp_tool_descriptions, mcp_tool_schemas) = if let Some(mcp) = &ctx.mcp {
