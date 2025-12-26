@@ -433,13 +433,15 @@ mod tests {
 
     #[test]
     fn test_normalize_id() {
+        // normalize_id keeps the '/' to preserve provider prefix for matching
+        // It only removes ':', '-', '_', '.' for fuzzy matching
         assert_eq!(
             BenchmarkRegistry::normalize_id("openai/gpt-4.1-mini"),
-            "openaigpt41mini"
+            "openai/gpt41mini"
         );
         assert_eq!(
             BenchmarkRegistry::normalize_id("deepseek/deepseek-v3.2:exacto"),
-            "deepseekdeepseekv32exacto"
+            "deepseek/deepseekv32exacto"
         );
     }
 }

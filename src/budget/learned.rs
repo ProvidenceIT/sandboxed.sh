@@ -249,15 +249,17 @@ mod tests {
     #[test]
     fn test_select_model_prefers_high_success_low_cost() {
         let config = LearnedSelectionConfig::default();
+        // Scoring formula: success_rate / ln(cost + 1)
+        // This strongly rewards lower cost while accounting for success rate
         let stats = vec![
-            make_stats("model-a", "code", 10, 0.9, 50.0),  // High success, moderate cost
-            make_stats("model-b", "code", 10, 0.8, 20.0),  // Lower success, low cost
-            make_stats("model-c", "code", 10, 0.95, 200.0), // Highest success, high cost
+            make_stats("model-a", "code", 10, 0.95, 30.0), // Highest success, low-moderate cost -> score = 0.95/ln(31) = 0.277
+            make_stats("model-b", "code", 10, 0.8, 20.0),  // Lower success, low cost -> score = 0.8/ln(21) = 0.263
+            make_stats("model-c", "code", 10, 0.95, 200.0), // Highest success, high cost -> score = 0.95/ln(201) = 0.179
         ];
 
         let selected = select_model_from_learned("code", &stats, &config, "fallback");
-        
-        // model-a should win: best balance of success and cost
+
+        // model-a should win: best balance of high success and reasonable cost
         assert_eq!(selected, "model-a");
     }
 

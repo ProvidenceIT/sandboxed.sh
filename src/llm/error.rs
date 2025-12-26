@@ -99,11 +99,11 @@ impl LlmError {
             _ => Duration::from_secs(1),
         };
 
-        // Exponential backoff: base * 2^attempt, capped at 60 seconds
+        // Exponential backoff: base * 2^attempt
         let multiplier = 2u64.saturating_pow(attempt);
-        let delay_secs = base_delay.as_secs().saturating_mul(multiplier).min(60);
-        
-        // Add jitter (up to 25% of delay)
+        let delay_secs = base_delay.as_secs().saturating_mul(multiplier);
+
+        // Add jitter (up to 25% of delay) before capping
         let jitter_range = delay_secs / 4;
         let jitter = if jitter_range > 0 {
             // Simple deterministic jitter based on attempt number
@@ -112,7 +112,10 @@ impl LlmError {
             0
         };
 
-        Duration::from_secs(delay_secs + jitter)
+        // Cap total delay (including jitter) at 60 seconds
+        let total_delay = (delay_secs + jitter).min(60);
+
+        Duration::from_secs(total_delay)
     }
 }
 

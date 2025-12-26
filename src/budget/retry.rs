@@ -485,15 +485,15 @@ mod tests {
             repetitive_actions: false,
             has_error_messages: false,
             partial_progress: true,
-            cost_spent_cents: 80,
+            cost_spent_cents: 85, // > 80% of budget (condition is budget_used_ratio > 0.8)
             budget_total_cents: 100,
             final_output: "Budget exhausted before completion".to_string(),
             model_used: "anthropic/claude-sonnet-4.5".to_string(),
         };
-        
+
         let analysis = signals.analyze();
         assert_eq!(analysis.mode, FailureMode::BudgetExhaustedWithProgress);
-        
+
         // Should recommend cheaper model or continue
         match analysis.recommendation {
             RetryRecommendation::TryCheaperModel { .. } |
