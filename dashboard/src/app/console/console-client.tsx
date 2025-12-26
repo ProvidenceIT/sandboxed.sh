@@ -202,19 +202,40 @@ function FilePreviewModal({
   onClose: () => void;
 }) {
   const [content, setContent] = useState<string | null>(null);
+  const [imageBlobUrl, setImageBlobUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const blobUrlRef = useRef<string | null>(null);
   const fileName = path.split("/").pop() ?? "file";
   const language = getLanguageFromPath(path);
   const isImage = isImageFile(path);
 
   useEffect(() => {
+    // Revoke previous blob URL if any
+    if (blobUrlRef.current) {
+      URL.revokeObjectURL(blobUrlRef.current);
+      blobUrlRef.current = null;
+    }
+
     async function loadFile() {
       setLoading(true);
       setError(null);
+      setImageBlobUrl(null);
       try {
         if (isImage) {
-          // For images, we'll use the download URL directly
+          // Fetch image as blob with authentication
+          const API_BASE = getRuntimeApiBase();
+          const res = await fetch(
+            `${API_BASE}/api/fs/download?path=${encodeURIComponent(path)}`,
+            {
+              headers: { ...authHeader() },
+            }
+          );
+          if (!res.ok) throw new Error(await res.text());
+          const blob = await res.blob();
+          const blobUrl = URL.createObjectURL(blob);
+          blobUrlRef.current = blobUrl;
+          setImageBlobUrl(blobUrl);
           setContent("image");
         } else {
           const text = await fetchFileContent(path);
@@ -232,6 +253,14 @@ function FilePreviewModal({
       }
     }
     void loadFile();
+
+    // Cleanup blob URL on unmount or path change
+    return () => {
+      if (blobUrlRef.current) {
+        URL.revokeObjectURL(blobUrlRef.current);
+        blobUrlRef.current = null;
+      }
+    };
   }, [path, isImage]);
 
   return (
@@ -292,11 +321,11 @@ function FilePreviewModal({
               </svg>
               <p className="text-sm">{error}</p>
             </div>
-          ) : isImage ? (
+          ) : isImage && imageBlobUrl ? (
             <div className="flex items-center justify-center p-8 bg-[var(--background)]">
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img
-                src={`${getRuntimeApiBase()}/api/fs/download?path=${encodeURIComponent(path)}`}
+                src={imageBlobUrl}
                 alt={fileName}
                 className="max-h-[60vh] max-w-full object-contain"
               />
