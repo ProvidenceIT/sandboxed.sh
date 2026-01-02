@@ -84,12 +84,7 @@ struct RunningMissionsBar: View {
                     .font(.caption.weight(.medium))
                     .foregroundStyle(Theme.textPrimary)
                     .lineLimit(1)
-                
-                // Mission ID
-                Text(String(mission.id.prefix(8)))
-                    .font(.system(size: 9).monospaced())
-                    .foregroundStyle(Theme.textMuted)
-                
+
                 // Selection indicator
                 if isViewing {
                     Image(systemName: "checkmark")
@@ -97,13 +92,13 @@ struct RunningMissionsBar: View {
                         .foregroundStyle(Theme.accent)
                 }
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
             .background(isViewing ? Theme.accent.opacity(0.15) : Color.white.opacity(0.05))
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(isViewing ? Theme.accent.opacity(0.3) : Theme.border, lineWidth: 1)
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(isViewing ? Theme.accent.opacity(0.3) : .clear, lineWidth: 1)
             )
         }
         .buttonStyle(.plain)
@@ -149,18 +144,13 @@ struct RunningMissionsBar: View {
                                     .opacity(0.6)
                             }
                         }
-                    
+
                     // Model name
                     Text(mission.displayModel)
                         .font(.caption.weight(.medium))
                         .foregroundStyle(Theme.textPrimary)
                         .lineLimit(1)
-                    
-                    // Mission ID
-                    Text(String(mission.missionId.prefix(8)))
-                        .font(.system(size: 9).monospaced())
-                        .foregroundStyle(Theme.textMuted)
-                    
+
                     // Stalled indicator
                     if isStalled {
                         HStack(spacing: 2) {
@@ -171,7 +161,7 @@ struct RunningMissionsBar: View {
                         }
                         .foregroundStyle(isSeverlyStalled ? Theme.error : Theme.warning)
                     }
-                    
+
                     // Selection indicator
                     if isViewing {
                         Image(systemName: "checkmark")
@@ -181,7 +171,7 @@ struct RunningMissionsBar: View {
                 }
             }
             .buttonStyle(.plain)
-            
+
             // Cancel button
             Button {
                 onCancelMission(mission.missionId)
@@ -190,19 +180,19 @@ struct RunningMissionsBar: View {
                     .font(.system(size: 9, weight: .medium))
                     .foregroundStyle(Theme.textMuted)
                     .frame(width: 18, height: 18)
-                    .background(Color.white.opacity(0.05))
+                    .background(Color.white.opacity(0.08))
                     .clipShape(Circle())
             }
             .buttonStyle(.plain)
         }
-        .padding(.leading, 10)
+        .padding(.leading, 12)
         .padding(.trailing, 6)
-        .padding(.vertical, 6)
+        .padding(.vertical, 8)
         .background(backgroundColor)
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(borderColor, lineWidth: 1)
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(isViewing ? borderColor : .clear, lineWidth: 1)
         )
     }
     
