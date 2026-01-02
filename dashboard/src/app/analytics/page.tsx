@@ -238,13 +238,13 @@ export default function AnalyticsPage() {
         <div className="bg-white/[0.02] border border-white/[0.06] rounded-xl p-4">
           <div className="flex items-center gap-2 mb-2">
             <CheckCircle className="h-4 w-4 text-emerald-400" />
-            <span className="text-xs text-white/50">Success Rate</span>
+            <span className="text-xs text-white/50">Mission Success Rate</span>
           </div>
           <div className="text-2xl font-semibold text-white">
             {(missionStats.successRate * 100).toFixed(0)}%
           </div>
           <div className="text-xs text-white/40 mt-1">
-            {missionStats.completed} completed, {missionStats.failed} failed
+            {missionStats.completed} missions completed, {missionStats.failed} failed
           </div>
         </div>
       </div>
