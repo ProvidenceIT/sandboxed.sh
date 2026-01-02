@@ -744,6 +744,16 @@ impl SupabaseClient {
     /// excluding the specified mission IDs (e.g., currently running missions).
     /// Returns the count of deleted missions.
     pub async fn delete_empty_untitled_missions_excluding(&self, exclude_ids: &[Uuid]) -> anyhow::Result<usize> {
+        // Minimal struct for partial field selection - avoids deserialization errors
+        // when querying only id, title, history fields (DbMission has more required fields)
+        #[derive(serde::Deserialize)]
+        struct PartialMission {
+            id: Uuid,
+            #[allow(dead_code)]
+            title: Option<String>,
+            history: serde_json::Value,
+        }
+
         // First get missions with null or "Untitled Mission" title and empty history
         let resp = self.client
             .get(format!(
@@ -760,7 +770,7 @@ impl SupabaseClient {
             anyhow::bail!("Failed to query empty missions: {}", text);
         }
 
-        let missions: Vec<DbMission> = resp.json().await?;
+        let missions: Vec<PartialMission> = resp.json().await?;
 
         // Filter to only those with empty history (history is a JSON array)
         // and not in the exclude list (e.g., currently running missions)
