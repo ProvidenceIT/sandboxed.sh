@@ -1213,6 +1213,9 @@ async fn control_actor_loop(
     let mut running: Option<tokio::task::JoinHandle<(Uuid, String, crate::agents::AgentResult)>> =
         None;
     let mut running_cancel: Option<CancellationToken> = None;
+    // Track which mission the main `running` task is actually working on.
+    // This is different from `current_mission` which can change when user creates a new mission.
+    let mut running_mission_id: Option<Uuid> = None;
 
     // Parallel mission runners - each runs independently
     let mut parallel_runners: std::collections::HashMap<Uuid, super::mission_runner::MissionRunner> =
@@ -1538,6 +1541,8 @@ async fn control_actor_loop(
                                 let tree_ref = Arc::clone(&current_tree);
                                 let progress_ref = Arc::clone(&progress);
                                 running_cancel = Some(cancel.clone());
+                                // Capture which mission this task is working on
+                                running_mission_id = current_mission.read().await.clone();
                                 running = Some(tokio::spawn(async move {
                                     let result = run_single_control_turn(
                                         cfg,
@@ -1742,10 +1747,11 @@ async fn control_actor_loop(
                     ControlCommand::ListRunning { respond } => {
                         // Return info about currently running missions
                         let mut running_list = Vec::new();
-                        
-                        // Add main mission if running
+
+                        // Add main mission if running - use running_mission_id (the actual mission being executed)
+                        // instead of current_mission (which can change when user creates a new mission)
                         if running.is_some() {
-                            if let Some(mission_id) = current_mission.read().await.clone() {
+                            if let Some(mission_id) = running_mission_id {
                                 running_list.push(super::mission_runner::RunningMissionInfo {
                                     mission_id,
                                     model_override: None,
@@ -1757,12 +1763,12 @@ async fn control_actor_loop(
                                 });
                             }
                         }
-                        
+
                         // Add all parallel runners
                         for runner in parallel_runners.values() {
                             running_list.push(super::mission_runner::RunningMissionInfo::from(runner));
                         }
-                        
+
                         let _ = respond.send(running_list);
                     }
                     ControlCommand::ResumeMission { mission_id, clean_workspace, respond } => {
@@ -1811,6 +1817,8 @@ async fn control_actor_loop(
                                         let tree_ref = Arc::clone(&current_tree);
                                         let progress_ref = Arc::clone(&progress);
                                         running_cancel = Some(cancel.clone());
+                                        // Capture which mission this task is working on (the resumed mission)
+                                        running_mission_id = Some(mission_id);
                                         running = Some(tokio::spawn(async move {
                                             let result = run_single_control_turn(
                                                 cfg,
@@ -1836,7 +1844,7 @@ async fn control_actor_loop(
                                         }));
                                     }
                                 }
-                                
+
                                 // Return the updated mission
                                 let mut updated_mission = mission;
                                 updated_mission.status = MissionStatus::Active;
@@ -1852,10 +1860,10 @@ async fn control_actor_loop(
                     ControlCommand::GracefulShutdown { respond } => {
                         // Mark all running missions as interrupted
                         let mut interrupted_ids = Vec::new();
-                        
-                        // Handle main mission
+
+                        // Handle main mission - use running_mission_id (the actual mission being executed)
                         if running.is_some() {
-                            if let Some(mission_id) = current_mission.read().await.clone() {
+                            if let Some(mission_id) = running_mission_id {
                                 // Persist current history before marking as interrupted
                                 persist_mission_history(&memory, &current_mission, &history).await;
                                 
@@ -1975,6 +1983,7 @@ async fn control_actor_loop(
                 if let Some(res) = finished {
                     running = None;
                     running_cancel = None;
+                    running_mission_id = None;
                     match res {
                         Ok((_mid, user_msg, agent_result)) => {
                             // Append to conversation history.
@@ -2004,8 +2013,11 @@ async fn control_actor_loop(
                                         
                                         if current_status.as_deref() == Some("active") {
                                             // Determine status based on terminal reason
-                                            // MaxIterations -> blocked (resumable) instead of failed
                                             let (status, new_status) = match agent_result.terminal_reason {
+                                                Some(TerminalReason::Completed) => {
+                                                    ("completed", MissionStatus::Completed)
+                                                }
+                                                // MaxIterations -> blocked (resumable) instead of failed
                                                 Some(TerminalReason::MaxIterations) => {
                                                     ("blocked", MissionStatus::Blocked)
                                                 }
@@ -2080,6 +2092,8 @@ async fn control_actor_loop(
                     let tree_ref = Arc::clone(&current_tree);
                     let progress_ref = Arc::clone(&progress);
                     running_cancel = Some(cancel.clone());
+                    // Capture which mission this task is working on
+                    running_mission_id = current_mission.read().await.clone();
                     running = Some(tokio::spawn(async move {
                         let result = run_single_control_turn(
                             cfg,

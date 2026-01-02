@@ -357,26 +357,22 @@ struct ControlView: View {
             ProgressView()
                 .progressViewStyle(.circular)
                 .tint(Theme.accent)
-            
+
             VStack(alignment: .leading, spacing: 2) {
                 Text("Agent is working...")
                     .font(.subheadline.weight(.medium))
                     .foregroundStyle(Theme.textPrimary)
-                
+
                 Text("Updates will appear here as they arrive")
                     .font(.caption)
                     .foregroundStyle(Theme.textTertiary)
             }
-            
+
             Spacer()
         }
         .padding(16)
         .background(.ultraThinMaterial)
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .stroke(Theme.accent.opacity(0.2), lineWidth: 1)
-        )
         .transition(.opacity.combined(with: .scale(scale: 0.95)))
     }
     
@@ -523,18 +519,18 @@ struct ControlView: View {
                 .background(Theme.border)
             
             HStack(alignment: .bottom, spacing: 12) {
-                // Text input
+                // Text input - borderless design with subtle focus glow
                 TextField("Message the agent...", text: $inputText, axis: .vertical)
                     .textFieldStyle(.plain)
                     .font(.body)
                     .lineLimit(1...5)
                     .padding(.horizontal, 16)
                     .padding(.vertical, 12)
-                    .background(Theme.backgroundSecondary)
+                    .background(.ultraThinMaterial)
                     .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
                     .overlay(
                         RoundedRectangle(cornerRadius: 22, style: .continuous)
-                            .stroke(isInputFocused ? Theme.accent.opacity(0.4) : Theme.border, lineWidth: 1)
+                            .stroke(isInputFocused ? Theme.accent.opacity(0.25) : .clear, lineWidth: 1)
                     )
                     .focused($isInputFocused)
                     .submitLabel(.send)
@@ -564,7 +560,8 @@ struct ControlView: View {
                 .animation(.easeInOut(duration: 0.15), value: runState)
             }
             .padding(.horizontal, 16)
-            .padding(.vertical, 12)
+            .padding(.top, 12)
+            .padding(.bottom, 16)
             .background(.thinMaterial)
         }
     }
