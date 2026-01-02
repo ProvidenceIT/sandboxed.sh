@@ -23,11 +23,16 @@ cargo test                      # Run tests
 cargo fmt                       # Format code
 cargo clippy                    # Lint
 
-# Dashboard (uses Bun, NOT npm)
+# Dashboard (uses Bun, NOT npm/yarn/pnpm)
 cd dashboard
-bun install                     # Install deps
+bun install                     # Install deps (NEVER use npm install)
 bun dev                         # Dev server (port 3001)
 bun run build                   # Production build
+
+# IMPORTANT: Always use bun for dashboard, never npm
+# - bun install (not npm install)
+# - bun add <pkg> (not npm install <pkg>)
+# - bun run <script> (not npm run <script>)
 
 # Deployment
 ssh root@95.216.112.253 'cd /root/open_agent && git pull && cargo build --release && cp target/release/open_agent /usr/local/bin/ && cp target/release/desktop-mcp /usr/local/bin/ && systemctl restart open_agent'

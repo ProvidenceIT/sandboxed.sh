@@ -34,3 +34,9 @@ lmarena_leaderboard.json
 # OS files
 .DS_Store
 Thumbs.db
+
+# Playwright MCP local data
+.playwright-mcp/
+
+# npm lockfile (we use bun)
+dashboard/package-lock.json
