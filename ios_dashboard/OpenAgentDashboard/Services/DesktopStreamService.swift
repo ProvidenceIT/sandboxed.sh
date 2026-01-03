@@ -30,6 +30,8 @@ final class DesktopStreamService: NSObject {
     // Picture-in-Picture state
     var isPipSupported: Bool { AVPictureInPictureController.isPictureInPictureSupported() }
     var isPipActive = false
+    /// Whether PiP has been set up and is ready to use
+    var isPipReady = false
     /// When true, disconnect and cleanup when PiP stops (set when view is dismissed while PiP is active)
     var shouldDisconnectAfterPip = false
     private(set) var pipController: AVPictureInPictureController?
@@ -225,6 +227,7 @@ final class DesktopStreamService: NSObject {
         let controller = AVPictureInPictureController(contentSource: contentSource)
         controller.delegate = self
         pipController = controller
+        isPipReady = true
     }
 
     /// Clean up PiP resources
@@ -234,6 +237,7 @@ final class DesktopStreamService: NSObject {
         sampleBufferDisplayLayer = nil
         pipController = nil
         pipContentSource = nil
+        isPipReady = false
     }
 
     /// Start Picture-in-Picture
@@ -389,8 +393,8 @@ extension DesktopStreamService: AVPictureInPictureSampleBufferPlaybackDelegate {
     }
 
     nonisolated func pictureInPictureControllerIsPlaybackPaused(_ pictureInPictureController: AVPictureInPictureController) -> Bool {
-        // Access from main actor
-        return false // We'll handle this via the service's isPaused state
+        // This is called on the main thread, so we can safely access MainActor-isolated state
+        return MainActor.assumeIsolated { isPaused }
     }
 
     nonisolated func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, didTransitionToRenderSize newRenderSize: CMVideoDimensions) {

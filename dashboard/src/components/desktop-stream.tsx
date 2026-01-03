@@ -276,12 +276,14 @@ export function DesktopStream({
   }, []);
 
   // Cleanup PiP resources on unmount
+  // Note: We don't forcibly exit PiP here to match iOS behavior where
+  // PiP continues when the sheet is dismissed. The PiP will naturally
+  // close when the WebSocket disconnects and the stream ends.
   useEffect(() => {
     return () => {
-      if (document.pictureInPictureElement) {
-        document.exitPictureInPicture().catch(() => {});
-      }
-      if (pipStreamRef.current) {
+      // Only stop stream tracks if PiP is not active
+      // This allows PiP to continue showing the last frame briefly
+      if (!document.pictureInPictureElement && pipStreamRef.current) {
         pipStreamRef.current.getTracks().forEach((track) => track.stop());
       }
     };

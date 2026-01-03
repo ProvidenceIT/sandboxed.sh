@@ -117,8 +117,8 @@ struct DesktopStreamView: View {
                         .background(streamService.isPipActive ? Theme.accent.opacity(0.2) : Theme.backgroundSecondary)
                         .clipShape(Circle())
                 }
-                .disabled(!streamService.isConnected)
-                .opacity(streamService.isConnected ? 1 : 0.5)
+                .disabled(!streamService.isConnected || !streamService.isPipReady)
+                .opacity(streamService.isConnected && streamService.isPipReady ? 1 : 0.5)
             }
 
             // Close button
@@ -239,8 +239,8 @@ struct DesktopStreamView: View {
                             .background(streamService.isPipActive ? Theme.accent : Theme.backgroundSecondary)
                             .clipShape(Circle())
                     }
-                    .disabled(!streamService.isConnected)
-                    .opacity(streamService.isConnected ? 1 : 0.5)
+                    .disabled(!streamService.isConnected || !streamService.isPipReady)
+                    .opacity(streamService.isConnected && streamService.isPipReady ? 1 : 0.5)
                 }
             }
 
