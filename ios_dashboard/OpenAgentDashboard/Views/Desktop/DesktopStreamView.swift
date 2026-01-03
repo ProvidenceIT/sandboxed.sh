@@ -52,8 +52,12 @@ struct DesktopStreamView: View {
             streamService.connect(displayId: displayId)
         }
         .onDisappear {
-            streamService.cleanupPip()
-            streamService.disconnect()
+            // Only disconnect if PiP is not active
+            // This allows the stream to continue in PiP mode after the sheet is dismissed
+            if !streamService.isPipActive {
+                streamService.cleanupPip()
+                streamService.disconnect()
+            }
         }
         .onTapGesture {
             withAnimation(.easeInOut(duration: 0.2)) {

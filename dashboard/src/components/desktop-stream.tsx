@@ -235,6 +235,11 @@ export function DesktopStream({
     }
 
     try {
+      // Stop any existing stream tracks to prevent resource leaks
+      if (pipStreamRef.current) {
+        pipStreamRef.current.getTracks().forEach((track) => track.stop());
+      }
+
       // Create a video element from canvas stream
       const canvas = canvasRef.current;
       const stream = canvas.captureStream(fps);
