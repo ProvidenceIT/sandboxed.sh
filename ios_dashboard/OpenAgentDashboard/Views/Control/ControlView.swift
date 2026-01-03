@@ -1080,9 +1080,10 @@ struct ControlView: View {
                 // Status for a specific mission - only apply if we're viewing that mission
                 shouldApply = statusId == viewingId
             } else {
-                // Status for main session - only apply if viewing the current (main) mission
-                // or if we don't have a current mission yet
-                shouldApply = viewingId == nil || viewingId == currentId
+                // Status for main session - only apply if viewing the current (main) mission,
+                // no specific mission, or currentId hasn't loaded yet (to match event filter
+                // logic and avoid desktop stream staying open when status=idle comes during loading)
+                shouldApply = viewingId == nil || viewingId == currentId || currentId == nil
             }
 
             if shouldApply {

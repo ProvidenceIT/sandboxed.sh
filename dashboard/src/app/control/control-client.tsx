@@ -1249,8 +1249,10 @@ export default function ControlClient() {
           // Status for a specific mission - only apply if viewing that mission
           shouldApplyStatus = statusMissionId === viewingId;
         } else {
-          // Status for main session - only apply if viewing main mission or no specific mission
-          shouldApplyStatus = !viewingId || viewingId === currentMissionId;
+          // Status for main session - only apply if viewing main mission, no specific mission,
+          // or currentMissionId hasn't loaded yet (to match event filter logic and avoid
+          // desktop stream staying open when status=idle comes during loading)
+          shouldApplyStatus = !viewingId || viewingId === currentMissionId || !currentMissionId;
         }
 
         if (shouldApplyStatus) {
