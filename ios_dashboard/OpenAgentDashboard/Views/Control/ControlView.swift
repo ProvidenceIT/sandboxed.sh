@@ -915,26 +915,15 @@ struct ControlView: View {
                 return // Another mission was requested, discard this response
             }
 
-            // If this is not a parallel mission, also update currentMission
-            if runningMissions.contains(where: { $0.missionId == id }) {
-                // This is a parallel mission - just load its history
-                messages = mission.history.enumerated().map { index, entry in
-                    ChatMessage(
-                        id: "\(mission.id)-\(index)",
-                        type: entry.isUser ? .user : .assistant(success: true, costCents: 0, model: nil),
-                        content: entry.content
-                    )
-                }
-            } else {
-                // This is the main mission - load it fully
-                currentMission = mission
-                messages = mission.history.enumerated().map { index, entry in
-                    ChatMessage(
-                        id: "\(mission.id)-\(index)",
-                        type: entry.isUser ? .user : .assistant(success: true, costCents: 0, model: nil),
-                        content: entry.content
-                    )
-                }
+            // Always update currentMission when switching - this ensures
+            // the event filter logic works correctly (viewingId == currentId)
+            currentMission = mission
+            messages = mission.history.enumerated().map { index, entry in
+                ChatMessage(
+                    id: "\(mission.id)-\(index)",
+                    type: entry.isUser ? .user : .assistant(success: true, costCents: 0, model: nil),
+                    content: entry.content
+                )
             }
 
             isLoading = false
