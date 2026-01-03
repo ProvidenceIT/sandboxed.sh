@@ -793,7 +793,7 @@ struct ControlView: View {
         messages.append(tempMessage)
         shouldScrollToBottom = true
 
-        Task {
+        Task { @MainActor in
             do {
                 let (messageId, _) = try await api.sendMessage(content: content)
 
