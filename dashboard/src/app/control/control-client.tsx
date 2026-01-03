@@ -1282,15 +1282,32 @@ export default function ControlClient() {
 
       if (event.type === "user_message" && isRecord(data)) {
         const msgId = String(data["id"] ?? Date.now());
+        const msgContent = String(data["content"] ?? "");
         setItems((prev) => {
-          // Skip if already added (optimistic update race condition)
+          // Skip if already added with this ID
           if (prev.some((item) => item.id === msgId)) return prev;
+
+          // Check if there's a pending temp message (SSE arrived before API response)
+          // Match by position: find FIRST temp message, since SSE events arrive in server order
+          // which matches the order messages were sent
+          const tempIndex = prev.findIndex(
+            (item) => item.kind === "user" && item.id.startsWith("temp-")
+          );
+
+          if (tempIndex !== -1) {
+            // Replace temp ID with server ID, keeping the original content/timestamp
+            const updated = [...prev];
+            updated[tempIndex] = { ...updated[tempIndex], id: msgId };
+            return updated;
+          }
+
+          // No temp message found, add new (message came from another client/session)
           return [
             ...prev,
             {
               kind: "user",
               id: msgId,
-              content: String(data["content"] ?? ""),
+              content: msgContent,
               timestamp: Date.now(),
             },
           ];
@@ -1481,24 +1498,35 @@ export default function ControlClient() {
     setInput("");
     setDraftInput("");
 
+    // Generate temp ID and add message optimistically BEFORE the API call
+    // This ensures messages appear in send order, not response order
+    const tempId = `temp-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const timestamp = Date.now();
+
+    setItems((prev) => [
+      ...prev,
+      {
+        kind: "user" as const,
+        id: tempId,
+        content,
+        timestamp,
+      },
+    ]);
+
     try {
       const { id } = await postControlMessage(content);
 
-      // Optimistically add user message if not already present (race condition guard)
-      setItems((prev) => {
-        if (prev.some((item) => item.id === id)) return prev;
-        return [
-          ...prev,
-          {
-            kind: "user" as const,
-            id,
-            content,
-            timestamp: Date.now(),
-          },
-        ];
-      });
+      // Replace temp ID with server-assigned ID
+      // This allows SSE handler to correctly deduplicate
+      setItems((prev) =>
+        prev.map((item) =>
+          item.id === tempId ? { ...item, id } : item
+        )
+      );
     } catch (err) {
       console.error(err);
+      // Remove the optimistic message on error
+      setItems((prev) => prev.filter((item) => item.id !== tempId));
       toast.error("Failed to send message");
     }
   };

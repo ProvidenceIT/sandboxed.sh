@@ -786,15 +786,21 @@ struct ControlView: View {
         inputText = ""
         HapticService.lightTap()
 
+        // Generate temp ID and add message optimistically BEFORE the API call
+        // This ensures messages appear in send order, not response order
+        let tempId = "temp-\(UUID().uuidString)"
+        let tempMessage = ChatMessage(id: tempId, type: .user, content: content)
+        messages.append(tempMessage)
+        shouldScrollToBottom = true
+
         Task {
             do {
                 let (messageId, _) = try await api.sendMessage(content: content)
 
-                // Add user message to UI if not already added by SSE (race condition guard)
-                if !messages.contains(where: { $0.id == messageId }) {
-                    let userMessage = ChatMessage(id: messageId, type: .user, content: content)
-                    messages.append(userMessage)
-                    shouldScrollToBottom = true
+                // Replace temp ID with server-assigned ID
+                // This allows SSE handler to correctly deduplicate
+                if let index = messages.firstIndex(where: { $0.id == tempId }) {
+                    messages[index] = ChatMessage(id: messageId, type: .user, content: content)
                 }
 
                 // If we don't have a current mission, the backend may have just created one
@@ -804,6 +810,8 @@ struct ControlView: View {
                 }
             } catch {
                 print("Failed to send message: \(error)")
+                // Remove the optimistic message on error
+                messages.removeAll { $0.id == tempId }
                 HapticService.error()
             }
         }
@@ -1079,10 +1087,22 @@ struct ControlView: View {
         case "user_message":
             if let content = data["content"] as? String,
                let id = data["id"] as? String {
-                // Skip if we already have this message (added optimistically)
+                // Skip if we already have this message with this ID
                 guard !messages.contains(where: { $0.id == id }) else { break }
-                let message = ChatMessage(id: id, type: .user, content: content)
-                messages.append(message)
+
+                // Check if there's a pending temp message (SSE arrived before API response)
+                // Match by position: find FIRST temp message, since SSE events arrive in server order
+                // which matches the order messages were sent
+                if let tempIndex = messages.firstIndex(where: {
+                    $0.type == .user && $0.id.hasPrefix("temp-")
+                }) {
+                    // Replace temp ID with server ID, keeping original content/timestamp
+                    messages[tempIndex] = ChatMessage(id: id, type: .user, content: messages[tempIndex].content)
+                } else {
+                    // No temp message found, add new (message came from another client/session)
+                    let message = ChatMessage(id: id, type: .user, content: content)
+                    messages.append(message)
+                }
             }
             
         case "assistant_message":
