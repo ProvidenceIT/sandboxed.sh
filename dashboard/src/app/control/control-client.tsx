@@ -692,6 +692,10 @@ export default function ControlClient() {
     viewingMissionRef.current = viewingMission;
   }, [viewingMission]);
 
+  useEffect(() => {
+    itemsRef.current = items;
+  }, [items]);
+
   // Smart auto-scroll
   const { containerRef, endRef, isAtBottom, scrollToBottom } =
     useScrollToBottom();
@@ -1427,40 +1431,30 @@ export default function ControlClient() {
         }
 
         // If eventToolName wasn't available, check stored items for desktop_start_session
-        // Use a ref-style pattern: read items synchronously, then update state purely
+        // Use itemsRef for synchronous read to avoid side effects in state updaters
         if (!eventToolName) {
-          // We need to access current items to find tool name, but can't call setItems with side effects
-          // Use a separate state read via the functional form, capture display, then update outside
-          let foundDisplay: string | null = null;
-          setItems((prev) => {
-            const toolItem = prev.find(
-              (it) => it.kind === "tool" && it.toolCallId === toolCallId
-            );
-            if (toolItem && toolItem.kind === "tool") {
-              const toolName = toolItem.name;
-              // Check for desktop_start_session (with or without desktop_ prefix from MCP)
-              if (toolName === "desktop_start_session" || toolName === "desktop_desktop_start_session") {
-                let result = data["result"];
-                // Handle case where result is a JSON string that needs parsing
-                if (typeof result === "string") {
-                  try {
-                    result = JSON.parse(result);
-                  } catch {
-                    // Not valid JSON, leave as-is
-                  }
-                }
-                if (isRecord(result) && typeof result["display"] === "string") {
-                  foundDisplay = result["display"];
+          const toolItem = itemsRef.current.find(
+            (it) => it.kind === "tool" && it.toolCallId === toolCallId
+          );
+          if (toolItem && toolItem.kind === "tool") {
+            const toolName = toolItem.name;
+            // Check for desktop_start_session (with or without desktop_ prefix from MCP)
+            if (toolName === "desktop_start_session" || toolName === "desktop_desktop_start_session") {
+              let result = data["result"];
+              // Handle case where result is a JSON string that needs parsing
+              if (typeof result === "string") {
+                try {
+                  result = JSON.parse(result);
+                } catch {
+                  // Not valid JSON, leave as-is
                 }
               }
+              if (isRecord(result) && typeof result["display"] === "string") {
+                const display = result["display"];
+                setDesktopDisplayId(display);
+                setShowDesktopStream(true);
+              }
             }
-            // Return prev unchanged - this is just for reading
-            return prev;
-          });
-          // Apply side effects outside the updater
-          if (foundDisplay) {
-            setDesktopDisplayId(foundDisplay);
-            setShowDesktopStream(true);
           }
         }
 

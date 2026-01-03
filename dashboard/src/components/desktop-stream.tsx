@@ -246,6 +246,10 @@ export function DesktopStream({
         video.muted = true;
         video.autoplay = true;
         video.playsInline = true;
+        // Attach PiP event listeners directly to the video element
+        // These events fire on the video, not document, so we need to listen here
+        video.addEventListener("enterpictureinpicture", () => setIsPipActive(true));
+        video.addEventListener("leavepictureinpicture", () => setIsPipActive(false));
         pipVideoRef.current = video;
       }
 
@@ -264,19 +268,6 @@ export function DesktopStream({
     setIsPipSupported(
       "pictureInPictureEnabled" in document && document.pictureInPictureEnabled
     );
-  }, []);
-
-  // Listen for PiP changes
-  useEffect(() => {
-    const handlePipChange = () => {
-      setIsPipActive(!!document.pictureInPictureElement);
-    };
-    document.addEventListener("enterpictureinpicture", handlePipChange);
-    document.addEventListener("leavepictureinpicture", handlePipChange);
-    return () => {
-      document.removeEventListener("enterpictureinpicture", handlePipChange);
-      document.removeEventListener("leavepictureinpicture", handlePipChange);
-    };
   }, []);
 
   // Cleanup PiP resources on unmount
