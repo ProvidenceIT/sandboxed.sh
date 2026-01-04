@@ -2,13 +2,15 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { login, getHealth } from '@/lib/api';
-import { clearJwt, getValidJwt, setJwt, signalAuthSuccess } from '@/lib/auth';
+import { clearJwt, getStoredUsername, getValidJwt, setJwt, setStoredUsername, signalAuthSuccess } from '@/lib/auth';
 import { Lock } from 'lucide-react';
 
 export function AuthGate({ children }: { children: React.ReactNode }) {
   const [ready, setReady] = useState(false);
   const [authRequired, setAuthRequired] = useState(false);
   const [isAuthed, setIsAuthed] = useState(true);
+  const [authMode, setAuthMode] = useState<'disabled' | 'single_tenant' | 'multi_user'>('single_tenant');
+  const [username, setUsername] = useState(getStoredUsername() ?? '');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -23,6 +25,9 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
         if (!mounted) return;
 
         setAuthRequired(Boolean(health.auth_required));
+        if (health.auth_mode) {
+          setAuthMode(health.auth_mode);
+        }
         if (!health.auth_required) {
           setIsAuthed(true);
         } else {
@@ -54,16 +59,27 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
 
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (authMode === 'multi_user' && !username.trim()) {
+      setError('Username is required');
+      return;
+    }
     setIsSubmitting(true);
     setError(null);
     try {
-      const res = await login(password);
+      const res = await login(password, authMode === 'multi_user' ? username : undefined);
       setJwt(res.token, res.exp);
+      if (authMode === 'multi_user') {
+        setStoredUsername(username);
+      }
       setIsAuthed(true);
       setPassword('');
       signalAuthSuccess();
-    } catch {
-      setError('Invalid password');
+    } catch (err) {
+      if (err instanceof Error) {
+        setError(err.message);
+      } else {
+        setError(authMode === 'multi_user' ? 'Invalid username or password' : 'Invalid password');
+      }
     } finally {
       setIsSubmitting(false);
     }
@@ -89,19 +105,36 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
               <div>
                 <h2 className="text-lg font-semibold text-white">Authenticate</h2>
                 <p className="text-xs text-white/50">
-                  Enter the dashboard password to continue
+                  {authMode === 'multi_user'
+                    ? 'Sign in with your username and password'
+                    : 'Enter the dashboard password to continue'}
                 </p>
               </div>
             </div>
 
             <form onSubmit={onSubmit} className="space-y-4">
+              {authMode === 'multi_user' && (
+                <div>
+                  <input
+                    type="text"
+                    value={username}
+                    onChange={(e) => setUsername(e.target.value)}
+                    placeholder="Username"
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    autoFocus={authMode === 'multi_user'}
+                    spellCheck={false}
+                    className="w-full rounded-lg border border-white/[0.06] bg-white/[0.02] px-4 py-3 text-sm text-white placeholder-white/30 focus:border-indigo-500/50 focus:outline-none transition-colors"
+                  />
+                </div>
+              )}
               <div>
                 <input
                   type="password"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder="Password"
-                  autoFocus
+                  autoFocus={authMode !== 'multi_user'}
                   className="w-full rounded-lg border border-white/[0.06] bg-white/[0.02] px-4 py-3 text-sm text-white placeholder-white/30 focus:border-indigo-500/50 focus:outline-none transition-colors"
                 />
               </div>
@@ -114,7 +147,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
 
               <button
                 type="submit"
-                disabled={!password || isSubmitting}
+                disabled={!password || (authMode === 'multi_user' && !username.trim()) || isSubmitting}
                 className="w-full rounded-lg bg-indigo-500 hover:bg-indigo-600 px-4 py-3 text-sm font-medium text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {isSubmitting ? 'Signing in…' : 'Sign in'}

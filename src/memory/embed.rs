@@ -112,6 +112,7 @@ struct EmbeddingRequest {
 #[derive(Debug, Deserialize)]
 struct EmbeddingResponse {
     data: Vec<EmbeddingData>,
+    #[allow(dead_code)]
     #[serde(default)]
     usage: Option<EmbeddingUsage>,
 }
@@ -123,7 +124,10 @@ struct EmbeddingData {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct EmbeddingUsage {
+    #[allow(dead_code)]
     prompt_tokens: u32,
+    #[allow(dead_code)]
     total_tokens: u32,
 }

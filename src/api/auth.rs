@@ -21,16 +21,25 @@ use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation};
 
 use super::routes::AppState;
 use super::types::{LoginRequest, LoginResponse};
-use crate::config::Config;
+use crate::config::{AuthMode, Config, UserAccount};
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct Claims {
     /// Subject (we only need a stable sentinel)
     sub: String,
+    /// Username (for display/auditing)
+    #[serde(default)]
+    usr: String,
     /// Issued-at unix seconds
     iat: i64,
     /// Expiration unix seconds
     exp: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct AuthUser {
+    pub id: String,
+    pub username: String,
 }
 
 fn constant_time_eq(a: &str, b: &str) -> bool {
@@ -46,11 +55,12 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
     diff == 0
 }
 
-fn issue_jwt(secret: &str, ttl_days: i64) -> anyhow::Result<(String, i64)> {
+fn issue_jwt(secret: &str, ttl_days: i64, user: &AuthUser) -> anyhow::Result<(String, i64)> {
     let now = Utc::now();
     let exp = now + Duration::days(ttl_days.max(1));
     let claims = Claims {
-        sub: "open_agent_dashboard".to_string(),
+        sub: user.id.clone(),
+        usr: user.username.clone(),
         iat: now.timestamp(),
         exp: exp.timestamp(),
     };
@@ -84,24 +94,82 @@ pub fn verify_token_for_config(token: &str, config: &Config) -> bool {
         Some(s) => s,
         None => return false,
     };
-    verify_jwt(token, secret).is_ok()
+    let Ok(claims) = verify_jwt(token, secret) else {
+        return false;
+    };
+    match config.auth.auth_mode(config.dev_mode) {
+        AuthMode::MultiUser => user_for_claims(&claims, &config.auth.users).is_some(),
+        AuthMode::SingleTenant => true,
+        AuthMode::Disabled => true,
+    }
 }
 
 pub async fn login(
     State(state): State<std::sync::Arc<AppState>>,
     Json(req): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, (StatusCode, String)> {
-    // If dev_mode is enabled, we still allow login, but it won't be required.
-    let expected = state
-        .config
-        .auth
-        .dashboard_password
-        .as_deref()
-        .unwrap_or("");
+    let auth_mode = state.config.auth.auth_mode(state.config.dev_mode);
+    let user = match auth_mode {
+        AuthMode::MultiUser => {
+            let username = req.username.as_deref().unwrap_or("").trim();
+            if username.is_empty() {
+                return Err((StatusCode::UNAUTHORIZED, "Username required".to_string()));
+            }
+            // Find user and verify password. Use a single generic error message
+            // for both invalid username and invalid password to prevent username enumeration.
+            let account = state
+                .config
+                .auth
+                .users
+                .iter()
+                .find(|u| u.username.trim() == username);
 
-    if expected.is_empty() || !constant_time_eq(req.password.trim(), expected) {
-        return Err((StatusCode::UNAUTHORIZED, "Invalid password".to_string()));
-    }
+            let valid = match account {
+                Some(acc) => {
+                    !acc.password.trim().is_empty()
+                        && constant_time_eq(req.password.trim(), acc.password.trim())
+                }
+                None => {
+                    // Perform a dummy comparison to prevent timing attacks
+                    let _ = constant_time_eq(req.password.trim(), "dummy_password_for_timing");
+                    false
+                }
+            };
+
+            if !valid {
+                return Err((
+                    StatusCode::UNAUTHORIZED,
+                    "Invalid username or password".to_string(),
+                ));
+            }
+
+            let account = account.unwrap();
+            let effective_id = effective_user_id(account);
+
+            AuthUser {
+                id: effective_id,
+                username: account.username.clone(),
+            }
+        }
+        AuthMode::SingleTenant | AuthMode::Disabled => {
+            // If dev_mode is enabled, we still allow login, but it won't be required.
+            let expected = state
+                .config
+                .auth
+                .dashboard_password
+                .as_deref()
+                .unwrap_or("");
+
+            if expected.is_empty() || !constant_time_eq(req.password.trim(), expected) {
+                return Err((StatusCode::UNAUTHORIZED, "Invalid password".to_string()));
+            }
+
+            AuthUser {
+                id: "default".to_string(),
+                username: "default".to_string(),
+            }
+        }
+    };
 
     let secret = state.config.auth.jwt_secret.as_deref().ok_or_else(|| {
         (
@@ -110,7 +178,7 @@ pub async fn login(
         )
     })?;
 
-    let (token, exp) = issue_jwt(secret, state.config.auth.jwt_ttl_days)
+    let (token, exp) = issue_jwt(secret, state.config.auth.jwt_ttl_days, &user)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(Json(LoginResponse { token, exp }))
@@ -118,11 +186,15 @@ pub async fn login(
 
 pub async fn require_auth(
     State(state): State<std::sync::Arc<AppState>>,
-    req: Request<Body>,
+    mut req: Request<Body>,
     next: Next,
 ) -> Response {
     // Dev mode => no auth checks.
     if state.config.dev_mode {
+        req.extensions_mut().insert(AuthUser {
+            id: "dev".to_string(),
+            username: "dev".to_string(),
+        });
         return next.run(req).await;
     }
 
@@ -154,7 +226,45 @@ pub async fn require_auth(
     }
 
     match verify_jwt(token, secret) {
-        Ok(_claims) => next.run(req).await,
+        Ok(claims) => {
+            let user = match state.config.auth.auth_mode(state.config.dev_mode) {
+                AuthMode::MultiUser => match user_for_claims(&claims, &state.config.auth.users) {
+                    Some(u) => u,
+                    None => {
+                        return (StatusCode::UNAUTHORIZED, "Invalid user").into_response();
+                    }
+                },
+                AuthMode::SingleTenant => AuthUser {
+                    id: claims.sub,
+                    username: claims.usr,
+                },
+                AuthMode::Disabled => AuthUser {
+                    id: "default".to_string(),
+                    username: "default".to_string(),
+                },
+            };
+            req.extensions_mut().insert(user);
+            next.run(req).await
+        }
         Err(_) => (StatusCode::UNAUTHORIZED, "Invalid or expired token").into_response(),
     }
+}
+
+/// Returns the effective user ID (id if non-empty, otherwise username).
+fn effective_user_id(user: &UserAccount) -> String {
+    if user.id.is_empty() {
+        user.username.clone()
+    } else {
+        user.id.clone()
+    }
+}
+
+fn user_for_claims(claims: &Claims, users: &[UserAccount]) -> Option<AuthUser> {
+    users
+        .iter()
+        .find(|u| effective_user_id(u) == claims.sub)
+        .map(|u| AuthUser {
+            id: effective_user_id(u),
+            username: u.username.clone(),
+        })
 }

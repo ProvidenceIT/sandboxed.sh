@@ -138,10 +138,11 @@ async fn search_tavily(api_key: &str, query: &str, max_results: u32) -> anyhow::
     // Format individual results
     for (i, result) in tavily_response.results.iter().enumerate() {
         output.push_str(&format!(
-            "### {}. {}\n**URL:** {}\n\n{}\n\n",
+            "### {}. {}\n**URL:** {}\n**Score:** {:.2}\n\n{}\n\n",
             i + 1,
             result.title,
             result.url,
+            result.score,
             result.content
         ));
     }

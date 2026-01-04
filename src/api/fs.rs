@@ -500,6 +500,9 @@ pub async fn upload_chunk(
     Query(q): Query<ChunkUploadQuery>,
     mut multipart: Multipart,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if q.path.trim().is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "Invalid path".to_string()));
+    }
     // Sanitize upload_id to prevent path traversal attacks
     let safe_upload_id = sanitize_path_component(&q.upload_id);
     if safe_upload_id.is_empty() {

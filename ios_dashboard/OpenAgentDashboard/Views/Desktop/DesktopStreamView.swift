@@ -191,7 +191,7 @@ struct DesktopStreamView: View {
     // MARK: - Controls
 
     private var controlsView: some View {
-        VStack(spacing: 16) {
+        VStack(alignment: .leading, spacing: 16) {
             // Play/Pause, PiP, and reconnect buttons
             HStack(spacing: 16) {
                 // Play/Pause
@@ -242,16 +242,19 @@ struct DesktopStreamView: View {
                     .disabled(!streamService.isConnected || !streamService.isPipReady)
                     .opacity(streamService.isConnected && streamService.isPipReady ? 1 : 0.5)
                 }
+
+                Spacer()
             }
+            .frame(maxWidth: .infinity)
 
             // Quality and FPS sliders
-            VStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 12) {
                 // FPS slider
-                HStack {
+                HStack(spacing: 8) {
                     Text("FPS")
                         .font(.caption.weight(.medium))
                         .foregroundStyle(Theme.textMuted)
-                        .frame(width: 50, alignment: .leading)
+                        .frame(width: 55, alignment: .leading)
 
                     Slider(value: Binding(
                         get: { Double(streamService.fps) },
@@ -262,15 +265,16 @@ struct DesktopStreamView: View {
                     Text("\(streamService.fps)")
                         .font(.caption.monospaced())
                         .foregroundStyle(Theme.textSecondary)
-                        .frame(width: 30)
+                        .frame(width: 30, alignment: .trailing)
                 }
+                .frame(maxWidth: .infinity)
 
                 // Quality slider
-                HStack {
+                HStack(spacing: 8) {
                     Text("Quality")
                         .font(.caption.weight(.medium))
                         .foregroundStyle(Theme.textMuted)
-                        .frame(width: 50, alignment: .leading)
+                        .frame(width: 55, alignment: .leading)
 
                     Slider(value: Binding(
                         get: { Double(streamService.quality) },
@@ -281,12 +285,15 @@ struct DesktopStreamView: View {
                     Text("\(streamService.quality)%")
                         .font(.caption.monospaced())
                         .foregroundStyle(Theme.textSecondary)
-                        .frame(width: 40)
+                        .frame(width: 40, alignment: .trailing)
                 }
+                .frame(maxWidth: .infinity)
             }
+            .frame(maxWidth: .infinity)
             .padding(.horizontal, 8)
         }
         .padding(16)
+        .frame(maxWidth: .infinity)
         .background(.ultraThinMaterial)
     }
 }

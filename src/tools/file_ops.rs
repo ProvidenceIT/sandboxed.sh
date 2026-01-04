@@ -68,11 +68,6 @@ impl Tool for ReadFile {
             Ok(text) => text,
             Err(_) => {
                 // Binary file detected - don't try to display content
-                let ext = resolution
-                    .resolved
-                    .extension()
-                    .map(|e| e.to_string_lossy().to_lowercase())
-                    .unwrap_or_default();
                 return Ok(format!(
                     "Binary file detected: {} ({} bytes)\n\n\
                     Cannot display binary content directly. For this file type:\n\

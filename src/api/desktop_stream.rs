@@ -95,7 +95,7 @@ enum ClientCommand {
 }
 
 /// Handle the WebSocket connection for desktop streaming
-async fn handle_desktop_stream(mut socket: WebSocket, params: StreamParams) {
+async fn handle_desktop_stream(socket: WebSocket, params: StreamParams) {
     let x11_display = params.display;
     let fps = params.fps.unwrap_or(10).clamp(1, 30);
     let quality = params.quality.unwrap_or(70).clamp(10, 100);
@@ -131,9 +131,8 @@ async fn handle_desktop_stream(mut socket: WebSocket, params: StreamParams) {
 
     // Streaming state
     let mut paused = false;
-    let mut current_fps = fps;
     let mut current_quality = quality;
-    let mut frame_interval = Duration::from_millis(1000 / current_fps as u64);
+    let mut frame_interval = Duration::from_millis(1000 / fps as u64);
 
     // Main streaming loop
     let mut stream_task = tokio::spawn(async move {
@@ -152,11 +151,13 @@ async fn handle_desktop_stream(mut socket: WebSocket, params: StreamParams) {
                         tracing::debug!("Stream resumed");
                     }
                     ClientCommand::SetFps { fps: new_fps } => {
-                        current_fps = new_fps.clamp(1, 30);
-                        frame_interval = Duration::from_millis(1000 / current_fps as u64);
-                        tracing::debug!(fps = current_fps, "FPS changed");
+                        let clamped = new_fps.clamp(1, 30);
+                        frame_interval = Duration::from_millis(1000 / clamped as u64);
+                        tracing::debug!(fps = clamped, "FPS changed");
                     }
-                    ClientCommand::SetQuality { quality: new_quality } => {
+                    ClientCommand::SetQuality {
+                        quality: new_quality,
+                    } => {
                         current_quality = new_quality.clamp(10, 100);
                         tracing::debug!(quality = current_quality, "Quality changed");
                     }

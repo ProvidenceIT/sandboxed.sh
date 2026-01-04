@@ -1,5 +1,6 @@
 const TOKEN_KEY = 'openagent.jwt';
 const EXP_KEY = 'openagent.jwt_exp';
+const USERNAME_KEY = 'openagent.username';
 
 export function getStoredJwt(): { token: string; exp: number } | null {
   if (typeof window === 'undefined') return null;
@@ -32,6 +33,19 @@ export function setJwt(token: string, exp: number): void {
   // Use localStorage for persistence across browser sessions
   localStorage.setItem(TOKEN_KEY, token);
   localStorage.setItem(EXP_KEY, String(exp));
+}
+
+export function getStoredUsername(): string | null {
+  if (typeof window === 'undefined') return null;
+  const username = localStorage.getItem(USERNAME_KEY);
+  return username && username.trim().length > 0 ? username : null;
+}
+
+export function setStoredUsername(username: string): void {
+  if (typeof window === 'undefined') return;
+  const trimmed = username.trim();
+  if (trimmed.length === 0) return;
+  localStorage.setItem(USERNAME_KEY, trimmed);
 }
 
 export function clearJwt(): void {

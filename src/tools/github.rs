@@ -359,9 +359,14 @@ For private repos, set GH_TOKEN env var with a Personal Access Token."
                 ""
             };
 
+            let url_line = repo
+                .url
+                .as_deref()
+                .map(|u| format!("  URL: {}\n", u))
+                .unwrap_or_default();
             output.push_str(&format!(
-                "- **{}**{} ({}, ⭐{})\n  {}\n",
-                repo.name, archived, lang, stars, desc
+                "- **{}**{} ({}, ⭐{})\n  {}\n{}",
+                repo.name, archived, lang, stars, desc, url_line
             ));
         }
 

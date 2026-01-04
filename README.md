@@ -45,13 +45,12 @@ cargo run --release
 
 The server starts on `http://127.0.0.1:3000` by default.
 
-### OpenCode Backend (External Agent)
+### OpenCode Backend (Required)
 
-Open Agent can delegate execution to an OpenCode server instead of using its built-in agent loop.
+Open Agent delegates execution to an OpenCode server. OpenCode must be running and reachable.
 
 ```bash
 # Point to a running OpenCode server
-export AGENT_BACKEND="opencode"
 export OPENCODE_BASE_URL="http://127.0.0.1:4096"
 
 # Optional: choose OpenCode agent (build/plan/etc)
@@ -142,6 +141,20 @@ curl http://localhost:3000/api/health
 | `HOST` | `127.0.0.1` | Server bind address |
 | `PORT` | `3000` | Server port |
 | `MAX_ITERATIONS` | `50` | Max agent loop iterations |
+| `OPEN_AGENT_USERS` | (optional) | JSON array of multi-user accounts (enables multi-user auth) |
+| `DASHBOARD_PASSWORD` | (optional) | Single-tenant dashboard password (legacy auth) |
+| `JWT_SECRET` | (required for auth) | HMAC secret for JWT signing |
+
+### Multi-user Auth
+
+Provide `OPEN_AGENT_USERS` to enable multi-user login:
+
+```bash
+export JWT_SECRET="your-secret"
+export OPEN_AGENT_USERS='[{"id":"alice","username":"alice","password":"..."}]'
+```
+
+When multi-user auth is enabled, the memory system is disabled to avoid cross-user leakage.
 
 ## Architecture
 
@@ -204,7 +217,7 @@ export OPENROUTER_API_KEY="sk-or-v1-..."
 cargo run --release --bin calibrate -- --workspace ./.open_agent_calibration --model openai/gpt-4.1-mini --write-tuning
 ```
 
-This writes a tuning file at `./.open_agent_calibration/.open_agent/tuning.json`. Move/copy it to your real workspace as `./.open_agent/tuning.json` to enable it.
+This writes a tuning file at `./.open_agent_calibration/.openagent/tuning.json`. Move/copy it to your real workspace as `./.openagent/tuning.json` to enable it.
 
 ## License
 

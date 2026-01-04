@@ -20,4 +20,4 @@ Configure the backend URL via:
 
 ## Auth
 
-If the backend reports `auth_required=true` from `GET /api/health`, the dashboard will prompt for a password and store a JWT in `sessionStorage`.
+If the backend reports `auth_required=true` from `GET /api/health`, the dashboard will prompt for credentials and store a JWT in `sessionStorage`. In multi-user mode (`auth_mode=multi_user`), it asks for username + password.

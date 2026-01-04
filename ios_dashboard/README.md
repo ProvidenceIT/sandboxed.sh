@@ -72,6 +72,8 @@ The app connects to the Open Agent backend. Configure the server URL:
 - Default: `https://agent-backend.thomas.md`
 - Can be changed in the login screen
 
+In multi-user mode, the login screen also asks for a username.
+
 ## Project Structure
 
 ```

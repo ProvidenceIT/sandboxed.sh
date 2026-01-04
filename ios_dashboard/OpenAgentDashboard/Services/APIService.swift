@@ -30,13 +30,21 @@ final class APIService {
     }
     
     var authRequired: Bool = false
+    var authMode: AuthMode = .singleTenant
+
+    enum AuthMode: String {
+        case disabled = "disabled"
+        case singleTenant = "single_tenant"
+        case multiUser = "multi_user"
+    }
     
     
     // MARK: - Authentication
     
-    func login(password: String) async throws -> Bool {
+    func login(password: String, username: String? = nil) async throws -> Bool {
         struct LoginRequest: Encodable {
             let password: String
+            let username: String?
         }
         
         struct LoginResponse: Decodable {
@@ -44,7 +52,7 @@ final class APIService {
             let exp: Int
         }
         
-        let response: LoginResponse = try await post("/api/auth/login", body: LoginRequest(password: password), authenticated: false)
+        let response: LoginResponse = try await post("/api/auth/login", body: LoginRequest(password: password, username: username), authenticated: false)
         jwtToken = response.token
         return true
     }
@@ -57,15 +65,22 @@ final class APIService {
         struct HealthResponse: Decodable {
             let status: String
             let authRequired: Bool
+            let authMode: String?
             
             enum CodingKeys: String, CodingKey {
                 case status
                 case authRequired = "auth_required"
+                case authMode = "auth_mode"
             }
         }
         
         let response: HealthResponse = try await get("/api/health", authenticated: false)
         authRequired = response.authRequired
+        if let modeRaw = response.authMode, let mode = AuthMode(rawValue: modeRaw) {
+            authMode = mode
+        } else {
+            authMode = authRequired ? .singleTenant : .disabled
+        }
         return response.status == "ok"
     }
     

@@ -53,7 +53,8 @@ base64 = "0.22"
 bytes = "1"
 portable-pty = "0.9"
 tokio-util = { version = "0.7", features = ["io"] }
-chromiumoxide = { version = "0.8.0", features = ["tokio-runtime"] }
+# Keep MSRV-compatible idna_adapter for the production builder (rustc 1.75).
+idna_adapter = "=1.1.0"
 
 [[bin]]
 name = "open_agent"
@@ -62,6 +63,10 @@ path = "src/main.rs"
 [[bin]]
 name = "desktop-mcp"
 path = "src/bin/desktop_mcp.rs"
+
+[[bin]]
+name = "host-mcp"
+path = "src/bin/host_mcp.rs"
 
 [dev-dependencies]
 tokio-test = "0.4"

@@ -6,7 +6,7 @@ use tokio::sync::RwLock;
 
 use axum::middleware;
 use axum::{
-    extract::{DefaultBodyLimit, Path, Query, State},
+    extract::{DefaultBodyLimit, Extension, Path, Query, State},
     http::StatusCode,
     response::{
         sse::{Event, Sse},
@@ -23,13 +23,14 @@ use uuid::Uuid;
 
 use crate::agents::{AgentContext, AgentRef, OpenCodeAgent};
 use crate::budget::ModelPricing;
-use crate::config::Config;
+use crate::config::{AuthMode, Config};
 use crate::llm::OpenRouterClient;
 use crate::mcp::McpRegistry;
 use crate::memory::{self, MemorySystem};
 use crate::tools::ToolRegistry;
+use crate::workspace;
 
-use super::auth;
+use super::auth::{self, AuthUser};
 use super::console;
 use super::control;
 use super::desktop_stream;
@@ -40,13 +41,13 @@ use super::types::*;
 /// Shared application state.
 pub struct AppState {
     pub config: Config,
-    pub tasks: RwLock<HashMap<Uuid, TaskState>>,
+    pub tasks: RwLock<HashMap<String, HashMap<Uuid, TaskState>>>,
     /// The agent used for task execution
     pub root_agent: AgentRef,
     /// Memory system (optional)
     pub memory: Option<MemorySystem>,
     /// Global interactive control session
-    pub control: control::ControlState,
+    pub control: control::ControlHub,
     /// MCP server registry
     pub mcp: Arc<McpRegistry>,
     /// Benchmark registry for task-aware model selection
@@ -60,8 +61,14 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     // Always use OpenCode backend
     let root_agent: AgentRef = Arc::new(OpenCodeAgent::new(config.clone()));
 
-    // Initialize memory system (optional - needs Supabase config)
-    let memory = memory::init_memory(&config.memory, &config.api_key).await;
+    // Initialize memory system (optional - needs Supabase config).
+    // Disable memory in multi-user mode to avoid cross-user leakage.
+    let memory = if matches!(config.auth.auth_mode(config.dev_mode), AuthMode::MultiUser) {
+        tracing::warn!("Multi-user auth enabled: disabling memory system");
+        None
+    } else {
+        memory::init_memory(&config.memory, &config.api_key).await
+    };
 
     // Initialize MCP registry
     let mcp = Arc::new(McpRegistry::new(&config.working_dir).await);
@@ -80,7 +87,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     let resolver = crate::budget::load_resolver(&config.working_dir.to_string_lossy());
 
     // Spawn the single global control session actor.
-    let control_state = control::spawn_control_session(
+    let control_state = control::ControlHub::new(
         config.clone(),
         Arc::clone(&root_agent),
         memory.clone(),
@@ -265,33 +272,43 @@ async fn shutdown_signal(state: Arc<AppState>) {
 
     tracing::info!("Shutdown signal received, marking running missions as interrupted...");
 
-    // Send graceful shutdown command to control session
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    if let Err(e) = state
-        .control
-        .cmd_tx
-        .send(control::ControlCommand::GracefulShutdown { respond: tx })
-        .await
-    {
-        tracing::error!("Failed to send shutdown command: {}", e);
+    // Send graceful shutdown command to all control sessions
+    let sessions = state.control.all_sessions().await;
+    if sessions.is_empty() {
+        tracing::info!("No active control sessions to shut down");
         return;
     }
 
-    match rx.await {
-        Ok(interrupted_ids) => {
-            if interrupted_ids.is_empty() {
-                tracing::info!("No running missions to interrupt");
-            } else {
-                tracing::info!(
-                    "Marked {} missions as interrupted: {:?}",
-                    interrupted_ids.len(),
-                    interrupted_ids
-                );
+    let mut all_interrupted: Vec<Uuid> = Vec::new();
+    for control in sessions {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if let Err(e) = control
+            .cmd_tx
+            .send(control::ControlCommand::GracefulShutdown { respond: tx })
+            .await
+        {
+            tracing::error!("Failed to send shutdown command: {}", e);
+            continue;
+        }
+
+        match rx.await {
+            Ok(mut interrupted_ids) => {
+                all_interrupted.append(&mut interrupted_ids);
+            }
+            Err(e) => {
+                tracing::error!("Failed to receive shutdown response: {}", e);
             }
         }
-        Err(e) => {
-            tracing::error!("Failed to receive shutdown response: {}", e);
-        }
+    }
+
+    if all_interrupted.is_empty() {
+        tracing::info!("No running missions to interrupt");
+    } else {
+        tracing::info!(
+            "Marked {} missions as interrupted: {:?}",
+            all_interrupted.len(),
+            all_interrupted
+        );
     }
 
     tracing::info!("Graceful shutdown complete");
@@ -299,32 +316,51 @@ async fn shutdown_signal(state: Arc<AppState>) {
 
 /// Health check endpoint.
 async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
+    let auth_mode = match state.config.auth.auth_mode(state.config.dev_mode) {
+        AuthMode::Disabled => "disabled",
+        AuthMode::SingleTenant => "single_tenant",
+        AuthMode::MultiUser => "multi_user",
+    };
     Json(HealthResponse {
         status: "ok".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         dev_mode: state.config.dev_mode,
         auth_required: state.config.auth.auth_required(state.config.dev_mode),
+        auth_mode: auth_mode.to_string(),
         max_iterations: state.config.max_iterations,
     })
 }
 
 /// Get system statistics.
-async fn get_stats(State(state): State<Arc<AppState>>) -> Json<StatsResponse> {
+async fn get_stats(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+) -> Json<StatsResponse> {
     let tasks = state.tasks.read().await;
+    let user_tasks = tasks.get(&user.id);
 
-    let total_tasks = tasks.len();
-    let active_tasks = tasks
-        .values()
-        .filter(|t| t.status == TaskStatus::Running)
-        .count();
-    let completed_tasks = tasks
-        .values()
-        .filter(|t| t.status == TaskStatus::Completed)
-        .count();
-    let failed_tasks = tasks
-        .values()
-        .filter(|t| t.status == TaskStatus::Failed)
-        .count();
+    let total_tasks = user_tasks.map(|t| t.len()).unwrap_or(0);
+    let active_tasks = user_tasks
+        .map(|t| {
+            t.values()
+                .filter(|s| s.status == TaskStatus::Running)
+                .count()
+        })
+        .unwrap_or(0);
+    let completed_tasks = user_tasks
+        .map(|t| {
+            t.values()
+                .filter(|s| s.status == TaskStatus::Completed)
+                .count()
+        })
+        .unwrap_or(0);
+    let failed_tasks = user_tasks
+        .map(|t| {
+            t.values()
+                .filter(|s| s.status == TaskStatus::Failed)
+                .count()
+        })
+        .unwrap_or(0);
 
     // Calculate total cost from runs in database
     let total_cost_cents = if let Some(mem) = &state.memory {
@@ -351,9 +387,15 @@ async fn get_stats(State(state): State<Arc<AppState>>) -> Json<StatsResponse> {
 }
 
 /// List all tasks.
-async fn list_tasks(State(state): State<Arc<AppState>>) -> Json<Vec<TaskState>> {
+async fn list_tasks(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+) -> Json<Vec<TaskState>> {
     let tasks = state.tasks.read().await;
-    let mut task_list: Vec<_> = tasks.values().cloned().collect();
+    let mut task_list: Vec<_> = tasks
+        .get(&user.id)
+        .map(|t| t.values().cloned().collect())
+        .unwrap_or_default();
     // Sort by most recent first (by ID since UUIDs are time-ordered)
     task_list.sort_by(|a, b| b.id.cmp(&a.id));
     Json(task_list)
@@ -362,11 +404,13 @@ async fn list_tasks(State(state): State<Arc<AppState>>) -> Json<Vec<TaskState>> 
 /// Stop a running task.
 async fn stop_task(
     State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let mut tasks = state.tasks.write().await;
+    let user_tasks = tasks.entry(user.id).or_default();
 
-    if let Some(task) = tasks.get_mut(&id) {
+    if let Some(task) = user_tasks.get_mut(&id) {
         if task.status == TaskStatus::Running {
             task.status = TaskStatus::Cancelled;
             task.result = Some("Task was cancelled by user".to_string());
@@ -388,6 +432,7 @@ async fn stop_task(
 /// Create a new task.
 async fn create_task(
     State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
     Json(req): Json<CreateTaskRequest>,
 ) -> Result<Json<CreateTaskResponse>, (StatusCode, String)> {
     let id = Uuid::new_v4();
@@ -408,19 +453,27 @@ async fn create_task(
     // Store task
     {
         let mut tasks = state.tasks.write().await;
-        tasks.insert(id, task_state);
+        tasks
+            .entry(user.id.clone())
+            .or_default()
+            .insert(id, task_state);
     }
 
     // Spawn background task to run the agent
     let state_clone = Arc::clone(&state);
     let task_description = req.task.clone();
-    let working_dir = req
-        .working_dir
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| state.config.working_dir.clone());
+    let working_dir = req.working_dir.map(std::path::PathBuf::from);
 
     tokio::spawn(async move {
-        run_agent_task(state_clone, id, task_description, model, working_dir).await;
+        run_agent_task(
+            state_clone,
+            user.id,
+            id,
+            task_description,
+            model,
+            working_dir,
+        )
+        .await;
     });
 
     Ok(Json(CreateTaskResponse {
@@ -432,16 +485,19 @@ async fn create_task(
 /// Run the agent for a task (background).
 async fn run_agent_task(
     state: Arc<AppState>,
+    user_id: String,
     task_id: Uuid,
     task_description: String,
     requested_model: String,
-    working_dir: std::path::PathBuf,
+    working_dir: Option<std::path::PathBuf>,
 ) {
     // Update status to running
     {
         let mut tasks = state.tasks.write().await;
-        if let Some(task_state) = tasks.get_mut(&task_id) {
-            task_state.status = TaskStatus::Running;
+        if let Some(user_tasks) = tasks.get_mut(&user_id) {
+            if let Some(task_state) = user_tasks.get_mut(&task_id) {
+                task_state.status = TaskStatus::Running;
+            }
         }
     }
 
@@ -455,9 +511,11 @@ async fn run_agent_task(
         Ok(t) => t,
         Err(e) => {
             let mut tasks = state.tasks.write().await;
-            if let Some(task_state) = tasks.get_mut(&task_id) {
-                task_state.status = TaskStatus::Failed;
-                task_state.result = Some(format!("Failed to create task: {}", e));
+            if let Some(user_tasks) = tasks.get_mut(&user_id) {
+                if let Some(task_state) = user_tasks.get_mut(&task_id) {
+                    task_state.status = TaskStatus::Failed;
+                    task_state.result = Some(format!("Failed to create task: {}", e));
+                }
             }
             return;
         }
@@ -468,9 +526,28 @@ async fn run_agent_task(
         task.analysis_mut().requested_model = Some(requested_model);
     }
 
+    // Prepare workspace for this task (or use a provided custom dir)
+    let working_dir = if let Some(dir) = working_dir {
+        match workspace::prepare_custom_workspace(&state.config, &state.mcp, dir).await {
+            Ok(path) => path,
+            Err(e) => {
+                tracing::warn!("Failed to prepare custom workspace: {}", e);
+                state.config.working_dir.clone()
+            }
+        }
+    } else {
+        match workspace::prepare_task_workspace(&state.config, &state.mcp, task_id).await {
+            Ok(path) => path,
+            Err(e) => {
+                tracing::warn!("Failed to prepare task workspace: {}", e);
+                state.config.working_dir.clone()
+            }
+        }
+    };
+
     // Create context with the specified working directory and memory
     let llm = Arc::new(OpenRouterClient::new(state.config.api_key.clone()));
-    let tools = ToolRegistry::new();
+    let tools = ToolRegistry::empty();
     let pricing = Arc::new(ModelPricing::new());
 
     let mut ctx = AgentContext::with_memory(
@@ -605,47 +682,50 @@ async fn run_agent_task(
     // Update task with result
     {
         let mut tasks = state.tasks.write().await;
-        if let Some(task_state) = tasks.get_mut(&task_id) {
-            // Extract iterations and tools from result data
-            // Note: RootAgent wraps executor data under "execution" field
-            if let Some(data) = &result.data {
-                // Try to get execution data (may be nested under "execution" from RootAgent)
-                let exec_data = data.get("execution").unwrap_or(data);
+        if let Some(user_tasks) = tasks.get_mut(&user_id) {
+            if let Some(task_state) = user_tasks.get_mut(&task_id) {
+                // Extract iterations and tools from result data
+                // Note: RootAgent wraps executor data under "execution" field
+                if let Some(data) = &result.data {
+                    // Try to get execution data (may be nested under "execution" from RootAgent)
+                    let exec_data = data.get("execution").unwrap_or(data);
 
-                // Update iterations count from execution signals
-                if let Some(signals) = exec_data.get("execution_signals") {
-                    if let Some(iterations) = signals.get("iterations").and_then(|v| v.as_u64()) {
-                        task_state.iterations = iterations as usize;
+                    // Update iterations count from execution signals
+                    if let Some(signals) = exec_data.get("execution_signals") {
+                        if let Some(iterations) = signals.get("iterations").and_then(|v| v.as_u64())
+                        {
+                            task_state.iterations = iterations as usize;
+                        }
                     }
-                }
 
-                // Add log entries for tools used
-                if let Some(tools_used) = exec_data.get("tools_used") {
-                    if let Some(arr) = tools_used.as_array() {
-                        for tool in arr {
-                            task_state.log.push(TaskLogEntry {
-                                timestamp: "0".to_string(),
-                                entry_type: LogEntryType::ToolCall,
-                                content: tool.as_str().unwrap_or("").to_string(),
-                            });
+                    // Add log entries for tools used
+                    if let Some(tools_used) = exec_data.get("tools_used") {
+                        if let Some(arr) = tools_used.as_array() {
+                            for tool in arr {
+                                task_state.log.push(TaskLogEntry {
+                                    timestamp: "0".to_string(),
+                                    entry_type: LogEntryType::ToolCall,
+                                    content: tool.as_str().unwrap_or("").to_string(),
+                                });
+                            }
                         }
                     }
                 }
-            }
 
-            // Add final response log
-            task_state.log.push(TaskLogEntry {
-                timestamp: "0".to_string(),
-                entry_type: LogEntryType::Response,
-                content: result.output.clone(),
-            });
+                // Add final response log
+                task_state.log.push(TaskLogEntry {
+                    timestamp: "0".to_string(),
+                    entry_type: LogEntryType::Response,
+                    content: result.output.clone(),
+                });
 
-            if result.success {
-                task_state.status = TaskStatus::Completed;
-                task_state.result = Some(result.output);
-            } else {
-                task_state.status = TaskStatus::Failed;
-                task_state.result = Some(format!("Error: {}", result.output));
+                if result.success {
+                    task_state.status = TaskStatus::Completed;
+                    task_state.result = Some(result.output);
+                } else {
+                    task_state.status = TaskStatus::Failed;
+                    task_state.result = Some(format!("Error: {}", result.output));
+                }
             }
         }
     }
@@ -654,13 +734,13 @@ async fn run_agent_task(
 /// Get task status and result.
 async fn get_task(
     State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<TaskState>, (StatusCode, String)> {
     let tasks = state.tasks.read().await;
-
     tasks
-        .get(&id)
-        .cloned()
+        .get(&user.id)
+        .and_then(|t| t.get(&id).cloned())
         .map(Json)
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Task {} not found", id)))
 }
@@ -668,13 +748,18 @@ async fn get_task(
 /// Stream task progress via SSE.
 async fn stream_task(
     State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
     Path(id): Path<Uuid>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, (StatusCode, String)>
 {
     // Check task exists
     {
         let tasks = state.tasks.read().await;
-        if !tasks.contains_key(&id) {
+        if !tasks
+            .get(&user.id)
+            .map(|t| t.contains_key(&id))
+            .unwrap_or(false)
+        {
             return Err((StatusCode::NOT_FOUND, format!("Task {} not found", id)));
         }
     }
@@ -686,7 +771,8 @@ async fn stream_task(
         loop {
             let (status, log_entries, result) = {
                 let tasks = state.tasks.read().await;
-                if let Some(task) = tasks.get(&id) {
+                let user_tasks = tasks.get(&user.id);
+                if let Some(task) = user_tasks.and_then(|t| t.get(&id)) {
                     (task.status.clone(), task.log.clone(), task.result.clone())
                 } else {
                     break;
@@ -738,15 +824,23 @@ async fn list_runs(
     State(state): State<Arc<AppState>>,
     Query(params): Query<ListRunsQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let limit = params.limit.unwrap_or(20);
+    let offset = params.offset.unwrap_or(0);
+
+    if state.memory.is_none() {
+        return Ok(Json(serde_json::json!({
+            "runs": [],
+            "limit": limit,
+            "offset": offset
+        })));
+    }
+
     let mem = state.memory.as_ref().ok_or_else(|| {
         (
             StatusCode::SERVICE_UNAVAILABLE,
             "Memory not configured".to_string(),
         )
     })?;
-
-    let limit = params.limit.unwrap_or(20);
-    let offset = params.offset.unwrap_or(0);
 
     let runs = mem
         .retriever
@@ -766,6 +860,9 @@ async fn get_run(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if state.memory.is_none() {
+        return Err((StatusCode::NOT_FOUND, "Run not found".to_string()));
+    }
     let mem = state.memory.as_ref().ok_or_else(|| {
         (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -789,6 +886,12 @@ async fn get_run_events(
     Path(id): Path<Uuid>,
     Query(params): Query<ListRunsQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if state.memory.is_none() {
+        return Ok(Json(serde_json::json!({
+            "run_id": id,
+            "events": []
+        })));
+    }
     let mem = state.memory.as_ref().ok_or_else(|| {
         (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -813,6 +916,12 @@ async fn get_run_tasks(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if state.memory.is_none() {
+        return Ok(Json(serde_json::json!({
+            "run_id": id,
+            "tasks": []
+        })));
+    }
     let mem = state.memory.as_ref().ok_or_else(|| {
         (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -845,6 +954,12 @@ async fn search_memory(
     State(state): State<Arc<AppState>>,
     Query(params): Query<SearchMemoryQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    if state.memory.is_none() {
+        return Ok(Json(serde_json::json!({
+            "query": params.q,
+            "results": []
+        })));
+    }
     let mem = state.memory.as_ref().ok_or_else(|| {
         (
             StatusCode::SERVICE_UNAVAILABLE,

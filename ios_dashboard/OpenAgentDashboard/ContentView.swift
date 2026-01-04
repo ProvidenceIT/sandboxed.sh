@@ -52,11 +52,13 @@ struct ContentView: View {
 struct LoginView: View {
     let onLogin: () -> Void
     
+    @State private var username = ""
     @State private var password = ""
     @State private var isLoading = false
     @State private var errorMessage: String?
     @State private var serverURL: String
     
+    @FocusState private var isUsernameFocused: Bool
     @FocusState private var isPasswordFocused: Bool
     
     private let api = APIService.shared
@@ -64,6 +66,7 @@ struct LoginView: View {
     init(onLogin: @escaping () -> Void) {
         self.onLogin = onLogin
         _serverURL = State(initialValue: APIService.shared.baseURL)
+        _username = State(initialValue: UserDefaults.standard.string(forKey: "last_username") ?? "")
     }
     
     var body: some View {
@@ -134,6 +137,28 @@ struct LoginView: View {
                                             .stroke(Theme.border, lineWidth: 1)
                                     )
                             }
+
+                            if api.authMode == .multiUser {
+                                VStack(alignment: .leading, spacing: 8) {
+                                    Text("Username")
+                                        .font(.caption.weight(.medium))
+                                        .foregroundStyle(Theme.textSecondary)
+
+                                    TextField("Enter username", text: $username)
+                                        .textFieldStyle(.plain)
+                                        .textInputAutocapitalization(.never)
+                                        .autocorrectionDisabled()
+                                        .focused($isUsernameFocused)
+                                        .padding(.horizontal, 16)
+                                        .padding(.vertical, 14)
+                                        .background(Color.white.opacity(0.05))
+                                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                                .stroke(isUsernameFocused ? Theme.accent.opacity(0.5) : Theme.border, lineWidth: 1)
+                                        )
+                                }
+                            }
                             
                             // Password field
                             VStack(alignment: .leading, spacing: 8) {
@@ -174,13 +199,27 @@ struct LoginView: View {
                                 "Sign In",
                                 icon: "arrow.right",
                                 isLoading: isLoading,
-                                isDisabled: password.isEmpty
+                                isDisabled: password.isEmpty || (api.authMode == .multiUser && username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                             ) {
                                 login()
                             }
                         }
                     }
                     .padding(.horizontal, 24)
+                    .onAppear {
+                        if api.authMode == .multiUser {
+                            isUsernameFocused = true
+                        } else {
+                            isPasswordFocused = true
+                        }
+                    }
+                    .onChange(of: api.authMode) { _, newMode in
+                        if newMode == .multiUser {
+                            isUsernameFocused = true
+                        } else {
+                            isPasswordFocused = true
+                        }
+                    }
                     
                     Spacer()
                 }
@@ -199,11 +238,33 @@ struct LoginView: View {
         
         Task {
             do {
-                let _ = try await api.login(password: password)
+                let usernameValue = api.authMode == .multiUser ? username : nil
+                let _ = try await api.login(password: password, username: usernameValue)
+                if api.authMode == .multiUser {
+                    let trimmed = username.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !trimmed.isEmpty {
+                        UserDefaults.standard.set(trimmed, forKey: "last_username")
+                    }
+                }
                 HapticService.success()
                 onLogin()
             } catch {
-                errorMessage = error.localizedDescription
+                if let apiError = error as? APIError {
+                    switch apiError {
+                    case .httpError(let code, _):
+                        if code == 401 {
+                            errorMessage = api.authMode == .multiUser ? "Invalid username or password" : "Invalid password"
+                        } else {
+                            errorMessage = apiError.errorDescription
+                        }
+                    case .unauthorized:
+                        errorMessage = api.authMode == .multiUser ? "Invalid username or password" : "Invalid password"
+                    default:
+                        errorMessage = apiError.errorDescription
+                    }
+                } else {
+                    errorMessage = error.localizedDescription
+                }
                 HapticService.error()
             }
             isLoading = false

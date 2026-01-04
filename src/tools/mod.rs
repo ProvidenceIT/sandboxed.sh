@@ -12,7 +12,6 @@
 //! This encourages agents to stay within their assigned workspace while preserving
 //! flexibility for tasks that require broader access.
 
-mod browser;
 mod composite;
 mod desktop;
 mod directory;
@@ -27,6 +26,13 @@ mod storage;
 mod terminal;
 mod ui;
 mod web;
+
+pub use directory::{ListDirectory, SearchFiles};
+pub use file_ops::{DeleteFile, ReadFile, WriteFile};
+pub use git::{GitCommit, GitDiff, GitLog, GitStatus};
+pub use search::GrepSearch;
+pub use terminal::RunCommand;
+pub use web::{FetchUrl, WebSearch};
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -155,6 +161,13 @@ impl ToolRegistry {
         Self::with_options(None, None)
     }
 
+    /// Create an empty registry (no built-in tools).
+    pub fn empty() -> Self {
+        Self {
+            tools: HashMap::new(),
+        }
+    }
+
     /// Create a new registry with all default tools and optional mission control.
     pub fn with_mission_control(mission_control: Option<mission::MissionControl>) -> Self {
         Self::with_options(mission_control, None)
@@ -237,42 +250,6 @@ impl ToolRegistry {
             Arc::new(composite::PrepareProject),
         );
         tools.insert("debug_error".to_string(), Arc::new(composite::DebugError));
-
-        // Browser automation (conditional on BROWSER_ENABLED)
-        let browser_enabled = std::env::var("BROWSER_ENABLED").unwrap_or_default();
-        tracing::info!("BROWSER_ENABLED env var = '{}'", browser_enabled);
-        if browser_enabled.to_lowercase() == "true" || browser_enabled == "1" {
-            tracing::info!("Registering browser automation tools");
-            tools.insert(
-                "browser_navigate".to_string(),
-                Arc::new(browser::BrowserNavigate),
-            );
-            tools.insert(
-                "browser_screenshot".to_string(),
-                Arc::new(browser::BrowserScreenshot),
-            );
-            tools.insert(
-                "browser_get_content".to_string(),
-                Arc::new(browser::BrowserGetContent),
-            );
-            tools.insert("browser_click".to_string(), Arc::new(browser::BrowserClick));
-            tools.insert("browser_type".to_string(), Arc::new(browser::BrowserType));
-            tools.insert(
-                "browser_evaluate".to_string(),
-                Arc::new(browser::BrowserEvaluate),
-            );
-            tools.insert("browser_wait".to_string(), Arc::new(browser::BrowserWait));
-            tools.insert("browser_close".to_string(), Arc::new(browser::BrowserClose));
-            tools.insert(
-                "browser_list_elements".to_string(),
-                Arc::new(browser::BrowserListElements),
-            );
-            tracing::info!(
-                "Registry {}: Added 9 browser tools, total now: {}",
-                registry_id,
-                tools.len()
-            );
-        }
 
         // Desktop automation (conditional on DESKTOP_ENABLED)
         if std::env::var("DESKTOP_ENABLED")

@@ -108,6 +108,7 @@ impl ProxyConfig {
     }
 
     /// Create the proxy extension directory with configured credentials
+    #[allow(dead_code)]
     fn create_extension(&self) -> anyhow::Result<PathBuf> {
         let ext_dir = std::env::temp_dir().join("open_agent_proxy_ext");
         std::fs::create_dir_all(&ext_dir)?;
@@ -422,6 +423,7 @@ async fn start_gost_forwarder(proxy: &ProxyConfig) -> anyhow::Result<()> {
 }
 
 /// Start a virtual X11 display using Xvfb
+#[allow(dead_code)]
 async fn start_virtual_display() -> anyhow::Result<String> {
     use std::sync::atomic::{AtomicU32, Ordering};
     use tokio::process::Command;

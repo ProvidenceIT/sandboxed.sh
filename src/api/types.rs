@@ -146,6 +146,9 @@ pub struct HealthResponse {
     /// Whether auth is required for API requests (dev_mode=false)
     pub auth_required: bool,
 
+    /// Authentication mode ("disabled", "single_tenant", "multi_user")
+    pub auth_mode: String,
+
     /// Maximum iterations per agent (from MAX_ITERATIONS env var)
     pub max_iterations: usize,
 }
@@ -153,6 +156,8 @@ pub struct HealthResponse {
 /// Login request for dashboard auth.
 #[derive(Debug, Clone, Deserialize)]
 pub struct LoginRequest {
+    #[serde(default)]
+    pub username: Option<String>,
     pub password: String,
 }
 

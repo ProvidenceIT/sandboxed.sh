@@ -10,6 +10,7 @@
 //! - `OPENCODE_BASE_URL` - Optional. Base URL for OpenCode server. Defaults to `http://127.0.0.1:4096`.
 //! - `OPENCODE_AGENT` - Optional. OpenCode agent name (e.g., `build`, `plan`).
 //! - `OPENCODE_PERMISSIVE` - Optional. If true, auto-allows all permissions for OpenCode sessions (default: true).
+//! - `OPEN_AGENT_USERS` - Optional. JSON array of user accounts for multi-user auth.
 //! - `CONSOLE_SSH_HOST` - Optional. Host for dashboard console/file explorer SSH (default: 127.0.0.1).
 //! - `CONSOLE_SSH_PORT` - Optional. SSH port (default: 22).
 //! - `CONSOLE_SSH_USER` - Optional. SSH user (default: root).
@@ -25,6 +26,7 @@
 //! and search anywhere on the machine. The `WORKING_DIR` is just the default for relative paths.
 
 use base64::Engine;
+use serde::Deserialize;
 use std::path::PathBuf;
 use thiserror::Error;
 
@@ -306,7 +308,7 @@ impl ConsoleSshConfig {
     }
 }
 
-/// API auth configuration (single-tenant).
+/// API auth configuration.
 #[derive(Debug, Clone)]
 pub struct AuthConfig {
     /// Password required by the dashboard to obtain a JWT.
@@ -317,6 +319,9 @@ pub struct AuthConfig {
 
     /// JWT validity in days.
     pub jwt_ttl_days: i64,
+
+    /// Multi-user accounts (if set, overrides dashboard_password auth).
+    pub users: Vec<UserAccount>,
 }
 
 impl Default for AuthConfig {
@@ -325,14 +330,50 @@ impl Default for AuthConfig {
             dashboard_password: None,
             jwt_secret: None,
             jwt_ttl_days: 30,
+            users: Vec::new(),
         }
     }
+}
+
+/// Authentication mode for the server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthMode {
+    Disabled,
+    SingleTenant,
+    MultiUser,
+}
+
+/// User account for multi-user auth.
+#[derive(Debug, Clone, Deserialize)]
+pub struct UserAccount {
+    /// Stable identifier for the user (defaults to username).
+    #[serde(default)]
+    pub id: String,
+    pub username: String,
+    pub password: String,
 }
 
 impl AuthConfig {
     /// Whether auth is required for API requests.
     pub fn auth_required(&self, dev_mode: bool) -> bool {
-        !dev_mode && self.dashboard_password.is_some() && self.jwt_secret.is_some()
+        matches!(
+            self.auth_mode(dev_mode),
+            AuthMode::SingleTenant | AuthMode::MultiUser
+        )
+    }
+
+    /// Determine the current auth mode.
+    pub fn auth_mode(&self, dev_mode: bool) -> AuthMode {
+        if dev_mode {
+            return AuthMode::Disabled;
+        }
+        if !self.users.is_empty() {
+            return AuthMode::MultiUser;
+        }
+        if self.dashboard_password.is_some() && self.jwt_secret.is_some() {
+            return AuthMode::SingleTenant;
+        }
+        AuthMode::Disabled
     }
 }
 
@@ -413,6 +454,25 @@ impl Config {
             // In debug builds, default to dev_mode=true; in release, default to false.
             .unwrap_or(cfg!(debug_assertions));
 
+        let users = std::env::var("OPEN_AGENT_USERS")
+            .ok()
+            .filter(|raw| !raw.trim().is_empty())
+            .map(|raw| {
+                serde_json::from_str::<Vec<UserAccount>>(&raw).map_err(|e| {
+                    ConfigError::InvalidValue("OPEN_AGENT_USERS".to_string(), e.to_string())
+                })
+            })
+            .transpose()?
+            .unwrap_or_default()
+            .into_iter()
+            .map(|mut user| {
+                if user.id.trim().is_empty() {
+                    user.id = user.username.clone();
+                }
+                user
+            })
+            .collect::<Vec<_>>();
+
         let auth = AuthConfig {
             dashboard_password: std::env::var("DASHBOARD_PASSWORD").ok(),
             jwt_secret: std::env::var("JWT_SECRET").ok(),
@@ -425,15 +485,47 @@ impl Config {
                 })
                 .transpose()?
                 .unwrap_or(30),
+            users,
         };
 
         // In non-dev mode, require auth secrets to be set.
         if !dev_mode {
-            if auth.dashboard_password.is_none() {
-                return Err(ConfigError::MissingEnvVar("DASHBOARD_PASSWORD".to_string()));
-            }
-            if auth.jwt_secret.is_none() {
-                return Err(ConfigError::MissingEnvVar("JWT_SECRET".to_string()));
+            match auth.auth_mode(dev_mode) {
+                AuthMode::MultiUser => {
+                    if auth.users.is_empty() {
+                        return Err(ConfigError::MissingEnvVar("OPEN_AGENT_USERS".to_string()));
+                    }
+                    if auth.jwt_secret.is_none() {
+                        return Err(ConfigError::MissingEnvVar("JWT_SECRET".to_string()));
+                    }
+                    if auth
+                        .users
+                        .iter()
+                        .any(|u| u.username.trim().is_empty() || u.password.trim().is_empty())
+                    {
+                        return Err(ConfigError::InvalidValue(
+                            "OPEN_AGENT_USERS".to_string(),
+                            "username/password must be non-empty".to_string(),
+                        ));
+                    }
+                }
+                AuthMode::SingleTenant => {
+                    if auth.dashboard_password.is_none() {
+                        return Err(ConfigError::MissingEnvVar("DASHBOARD_PASSWORD".to_string()));
+                    }
+                    if auth.jwt_secret.is_none() {
+                        return Err(ConfigError::MissingEnvVar("JWT_SECRET".to_string()));
+                    }
+                }
+                AuthMode::Disabled => {
+                    // Provide a more specific error message when partial config exists
+                    if auth.dashboard_password.is_some() && auth.jwt_secret.is_none() {
+                        return Err(ConfigError::MissingEnvVar("JWT_SECRET".to_string()));
+                    }
+                    return Err(ConfigError::MissingEnvVar(
+                        "DASHBOARD_PASSWORD or OPEN_AGENT_USERS".to_string(),
+                    ));
+                }
             }
         }
 
