@@ -121,7 +121,7 @@ pub async fn login(
                 .auth
                 .users
                 .iter()
-                .find(|u| u.username == username);
+                .find(|u| u.username.trim() == username);
 
             let valid = match account {
                 Some(acc) => {
