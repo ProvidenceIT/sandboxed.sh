@@ -1769,6 +1769,8 @@ async fn control_actor_loop(
     // Track which mission the main `running` task is actually working on.
     // This is different from `current_mission` which can change when user creates a new mission.
     let mut running_mission_id: Option<Uuid> = None;
+    // Track last activity for the main runner (for stall detection)
+    let mut main_runner_last_activity: std::time::Instant = std::time::Instant::now();
 
     // Parallel mission runners - each runs independently
     let mut parallel_runners: std::collections::HashMap<
@@ -2343,7 +2345,7 @@ async fn control_actor_loop(
                                     state: "running".to_string(),
                                     queue_len: queue.len(),
                                     history_len: history.len(),
-                                    seconds_since_activity: 0, // Main runner doesn't track this yet
+                                    seconds_since_activity: main_runner_last_activity.elapsed().as_secs(),
                                     expected_deliverables: 0,
                                 });
                             }
@@ -2873,7 +2875,7 @@ async fn control_actor_loop(
                     tracing::info!("Parallel mission {} removed from runners", mid);
                 }
             }
-            // Update last_activity for parallel runners when we receive events for them
+            // Update last_activity for runners when we receive events for them
             event = events_rx.recv() => {
                 if let Ok(event) = event {
                     // Extract mission_id from event if present
@@ -2886,9 +2888,13 @@ async fn control_actor_loop(
                         AgentEvent::Progress { mission_id, .. } => *mission_id,
                         _ => None,
                     };
-                    // Update last_activity for matching parallel runner
+                    // Update last_activity for matching runner (main or parallel)
                     if let Some(mid) = mission_id {
-                        if let Some(runner) = parallel_runners.get_mut(&mid) {
+                        if running_mission_id == Some(mid) {
+                            // Update main runner activity
+                            main_runner_last_activity = std::time::Instant::now();
+                        } else if let Some(runner) = parallel_runners.get_mut(&mid) {
+                            // Update parallel runner activity
                             runner.touch();
                         }
                     }
