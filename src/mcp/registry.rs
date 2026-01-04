@@ -134,6 +134,7 @@ impl McpRegistry {
             vec![
                 "@playwright/mcp@latest".to_string(),
                 "--isolated".to_string(),
+                "--no-sandbox".to_string(),
             ],
             HashMap::new(),
         );
@@ -155,31 +156,40 @@ impl McpRegistry {
                 Err(e) => tracing::warn!("Failed to add default MCP {}: {}", config.name, e),
             }
         }
-        // Ensure Playwright MCP runs in isolated mode to avoid profile contention.
+        // Ensure Playwright MCP runs in isolated mode and without sandboxing
+        // so it can launch browsers under root.
         for config in configs.iter_mut() {
             if config.name != "playwright" {
                 continue;
             }
 
-            let needs_isolated = match &config.transport {
-                McpTransport::Stdio { args, .. } => !args.iter().any(|arg| arg == "--isolated"),
-                McpTransport::Http { .. } => false,
+            let missing_flags: Vec<&str> = match &config.transport {
+                McpTransport::Stdio { args, .. } => ["--isolated", "--no-sandbox"]
+                    .iter()
+                    .copied()
+                    .filter(|flag| !args.iter().any(|arg| arg == *flag))
+                    .collect(),
+                McpTransport::Http { .. } => Vec::new(),
             };
 
-            if !needs_isolated {
+            if missing_flags.is_empty() {
                 continue;
             }
 
             if let McpTransport::Stdio { args, .. } = &mut config.transport {
-                args.push("--isolated".to_string());
+                for flag in &missing_flags {
+                    args.push((*flag).to_string());
+                }
             }
 
             let id = config.id;
             let _ = config_store
                 .update(id, |c| {
                     if let McpTransport::Stdio { args, .. } = &mut c.transport {
-                        if !args.iter().any(|arg| arg == "--isolated") {
-                            args.push("--isolated".to_string());
+                        for flag in ["--isolated", "--no-sandbox"] {
+                            if !args.iter().any(|arg| arg == flag) {
+                                args.push(flag.to_string());
+                            }
                         }
                     }
                 })

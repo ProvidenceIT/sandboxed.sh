@@ -16,7 +16,7 @@
     },
     "playwright": {
       "type": "local",
-      "command": ["npx", "@playwright/mcp@latest", "--isolated"],
+      "command": ["npx", "@playwright/mcp@latest", "--isolated", "--no-sandbox"],
       "enabled": true
     }
   }
