@@ -144,9 +144,10 @@ pub async fn login(
             }
 
             let account = account.unwrap();
+            let effective_id = effective_user_id(account);
 
             AuthUser {
-                id: account.id.clone(),
+                id: effective_id,
                 username: account.username.clone(),
             }
         }
@@ -249,9 +250,21 @@ pub async fn require_auth(
     }
 }
 
+/// Returns the effective user ID (id if non-empty, otherwise username).
+fn effective_user_id(user: &UserAccount) -> String {
+    if user.id.is_empty() {
+        user.username.clone()
+    } else {
+        user.id.clone()
+    }
+}
+
 fn user_for_claims(claims: &Claims, users: &[UserAccount]) -> Option<AuthUser> {
-    users.iter().find(|u| u.id == claims.sub).map(|u| AuthUser {
-        id: u.id.clone(),
-        username: u.username.clone(),
-    })
+    users
+        .iter()
+        .find(|u| effective_user_id(u) == claims.sub)
+        .map(|u| AuthUser {
+            id: effective_user_id(u),
+            username: u.username.clone(),
+        })
 }
