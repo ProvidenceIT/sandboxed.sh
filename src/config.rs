@@ -283,8 +283,8 @@ pub struct Config {
     pub library_path: PathBuf,
 
     /// Git remote URL for the configuration library.
-    /// Default: git@github.com:Th0rgal/skills.git
-    pub library_remote: String,
+    /// Set via LIBRARY_REMOTE env var. If not set, library features are disabled.
+    pub library_remote: Option<String>,
 }
 
 /// SSH configuration for the dashboard console + file explorer.
@@ -595,8 +595,7 @@ impl Config {
             .map(PathBuf::from)
             .unwrap_or_else(|_| working_dir.join(".openagent/library"));
 
-        let library_remote = std::env::var("LIBRARY_REMOTE")
-            .unwrap_or_else(|_| "git@github.com:Th0rgal/skills.git".to_string());
+        let library_remote = std::env::var("LIBRARY_REMOTE").ok();
 
         Ok(Self {
             api_key,
@@ -643,7 +642,7 @@ impl Config {
             opencode_permissive: true,
             tool_stuck_abort_timeout_secs: 0,
             library_path,
-            library_remote: "git@github.com:Th0rgal/skills.git".to_string(),
+            library_remote: None,
         }
     }
 }

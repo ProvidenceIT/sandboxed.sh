@@ -102,12 +102,11 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         Arc::clone(&mcp),
     );
 
-    // Initialize configuration library (optional - clones from git if needed)
+    // Initialize configuration library (optional - only if LIBRARY_REMOTE is set)
     let library: library_api::SharedLibrary = Arc::new(RwLock::new(None));
-    {
+    if let Some(library_remote) = config.library_remote.clone() {
         let library_clone = Arc::clone(&library);
         let library_path = config.library_path.clone();
-        let library_remote = config.library_remote.clone();
         tokio::spawn(async move {
             match crate::library::LibraryStore::new(library_path, &library_remote).await {
                 Ok(store) => {
@@ -119,6 +118,8 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
                 }
             }
         });
+    } else {
+        tracing::info!("Configuration library disabled (LIBRARY_REMOTE not set)");
     }
 
     // Initialize workspace store

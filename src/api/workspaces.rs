@@ -81,14 +81,51 @@ async fn list_workspaces(
     Ok(Json(responses))
 }
 
+/// Validate workspace name to prevent path traversal.
+fn validate_workspace_name(name: &str) -> Result<(), (StatusCode, String)> {
+    if name.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "Name cannot be empty".to_string()));
+    }
+    if name.contains("..") || name.contains('/') || name.contains('\\') {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Name contains invalid characters".to_string(),
+        ));
+    }
+    if name.starts_with('.') {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Name cannot start with a dot".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// POST /api/workspaces - Create a new workspace.
 async fn create_workspace(
     State(state): State<Arc<super::routes::AppState>>,
     Json(req): Json<CreateWorkspaceRequest>,
 ) -> Result<Json<WorkspaceResponse>, (StatusCode, String)> {
+    // Validate workspace name for path traversal
+    validate_workspace_name(&req.name)?;
+
     // Determine path
-    let path = req.path.unwrap_or_else(|| {
-        match req.workspace_type {
+    let path = match &req.path {
+        Some(custom_path) => {
+            // For custom paths, validate they're within the working directory
+            let working_dir = &state.config.working_dir;
+            let canonical_working = working_dir.canonicalize().unwrap_or_else(|_| working_dir.clone());
+            let canonical_custom = custom_path.canonicalize().unwrap_or_else(|_| custom_path.clone());
+
+            if !canonical_custom.starts_with(&canonical_working) {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "Custom path must be within the working directory".to_string(),
+                ));
+            }
+            custom_path.clone()
+        }
+        None => match req.workspace_type {
             WorkspaceType::Host => state.config.working_dir.clone(),
             WorkspaceType::Chroot => {
                 // Chroot workspaces go in a dedicated directory
@@ -98,8 +135,8 @@ async fn create_workspace(
                     .join(".openagent/chroots")
                     .join(&req.name)
             }
-        }
-    });
+        },
+    };
 
     let workspace = match req.workspace_type {
         WorkspaceType::Host => Workspace {
