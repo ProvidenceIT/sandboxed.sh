@@ -51,7 +51,7 @@ export function LibraryUnavailable({ message, onConfigured }: LibraryUnavailable
   };
 
   return (
-    <div className="flex items-center justify-center min-h-[60vh]">
+    <div className="flex items-center justify-center min-h-[calc(100vh-12rem)]">
       <div className="w-full max-w-md text-center">
         <div className="flex justify-center mb-6">
           <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-indigo-500/10 border border-indigo-500/20">
