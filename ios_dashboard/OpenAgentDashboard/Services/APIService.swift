@@ -286,8 +286,64 @@ final class APIService {
     
     // MARK: - Workspaces
 
+    // MARK: - Agents
+
+    func listAgents(completion: @escaping (Result<[AgentConfig], Error>) -> Void) {
+        Task {
+            do {
+                let agents: [AgentConfig] = try await get("/api/agents")
+                completion(.success(agents))
+            } catch {
+                completion(.failure(error))
+            }
+        }
+    }
+
+    func createAgent(name: String, modelId: String, completion: @escaping (Result<AgentConfig, Error>) -> Void) {
+        Task {
+            do {
+                struct CreateAgentRequest: Encodable {
+                    let name: String
+                    let model_id: String
+                }
+                let agent: AgentConfig = try await post("/api/agents", body: CreateAgentRequest(name: name, model_id: modelId))
+                completion(.success(agent))
+            } catch {
+                completion(.failure(error))
+            }
+        }
+    }
+
+    // MARK: - Workspaces
+
     func listWorkspaces() async throws -> [Workspace] {
         try await get("/api/workspaces")
+    }
+
+    func listWorkspaces(completion: @escaping (Result<[Workspace], Error>) -> Void) {
+        Task {
+            do {
+                let workspaces: [Workspace] = try await get("/api/workspaces")
+                completion(.success(workspaces))
+            } catch {
+                completion(.failure(error))
+            }
+        }
+    }
+
+    func createWorkspace(name: String, type: WorkspaceType, completion: @escaping (Result<Workspace, Error>) -> Void) {
+        Task {
+            do {
+                struct CreateWorkspaceRequest: Encodable {
+                    let name: String
+                    let workspace_type: String
+                }
+                let workspace: Workspace = try await post("/api/workspaces", body: CreateWorkspaceRequest(name: name, workspace_type: type.rawValue))
+                completion(.success(workspace))
+            } catch {
+                completion(.failure(error))
+            }
+        }
     }
 
     func getWorkspace(id: String) async throws -> Workspace {

@@ -35,6 +35,21 @@
 
 - **Build Status**: Both backend and dashboard compile successfully
 
+#### iOS Dashboard ✅
+- **AgentsView** (`ios_dashboard/OpenAgentDashboard/Views/Agents/AgentsView.swift`)
+  - List agents with card view
+  - View agent details (model, MCPs, skills, commands)
+  - Create new agents
+  - Uses completion-based async pattern
+
+- **WorkspacesView** (`ios_dashboard/OpenAgentDashboard/Views/Workspaces/WorkspacesView.swift`)
+  - Grid view of all workspaces
+  - View workspace details
+  - Create new workspaces (host or chroot)
+  - Status badges
+
+- **APIService Updates**: Added agent and workspace methods
+
 ### Existing Features (Already Implemented)
 - Mission/Control page with SSE streaming
 - Library management (Skills, Commands, MCPs)
