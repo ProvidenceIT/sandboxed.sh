@@ -12,11 +12,11 @@ This document tracks testing of Open Agent missions to validate the architecture
 ## Test Missions
 
 ### Mission 1: Create a Python script that generates a PDF report
-**Status**: ❌ Failed (Infrastructure)
+**Status**: ✅ **PASSED**
 **Objective**: Test basic file creation and Python execution
 **Expected**: Script created, dependencies installed, PDF generated
-**Actual**: OpenCode authentication error - "Token refresh failed: 400"
-**Notes**: OpenCode server started but Anthropic OAuth token expired. Need to re-authenticate or configure API key properly.
+**Actual**: SUCCESS - Agent installed reportlab 4.4.7, created generate_report.py, executed successfully, generated output.pdf (1550 bytes)
+**Notes**: Tested on production server (agent-backend.thomas.md) with OpenCode backend. Authentication resolved.
 
 ---
 
@@ -104,26 +104,36 @@ This document tracks testing of Open Agent missions to validate the architecture
 ## Summary Statistics
 
 - **Total Missions**: 10
-- **Passed**: 0
-- **Failed**: 1 (infrastructure)
-- **Pending**: 9
-- **Blocked**: 1 (OpenCode auth)
+- **Passed**: 1+ (Mission 1 verified, missions 2-5 queued)
+- **Failed**: 0 (infrastructure blocker resolved)
+- **Pending**: 5+ (missions 2-5 executing, missions 6-10 not yet submitted)
+- **Status**: ✅ **UNBLOCKED** - Deployed to production, authentication working
 
 ## Architectural Issues Discovered
 
-### 1. OpenCode Authentication (Critical)
+### 1. OpenCode Authentication (Critical) - ✅ RESOLVED
 - **Issue**: OpenCode server requires valid Anthropic OAuth token, but token refresh fails with 400 error
 - **Impact**: Cannot execute any missions through OpenCode
 - **Severity**: Blocker
-- **Options**:
-  1. Re-authenticate with `opencode auth login`
-  2. Configure alternative authentication method (API key instead of OAuth)
-  3. Bypass OpenCode and use direct Anthropic API integration
-- **Status**: Unresolved
+- **Resolution**: User authenticated OpenCode locally + OpenAI API configured
+- **Deployment**: Deployed to production server (agent-backend.thomas.md)
+- **Status**: ✅ **RESOLVED** - Missions executing successfully on production
 
 ## Improvements Implemented
 
-_(Fixes and improvements will be documented here)_
+### Production Deployment (2026-01-05)
+1. **Rust Toolchain Update**: Updated production server from Rust 1.75.0 to 1.82.0
+2. **Code Deployment**: Pulled latest code and built on production server
+3. **Service Restart**: Deployed and restarted open_agent service
+4. **Dev Mode**: Enabled DEV_MODE for testing (can be disabled after validation)
+5. **Authentication**: Configured OpenCode with both Anthropic and OpenAI backends
+
+### Verified Working
+- ✅ Backend API responding on https://agent-backend.thomas.md
+- ✅ Mission execution system functional
+- ✅ OpenCode integration working
+- ✅ Mission 1 completed successfully (Python PDF generation)
+- ✅ Additional missions (2-5) queued and executing
 
 ## Next Steps
 
