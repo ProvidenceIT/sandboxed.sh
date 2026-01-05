@@ -80,7 +80,7 @@ struct NewMissionSheet: View {
                         .background(Theme.accent)
                         .clipShape(RoundedRectangle(cornerRadius: 12))
                     }
-                    .disabled(workspaces.isEmpty && selectedWorkspaceId == nil)
+                    .disabled(workspaces.isEmpty)
 
                     Button {
                         onCancel()

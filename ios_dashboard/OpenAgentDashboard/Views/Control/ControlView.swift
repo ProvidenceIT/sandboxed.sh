@@ -791,6 +791,7 @@ struct ControlView: View {
         } catch {
             print("Failed to load workspaces: \(error)")
             workspaces = []
+            selectedWorkspaceId = nil
         }
     }
     

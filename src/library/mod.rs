@@ -228,9 +228,36 @@ impl LibraryStore {
         Ok(())
     }
 
+    /// Validate that a path doesn't escape the base directory via traversal.
+    fn validate_path_within(&self, base: &std::path::Path, target: &std::path::Path) -> Result<()> {
+        // Canonicalize what we can, but for non-existent paths we need to check components
+        let base_canonical = base.canonicalize().unwrap_or_else(|_| base.to_path_buf());
+
+        // Check for path traversal in the target path components
+        for component in target.components() {
+            if let std::path::Component::ParentDir = component {
+                anyhow::bail!("Path traversal not allowed");
+            }
+        }
+
+        // If the file exists, verify it's within the base directory
+        if target.exists() {
+            let target_canonical = target.canonicalize()?;
+            if !target_canonical.starts_with(&base_canonical) {
+                anyhow::bail!("Path escapes allowed directory");
+            }
+        }
+
+        Ok(())
+    }
+
     /// Get a reference file from a skill.
     pub async fn get_skill_reference(&self, skill_name: &str, ref_path: &str) -> Result<String> {
-        let file_path = self.path.join("skills").join(skill_name).join(ref_path);
+        let skill_dir = self.path.join("skills").join(skill_name);
+        let file_path = skill_dir.join(ref_path);
+
+        // Validate path doesn't escape skill directory
+        self.validate_path_within(&skill_dir, &file_path)?;
 
         if !file_path.exists() {
             anyhow::bail!("Reference file not found: {}/{}", skill_name, ref_path);
@@ -248,7 +275,11 @@ impl LibraryStore {
         ref_path: &str,
         content: &str,
     ) -> Result<()> {
-        let file_path = self.path.join("skills").join(skill_name).join(ref_path);
+        let skill_dir = self.path.join("skills").join(skill_name);
+        let file_path = skill_dir.join(ref_path);
+
+        // Validate path doesn't escape skill directory
+        self.validate_path_within(&skill_dir, &file_path)?;
 
         // Ensure parent directories exist
         if let Some(parent) = file_path.parent() {
