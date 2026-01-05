@@ -15,13 +15,32 @@ import {
   CheckCircle,
   XCircle,
   Library,
+  ChevronDown,
+  Plug,
+  FileCode,
 } from 'lucide-react';
 
-const navigation = [
+type NavItem = {
+  name: string;
+  href: string;
+  icon: React.ComponentType<{ className?: string }>;
+  children?: { name: string; href: string; icon: React.ComponentType<{ className?: string }> }[];
+};
+
+const navigation: NavItem[] = [
   { name: 'Overview', href: '/', icon: LayoutDashboard },
   { name: 'Mission', href: '/control', icon: MessageSquare },
   { name: 'Console', href: '/console', icon: Terminal },
-  { name: 'Library', href: '/library', icon: Library },
+  {
+    name: 'Library',
+    href: '/library',
+    icon: Library,
+    children: [
+      { name: 'MCP Servers', href: '/library/mcps', icon: Plug },
+      { name: 'Skills', href: '/library/skills', icon: FileCode },
+      { name: 'Commands', href: '/library/commands', icon: Terminal },
+    ],
+  },
   { name: 'Settings', href: '/settings', icon: Settings },
 ];
 
@@ -33,6 +52,14 @@ export function Sidebar() {
   const pathname = usePathname();
   const [currentMission, setCurrentMission] = useState<Mission | null>(null);
   const [controlState, setControlState] = useState<ControlRunState>('idle');
+  const [expandedItems, setExpandedItems] = useState<Set<string>>(new Set());
+
+  // Auto-expand Library if we're on a library subpage
+  useEffect(() => {
+    if (pathname.startsWith('/library')) {
+      setExpandedItems((prev) => new Set([...prev, 'Library']));
+    }
+  }, [pathname]);
 
   // Stream control events for real-time status
   useEffect(() => {
@@ -94,8 +121,71 @@ export function Sidebar() {
       <nav className="flex flex-1 flex-col gap-1 p-3">
         {navigation.map((item) => {
           const isCurrentPath = pathname === item.href;
+          const isChildActive = item.children?.some((child) => pathname === child.href);
+          const isExpanded = expandedItems.has(item.name);
           const showMissionIndicator = item.href === '/control' && currentMission;
-          
+
+          const toggleExpanded = () => {
+            setExpandedItems((prev) => {
+              const next = new Set(prev);
+              if (next.has(item.name)) {
+                next.delete(item.name);
+              } else {
+                next.add(item.name);
+              }
+              return next;
+            });
+          };
+
+          // Items with children render as expandable sections
+          if (item.children) {
+            return (
+              <div key={item.name}>
+                <button
+                  onClick={toggleExpanded}
+                  className={cn(
+                    'flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-all relative',
+                    isCurrentPath || isChildActive
+                      ? 'bg-white/[0.08] text-white'
+                      : 'text-white/50 hover:bg-white/[0.04] hover:text-white/80'
+                  )}
+                >
+                  <item.icon className="h-[18px] w-[18px]" />
+                  {item.name}
+                  <ChevronDown
+                    className={cn(
+                      'ml-auto h-4 w-4 transition-transform duration-200',
+                      isExpanded && 'rotate-180'
+                    )}
+                  />
+                </button>
+                {isExpanded && (
+                  <div className="ml-3 mt-1 space-y-1 border-l border-white/[0.06] pl-3">
+                    {item.children.map((child) => {
+                      const isChildCurrent = pathname === child.href;
+                      return (
+                        <Link
+                          key={child.name}
+                          href={child.href}
+                          className={cn(
+                            'flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-all',
+                            isChildCurrent
+                              ? 'bg-white/[0.08] text-white'
+                              : 'text-white/50 hover:bg-white/[0.04] hover:text-white/80'
+                          )}
+                        >
+                          <child.icon className="h-4 w-4" />
+                          {child.name}
+                        </Link>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            );
+          }
+
+          // Regular items render as links
           return (
             <Link
               key={item.name}
@@ -109,7 +199,7 @@ export function Sidebar() {
             >
               <item.icon className="h-[18px] w-[18px]" />
               {item.name}
-              
+
               {/* Active mission indicator on Control link */}
               {showMissionIndicator && isActive && (
                 <span className="absolute right-2 h-2 w-2 rounded-full bg-indigo-400 animate-pulse" />
