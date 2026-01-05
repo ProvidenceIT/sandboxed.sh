@@ -80,11 +80,23 @@
 - File explorer
 - History page
 
+## Current Blockers
+
+### OpenCode Authentication (Critical)
+- **Issue**: OpenCode OAuth token expired, causing "Token refresh failed: 400"
+- **Impact**: Cannot execute missions through OpenCode backend
+- **Options**:
+  1. Re-authenticate interactively (requires user action)
+  2. Alternative: Direct Anthropic API integration
+  3. Alternative: Use OpenRouter with API key
+- **Next**: User must run `opencode auth login` or configure alternative auth
+
 ## Next Steps (Priority Order)
 
-### High Priority
+### High Priority (Blocked)
 1. **Mission Testing**: Execute 10+ test missions to validate the architecture
-2. **iOS Dashboard**: Add Agent and Workspace views to iOS app
+   - ⚠️ BLOCKED: Requires OpenCode authentication fix
+2. **iOS Dashboard Testing**: Verify Agent and Workspace views work on iOS
 3. **Overview Page Enhancement**: Add real metrics (CPU, RAM, network graphs)
 
 ### Medium Priority

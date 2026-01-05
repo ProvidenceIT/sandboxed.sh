@@ -12,11 +12,11 @@ This document tracks testing of Open Agent missions to validate the architecture
 ## Test Missions
 
 ### Mission 1: Create a Python script that generates a PDF report
-**Status**: ⏳ Pending
+**Status**: ❌ Failed (Infrastructure)
 **Objective**: Test basic file creation and Python execution
 **Expected**: Script created, dependencies installed, PDF generated
-**Actual**: Not yet executed
-**Notes**: -
+**Actual**: OpenCode authentication error - "Token refresh failed: 400"
+**Notes**: OpenCode server started but Anthropic OAuth token expired. Need to re-authenticate or configure API key properly.
 
 ---
 
@@ -105,13 +105,21 @@ This document tracks testing of Open Agent missions to validate the architecture
 
 - **Total Missions**: 10
 - **Passed**: 0
-- **Failed**: 0
-- **Pending**: 10
-- **Success Rate**: N/A
+- **Failed**: 1 (infrastructure)
+- **Pending**: 9
+- **Blocked**: 1 (OpenCode auth)
 
 ## Architectural Issues Discovered
 
-_(Issues will be documented here as they are discovered during testing)_
+### 1. OpenCode Authentication (Critical)
+- **Issue**: OpenCode server requires valid Anthropic OAuth token, but token refresh fails with 400 error
+- **Impact**: Cannot execute any missions through OpenCode
+- **Severity**: Blocker
+- **Options**:
+  1. Re-authenticate with `opencode auth login`
+  2. Configure alternative authentication method (API key instead of OAuth)
+  3. Bypass OpenCode and use direct Anthropic API integration
+- **Status**: Unresolved
 
 ## Improvements Implemented
 
