@@ -1822,88 +1822,82 @@ export default function ControlClient() {
 
       {/* Header */}
       <div className="mb-6 flex items-center justify-between gap-4">
-        <div className="flex flex-col gap-1.5">
-          <div className="flex items-center gap-3">
-            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-indigo-500/20">
-              <Target className="h-4 w-4 text-indigo-400" />
-            </div>
-            <span className="text-sm font-medium text-white/60">
-              {activeMission ? activeMission.id.slice(0, 8) : "No mission"}
-            </span>
-            {activeMission && missionStatus && (
-              <div className="relative" ref={statusMenuRef}>
-                <button
-                  onClick={() => setShowStatusMenu(!showStatusMenu)}
-                  className={cn(
-                    "flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium transition-colors hover:opacity-80",
-                    missionStatus.className
-                  )}
-                >
-                  {missionStatus.label}
-                  <ChevronDown className="h-3 w-3" />
-                </button>
-                {showStatusMenu && (
-                  <div className="absolute left-0 top-full mt-1 w-44 rounded-lg border border-white/[0.06] bg-[#1a1a1a] py-1 shadow-xl z-10">
-                    <button
-                      onClick={() => handleSetStatus("completed")}
-                      className="flex w-full items-center gap-2 px-3 py-2 text-sm text-white/70 hover:bg-white/[0.04]"
-                    >
-                      <CheckCircle className="h-4 w-4 text-emerald-400" />
-                      Mark Complete
-                    </button>
-                    <button
-                      onClick={() => handleSetStatus("failed")}
-                      className="flex w-full items-center gap-2 px-3 py-2 text-sm text-white/70 hover:bg-white/[0.04]"
-                    >
-                      <XCircle className="h-4 w-4 text-red-400" />
-                      Mark Failed
-                    </button>
-                    {(activeMission?.status === "interrupted" || activeMission?.status === "blocked") && (
-                      <>
-                        <button
-                          onClick={() => handleResumeMission(false)}
-                          disabled={missionLoading}
-                          className="flex w-full items-center gap-2 px-3 py-2 text-sm text-white/70 hover:bg-white/[0.04] disabled:opacity-50"
-                        >
-                          <PlayCircle className="h-4 w-4 text-emerald-400" />
-                          {activeMission?.status === "blocked" ? "Continue" : "Resume"}
-                        </button>
-                        <button
-                          onClick={() => handleResumeMission(true)}
-                          disabled={missionLoading}
-                          className="flex w-full items-center gap-2 px-3 py-2 text-sm text-white/70 hover:bg-white/[0.04] disabled:opacity-50"
-                          title="Delete work folder and start fresh"
-                        >
-                          <Trash2 className="h-4 w-4 text-orange-400" />
-                          Clean & {activeMission?.status === "blocked" ? "Continue" : "Resume"}
-                        </button>
-                      </>
-                    )}
-                    {activeMission?.status !== "active" && activeMission?.status !== "interrupted" && activeMission?.status !== "blocked" && (
-                      <button
-                        onClick={() => handleSetStatus("active")}
-                        className="flex w-full items-center gap-2 px-3 py-2 text-sm text-white/70 hover:bg-white/[0.04]"
-                      >
-                        <Clock className="h-4 w-4 text-indigo-400" />
-                        Reactivate
-                      </button>
-                    )}
-                  </div>
-                )}
-              </div>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => (runningMissions.length > 0 || currentMission) && setShowParallelPanel(!showParallelPanel)}
+            className={cn(
+              "flex h-9 w-9 shrink-0 items-center justify-center rounded-lg transition-colors",
+              (runningMissions.length > 0 || currentMission) ? "cursor-pointer hover:bg-indigo-500/30" : "cursor-default",
+              showParallelPanel ? "bg-indigo-500/30" : "bg-indigo-500/20"
             )}
-          </div>
-          {/* Running missions indicator - compact line under mission info */}
-          {(runningMissions.length > 0 || currentMission) && (
-            <button
-              onClick={() => setShowParallelPanel(!showParallelPanel)}
-              className="flex items-center gap-1.5 text-xs text-white/40 hover:text-white/60 transition-colors ml-12"
-            >
-              <Layers className="h-3 w-3" />
-              <span className="font-medium tabular-nums">{runningMissions.length}</span>
-              <span>running</span>
-              <ChevronDown className={cn("h-3 w-3 transition-transform", showParallelPanel && "rotate-180")} />
-            </button>
+            title={runningMissions.length > 0 ? `${runningMissions.length} running mission${runningMissions.length > 1 ? 's' : ''}` : 'Missions'}
+          >
+            <Layers className="h-4 w-4 text-indigo-400" />
+          </button>
+          <span className="text-sm font-medium text-white/60">
+            {activeMission ? activeMission.id.slice(0, 8) : "No mission"}
+          </span>
+          {activeMission && missionStatus && (
+            <div className="relative" ref={statusMenuRef}>
+              <button
+                onClick={() => setShowStatusMenu(!showStatusMenu)}
+                className={cn(
+                  "flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium transition-colors hover:opacity-80",
+                  missionStatus.className
+                )}
+              >
+                {missionStatus.label}
+                <ChevronDown className="h-3 w-3" />
+              </button>
+              {showStatusMenu && (
+                <div className="absolute left-0 top-full mt-1 w-44 rounded-lg border border-white/[0.06] bg-[#1a1a1a] py-1 shadow-xl z-10">
+                  <button
+                    onClick={() => handleSetStatus("completed")}
+                    className="flex w-full items-center gap-2 px-3 py-2 text-sm text-white/70 hover:bg-white/[0.04]"
+                  >
+                    <CheckCircle className="h-4 w-4 text-emerald-400" />
+                    Mark Complete
+                  </button>
+                  <button
+                    onClick={() => handleSetStatus("failed")}
+                    className="flex w-full items-center gap-2 px-3 py-2 text-sm text-white/70 hover:bg-white/[0.04]"
+                  >
+                    <XCircle className="h-4 w-4 text-red-400" />
+                    Mark Failed
+                  </button>
+                  {(activeMission?.status === "interrupted" || activeMission?.status === "blocked") && (
+                    <>
+                      <button
+                        onClick={() => handleResumeMission(false)}
+                        disabled={missionLoading}
+                        className="flex w-full items-center gap-2 px-3 py-2 text-sm text-white/70 hover:bg-white/[0.04] disabled:opacity-50"
+                      >
+                        <PlayCircle className="h-4 w-4 text-emerald-400" />
+                        {activeMission?.status === "blocked" ? "Continue" : "Resume"}
+                      </button>
+                      <button
+                        onClick={() => handleResumeMission(true)}
+                        disabled={missionLoading}
+                        className="flex w-full items-center gap-2 px-3 py-2 text-sm text-white/70 hover:bg-white/[0.04] disabled:opacity-50"
+                        title="Delete work folder and start fresh"
+                      >
+                        <Trash2 className="h-4 w-4 text-orange-400" />
+                        Clean & {activeMission?.status === "blocked" ? "Continue" : "Resume"}
+                      </button>
+                    </>
+                  )}
+                  {activeMission?.status !== "active" && activeMission?.status !== "interrupted" && activeMission?.status !== "blocked" && (
+                    <button
+                      onClick={() => handleSetStatus("active")}
+                      className="flex w-full items-center gap-2 px-3 py-2 text-sm text-white/70 hover:bg-white/[0.04]"
+                    >
+                      <Clock className="h-4 w-4 text-indigo-400" />
+                      Reactivate
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
           )}
         </div>
 
