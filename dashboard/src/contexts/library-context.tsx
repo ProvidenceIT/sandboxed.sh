@@ -328,8 +328,18 @@ export function LibraryProvider({ children }: LibraryProviderProps) {
   }, []);
 
   const saveLibraryAgentFn = useCallback(async (name: string, content: string) => {
-    // Build a LibraryAgent object from content
-    const agent: LibraryAgent = { name, content };
+    // Build a partial LibraryAgent object from content - server handles parsing
+    const agent: LibraryAgent = {
+      name,
+      content,
+      description: null,
+      path: `agent/${name}.md`,
+      model: null,
+      tools: {},
+      permissions: {},
+      skills: [],
+      rules: [],
+    };
     await apiSaveLibraryAgent(name, agent);
     const agentsData = await listLibraryAgents();
     setLibraryAgents(agentsData);

@@ -721,7 +721,7 @@ export interface McpServerState extends McpServerConfig {
 export interface ToolInfo {
   name: string;
   description: string;
-  source: "builtin" | { mcp: { id: string; name: string } };
+  source: "builtin" | { mcp: { id: string; name: string } } | { plugin: { id: string; name: string } };
   enabled: boolean;
 }
 
@@ -1883,16 +1883,24 @@ export interface AIProviderStatus {
   message?: string;
 }
 
+export interface AIProviderAuthMethod {
+  label: string;
+  type: "oauth" | "api";
+  description?: string;
+}
+
 export interface AIProvider {
   id: string;
   provider_type: AIProviderType;
   provider_type_name: string;
   name: string;
   has_api_key: boolean;
+  has_oauth: boolean;
   base_url: string | null;
   enabled: boolean;
   is_default: boolean;
   uses_oauth: boolean;
+  auth_methods: AIProviderAuthMethod[];
   status: AIProviderStatus;
   created_at: string;
   updated_at: string;
@@ -1902,6 +1910,12 @@ export interface AIProviderAuthResponse {
   success: boolean;
   message: string;
   auth_url: string | null;
+}
+
+export interface OAuthAuthorizeResponse {
+  url: string;
+  instructions: string;
+  method: "code" | "auto";
 }
 
 // List all AI providers
@@ -1978,6 +1992,41 @@ export async function authenticateAIProvider(id: string): Promise<AIProviderAuth
 export async function setDefaultAIProvider(id: string): Promise<AIProvider> {
   const res = await apiFetch(`/api/ai/providers/${id}/default`, { method: "POST" });
   if (!res.ok) throw new Error("Failed to set default AI provider");
+  return res.json();
+}
+
+// Get auth methods for a provider
+export async function getAuthMethods(id: string): Promise<AIProviderAuthMethod[]> {
+  const res = await apiFetch(`/api/ai/providers/${id}/auth/methods`);
+  if (!res.ok) throw new Error("Failed to get auth methods");
+  return res.json();
+}
+
+// Start OAuth authorization flow
+export async function oauthAuthorize(id: string, methodIndex: number): Promise<OAuthAuthorizeResponse> {
+  const res = await apiFetch(`/api/ai/providers/${id}/oauth/authorize`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ method_index: methodIndex }),
+  });
+  if (!res.ok) {
+    const error = await res.text();
+    throw new Error(error || "Failed to start OAuth authorization");
+  }
+  return res.json();
+}
+
+// Complete OAuth flow with authorization code
+export async function oauthCallback(id: string, methodIndex: number, code: string): Promise<AIProvider> {
+  const res = await apiFetch(`/api/ai/providers/${id}/oauth/callback`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ method_index: methodIndex, code }),
+  });
+  if (!res.ok) {
+    const error = await res.text();
+    throw new Error(error || "Failed to complete OAuth");
+  }
   return res.json();
 }
 

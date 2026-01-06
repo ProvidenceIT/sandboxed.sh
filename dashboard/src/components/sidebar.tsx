@@ -14,15 +14,14 @@ import {
   Loader,
   CheckCircle,
   XCircle,
-  Library,
   ChevronDown,
   Plug,
   FileCode,
+  FileText,
   Bot,
   Server,
   Puzzle,
   ScrollText,
-  Users,
   Wrench,
 } from 'lucide-react';
 
@@ -40,17 +39,23 @@ const navigation: NavItem[] = [
   { name: 'Workspaces', href: '/workspaces', icon: Server },
   { name: 'Console', href: '/console', icon: Terminal },
   {
-    name: 'Library',
-    href: '/library',
-    icon: Library,
+    name: 'Config',
+    href: '/config',
+    icon: FileText,
     children: [
-      { name: 'MCP Servers', href: '/library/mcps', icon: Plug },
-      { name: 'Plugins', href: '/library/plugins', icon: Puzzle },
-      { name: 'Skills', href: '/library/skills', icon: FileCode },
-      { name: 'Commands', href: '/library/commands', icon: Terminal },
-      { name: 'Rules', href: '/library/rules', icon: ScrollText },
-      { name: 'Agents', href: '/library/agents', icon: Users },
-      { name: 'Tools', href: '/library/tools', icon: Wrench },
+      { name: 'Commands', href: '/config/commands', icon: Terminal },
+      { name: 'Skills', href: '/config/skills', icon: FileCode },
+      { name: 'Rules', href: '/config/rules', icon: ScrollText },
+    ],
+  },
+  {
+    name: 'Extensions',
+    href: '/extensions',
+    icon: Puzzle,
+    children: [
+      { name: 'MCP Servers', href: '/extensions/mcps', icon: Plug },
+      { name: 'Plugins', href: '/extensions/plugins', icon: Puzzle },
+      { name: 'Tools', href: '/extensions/tools', icon: Wrench },
     ],
   },
   { name: 'Settings', href: '/settings', icon: Settings },
@@ -66,10 +71,13 @@ export function Sidebar() {
   const [controlState, setControlState] = useState<ControlRunState>('idle');
   const [expandedItems, setExpandedItems] = useState<Set<string>>(new Set());
 
-  // Auto-expand Library if we're on a library subpage
+  // Auto-expand sections if we're on their subpages
   useEffect(() => {
-    if (pathname.startsWith('/library')) {
-      setExpandedItems((prev) => new Set([...prev, 'Library']));
+    if (pathname.startsWith('/config')) {
+      setExpandedItems((prev) => new Set([...prev, 'Config']));
+    }
+    if (pathname.startsWith('/extensions')) {
+      setExpandedItems((prev) => new Set([...prev, 'Extensions']));
     }
   }, [pathname]);
 

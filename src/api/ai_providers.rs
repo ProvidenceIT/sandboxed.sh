@@ -15,11 +15,18 @@ use axum::{
     routing::{delete, get, post, put},
     Json, Router,
 };
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::ai_providers::{AIProvider, ProviderStatus, ProviderType};
+use crate::ai_providers::{
+    AIProvider, AuthMethod, OAuthCredentials, PendingOAuth, ProviderStatus, ProviderType,
+};
+
+/// Anthropic OAuth client ID (from opencode-anthropic-auth plugin)
+const ANTHROPIC_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 
 /// Create AI provider routes.
 pub fn routes() -> Router<Arc<super::routes::AppState>> {
@@ -31,6 +38,9 @@ pub fn routes() -> Router<Arc<super::routes::AppState>> {
         .route("/:id", put(update_provider))
         .route("/:id", delete(delete_provider))
         .route("/:id/auth", post(authenticate_provider))
+        .route("/:id/auth/methods", get(get_auth_methods))
+        .route("/:id/oauth/authorize", post(oauth_authorize))
+        .route("/:id/oauth/callback", post(oauth_callback))
         .route("/:id/default", post(set_default))
 }
 
@@ -77,10 +87,12 @@ pub struct ProviderResponse {
     pub provider_type_name: String,
     pub name: String,
     pub has_api_key: bool,
+    pub has_oauth: bool,
     pub base_url: Option<String>,
     pub enabled: bool,
     pub is_default: bool,
     pub uses_oauth: bool,
+    pub auth_methods: Vec<AuthMethod>,
     pub status: ProviderStatusResponse,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
@@ -112,12 +124,14 @@ impl From<AIProvider> for ProviderResponse {
             id: p.id,
             provider_type: p.provider_type,
             provider_type_name: p.provider_type.display_name().to_string(),
-            name: p.name,
+            name: p.name.clone(),
             has_api_key: p.api_key.is_some(),
+            has_oauth: p.oauth.is_some(),
             base_url: p.base_url,
             enabled: p.enabled,
             is_default: p.is_default,
             uses_oauth: p.provider_type.uses_oauth(),
+            auth_methods: p.provider_type.auth_methods(),
             status: p.status.into(),
             created_at: p.created_at,
             updated_at: p.updated_at,
@@ -131,6 +145,33 @@ pub struct AuthResponse {
     pub message: String,
     /// OAuth URL to redirect user to (if OAuth flow required)
     pub auth_url: Option<String>,
+}
+
+/// Request to initiate OAuth authorization.
+#[derive(Debug, Deserialize)]
+pub struct OAuthAuthorizeRequest {
+    /// Index of the auth method to use (0-indexed)
+    pub method_index: usize,
+}
+
+/// Response from OAuth authorization initiation.
+#[derive(Debug, Serialize)]
+pub struct OAuthAuthorizeResponse {
+    /// URL to redirect user to for authorization
+    pub url: String,
+    /// Instructions to show the user
+    pub instructions: String,
+    /// Method for callback: "code" means user pastes code
+    pub method: String,
+}
+
+/// Request to exchange OAuth code for credentials.
+#[derive(Debug, Deserialize)]
+pub struct OAuthCallbackRequest {
+    /// Index of the auth method used
+    pub method_index: usize,
+    /// Authorization code from the OAuth flow
+    pub code: String,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -407,4 +448,310 @@ async fn set_default(
     tracing::info!("Set default AI provider: {} ({})", provider.name, id);
 
     Ok(Json(provider.into()))
+}
+
+/// GET /api/ai/providers/:id/auth/methods - Get available auth methods for a provider.
+async fn get_auth_methods(
+    State(state): State<Arc<super::routes::AppState>>,
+    AxumPath(id): AxumPath<Uuid>,
+) -> Result<Json<Vec<AuthMethod>>, (StatusCode, String)> {
+    let provider = state
+        .ai_providers
+        .get(id)
+        .await
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Provider {} not found", id)))?;
+
+    Ok(Json(provider.provider_type.auth_methods()))
+}
+
+/// Generate PKCE code verifier and challenge.
+fn generate_pkce() -> (String, String) {
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    let verifier: String = (0..43)
+        .map(|_| {
+            let idx = rng.gen_range(0..62);
+            let chars: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+            chars[idx] as char
+        })
+        .collect();
+
+    let mut hasher = Sha256::new();
+    hasher.update(verifier.as_bytes());
+    let hash = hasher.finalize();
+    let challenge = URL_SAFE_NO_PAD.encode(hash);
+
+    (verifier, challenge)
+}
+
+/// POST /api/ai/providers/:id/oauth/authorize - Initiate OAuth authorization.
+async fn oauth_authorize(
+    State(state): State<Arc<super::routes::AppState>>,
+    AxumPath(id): AxumPath<Uuid>,
+    Json(req): Json<OAuthAuthorizeRequest>,
+) -> Result<Json<OAuthAuthorizeResponse>, (StatusCode, String)> {
+    let provider = state
+        .ai_providers
+        .get(id)
+        .await
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Provider {} not found", id)))?;
+
+    let auth_methods = provider.provider_type.auth_methods();
+    let method = auth_methods
+        .get(req.method_index)
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "Invalid method index".to_string()))?;
+
+    match provider.provider_type {
+        ProviderType::Anthropic => {
+            // Generate PKCE
+            let (verifier, challenge) = generate_pkce();
+
+            // Determine mode based on method label
+            let mode = if method.label.contains("Pro") || method.label.contains("Max") {
+                "max"
+            } else {
+                "console"
+            };
+
+            // Build OAuth URL
+            let base_url = if mode == "max" {
+                "https://claude.ai/oauth/authorize"
+            } else {
+                "https://console.anthropic.com/oauth/authorize"
+            };
+
+            let mut url = url::Url::parse(base_url).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to parse URL: {}", e),
+                )
+            })?;
+
+            url.query_pairs_mut()
+                .append_pair("code", "true")
+                .append_pair("client_id", ANTHROPIC_CLIENT_ID)
+                .append_pair("response_type", "code")
+                .append_pair(
+                    "redirect_uri",
+                    "https://console.anthropic.com/oauth/code/callback",
+                )
+                .append_pair("scope", "org:create_api_key user:profile user:inference")
+                .append_pair("code_challenge", &challenge)
+                .append_pair("code_challenge_method", "S256")
+                .append_pair("state", &verifier);
+
+            // Store pending OAuth
+            state
+                .ai_providers
+                .set_pending_oauth(
+                    id,
+                    PendingOAuth {
+                        verifier,
+                        mode: mode.to_string(),
+                        created_at: std::time::Instant::now(),
+                    },
+                )
+                .await;
+
+            Ok(Json(OAuthAuthorizeResponse {
+                url: url.to_string(),
+                instructions: "Visit the link above and paste the authorization code here"
+                    .to_string(),
+                method: "code".to_string(),
+            }))
+        }
+        _ => Err((
+            StatusCode::BAD_REQUEST,
+            "OAuth not supported for this provider".to_string(),
+        )),
+    }
+}
+
+/// POST /api/ai/providers/:id/oauth/callback - Exchange OAuth code for credentials.
+async fn oauth_callback(
+    State(state): State<Arc<super::routes::AppState>>,
+    AxumPath(id): AxumPath<Uuid>,
+    Json(req): Json<OAuthCallbackRequest>,
+) -> Result<Json<ProviderResponse>, (StatusCode, String)> {
+    let provider = state
+        .ai_providers
+        .get(id)
+        .await
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Provider {} not found", id)))?;
+
+    // Get pending OAuth state
+    let pending = state
+        .ai_providers
+        .take_pending_oauth(id)
+        .await
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                "No pending OAuth authorization. Please start the OAuth flow again.".to_string(),
+            )
+        })?;
+
+    // Check if OAuth hasn't expired (10 minutes)
+    if pending.created_at.elapsed() > std::time::Duration::from_secs(600) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "OAuth authorization expired. Please start again.".to_string(),
+        ));
+    }
+
+    match provider.provider_type {
+        ProviderType::Anthropic => {
+            // Exchange code for tokens
+            let code = req.code.clone();
+            let splits: Vec<&str> = code.split('#').collect();
+            let code_part = splits.first().copied().unwrap_or(&code);
+            let state_part = splits.get(1).copied();
+
+            let client = reqwest::Client::new();
+            let token_response = client
+                .post("https://console.anthropic.com/v1/oauth/token")
+                .json(&serde_json::json!({
+                    "code": code_part,
+                    "state": state_part,
+                    "grant_type": "authorization_code",
+                    "client_id": ANTHROPIC_CLIENT_ID,
+                    "redirect_uri": "https://console.anthropic.com/oauth/code/callback",
+                    "code_verifier": pending.verifier
+                }))
+                .send()
+                .await
+                .map_err(|e| {
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        format!("Failed to exchange code: {}", e),
+                    )
+                })?;
+
+            if !token_response.status().is_success() {
+                let error_text = token_response.text().await.unwrap_or_default();
+                return Err((
+                    StatusCode::BAD_GATEWAY,
+                    format!("OAuth token exchange failed: {}", error_text),
+                ));
+            }
+
+            let token_data: serde_json::Value = token_response.json().await.map_err(|e| {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    format!("Failed to parse token response: {}", e),
+                )
+            })?;
+
+            let auth_methods = provider.provider_type.auth_methods();
+            let method = auth_methods.get(req.method_index);
+
+            // Check if this is "Create an API Key" method
+            let is_create_api_key = method
+                .map(|m| m.label.contains("Create") && m.label.contains("API Key"))
+                .unwrap_or(false);
+
+            if is_create_api_key {
+                // Create an API key using the access token
+                let access_token = token_data["access_token"].as_str().ok_or_else(|| {
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        "No access token in response".to_string(),
+                    )
+                })?;
+
+                let api_key_response = client
+                    .post("https://api.anthropic.com/api/oauth/claude_cli/create_api_key")
+                    .header("Authorization", format!("Bearer {}", access_token))
+                    .header("Content-Type", "application/json")
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        (
+                            StatusCode::BAD_GATEWAY,
+                            format!("Failed to create API key: {}", e),
+                        )
+                    })?;
+
+                if !api_key_response.status().is_success() {
+                    let error_text = api_key_response.text().await.unwrap_or_default();
+                    return Err((
+                        StatusCode::BAD_GATEWAY,
+                        format!("API key creation failed: {}", error_text),
+                    ));
+                }
+
+                let api_key_data: serde_json::Value =
+                    api_key_response.json().await.map_err(|e| {
+                        (
+                            StatusCode::BAD_GATEWAY,
+                            format!("Failed to parse API key response: {}", e),
+                        )
+                    })?;
+
+                let api_key = api_key_data["raw_key"].as_str().ok_or_else(|| {
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        "No API key in response".to_string(),
+                    )
+                })?;
+
+                // Store the API key
+                let updated = state
+                    .ai_providers
+                    .set_api_key(id, api_key.to_string())
+                    .await
+                    .ok_or_else(|| (StatusCode::NOT_FOUND, "Provider not found".to_string()))?;
+
+                tracing::info!(
+                    "Created API key for provider: {} ({})",
+                    updated.name,
+                    id
+                );
+
+                Ok(Json(updated.into()))
+            } else {
+                // Store OAuth credentials (Claude Pro/Max mode)
+                let refresh_token = token_data["refresh_token"].as_str().ok_or_else(|| {
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        "No refresh token in response".to_string(),
+                    )
+                })?;
+
+                let access_token = token_data["access_token"].as_str().ok_or_else(|| {
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        "No access token in response".to_string(),
+                    )
+                })?;
+
+                let expires_in = token_data["expires_in"].as_i64().unwrap_or(3600);
+                let expires_at = chrono::Utc::now().timestamp_millis() + (expires_in * 1000);
+
+                let credentials = OAuthCredentials {
+                    refresh_token: refresh_token.to_string(),
+                    access_token: access_token.to_string(),
+                    expires_at,
+                };
+
+                let updated = state
+                    .ai_providers
+                    .set_oauth_credentials(id, credentials)
+                    .await
+                    .ok_or_else(|| (StatusCode::NOT_FOUND, "Provider not found".to_string()))?;
+
+                tracing::info!(
+                    "OAuth credentials saved for provider: {} ({})",
+                    updated.name,
+                    id
+                );
+
+                Ok(Json(updated.into()))
+            }
+        }
+        _ => Err((
+            StatusCode::BAD_REQUEST,
+            "OAuth not supported for this provider".to_string(),
+        )),
+    }
 }

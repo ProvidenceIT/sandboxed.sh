@@ -721,8 +721,8 @@ impl LibraryStore {
     /// Save a command's content.
     pub async fn save_command(&self, name: &str, content: &str) -> Result<()> {
         Self::validate_name(name)?;
-        // Use new path for saving
-        let commands_dir = self.path.join(COMMAND_DIR);
+        // Use same directory as list_commands for consistency (respects legacy path)
+        let commands_dir = self.commands_dir();
         let command_path = commands_dir.join(format!("{}.md", name));
 
         // Ensure directory exists

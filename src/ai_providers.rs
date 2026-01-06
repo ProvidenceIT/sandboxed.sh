@@ -9,6 +9,61 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Authentication Methods
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Authentication method types.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthMethodType {
+    /// OAuth-based authentication (Claude Pro/Max, GitHub Copilot)
+    Oauth,
+    /// Manual API key entry
+    Api,
+}
+
+/// An authentication method for a provider.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthMethod {
+    pub label: String,
+    #[serde(rename = "type")]
+    pub method_type: AuthMethodType,
+    /// Optional description for the method
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// Pending OAuth authorization state.
+#[derive(Debug, Clone)]
+pub struct PendingOAuth {
+    pub verifier: String,
+    pub mode: String, // "max" or "console"
+    pub created_at: std::time::Instant,
+}
+
+/// Stored OAuth credentials.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OAuthCredentials {
+    pub refresh_token: String,
+    pub access_token: String,
+    pub expires_at: i64,
+}
+
+/// Provider credential type.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ProviderCredential {
+    /// API key authentication
+    ApiKey { key: String },
+    /// OAuth token authentication
+    OAuth {
+        refresh_token: String,
+        access_token: String,
+        expires_at: i64,
+    },
+}
+
 /// Known AI provider types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -80,6 +135,47 @@ impl ProviderType {
     pub fn uses_oauth(&self) -> bool {
         matches!(self, Self::Anthropic | Self::GithubCopilot)
     }
+
+    /// Returns available authentication methods for this provider.
+    pub fn auth_methods(&self) -> Vec<AuthMethod> {
+        match self {
+            Self::Anthropic => vec![
+                AuthMethod {
+                    label: "Claude Pro/Max".to_string(),
+                    method_type: AuthMethodType::Oauth,
+                    description: Some(
+                        "Use your Claude Pro or Max subscription for unlimited usage".to_string(),
+                    ),
+                },
+                AuthMethod {
+                    label: "Create an API Key".to_string(),
+                    method_type: AuthMethodType::Oauth,
+                    description: Some(
+                        "Create a new API key from your Anthropic account".to_string(),
+                    ),
+                },
+                AuthMethod {
+                    label: "Manually enter API Key".to_string(),
+                    method_type: AuthMethodType::Api,
+                    description: Some("Enter an existing Anthropic API key".to_string()),
+                },
+            ],
+            Self::GithubCopilot => vec![
+                AuthMethod {
+                    label: "GitHub Copilot".to_string(),
+                    method_type: AuthMethodType::Oauth,
+                    description: Some(
+                        "Connect your GitHub Copilot subscription".to_string(),
+                    ),
+                },
+            ],
+            _ => vec![AuthMethod {
+                label: "API Key".to_string(),
+                method_type: AuthMethodType::Api,
+                description: None,
+            }],
+        }
+    }
 }
 
 impl std::fmt::Display for ProviderType {
@@ -99,6 +195,9 @@ pub struct AIProvider {
     /// API key (if using API key auth)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
+    /// OAuth credentials (if using OAuth auth)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth: Option<OAuthCredentials>,
     /// Custom base URL (for self-hosted or proxy endpoints)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
@@ -138,6 +237,7 @@ impl AIProvider {
             provider_type,
             name,
             api_key: None,
+            oauth: None,
             base_url: None,
             enabled: true,
             is_default: false,
@@ -149,12 +249,12 @@ impl AIProvider {
 
     /// Check if this provider has valid credentials configured.
     pub fn has_credentials(&self) -> bool {
-        // OAuth providers are handled separately
-        if self.provider_type.uses_oauth() {
-            return true; // Will be validated at runtime
-        }
-        // API key providers need a key
-        self.api_key.is_some()
+        self.api_key.is_some() || self.oauth.is_some()
+    }
+
+    /// Check if this provider has OAuth credentials.
+    pub fn has_oauth(&self) -> bool {
+        self.oauth.is_some()
     }
 }
 
@@ -162,6 +262,8 @@ impl AIProvider {
 #[derive(Debug, Clone)]
 pub struct AIProviderStore {
     providers: Arc<RwLock<HashMap<Uuid, AIProvider>>>,
+    /// Pending OAuth authorizations (keyed by provider ID)
+    pending_oauth: Arc<RwLock<HashMap<Uuid, PendingOAuth>>>,
     storage_path: PathBuf,
 }
 
@@ -169,6 +271,7 @@ impl AIProviderStore {
     pub async fn new(storage_path: PathBuf) -> Self {
         let store = Self {
             providers: Arc::new(RwLock::new(HashMap::new())),
+            pending_oauth: Arc::new(RwLock::new(HashMap::new())),
             storage_path,
         };
 
@@ -327,6 +430,64 @@ impl AIProviderStore {
         }
 
         true
+    }
+
+    /// Store a pending OAuth authorization.
+    pub async fn set_pending_oauth(&self, id: Uuid, pending: PendingOAuth) {
+        let mut pending_oauth = self.pending_oauth.write().await;
+        pending_oauth.insert(id, pending);
+    }
+
+    /// Get and remove a pending OAuth authorization.
+    pub async fn take_pending_oauth(&self, id: Uuid) -> Option<PendingOAuth> {
+        let mut pending_oauth = self.pending_oauth.write().await;
+        pending_oauth.remove(&id)
+    }
+
+    /// Update a provider with OAuth credentials.
+    pub async fn set_oauth_credentials(
+        &self,
+        id: Uuid,
+        credentials: OAuthCredentials,
+    ) -> Option<AIProvider> {
+        let mut providers = self.providers.write().await;
+
+        if let Some(provider) = providers.get_mut(&id) {
+            provider.oauth = Some(credentials);
+            provider.status = ProviderStatus::Connected;
+            provider.updated_at = chrono::Utc::now();
+            let updated = provider.clone();
+            drop(providers);
+
+            if let Err(e) = self.save_to_disk().await {
+                tracing::error!("Failed to save AI providers to disk: {}", e);
+            }
+
+            Some(updated)
+        } else {
+            None
+        }
+    }
+
+    /// Update a provider with an API key.
+    pub async fn set_api_key(&self, id: Uuid, api_key: String) -> Option<AIProvider> {
+        let mut providers = self.providers.write().await;
+
+        if let Some(provider) = providers.get_mut(&id) {
+            provider.api_key = Some(api_key);
+            provider.status = ProviderStatus::Connected;
+            provider.updated_at = chrono::Utc::now();
+            let updated = provider.clone();
+            drop(providers);
+
+            if let Err(e) = self.save_to_disk().await {
+                tracing::error!("Failed to save AI providers to disk: {}", e);
+            }
+
+            Some(updated)
+        } else {
+            None
+        }
     }
 }
 
