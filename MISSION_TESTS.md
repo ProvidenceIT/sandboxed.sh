@@ -145,3 +145,117 @@ This document tracks testing of Open Agent missions to validate the architecture
 3. Document results and iterate through remaining missions
 4. Fix any architectural issues discovered
 5. Re-test failed missions after fixes
+
+---
+
+## Testing Infrastructure (Updated 2026-01-06)
+
+### Web Dashboard - Playwright Tests
+
+**Total Tests**: 44
+**Passed**: 44 (100%)
+**Failed**: 0
+
+#### Test Coverage by Area:
+
+| Area | Tests | Status |
+|------|-------|--------|
+| Navigation | 6 | ✅ All passing |
+| Agents Page | 5 | ✅ All passing |
+| Workspaces Page | 5 | ✅ All passing |
+| Control/Mission Page | 6 | ✅ All passing |
+| Settings Page | 6 | ✅ All passing |
+| Overview Page | 9 | ✅ All passing |
+| Library - MCPs | 3 | ✅ All passing |
+| Library - Skills | 2 | ✅ All passing |
+| Library - Commands | 2 | ✅ All passing |
+
+#### Test Files:
+- `dashboard/tests/navigation.spec.ts` - Page navigation and sidebar
+- `dashboard/tests/agents.spec.ts` - Agent configuration management
+- `dashboard/tests/workspaces.spec.ts` - Workspace management
+- `dashboard/tests/control.spec.ts` - Mission control interface
+- `dashboard/tests/settings.spec.ts` - Settings and connection
+- `dashboard/tests/overview.spec.ts` - Dashboard metrics and stats
+- `dashboard/tests/library.spec.ts` - Library configuration (Skills, Commands, MCPs)
+
+#### Running Tests:
+```bash
+cd dashboard
+bunx playwright test        # Run all tests
+bunx playwright test:ui     # Interactive UI mode
+```
+
+---
+
+### iOS Dashboard - XCTest Unit Tests
+
+**Total Tests**: 23
+**Passed**: 23 (100%)
+**Failed**: 0
+
+#### Test Coverage by Area:
+
+| Area | Tests | Status |
+|------|-------|--------|
+| Model Tests | 13 | ✅ All passing |
+| Theme Tests | 10 | ✅ All passing |
+
+#### Model Tests Include:
+- AgentConfig decoding/encoding
+- Workspace decoding and properties
+- Mission status decoding and display labels
+- FileEntry decoding and helpers
+- WorkspaceType and WorkspaceStatus enums
+
+#### Theme Tests Include:
+- Background, card, border color definitions
+- Semantic colors (success, warning, error, info)
+- Text colors and accent colors
+- StatusType colors, labels, icons, and pulse behavior
+
+#### Test Files:
+- `ios_dashboard/OpenAgentDashboardTests/ModelTests.swift`
+- `ios_dashboard/OpenAgentDashboardTests/ThemeTests.swift`
+
+#### Running Tests:
+```bash
+cd ios_dashboard
+xcodegen generate  # Regenerate project if needed
+xcodebuild -project OpenAgentDashboard.xcodeproj \
+  -scheme OpenAgentDashboardTests \
+  -destination "platform=iOS Simulator,id=<UDID>" \
+  test
+```
+
+---
+
+### iOS Simulator Testing
+
+**Simulator**: iPhone 17 Pro (iOS 18.0)
+**Build Status**: ✅ Successful
+**App Status**: ✅ Running in simulator
+
+#### Screenshots Captured:
+- Control view with "Ready to Help" interface
+- Quick action buttons (Analyze files, Search web, Write code, Run command)
+- Tab bar navigation (Control, History, Terminal, Files)
+
+#### Features Verified:
+- App launches successfully
+- Control view renders correctly
+- Tab bar navigation visible
+- Quick action buttons present
+- "Quiet Luxury + Liquid Glass" design system applied
+
+---
+
+### Summary
+
+| Platform | Tests | Passed | Coverage |
+|----------|-------|--------|----------|
+| Web (Playwright) | 44 | 44 (100%) | Navigation, Pages, Forms |
+| iOS (XCTest) | 23 | 23 (100%) | Models, Theme |
+| **Total** | **67** | **67 (100%)** | |
+
+All automated tests are passing. Manual verification confirms iOS app functionality in simulator.
