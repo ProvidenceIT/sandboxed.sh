@@ -242,8 +242,14 @@ async fn delete_workspace(
     if let Some(ws) = state.workspaces.get(id).await {
         if ws.workspace_type == WorkspaceType::Chroot {
             if let Err(e) = crate::workspace::destroy_chroot_workspace(&ws).await {
-                tracing::warn!("Failed to destroy chroot: {}", e);
-                // Continue with deletion anyway
+                tracing::error!("Failed to destroy chroot for workspace {}: {}", id, e);
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!(
+                        "Failed to destroy chroot: {}. Workspace not deleted to prevent orphaned state.",
+                        e
+                    ),
+                ));
             }
         }
     }
