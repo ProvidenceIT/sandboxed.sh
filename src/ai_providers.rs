@@ -65,7 +65,7 @@ pub enum ProviderCredential {
 }
 
 /// Known AI provider types.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ProviderType {
     Anthropic,
@@ -107,6 +107,49 @@ impl ProviderType {
             Self::Perplexity => "Perplexity",
             Self::GithubCopilot => "GitHub Copilot",
             Self::Custom => "Custom",
+        }
+    }
+
+    pub fn id(&self) -> &'static str {
+        match self {
+            Self::Anthropic => "anthropic",
+            Self::OpenAI => "openai",
+            Self::Google => "google",
+            Self::AmazonBedrock => "amazon-bedrock",
+            Self::Azure => "azure",
+            Self::OpenRouter => "open-router",
+            Self::Mistral => "mistral",
+            Self::Groq => "groq",
+            Self::Xai => "xai",
+            Self::DeepInfra => "deep-infra",
+            Self::Cerebras => "cerebras",
+            Self::Cohere => "cohere",
+            Self::TogetherAI => "together-ai",
+            Self::Perplexity => "perplexity",
+            Self::GithubCopilot => "github-copilot",
+            Self::Custom => "custom",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<Self> {
+        match id {
+            "anthropic" => Some(Self::Anthropic),
+            "openai" => Some(Self::OpenAI),
+            "google" => Some(Self::Google),
+            "amazon-bedrock" => Some(Self::AmazonBedrock),
+            "azure" => Some(Self::Azure),
+            "open-router" => Some(Self::OpenRouter),
+            "mistral" => Some(Self::Mistral),
+            "groq" => Some(Self::Groq),
+            "xai" => Some(Self::Xai),
+            "deep-infra" => Some(Self::DeepInfra),
+            "cerebras" => Some(Self::Cerebras),
+            "cohere" => Some(Self::Cohere),
+            "together-ai" => Some(Self::TogetherAI),
+            "perplexity" => Some(Self::Perplexity),
+            "github-copilot" => Some(Self::GithubCopilot),
+            "custom" => Some(Self::Custom),
+            _ => None,
         }
     }
 

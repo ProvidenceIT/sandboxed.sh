@@ -2,13 +2,12 @@
 name = "open_agent"
 version = "0.1.0"
 edition = "2021"
-description = "A minimal autonomous coding agent with full machine access"
+description = "Managed control plane for OpenCode-based agents"
 authors = ["Open Agent Contributors"]
 
 [dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full"] }
-tokio-stream = "0.1"
 
 # Web framework
 axum = { version = "0.7", features = ["ws", "multipart"] }

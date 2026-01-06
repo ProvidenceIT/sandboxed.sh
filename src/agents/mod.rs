@@ -1,12 +1,7 @@
 //! Agents module - task execution via OpenCode.
 //!
 //! # Agent Types
-//! - **OpenCodeAgent**: Delegates task execution to an OpenCode server (Claude Max)
-//!
-//! # Design Principles
-//! - OpenCode handles all task execution
-//! - Real-time event streaming (thinking, tool calls, results)
-//! - Integration with Claude Max subscriptions
+//! - **OpenCodeAgent**: Delegates task execution to an OpenCode server
 
 mod context;
 mod opencode;
@@ -17,7 +12,7 @@ use std::sync::Arc;
 pub use opencode::OpenCodeAgent;
 
 pub use context::AgentContext;
-pub use types::{AgentError, AgentId, AgentResult, AgentType, Complexity, TerminalReason};
+pub use types::{AgentError, AgentId, AgentResult, AgentType, TerminalReason};
 
 use crate::task::Task;
 use async_trait::async_trait;
@@ -39,46 +34,10 @@ pub trait Agent: Send + Sync {
     fn agent_type(&self) -> AgentType;
 
     /// Execute a task.
-    ///
-    /// # Preconditions
-    /// - `task.budget().remaining_cents() > 0` (has budget)
-    /// - `task.status() == Pending || task.status() == Running`
-    ///
-    /// # Postconditions
-    /// - On success: task is completed or delegated appropriately
-    /// - `result.cost_cents <= task.budget().total_cents()`
     async fn execute(&self, task: &mut Task, ctx: &AgentContext) -> AgentResult;
 
     /// Get a human-readable description of this agent.
     fn description(&self) -> &str {
         "Generic agent"
-    }
-}
-
-/// Capabilities of leaf agents.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum LeafCapability {
-    /// Can estimate task complexity
-    ComplexityEstimation,
-
-    /// Can select optimal model for a task
-    ModelSelection,
-
-    /// Can execute tasks using tools
-    TaskExecution,
-
-    /// Can verify task completion
-    Verification,
-}
-
-impl LeafCapability {
-    /// Get the agent type for this capability.
-    pub fn agent_type(&self) -> AgentType {
-        match self {
-            Self::ComplexityEstimation => AgentType::ComplexityEstimator,
-            Self::ModelSelection => AgentType::ModelSelector,
-            Self::TaskExecution => AgentType::TaskExecutor,
-            Self::Verification => AgentType::Verifier,
-        }
     }
 }

@@ -135,7 +135,6 @@ pub fn safe_truncate_index(s: &str, max: usize) -> usize {
 use async_trait::async_trait;
 use serde_json::Value;
 
-use crate::llm::{FunctionDefinition, ToolDefinition};
 
 /// Information about a tool for display purposes.
 #[derive(Debug, Clone)]
@@ -317,21 +316,6 @@ impl ToolRegistry {
     /// Check if a tool exists by name.
     pub fn has_tool(&self, name: &str) -> bool {
         self.tools.contains_key(name)
-    }
-
-    /// Get tool schemas in LLM-compatible format.
-    pub fn get_tool_schemas(&self) -> Vec<ToolDefinition> {
-        self.tools
-            .values()
-            .map(|t| ToolDefinition {
-                tool_type: "function".to_string(),
-                function: FunctionDefinition {
-                    name: t.name().to_string(),
-                    description: t.description().to_string(),
-                    parameters: t.parameters_schema(),
-                },
-            })
-            .collect()
     }
 
     /// Execute a tool by name.

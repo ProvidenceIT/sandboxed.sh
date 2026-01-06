@@ -6,7 +6,7 @@
 //! - `GET /api/task/{id}` - Get task status and result
 //! - `GET /api/task/{id}/stream` - Stream task progress via SSE
 //! - `GET /api/health` - Health check
-//! - `GET /api/providers` - List available providers and models
+//! - `GET /api/providers` - List available providers
 //! - `GET /api/mcp` - List all MCP servers
 //! - `POST /api/mcp` - Add a new MCP server
 //! - `DELETE /api/mcp/{id}` - Remove an MCP server

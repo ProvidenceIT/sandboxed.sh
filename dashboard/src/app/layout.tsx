@@ -18,7 +18,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "OpenAgent Dashboard",
-  description: "Monitor and control your autonomous coding agent",
+  description: "Monitor and control your OpenCode agents",
   icons: {
     icon: "/favicon.svg",
   },

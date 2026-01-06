@@ -87,6 +87,8 @@ const AGENT_ICONS = {
   ModelSelector: Cpu,
   TaskExecutor: Zap,
   Verifier: Target,
+  OpenCode: Bot,
+  OpenCodeSession: GitBranch,
 };
 
 interface AgentTreeCanvasProps {

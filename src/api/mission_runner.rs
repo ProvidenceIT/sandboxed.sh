@@ -19,12 +19,9 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::agents::{AgentContext, AgentRef, AgentResult};
-use crate::budget::{Budget, ModelPricing, SharedBenchmarkRegistry, SharedModelResolver};
 use crate::config::Config;
-use crate::llm::OpenRouterClient;
 use crate::mcp::McpRegistry;
-use crate::task::{extract_deliverables, DeliverableSet, VerificationCriteria};
-use crate::tools::ToolRegistry;
+use crate::task::{extract_deliverables, DeliverableSet};
 use crate::workspace;
 
 use super::control::{
@@ -213,11 +210,8 @@ impl MissionRunner {
         &mut self,
         config: Config,
         root_agent: AgentRef,
-        benchmarks: SharedBenchmarkRegistry,
-        resolver: SharedModelResolver,
         mcp: Arc<McpRegistry>,
         workspaces: workspace::SharedWorkspaceStore,
-        pricing: Arc<ModelPricing>,
         events_tx: broadcast::Sender<AgentEvent>,
         tool_hub: Arc<FrontendToolHub>,
         status: Arc<RwLock<ControlStatus>>,
@@ -266,11 +260,8 @@ impl MissionRunner {
             let result = run_mission_turn(
                 config,
                 root_agent,
-                benchmarks,
-                resolver,
                 mcp,
                 workspaces,
-                pricing,
                 events_tx,
                 tool_hub,
                 status,
@@ -370,11 +361,8 @@ fn build_history_context(history: &[(String, String)], max_chars: usize) -> Stri
 async fn run_mission_turn(
     config: Config,
     root_agent: AgentRef,
-    benchmarks: SharedBenchmarkRegistry,
-    resolver: SharedModelResolver,
     mcp: Arc<McpRegistry>,
     workspaces: workspace::SharedWorkspaceStore,
-    pricing: Arc<ModelPricing>,
     events_tx: broadcast::Sender<AgentEvent>,
     tool_hub: Arc<FrontendToolHub>,
     status: Arc<RwLock<ControlStatus>>,
@@ -441,9 +429,7 @@ async fn run_mission_turn(
     convo.push_str(multi_step_instructions);
     convo.push_str("\n");
 
-    let budget = Budget::new(1000);
-    let verification = VerificationCriteria::None;
-    let mut task = match crate::task::Task::new(convo, verification, budget) {
+    let mut task = match crate::task::Task::new(convo, Some(1000)) {
         Ok(t) => t,
         Err(e) => {
             return AgentResult::failure(format!("Failed to create task: {}", e), 0);
@@ -455,9 +441,6 @@ async fn run_mission_turn(
         tracing::info!("Mission using model override: {}", model);
         task.analysis_mut().requested_model = Some(model);
     }
-
-    // Create LLM client
-    let llm = Arc::new(OpenRouterClient::new(config.api_key.clone()));
 
     // Ensure mission workspace exists and is configured for OpenCode.
     let workspace_root =
@@ -478,21 +461,12 @@ async fn run_mission_turn(
             }
         };
 
-    let tools = ToolRegistry::empty();
-    let mut ctx = AgentContext::new(
-        config.clone(),
-        llm,
-        tools,
-        pricing,
-        mission_work_dir,
-    );
+    let mut ctx = AgentContext::new(config.clone(), mission_work_dir);
     ctx.mission_control = mission_control;
     ctx.control_events = Some(events_tx);
     ctx.frontend_tool_hub = Some(tool_hub);
     ctx.control_status = Some(status);
     ctx.cancel_token = Some(cancel);
-    ctx.benchmarks = Some(benchmarks);
-    ctx.resolver = Some(resolver);
     ctx.tree_snapshot = Some(tree_snapshot);
     ctx.progress_snapshot = Some(progress_snapshot);
     ctx.mission_id = Some(mission_id);

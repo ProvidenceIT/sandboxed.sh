@@ -26,12 +26,8 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::agents::{AgentContext, AgentRef, TerminalReason};
-use crate::budget::{Budget, ModelPricing};
 use crate::config::Config;
-use crate::llm::OpenRouterClient;
 use crate::mcp::McpRegistry;
-use crate::task::VerificationCriteria;
-use crate::tools::ToolRegistry;
 use crate::workspace;
 
 use super::auth::AuthUser;
@@ -238,7 +234,7 @@ pub enum AgentEvent {
     },
     /// Agent phase update (for showing preparation steps)
     AgentPhase {
-        /// Phase name: "estimating_complexity", "selecting_model", "splitting_task", "executing", "verifying"
+        /// Phase name: "executing", "delegating", etc.
         phase: String,
         /// Optional details about what's happening
         detail: Option<String>,
@@ -277,7 +273,7 @@ pub enum AgentEvent {
 pub struct AgentTreeNode {
     pub id: String,
     #[serde(rename = "type")]
-    pub node_type: String, // "Root", "Node", "ComplexityEstimator", "ModelSelector", "TaskExecutor", "Verifier"
+    pub node_type: String, // e.g. "Root", "Worker"
     pub name: String,
     pub description: String,
     pub status: String, // "pending", "running", "completed", "failed"
@@ -780,8 +776,6 @@ pub struct ControlHub {
     sessions: Arc<RwLock<HashMap<String, ControlState>>>,
     config: Config,
     root_agent: AgentRef,
-    benchmarks: crate::budget::SharedBenchmarkRegistry,
-    resolver: crate::budget::SharedModelResolver,
     mcp: Arc<McpRegistry>,
     workspaces: workspace::SharedWorkspaceStore,
 }
@@ -790,8 +784,6 @@ impl ControlHub {
     pub fn new(
         config: Config,
         root_agent: AgentRef,
-        benchmarks: crate::budget::SharedBenchmarkRegistry,
-        resolver: crate::budget::SharedModelResolver,
         mcp: Arc<McpRegistry>,
         workspaces: workspace::SharedWorkspaceStore,
     ) -> Self {
@@ -799,8 +791,6 @@ impl ControlHub {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             config,
             root_agent,
-            benchmarks,
-            resolver,
             mcp,
             workspaces,
         }
@@ -818,8 +808,6 @@ impl ControlHub {
         let state = spawn_control_session(
             self.config.clone(),
             Arc::clone(&self.root_agent),
-            Arc::clone(&self.benchmarks),
-            Arc::clone(&self.resolver),
             Arc::clone(&self.mcp),
             Arc::clone(&self.workspaces),
             mission_store,
@@ -833,7 +821,7 @@ impl ControlHub {
     }
 }
 
-/// Execution progress for showing "Subtask X of Y"
+/// Execution progress for showing overall mission progress
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct ExecutionProgress {
     /// Total number of subtasks
@@ -1637,8 +1625,6 @@ pub async fn stream(
 fn spawn_control_session(
     config: Config,
     root_agent: AgentRef,
-    benchmarks: crate::budget::SharedBenchmarkRegistry,
-    resolver: crate::budget::SharedModelResolver,
     mcp: Arc<McpRegistry>,
     workspaces: workspace::SharedWorkspaceStore,
     mission_store: Arc<dyn MissionStore>,
@@ -1678,8 +1664,6 @@ fn spawn_control_session(
     tokio::spawn(control_actor_loop(
         config.clone(),
         root_agent,
-        benchmarks,
-        resolver,
         mcp,
         workspaces,
         cmd_rx,
@@ -1762,8 +1746,6 @@ async fn stale_mission_cleanup_loop(
 async fn control_actor_loop(
     config: Config,
     root_agent: AgentRef,
-    benchmarks: crate::budget::SharedBenchmarkRegistry,
-    resolver: crate::budget::SharedModelResolver,
     mcp: Arc<McpRegistry>,
     workspaces: workspace::SharedWorkspaceStore,
     mut cmd_rx: mpsc::Receiver<ControlCommand>,
@@ -1781,8 +1763,6 @@ async fn control_actor_loop(
     // Queue stores (id, content, model_override) for the current/primary mission
     let mut queue: VecDeque<(Uuid, String, Option<String>)> = VecDeque::new();
     let mut history: Vec<(String, String)> = Vec::new(); // (role, content) pairs (user/assistant)
-    let pricing = Arc::new(ModelPricing::new());
-
     let mut running: Option<tokio::task::JoinHandle<(Uuid, String, crate::agents::AgentResult)>> =
         None;
     let mut running_cancel: Option<CancellationToken> = None;
@@ -2113,15 +2093,12 @@ async fn control_actor_loop(
 
                                 let cfg = config.clone();
                                 let agent = Arc::clone(&root_agent);
-                                let bench = Arc::clone(&benchmarks);
-                                let res = Arc::clone(&resolver);
                                 let mcp_ref = Arc::clone(&mcp);
                                 let workspaces_ref = Arc::clone(&workspaces);
                                 let events = events_tx.clone();
                                 let tools_hub = Arc::clone(&tool_hub);
                                 let status_ref = Arc::clone(&status);
                                 let cancel = CancellationToken::new();
-                                let pricing = Arc::clone(&pricing);
                                 let hist_snapshot = history.clone();
                                 let mission_ctrl = crate::tools::mission::MissionControl {
                                     current_mission_id: Arc::clone(&current_mission),
@@ -2161,11 +2138,8 @@ async fn control_actor_loop(
                                     let result = run_single_control_turn(
                                         cfg,
                                         agent,
-                                        bench,
-                                        res,
                                         mcp_ref,
                                         workspaces_ref,
-                                        pricing,
                                         events,
                                         tools_hub,
                                         status_ref,
@@ -2336,11 +2310,8 @@ async fn control_actor_loop(
                             let started = runner.start_next(
                                 config.clone(),
                                 Arc::clone(&root_agent),
-                                Arc::clone(&benchmarks),
-                                Arc::clone(&resolver),
                                 Arc::clone(&mcp),
                                 Arc::clone(&workspaces),
-                                Arc::clone(&pricing),
                                 events_tx.clone(),
                                 Arc::clone(&tool_hub),
                                 Arc::clone(&status),
@@ -2459,15 +2430,12 @@ async fn control_actor_loop(
                                         let _ = events_tx.send(AgentEvent::UserMessage { id: mid, content: msg.clone(), mission_id: Some(mission_id) });
                                         let cfg = config.clone();
                                         let agent = Arc::clone(&root_agent);
-                                        let bench = Arc::clone(&benchmarks);
-                                        let res = Arc::clone(&resolver);
                                         let mcp_ref = Arc::clone(&mcp);
                                         let workspaces_ref = Arc::clone(&workspaces);
                                         let events = events_tx.clone();
                                         let tools_hub = Arc::clone(&tool_hub);
                                         let status_ref = Arc::clone(&status);
                                         let cancel = CancellationToken::new();
-                                        let pricing = Arc::clone(&pricing);
                                         let hist_snapshot = history.clone();
                                         let mission_ctrl = crate::tools::mission::MissionControl {
                                             current_mission_id: Arc::clone(&current_mission),
@@ -2483,11 +2451,8 @@ async fn control_actor_loop(
                                             let result = run_single_control_turn(
                                                 cfg,
                                                 agent,
-                                                bench,
-                                                res,
                                                 mcp_ref,
                                                 workspaces_ref,
-                                                pricing,
                                                 events,
                                                 tools_hub,
                                                 status_ref,
@@ -2833,15 +2798,12 @@ async fn control_actor_loop(
 
                     let cfg = config.clone();
                     let agent = Arc::clone(&root_agent);
-                    let bench = Arc::clone(&benchmarks);
-                    let res = Arc::clone(&resolver);
                     let mcp_ref = Arc::clone(&mcp);
                     let workspaces_ref = Arc::clone(&workspaces);
                     let events = events_tx.clone();
                     let tools_hub = Arc::clone(&tool_hub);
                     let status_ref = Arc::clone(&status);
                     let cancel = CancellationToken::new();
-                    let pricing = Arc::clone(&pricing);
                     let hist_snapshot = history.clone();
                     let mission_ctrl = crate::tools::mission::MissionControl {
                         current_mission_id: Arc::clone(&current_mission),
@@ -2881,11 +2843,8 @@ async fn control_actor_loop(
                         let result = run_single_control_turn(
                             cfg,
                             agent,
-                            bench,
-                            res,
                             mcp_ref,
                             workspaces_ref,
-                            pricing,
                             events,
                             tools_hub,
                             status_ref,
@@ -2994,11 +2953,8 @@ async fn control_actor_loop(
 async fn run_single_control_turn(
     config: Config,
     root_agent: AgentRef,
-    benchmarks: crate::budget::SharedBenchmarkRegistry,
-    resolver: crate::budget::SharedModelResolver,
     mcp: Arc<McpRegistry>,
     workspaces: workspace::SharedWorkspaceStore,
-    pricing: Arc<ModelPricing>,
     events_tx: broadcast::Sender<AgentEvent>,
     tool_hub: Arc<FrontendToolHub>,
     status: Arc<RwLock<ControlStatus>>,
@@ -3042,9 +2998,7 @@ async fn run_single_control_turn(
     convo.push_str(&user_message);
     convo.push_str("\n\nInstructions:\n- Continue the conversation helpfully.\n- Use available tools as needed.\n- For large data processing tasks (>10KB), prefer executing scripts rather than inline processing.\n");
 
-    let budget = Budget::new(1000);
-    let verification = VerificationCriteria::None;
-    let mut task = match crate::task::Task::new(convo, verification, budget) {
+    let mut task = match crate::task::Task::new(convo, Some(1000)) {
         Ok(t) => t,
         Err(e) => {
             let r = crate::agents::AgentResult::failure(format!("Failed to create task: {}", e), 0);
@@ -3059,23 +3013,12 @@ async fn run_single_control_turn(
     }
 
     // Context for agent execution.
-    let llm = Arc::new(OpenRouterClient::new(config.api_key.clone()));
-
-    let tools = ToolRegistry::empty();
-    let mut ctx = AgentContext::new(
-        config.clone(),
-        llm,
-        tools,
-        pricing,
-        working_dir_path,
-    );
+    let mut ctx = AgentContext::new(config.clone(), working_dir_path);
     ctx.mission_control = mission_control;
     ctx.control_events = Some(events_tx);
     ctx.frontend_tool_hub = Some(tool_hub);
     ctx.control_status = Some(status);
     ctx.cancel_token = Some(cancel);
-    ctx.benchmarks = Some(benchmarks);
-    ctx.resolver = Some(resolver);
     ctx.tree_snapshot = Some(tree_snapshot);
     ctx.progress_snapshot = Some(progress_snapshot);
     ctx.mission_id = mission_id;

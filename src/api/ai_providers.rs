@@ -9,7 +9,8 @@
 //! - Authenticate provider (OAuth flow)
 //! - Set default provider
 
-use std::path::PathBuf;
+use std::collections::{BTreeSet, HashMap};
+use std::path::{Path, PathBuf};
 
 use axum::{
     extract::{Path as AxumPath, State},
@@ -21,11 +22,8 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
-use uuid::Uuid;
 
-use crate::ai_providers::{
-    AIProvider, AuthMethod, OAuthCredentials, PendingOAuth, ProviderStatus, ProviderType,
-};
+use crate::ai_providers::{AuthMethod, PendingOAuth, ProviderType};
 
 /// Anthropic OAuth client ID (from opencode-anthropic-auth plugin)
 const ANTHROPIC_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
@@ -86,7 +84,7 @@ pub struct UpdateProviderRequest {
 
 #[derive(Debug, Serialize)]
 pub struct ProviderResponse {
-    pub id: Uuid,
+    pub id: String,
     pub provider_type: ProviderType,
     pub provider_type_name: String,
     pub name: String,
@@ -111,35 +109,62 @@ pub enum ProviderStatusResponse {
     Error { message: String },
 }
 
-impl From<ProviderStatus> for ProviderStatusResponse {
-    fn from(status: ProviderStatus) -> Self {
-        match status {
-            ProviderStatus::Unknown => Self::Unknown,
-            ProviderStatus::Connected => Self::Connected,
-            ProviderStatus::NeedsAuth => Self::NeedsAuth { auth_url: None },
-            ProviderStatus::Error(msg) => Self::Error { message: msg },
-        }
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AuthKind {
+    ApiKey,
+    OAuth,
 }
 
-impl From<AIProvider> for ProviderResponse {
-    fn from(p: AIProvider) -> Self {
-        Self {
-            id: p.id,
-            provider_type: p.provider_type,
-            provider_type_name: p.provider_type.display_name().to_string(),
-            name: p.name.clone(),
-            has_api_key: p.api_key.is_some(),
-            has_oauth: p.oauth.is_some(),
-            base_url: p.base_url,
-            enabled: p.enabled,
-            is_default: p.is_default,
-            uses_oauth: p.provider_type.uses_oauth(),
-            auth_methods: p.provider_type.auth_methods(),
-            status: p.status.into(),
-            created_at: p.created_at,
-            updated_at: p.updated_at,
+#[derive(Debug, Clone)]
+struct ProviderConfigEntry {
+    name: Option<String>,
+    base_url: Option<String>,
+    enabled: Option<bool>,
+}
+
+fn build_provider_response(
+    provider_type: ProviderType,
+    config: Option<ProviderConfigEntry>,
+    auth: Option<AuthKind>,
+    default_provider: Option<ProviderType>,
+) -> ProviderResponse {
+    let now = chrono::Utc::now();
+    let name = config
+        .as_ref()
+        .and_then(|c| c.name.clone())
+        .unwrap_or_else(|| provider_type.display_name().to_string());
+    let base_url = config.as_ref().and_then(|c| c.base_url.clone());
+    let enabled = config
+        .as_ref()
+        .and_then(|c| c.enabled)
+        .unwrap_or(true);
+    let is_default = default_provider.map(|p| p == provider_type).unwrap_or(false);
+    let status = match auth {
+        Some(AuthKind::ApiKey) | Some(AuthKind::OAuth) => ProviderStatusResponse::Connected,
+        None => {
+            if provider_type.uses_oauth() {
+                ProviderStatusResponse::NeedsAuth { auth_url: None }
+            } else {
+                ProviderStatusResponse::NeedsAuth { auth_url: None }
+            }
         }
+    };
+
+    ProviderResponse {
+        id: provider_type.id().to_string(),
+        provider_type,
+        provider_type_name: provider_type.display_name().to_string(),
+        name,
+        has_api_key: matches!(auth, Some(AuthKind::ApiKey)),
+        has_oauth: matches!(auth, Some(AuthKind::OAuth)),
+        base_url,
+        enabled,
+        is_default,
+        uses_oauth: provider_type.uses_oauth(),
+        auth_methods: provider_type.auth_methods(),
+        status,
+        created_at: now,
+        updated_at: now,
     }
 }
 
@@ -223,10 +248,7 @@ fn sync_to_opencode_auth(
     access_token: &str,
     expires_at: i64,
 ) -> Result<(), String> {
-    // Get OpenCode auth path
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
-    let auth_path = PathBuf::from(&home)
-        .join(".local/share/opencode/auth.json");
+    let auth_path = get_opencode_auth_path();
 
     // Ensure parent directory exists
     if let Some(parent) = auth_path.parent() {
@@ -244,11 +266,9 @@ fn sync_to_opencode_auth(
     };
 
     // Map our provider type to OpenCode's key
-    let key = match provider_type {
-        ProviderType::Anthropic => "anthropic",
-        ProviderType::GithubCopilot => "github-copilot",
-        _ => return Ok(()), // Skip providers that OpenCode doesn't use OAuth for
-    };
+    let key = opencode_auth_key(provider_type).ok_or_else(|| {
+        "Provider does not map to an OpenCode auth key".to_string()
+    })?;
 
     // Create the auth entry in OpenCode format
     let entry = serde_json::json!({
@@ -274,10 +294,284 @@ fn sync_to_opencode_auth(
     Ok(())
 }
 
+/// Sync an API key to OpenCode's auth.json file.
+fn sync_api_key_to_opencode_auth(
+    provider_type: ProviderType,
+    api_key: &str,
+) -> Result<(), String> {
+    let auth_path = get_opencode_auth_path();
+
+    // Ensure parent directory exists
+    if let Some(parent) = auth_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create OpenCode auth directory: {}", e))?;
+    }
+
+    let mut auth: serde_json::Map<String, serde_json::Value> = if auth_path.exists() {
+        let contents = std::fs::read_to_string(&auth_path)
+            .map_err(|e| format!("Failed to read OpenCode auth: {}", e))?;
+        serde_json::from_str(&contents).unwrap_or_default()
+    } else {
+        serde_json::Map::new()
+    };
+
+    let key = match opencode_auth_key(provider_type) {
+        Some(key) => key,
+        None => return Ok(()),
+    };
+
+    let entry = serde_json::json!({
+        "type": "api_key",
+        "key": api_key
+    });
+
+    auth.insert(key.to_string(), entry);
+
+    let contents = serde_json::to_string_pretty(&auth)
+        .map_err(|e| format!("Failed to serialize OpenCode auth: {}", e))?;
+    std::fs::write(&auth_path, contents)
+        .map_err(|e| format!("Failed to write OpenCode auth: {}", e))?;
+
+    tracing::info!(
+        "Synced API key to OpenCode auth.json for provider: {}",
+        key
+    );
+
+    Ok(())
+}
+
+/// Remove a provider entry from OpenCode's auth.json file.
+fn remove_opencode_auth_entry(provider_type: ProviderType) -> Result<(), String> {
+    let auth_path = get_opencode_auth_path();
+    if !auth_path.exists() {
+        return Ok(());
+    }
+
+    let mut auth: serde_json::Map<String, serde_json::Value> = {
+        let contents = std::fs::read_to_string(&auth_path)
+            .map_err(|e| format!("Failed to read OpenCode auth: {}", e))?;
+        serde_json::from_str(&contents).unwrap_or_default()
+    };
+
+    let key = match opencode_auth_key(provider_type) {
+        Some(key) => key,
+        None => return Ok(()),
+    };
+
+    if auth.remove(key).is_some() {
+        let contents = serde_json::to_string_pretty(&auth)
+            .map_err(|e| format!("Failed to serialize OpenCode auth: {}", e))?;
+        std::fs::write(&auth_path, contents)
+            .map_err(|e| format!("Failed to write OpenCode auth: {}", e))?;
+    }
+
+    Ok(())
+}
+
 /// Get the path to OpenCode's auth.json file.
 fn get_opencode_auth_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
-    PathBuf::from(&home).join(".local/share/opencode/auth.json")
+    let data_home = std::env::var("XDG_DATA_HOME").ok();
+    let base = if let Some(data_home) = data_home {
+        PathBuf::from(data_home).join("opencode")
+    } else {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+        PathBuf::from(&home).join(".local/share/opencode")
+    };
+
+    base.join("auth.json")
+}
+
+fn opencode_auth_key(provider_type: ProviderType) -> Option<&'static str> {
+    match provider_type {
+        ProviderType::Custom => None,
+        _ => Some(provider_type.id()),
+    }
+}
+
+fn get_opencode_config_path(working_dir: &Path) -> PathBuf {
+    if let Ok(path) = std::env::var("OPENCODE_CONFIG") {
+        return PathBuf::from(path);
+    }
+    working_dir.join("opencode.json")
+}
+
+fn strip_jsonc_comments(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    let mut in_string = false;
+    let mut escape = false;
+
+    while let Some(c) = chars.next() {
+        if in_string {
+            out.push(c);
+            if escape {
+                escape = false;
+            } else if c == '\\' {
+                escape = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        if c == '"' {
+            in_string = true;
+            out.push(c);
+            continue;
+        }
+
+        if c == '/' {
+            match chars.peek() {
+                Some('/') => {
+                    chars.next();
+                    while let Some(n) = chars.next() {
+                        if n == '\n' {
+                            out.push('\n');
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                Some('*') => {
+                    chars.next();
+                    let mut prev = '\0';
+                    while let Some(n) = chars.next() {
+                        if prev == '*' && n == '/' {
+                            break;
+                        }
+                        prev = n;
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+        }
+
+        out.push(c);
+    }
+
+    out
+}
+
+fn read_opencode_config(path: &Path) -> Result<serde_json::Value, String> {
+    if !path.exists() {
+        return Ok(serde_json::json!({
+            "$schema": "https://opencode.ai/config.json",
+            "provider": {}
+        }));
+    }
+
+    let contents = std::fs::read_to_string(path)
+        .map_err(|e| format!("Failed to read OpenCode config: {}", e))?;
+
+    match serde_json::from_str::<serde_json::Value>(&contents) {
+        Ok(value) => Ok(value),
+        Err(_) => {
+            let stripped = strip_jsonc_comments(&contents);
+            serde_json::from_str(&stripped)
+                .map_err(|e| format!("Failed to parse OpenCode config: {}", e))
+        }
+    }
+}
+
+fn write_opencode_config(path: &Path, config: &serde_json::Value) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create OpenCode config directory: {}", e))?;
+    }
+
+    let contents = serde_json::to_string_pretty(config)
+        .map_err(|e| format!("Failed to serialize OpenCode config: {}", e))?;
+    std::fs::write(path, contents)
+        .map_err(|e| format!("Failed to write OpenCode config: {}", e))?;
+    Ok(())
+}
+
+fn get_provider_config_entry(config: &serde_json::Value, provider: ProviderType) -> Option<ProviderConfigEntry> {
+    let providers = config.get("provider")?.as_object()?;
+    let entry = providers.get(provider.id())?.as_object()?;
+    let name = entry.get("name").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let base_url = entry
+        .get("baseURL")
+        .or_else(|| entry.get("baseUrl"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let enabled = entry.get("enabled").and_then(|v| v.as_bool());
+    Some(ProviderConfigEntry { name, base_url, enabled })
+}
+
+fn set_provider_config_entry(
+    config: &mut serde_json::Value,
+    provider: ProviderType,
+    name: Option<String>,
+    base_url: Option<Option<String>>,
+    enabled: Option<bool>,
+) {
+    if !config.is_object() {
+        *config = serde_json::json!({});
+    }
+    let root = config.as_object_mut().expect("config object");
+    let providers_value = root
+        .entry("provider")
+        .or_insert_with(|| serde_json::json!({}));
+    if !providers_value.is_object() {
+        *providers_value = serde_json::json!({});
+    }
+    let providers = providers_value
+        .as_object_mut()
+        .expect("provider object");
+    let entry = providers
+        .entry(provider.id().to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    if !entry.is_object() {
+        *entry = serde_json::json!({});
+    }
+    let entry_obj = entry.as_object_mut().expect("provider entry object");
+
+    if let Some(name) = name {
+        entry_obj.insert("name".to_string(), serde_json::Value::String(name));
+    }
+
+    if let Some(base_url) = base_url {
+        match base_url {
+            Some(url) => {
+                entry_obj.insert("baseURL".to_string(), serde_json::Value::String(url));
+            }
+            None => {
+                entry_obj.remove("baseURL");
+                entry_obj.remove("baseUrl");
+            }
+        }
+    }
+
+    if let Some(enabled) = enabled {
+        entry_obj.insert("enabled".to_string(), serde_json::Value::Bool(enabled));
+    }
+}
+
+fn remove_provider_config_entry(config: &mut serde_json::Value, provider: ProviderType) {
+    if let Some(root) = config.as_object_mut() {
+        if let Some(providers_value) = root.get_mut("provider") {
+            if let Some(providers) = providers_value.as_object_mut() {
+                providers.remove(provider.id());
+            }
+        }
+    }
+}
+
+fn get_default_provider(config: &serde_json::Value) -> Option<ProviderType> {
+    let openagent_default = config
+        .get("openagent")
+        .and_then(|v| v.get("default_provider"))
+        .and_then(|v| v.as_str())
+        .and_then(ProviderType::from_id);
+    if openagent_default.is_some() {
+        return openagent_default;
+    }
+
+    let model = config.get("model").and_then(|v| v.as_str())?;
+    let provider = model.splitn(2, '/').next()?.trim();
+    ProviderType::from_id(provider)
 }
 
 /// Read OpenCode's current auth.json contents.
@@ -290,6 +584,38 @@ fn read_opencode_auth() -> Result<serde_json::Value, String> {
     let contents = std::fs::read_to_string(&auth_path)
         .map_err(|e| format!("Failed to read OpenCode auth: {}", e))?;
     serde_json::from_str(&contents).map_err(|e| format!("Failed to parse OpenCode auth: {}", e))
+}
+
+fn read_opencode_auth_map() -> Result<HashMap<ProviderType, AuthKind>, String> {
+    let auth = read_opencode_auth()?;
+    let mut out = HashMap::new();
+    let Some(map) = auth.as_object() else {
+        return Ok(out);
+    };
+
+    for (key, value) in map {
+        let Some(provider_type) = ProviderType::from_id(key.as_str()) else {
+            continue;
+        };
+        let kind = match value.get("type").and_then(|v| v.as_str()) {
+            Some("oauth") => Some(AuthKind::OAuth),
+            Some("api_key") => Some(AuthKind::ApiKey),
+            _ => {
+                if value.get("refresh").is_some() || value.get("access").is_some() {
+                    Some(AuthKind::OAuth)
+                } else if value.get("key").is_some() || value.get("api_key").is_some() {
+                    Some(AuthKind::ApiKey)
+                } else {
+                    None
+                }
+            }
+        };
+        if let Some(kind) = kind {
+            out.insert(provider_type, kind);
+        }
+    }
+
+    Ok(out)
 }
 
 /// Write to OpenCode's auth.json file.
@@ -330,16 +656,16 @@ async fn get_opencode_auth() -> Result<Json<OpenCodeAuthResponse>, (StatusCode, 
 async fn set_opencode_auth(
     Json(req): Json<SetOpenCodeAuthRequest>,
 ) -> Result<Json<OpenCodeAuthResponse>, (StatusCode, String)> {
-    // Validate provider
-    let valid_providers = ["anthropic", "github-copilot"];
-    if !valid_providers.contains(&req.provider.as_str()) {
+    let provider_type = ProviderType::from_id(&req.provider).ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Invalid provider: {}", req.provider),
+        )
+    })?;
+    if !provider_type.uses_oauth() {
         return Err((
             StatusCode::BAD_REQUEST,
-            format!(
-                "Invalid provider: {}. Must be one of: {}",
-                req.provider,
-                valid_providers.join(", ")
-            ),
+            format!("Provider {} does not use OAuth", req.provider),
         ));
     }
 
@@ -452,9 +778,43 @@ async fn list_provider_types() -> Json<Vec<ProviderTypeInfo>> {
 async fn list_providers(
     State(state): State<Arc<super::routes::AppState>>,
 ) -> Result<Json<Vec<ProviderResponse>>, (StatusCode, String)> {
-    let providers = state.ai_providers.list().await;
-    let responses: Vec<ProviderResponse> = providers.into_iter().map(Into::into).collect();
-    Ok(Json(responses))
+    let config_path = get_opencode_config_path(&state.config.working_dir);
+    let opencode_config = read_opencode_config(&config_path)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let auth_map = read_opencode_auth_map()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let default_provider = get_default_provider(&opencode_config);
+
+    let mut provider_ids: BTreeSet<String> = BTreeSet::new();
+    for provider in auth_map.keys() {
+        provider_ids.insert(provider.id().to_string());
+    }
+    if let Some(provider_map) = opencode_config.get("provider").and_then(|v| v.as_object()) {
+        for key in provider_map.keys() {
+            provider_ids.insert(key.to_string());
+        }
+    }
+    if let Some(provider) = default_provider {
+        provider_ids.insert(provider.id().to_string());
+    }
+
+    let mut providers: Vec<ProviderResponse> = provider_ids
+        .into_iter()
+        .filter_map(|provider_id| {
+            let provider_type = ProviderType::from_id(&provider_id)?;
+            let config_entry = get_provider_config_entry(&opencode_config, provider_type);
+            let auth_kind = auth_map.get(&provider_type).copied();
+            Some(build_provider_response(
+                provider_type,
+                config_entry,
+                auth_kind,
+                default_provider,
+            ))
+        })
+        .collect();
+
+    providers.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(Json(providers))
 }
 
 /// POST /api/ai/providers - Create a new provider.
@@ -473,128 +833,170 @@ async fn create_provider(
         }
     }
 
-    let mut provider = AIProvider::new(req.provider_type, req.name);
-    provider.api_key = req.api_key;
-    provider.base_url = req.base_url;
-    provider.enabled = req.enabled;
+    let provider_type = req.provider_type;
+    let config_path = get_opencode_config_path(&state.config.working_dir);
+    let mut opencode_config = read_opencode_config(&config_path)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    // Set initial status
-    if provider.provider_type.uses_oauth() && provider.api_key.is_none() {
-        provider.status = ProviderStatus::NeedsAuth;
-    } else if provider.api_key.is_some() {
-        provider.status = ProviderStatus::Connected;
-    }
-
-    let id = state.ai_providers.add(provider.clone()).await;
-
-    tracing::info!(
-        "Created AI provider: {} ({}) [{}]",
-        provider.name,
-        provider.provider_type,
-        id
+    set_provider_config_entry(
+        &mut opencode_config,
+        provider_type,
+        Some(req.name),
+        Some(req.base_url),
+        Some(req.enabled),
     );
 
-    // Refresh to get updated is_default flag
-    let updated = state.ai_providers.get(id).await.unwrap_or(provider);
+    write_opencode_config(&config_path, &opencode_config)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    Ok(Json(updated.into()))
+    if let Some(ref api_key) = req.api_key {
+        if let Err(e) = sync_api_key_to_opencode_auth(provider_type, api_key) {
+            tracing::error!("Failed to sync API key to OpenCode: {}", e);
+        }
+    }
+
+    let auth_kind = if req.api_key.is_some() {
+        Some(AuthKind::ApiKey)
+    } else {
+        None
+    };
+    let default_provider = get_default_provider(&opencode_config);
+    let config_entry = get_provider_config_entry(&opencode_config, provider_type);
+    let response = build_provider_response(provider_type, config_entry, auth_kind, default_provider);
+
+    tracing::info!(
+        "Created AI provider config for: {} ({})",
+        response.name,
+        response.provider_type
+    );
+
+    Ok(Json(response))
 }
 
 /// GET /api/ai/providers/:id - Get provider details.
 async fn get_provider(
     State(state): State<Arc<super::routes::AppState>>,
-    AxumPath(id): AxumPath<Uuid>,
+    AxumPath(id): AxumPath<String>,
 ) -> Result<Json<ProviderResponse>, (StatusCode, String)> {
-    state
-        .ai_providers
-        .get(id)
-        .await
-        .map(|p| Json(p.into()))
-        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Provider {} not found", id)))
+    let provider_type = ProviderType::from_id(&id)
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Provider {} not found", id)))?;
+    let config_path = get_opencode_config_path(&state.config.working_dir);
+    let opencode_config = read_opencode_config(&config_path)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let auth_map = read_opencode_auth_map()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let default_provider = get_default_provider(&opencode_config);
+    let config_entry = get_provider_config_entry(&opencode_config, provider_type);
+    let auth_kind = auth_map.get(&provider_type).copied();
+    let response =
+        build_provider_response(provider_type, config_entry, auth_kind, default_provider);
+    Ok(Json(response))
 }
 
 /// PUT /api/ai/providers/:id - Update a provider.
 async fn update_provider(
     State(state): State<Arc<super::routes::AppState>>,
-    AxumPath(id): AxumPath<Uuid>,
+    AxumPath(id): AxumPath<String>,
     Json(req): Json<UpdateProviderRequest>,
 ) -> Result<Json<ProviderResponse>, (StatusCode, String)> {
-    let mut provider = state
-        .ai_providers
-        .get(id)
-        .await
+    let provider_type = ProviderType::from_id(&id)
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Provider {} not found", id)))?;
 
-    if let Some(name) = req.name {
+    if let Some(ref name) = req.name {
         if name.is_empty() {
             return Err((StatusCode::BAD_REQUEST, "Name cannot be empty".to_string()));
         }
-        provider.name = name;
     }
 
-    if let Some(api_key) = req.api_key {
-        provider.api_key = api_key;
-        // Update status based on credentials
-        if provider.api_key.is_some() {
-            provider.status = ProviderStatus::Connected;
-        } else if provider.provider_type.uses_oauth() {
-            provider.status = ProviderStatus::NeedsAuth;
-        }
-    }
-
-    if let Some(base_url) = req.base_url {
+    if let Some(base_url) = req.base_url.as_ref() {
         if let Some(ref url) = base_url {
             if url::Url::parse(url).is_err() {
                 return Err((StatusCode::BAD_REQUEST, "Invalid URL format".to_string()));
             }
         }
-        provider.base_url = base_url;
     }
 
-    if let Some(enabled) = req.enabled {
-        provider.enabled = enabled;
+    let config_path = get_opencode_config_path(&state.config.working_dir);
+    let mut opencode_config = read_opencode_config(&config_path)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    set_provider_config_entry(
+        &mut opencode_config,
+        provider_type,
+        req.name,
+        req.base_url,
+        req.enabled,
+    );
+
+    write_opencode_config(&config_path, &opencode_config)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    if let Some(api_key_update) = req.api_key {
+        match api_key_update {
+            Some(api_key) => {
+                if let Err(e) = sync_api_key_to_opencode_auth(provider_type, &api_key) {
+                    tracing::error!("Failed to sync API key to OpenCode: {}", e);
+                }
+            }
+            None => {
+                if let Err(e) = remove_opencode_auth_entry(provider_type) {
+                    tracing::error!("Failed to remove OpenCode auth entry: {}", e);
+                }
+            }
+        }
     }
 
-    let updated = state
-        .ai_providers
-        .update(id, provider)
-        .await
-        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Provider {} not found", id)))?;
+    let auth_map = read_opencode_auth_map()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let default_provider = get_default_provider(&opencode_config);
+    let config_entry = get_provider_config_entry(&opencode_config, provider_type);
+    let auth_kind = auth_map.get(&provider_type).copied();
+    let response =
+        build_provider_response(provider_type, config_entry, auth_kind, default_provider);
 
-    tracing::info!("Updated AI provider: {} ({})", updated.name, id);
+    tracing::info!("Updated AI provider config: {} ({})", response.name, id);
 
-    Ok(Json(updated.into()))
+    Ok(Json(response))
 }
 
 /// DELETE /api/ai/providers/:id - Delete a provider.
 async fn delete_provider(
     State(state): State<Arc<super::routes::AppState>>,
-    AxumPath(id): AxumPath<Uuid>,
+    AxumPath(id): AxumPath<String>,
 ) -> Result<(StatusCode, String), (StatusCode, String)> {
-    if state.ai_providers.delete(id).await {
-        Ok((
-            StatusCode::OK,
-            format!("Provider {} deleted successfully", id),
-        ))
-    } else {
-        Err((StatusCode::NOT_FOUND, format!("Provider {} not found", id)))
+    let provider_type = ProviderType::from_id(&id)
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Provider {} not found", id)))?;
+    let config_path = get_opencode_config_path(&state.config.working_dir);
+    let mut opencode_config = read_opencode_config(&config_path)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    remove_provider_config_entry(&mut opencode_config, provider_type);
+    write_opencode_config(&config_path, &opencode_config)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    if let Err(e) = remove_opencode_auth_entry(provider_type) {
+        tracing::error!("Failed to remove OpenCode auth entry: {}", e);
     }
+
+    Ok((
+        StatusCode::OK,
+        format!("Provider {} deleted successfully", id),
+    ))
 }
 
 /// POST /api/ai/providers/:id/auth - Initiate authentication for a provider.
 async fn authenticate_provider(
-    State(state): State<Arc<super::routes::AppState>>,
-    AxumPath(id): AxumPath<Uuid>,
+    State(_state): State<Arc<super::routes::AppState>>,
+    AxumPath(id): AxumPath<String>,
 ) -> Result<Json<AuthResponse>, (StatusCode, String)> {
-    let provider = state
-        .ai_providers
-        .get(id)
-        .await
+    let provider_type = ProviderType::from_id(&id)
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Provider {} not found", id)))?;
+    let auth_map = read_opencode_auth_map()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     // For OAuth providers, we need to return an auth URL
-    if provider.provider_type.uses_oauth() {
-        let auth_url = match provider.provider_type {
+    if provider_type.uses_oauth() {
+        let auth_url = match provider_type {
             ProviderType::Anthropic => {
                 // For Anthropic/Claude, this would typically use Claude's OAuth flow
                 // For now, we'll indicate that manual auth is needed
@@ -611,14 +1013,14 @@ async fn authenticate_provider(
             success: false,
             message: format!(
                 "Please authenticate with {} to connect this provider",
-                provider.provider_type.display_name()
+                provider_type.display_name()
             ),
             auth_url,
         }));
     }
 
     // For API key providers, check if key is set
-    if provider.api_key.is_some() {
+    if auth_map.get(&provider_type) == Some(&AuthKind::ApiKey) {
         Ok(Json(AuthResponse {
             success: true,
             message: "Provider is authenticated".to_string(),
@@ -636,35 +1038,54 @@ async fn authenticate_provider(
 /// POST /api/ai/providers/:id/default - Set as default provider.
 async fn set_default(
     State(state): State<Arc<super::routes::AppState>>,
-    AxumPath(id): AxumPath<Uuid>,
+    AxumPath(id): AxumPath<String>,
 ) -> Result<Json<ProviderResponse>, (StatusCode, String)> {
-    if !state.ai_providers.set_default(id).await {
-        return Err((StatusCode::NOT_FOUND, format!("Provider {} not found", id)));
-    }
-
-    let provider = state
-        .ai_providers
-        .get(id)
-        .await
+    let provider_type = ProviderType::from_id(&id)
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Provider {} not found", id)))?;
+    let config_path = get_opencode_config_path(&state.config.working_dir);
+    let mut opencode_config = read_opencode_config(&config_path)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    tracing::info!("Set default AI provider: {} ({})", provider.name, id);
+    if !opencode_config.is_object() {
+        opencode_config = serde_json::json!({});
+    }
+    let root = opencode_config.as_object_mut().expect("config object");
+    let openagent = root
+        .entry("openagent")
+        .or_insert_with(|| serde_json::json!({}));
+    if !openagent.is_object() {
+        *openagent = serde_json::json!({});
+    }
+    let openagent_obj = openagent.as_object_mut().expect("openagent object");
+    openagent_obj.insert(
+        "default_provider".to_string(),
+        serde_json::Value::String(provider_type.id().to_string()),
+    );
 
-    Ok(Json(provider.into()))
+    write_opencode_config(&config_path, &opencode_config)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    let auth_map = read_opencode_auth_map()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let default_provider = get_default_provider(&opencode_config);
+    let config_entry = get_provider_config_entry(&opencode_config, provider_type);
+    let auth_kind = auth_map.get(&provider_type).copied();
+    let response =
+        build_provider_response(provider_type, config_entry, auth_kind, default_provider);
+
+    tracing::info!("Set default AI provider: {} ({})", response.name, id);
+
+    Ok(Json(response))
 }
 
 /// GET /api/ai/providers/:id/auth/methods - Get available auth methods for a provider.
 async fn get_auth_methods(
-    State(state): State<Arc<super::routes::AppState>>,
-    AxumPath(id): AxumPath<Uuid>,
+    State(_state): State<Arc<super::routes::AppState>>,
+    AxumPath(id): AxumPath<String>,
 ) -> Result<Json<Vec<AuthMethod>>, (StatusCode, String)> {
-    let provider = state
-        .ai_providers
-        .get(id)
-        .await
+    let provider_type = ProviderType::from_id(&id)
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Provider {} not found", id)))?;
-
-    Ok(Json(provider.provider_type.auth_methods()))
+    Ok(Json(provider_type.auth_methods()))
 }
 
 /// Generate PKCE code verifier and challenge.
@@ -690,21 +1111,18 @@ fn generate_pkce() -> (String, String) {
 /// POST /api/ai/providers/:id/oauth/authorize - Initiate OAuth authorization.
 async fn oauth_authorize(
     State(state): State<Arc<super::routes::AppState>>,
-    AxumPath(id): AxumPath<Uuid>,
+    AxumPath(id): AxumPath<String>,
     Json(req): Json<OAuthAuthorizeRequest>,
 ) -> Result<Json<OAuthAuthorizeResponse>, (StatusCode, String)> {
-    let provider = state
-        .ai_providers
-        .get(id)
-        .await
+    let provider_type = ProviderType::from_id(&id)
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Provider {} not found", id)))?;
 
-    let auth_methods = provider.provider_type.auth_methods();
+    let auth_methods = provider_type.auth_methods();
     let method = auth_methods
         .get(req.method_index)
         .ok_or_else(|| (StatusCode::BAD_REQUEST, "Invalid method index".to_string()))?;
 
-    match provider.provider_type {
+    match provider_type {
         ProviderType::Anthropic => {
             // Generate PKCE
             let (verifier, challenge) = generate_pkce();
@@ -744,17 +1162,17 @@ async fn oauth_authorize(
                 .append_pair("state", &verifier);
 
             // Store pending OAuth
-            state
-                .ai_providers
-                .set_pending_oauth(
-                    id,
+            {
+                let mut pending = state.pending_oauth.write().await;
+                pending.insert(
+                    provider_type,
                     PendingOAuth {
                         verifier,
                         mode: mode.to_string(),
                         created_at: std::time::Instant::now(),
                     },
-                )
-                .await;
+                );
+            }
 
             Ok(Json(OAuthAuthorizeResponse {
                 url: url.to_string(),
@@ -773,26 +1191,23 @@ async fn oauth_authorize(
 /// POST /api/ai/providers/:id/oauth/callback - Exchange OAuth code for credentials.
 async fn oauth_callback(
     State(state): State<Arc<super::routes::AppState>>,
-    AxumPath(id): AxumPath<Uuid>,
+    AxumPath(id): AxumPath<String>,
     Json(req): Json<OAuthCallbackRequest>,
 ) -> Result<Json<ProviderResponse>, (StatusCode, String)> {
-    let provider = state
-        .ai_providers
-        .get(id)
-        .await
+    let provider_type = ProviderType::from_id(&id)
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Provider {} not found", id)))?;
 
     // Get pending OAuth state
-    let pending = state
-        .ai_providers
-        .take_pending_oauth(id)
-        .await
-        .ok_or_else(|| {
-            (
-                StatusCode::BAD_REQUEST,
-                "No pending OAuth authorization. Please start the OAuth flow again.".to_string(),
-            )
-        })?;
+    let pending = {
+        let mut pending_oauth = state.pending_oauth.write().await;
+        pending_oauth.remove(&provider_type)
+    }
+    .ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            "No pending OAuth authorization. Please start the OAuth flow again.".to_string(),
+        )
+    })?;
 
     // Check if OAuth hasn't expired (10 minutes)
     if pending.created_at.elapsed() > std::time::Duration::from_secs(600) {
@@ -802,7 +1217,7 @@ async fn oauth_callback(
         ));
     }
 
-    match provider.provider_type {
+    match provider_type {
         ProviderType::Anthropic => {
             // Exchange code for tokens
             let code = req.code.clone();
@@ -845,7 +1260,7 @@ async fn oauth_callback(
                 )
             })?;
 
-            let auth_methods = provider.provider_type.auth_methods();
+            let auth_methods = provider_type.auth_methods();
             let method = auth_methods.get(req.method_index);
 
             // Check if this is "Create an API Key" method
@@ -899,19 +1314,29 @@ async fn oauth_callback(
                 })?;
 
                 // Store the API key
-                let updated = state
-                    .ai_providers
-                    .set_api_key(id, api_key.to_string())
-                    .await
-                    .ok_or_else(|| (StatusCode::NOT_FOUND, "Provider not found".to_string()))?;
+                if let Err(e) = sync_api_key_to_opencode_auth(provider_type, api_key) {
+                    tracing::error!("Failed to sync API key to OpenCode: {}", e);
+                }
+
+                let config_path = get_opencode_config_path(&state.config.working_dir);
+                let opencode_config = read_opencode_config(&config_path)
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+                let default_provider = get_default_provider(&opencode_config);
+                let config_entry = get_provider_config_entry(&opencode_config, provider_type);
+                let response = build_provider_response(
+                    provider_type,
+                    config_entry,
+                    Some(AuthKind::ApiKey),
+                    default_provider,
+                );
 
                 tracing::info!(
                     "Created API key for provider: {} ({})",
-                    updated.name,
+                    response.name,
                     id
                 );
 
-                Ok(Json(updated.into()))
+                Ok(Json(response))
             } else {
                 // Store OAuth credentials (Claude Pro/Max mode)
                 let refresh_token = token_data["refresh_token"].as_str().ok_or_else(|| {
@@ -931,36 +1356,29 @@ async fn oauth_callback(
                 let expires_in = token_data["expires_in"].as_i64().unwrap_or(3600);
                 let expires_at = chrono::Utc::now().timestamp_millis() + (expires_in * 1000);
 
-                let credentials = OAuthCredentials {
-                    refresh_token: refresh_token.to_string(),
-                    access_token: access_token.to_string(),
-                    expires_at,
-                };
-
-                let updated = state
-                    .ai_providers
-                    .set_oauth_credentials(id, credentials)
-                    .await
-                    .ok_or_else(|| (StatusCode::NOT_FOUND, "Provider not found".to_string()))?;
-
-                tracing::info!(
-                    "OAuth credentials saved for provider: {} ({})",
-                    updated.name,
-                    id
-                );
+                tracing::info!("OAuth credentials saved for provider: {} ({})", provider_type, id);
 
                 // Sync to OpenCode's auth.json so OpenCode can use these credentials
-                if let Err(e) = sync_to_opencode_auth(
-                    provider.provider_type,
-                    refresh_token,
-                    access_token,
-                    expires_at,
-                ) {
+                if let Err(e) =
+                    sync_to_opencode_auth(provider_type, refresh_token, access_token, expires_at)
+                {
                     tracing::error!("Failed to sync credentials to OpenCode: {}", e);
                     // Don't fail the request, but log the error
                 }
 
-                Ok(Json(updated.into()))
+                let config_path = get_opencode_config_path(&state.config.working_dir);
+                let opencode_config = read_opencode_config(&config_path)
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+                let default_provider = get_default_provider(&opencode_config);
+                let config_entry = get_provider_config_entry(&opencode_config, provider_type);
+                let response = build_provider_response(
+                    provider_type,
+                    config_entry,
+                    Some(AuthKind::OAuth),
+                    default_provider,
+                );
+
+                Ok(Json(response))
             }
         }
         _ => Err((

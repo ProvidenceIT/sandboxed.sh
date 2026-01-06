@@ -1,11 +1,11 @@
-//! # Open Agent
+//! # Open Agent Panel
 //!
-//! A minimal autonomous coding agent with full machine access.
+//! Managed control plane for OpenCode-based agents.
 //!
 //! This library provides:
-//! - An HTTP API for task submission and monitoring
-//! - OpenCode-based agent architecture for task execution
-//! - Integration with Claude Max subscriptions via OpenCode
+//! - HTTP APIs for missions, workspaces, MCP tooling, and library sync
+//! - An OpenCode-backed agent wrapper for task delegation
+//! - Streaming events for mission telemetry in the dashboards
 //!
 //! ## Architecture (OpenCode Backend)
 //!
@@ -23,25 +23,23 @@
 //! ```
 //!
 //! ## Task Flow
-//! 1. Receive task via API
+//! 1. Receive mission task via API
 //! 2. Delegate to OpenCode server
 //! 3. Stream real-time events (thinking, tool calls, results)
-//! 4. Return result
+//! 4. Store logs and return result
 //!
 //! ## Modules
 //! - `agents`: OpenCodeAgent for task delegation
-//! - `task`: Task and verification types
-//! - `budget`: Cost tracking and model pricing
+//! - `task`: Task definitions and lightweight cost tracking
+//! - `opencode`: OpenCode API client
 
 pub mod agent_config;
 pub mod agents;
 pub mod ai_providers;
 pub mod api;
-pub mod budget;
 pub mod chroot;
 pub mod config;
 pub mod library;
-pub mod llm;
 pub mod mcp;
 pub mod opencode;
 pub mod opencode_config;

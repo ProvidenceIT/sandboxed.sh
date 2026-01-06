@@ -241,7 +241,7 @@ impl Agent for OpenCodeAgent {
 
     async fn execute(&self, task: &mut Task, ctx: &AgentContext) -> AgentResult {
         let task_desc = task.description().chars().take(60).collect::<String>();
-        let budget_cents = task.budget().total_cents();
+        let budget_cents = task.cost().budget_cents().unwrap_or(0);
 
         let mut tree = self.build_tree(&task_desc, budget_cents);
         ctx.emit_tree(tree.clone());

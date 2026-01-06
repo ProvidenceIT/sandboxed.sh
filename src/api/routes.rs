@@ -22,11 +22,8 @@ use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
 use crate::agents::{AgentContext, AgentRef, OpenCodeAgent};
-use crate::budget::ModelPricing;
 use crate::config::{AuthMode, Config};
-use crate::llm::OpenRouterClient;
 use crate::mcp::McpRegistry;
-use crate::tools::ToolRegistry;
 use crate::workspace;
 
 use super::ai_providers as ai_providers_api;
@@ -52,10 +49,6 @@ pub struct AppState {
     pub control: control::ControlHub,
     /// MCP server registry
     pub mcp: Arc<McpRegistry>,
-    /// Benchmark registry for task-aware model selection
-    pub benchmarks: crate::budget::SharedBenchmarkRegistry,
-    /// Model resolver for auto-upgrading outdated model names
-    pub resolver: crate::budget::SharedModelResolver,
     /// Configuration library (git-based)
     pub library: library_api::SharedLibrary,
     /// Workspace store
@@ -66,6 +59,8 @@ pub struct AppState {
     pub opencode_connections: Arc<crate::opencode_config::OpenCodeStore>,
     /// AI Provider store
     pub ai_providers: Arc<crate::ai_providers::AIProviderStore>,
+    /// Pending OAuth state for provider authorization
+    pub pending_oauth: Arc<RwLock<HashMap<crate::ai_providers::ProviderType, crate::ai_providers::PendingOAuth>>>,
     /// Secrets store for encrypted credentials
     pub secrets: Option<Arc<crate::secrets::SecretsStore>>,
 }
@@ -85,12 +80,6 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         });
     }
 
-    // Load benchmark registry for task-aware model selection
-    let benchmarks = crate::budget::load_benchmarks(&config.working_dir.to_string_lossy());
-
-    // Load model resolver for auto-upgrading outdated model names
-    let resolver = crate::budget::load_resolver(&config.working_dir.to_string_lossy());
-
     // Initialize workspace store (loads from disk and recovers orphaned chroots)
     let workspaces = Arc::new(workspace::WorkspaceStore::new(config.working_dir.clone()).await);
 
@@ -108,6 +97,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     let ai_providers = Arc::new(crate::ai_providers::AIProviderStore::new(
         config.working_dir.join(".openagent/ai_providers.json"),
     ).await);
+    let pending_oauth = Arc::new(RwLock::new(HashMap::new()));
 
     // Initialize secrets store
     let secrets = match crate::secrets::SecretsStore::new(&config.working_dir).await {
@@ -125,8 +115,6 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     let control_state = control::ControlHub::new(
         config.clone(),
         Arc::clone(&root_agent),
-        Arc::clone(&benchmarks),
-        Arc::clone(&resolver),
         Arc::clone(&mcp),
         Arc::clone(&workspaces),
     );
@@ -157,13 +145,12 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         root_agent,
         control: control_state,
         mcp,
-        benchmarks,
-        resolver,
         library,
         workspaces,
         agents,
         opencode_connections,
         ai_providers,
+        pending_oauth,
         secrets,
     });
 
@@ -274,12 +261,8 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         // Tools management endpoints
         .route("/api/tools", get(mcp_api::list_tools))
         .route("/api/tools/:name/toggle", post(mcp_api::toggle_tool))
-        // Provider and model management endpoints
+        // Provider management endpoints
         .route("/api/providers", get(super::providers::list_providers))
-        .route("/api/models", get(list_models))
-        .route("/api/models/refresh", post(refresh_models))
-        .route("/api/models/families", get(list_model_families))
-        .route("/api/models/performance", get(get_model_performance))
         // Library management endpoints
         .nest("/api/library", library_api::routes())
         // Workspace management endpoints
@@ -532,6 +515,7 @@ async fn create_task(
     // Spawn background task to run the agent
     let state_clone = Arc::clone(&state);
     let task_description = req.task.clone();
+    let budget_cents = req.budget_cents;
     let working_dir = req.working_dir.map(std::path::PathBuf::from);
 
     tokio::spawn(async move {
@@ -541,6 +525,7 @@ async fn create_task(
             id,
             task_description,
             model,
+            budget_cents,
             working_dir,
         )
         .await;
@@ -559,6 +544,7 @@ async fn run_agent_task(
     task_id: Uuid,
     task_description: String,
     requested_model: String,
+    budget_cents: Option<u64>,
     working_dir: Option<std::path::PathBuf>,
 ) {
     // Update status to running
@@ -571,11 +557,8 @@ async fn run_agent_task(
         }
     }
 
-    // Create a Task object for the hierarchical agent
-    let budget = crate::budget::Budget::new(1000); // $10 default budget
-    let verification = crate::task::VerificationCriteria::None;
-
-    let task_result = crate::task::Task::new(task_description.clone(), verification, budget);
+    // Create a Task object for the OpenCode agent
+    let task_result = crate::task::Task::new(task_description.clone(), budget_cents.or(Some(1000)));
 
     let mut task = match task_result {
         Ok(t) => t,
@@ -616,19 +599,7 @@ async fn run_agent_task(
     };
 
     // Create context with the specified working directory
-    let llm = Arc::new(OpenRouterClient::new(state.config.api_key.clone()));
-    let tools = ToolRegistry::empty();
-    let pricing = Arc::new(ModelPricing::new());
-
-    let mut ctx = AgentContext::new(
-        state.config.clone(),
-        llm,
-        tools,
-        pricing,
-        working_dir,
-    );
-    ctx.benchmarks = Some(Arc::clone(&state.benchmarks));
-    ctx.resolver = Some(Arc::clone(&state.resolver));
+    let mut ctx = AgentContext::new(state.config.clone(), working_dir);
     ctx.mcp = Some(Arc::clone(&state.mcp));
 
     // Run the hierarchical agent
@@ -832,144 +803,4 @@ async fn search_memory(
         "query": params.q,
         "results": []
     }))
-}
-
-// ============================================================================
-// Model Management Endpoints
-// ============================================================================
-
-/// List all model families with their latest versions.
-async fn list_model_families(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let resolver = state.resolver.read().await;
-    let families = resolver.families();
-
-    let family_list: Vec<serde_json::Value> = families
-        .iter()
-        .map(|(name, family)| {
-            serde_json::json!({
-                "name": name,
-                "latest": family.latest,
-                "members": family.members,
-                "tier": family.tier
-            })
-        })
-        .collect();
-
-    Json(serde_json::json!({
-        "families": family_list,
-        "count": family_list.len()
-    }))
-}
-
-/// List available models with optional filtering.
-#[derive(Debug, Deserialize)]
-pub struct ListModelsQuery {
-    /// Filter by tier: "flagship", "mid", "fast"
-    tier: Option<String>,
-    /// Only show latest version of each family
-    latest_only: Option<bool>,
-}
-
-async fn list_models(
-    State(state): State<Arc<AppState>>,
-    Query(params): Query<ListModelsQuery>,
-) -> Json<serde_json::Value> {
-    let resolver = state.resolver.read().await;
-
-    let models: Vec<&str> = if let Some(tier) = &params.tier {
-        resolver.models_by_tier(tier)
-    } else if params.latest_only.unwrap_or(false) {
-        resolver.latest_models()
-    } else {
-        // Return all latest models by default
-        resolver.latest_models()
-    };
-
-    Json(serde_json::json!({
-        "models": models,
-        "count": models.len()
-    }))
-}
-
-/// Response for model refresh endpoint.
-#[derive(serde::Serialize)]
-struct RefreshModelsResponse {
-    success: bool,
-    message: String,
-    families_count: usize,
-    aliases_count: usize,
-}
-
-/// Refresh model data by reloading from disk.
-///
-/// This reloads the models_with_benchmarks.json file to pick up any updates.
-/// To fully refresh from OpenRouter API and benchmarks, run the merge_benchmarks.py script.
-async fn refresh_models(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<RefreshModelsResponse>, (StatusCode, String)> {
-    let working_dir = state.config.working_dir.to_string_lossy().to_string();
-    let path = format!("{}/models_with_benchmarks.json", working_dir);
-
-    // Reload resolver from disk
-    match crate::budget::ModelResolver::load_from_file(&path) {
-        Ok(new_resolver) => {
-            let families_count = new_resolver.families().len();
-
-            // Update the shared resolver
-            {
-                let mut resolver = state.resolver.write().await;
-                *resolver = new_resolver;
-            }
-
-            // Also reload benchmarks from disk
-            match crate::budget::BenchmarkRegistry::load_from_file(&path) {
-                Ok(new_benchmarks) => {
-                    let benchmark_count = new_benchmarks.benchmark_count();
-                    let mut benchmarks = state.benchmarks.write().await;
-                    *benchmarks = new_benchmarks;
-                    tracing::info!(
-                        "Refreshed model resolver: {} families, {} benchmarks",
-                        families_count,
-                        benchmark_count
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to reload benchmarks: {}", e);
-                }
-            }
-
-            Ok(Json(RefreshModelsResponse {
-                success: true,
-                message: format!("Model data refreshed from {}", path),
-                families_count,
-                aliases_count: 0,
-            }))
-        }
-        Err(e) => {
-            tracing::error!("Failed to reload model data: {}", e);
-            Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to reload model data: {}", e),
-            ))
-        }
-    }
-}
-
-/// Response for model performance endpoint.
-#[derive(serde::Serialize)]
-struct ModelPerformanceResponse {
-    learned_stats: Vec<crate::budget::LearnedModelStats>,
-    budget_estimates: Vec<crate::budget::LearnedBudgetEstimate>,
-    best_models_by_task: std::collections::HashMap<String, String>,
-}
-
-/// Get learned model performance statistics (stub - memory system removed).
-///
-/// Returns empty data since memory system is disabled.
-async fn get_model_performance() -> Json<ModelPerformanceResponse> {
-    Json(ModelPerformanceResponse {
-        learned_stats: vec![],
-        budget_estimates: vec![],
-        best_models_by_task: std::collections::HashMap::new(),
-    })
 }

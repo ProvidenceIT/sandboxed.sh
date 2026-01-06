@@ -1,8 +1,7 @@
 //! Configuration management for Open Agent.
 //!
 //! Open Agent uses OpenCode as its execution backend. Configuration can be set via environment variables:
-//! - `OPENROUTER_API_KEY` - Optional. Only required for memory embeddings.
-//! - `DEFAULT_MODEL` - Optional. The default LLM model to use. Defaults to `claude-opus-4-5-20251101`.
+//! - `DEFAULT_MODEL` - Optional. Default OpenCode model to request (e.g. `claude-opus-4-5-20251101`).
 //! - `WORKING_DIR` - Optional. Default working directory for relative paths. Defaults to `/root` in production, current directory in dev.
 //! - `HOST` - Optional. Server host. Defaults to `127.0.0.1`.
 //! - `PORT` - Optional. Server port. Defaults to `3000`.
@@ -225,10 +224,7 @@ impl MemoryConfig {
 /// Agent configuration.
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// OpenRouter API key
-    pub api_key: String,
-
-    /// Default LLM model identifier (OpenRouter format)
+    /// Default OpenCode model identifier (provider/model format).
     pub default_model: String,
 
     /// Default working directory for relative paths (agent has full system access regardless).
@@ -393,11 +389,7 @@ impl Config {
     /// Load configuration from environment variables.
     ///
     /// # Errors
-    ///
-    /// Returns `ConfigError::MissingEnvVar` if `OPENROUTER_API_KEY` is required but not set.
     pub fn from_env() -> Result<Self, ConfigError> {
-        let api_key_env = std::env::var("OPENROUTER_API_KEY").ok();
-
         // OpenCode configuration (always used)
         let opencode_base_url = std::env::var("OPENCODE_BASE_URL")
             .unwrap_or_else(|_| "http://127.0.0.1:4096".to_string());
@@ -565,14 +557,6 @@ impl Config {
             embed_dimension,
         };
 
-        // OpenRouter key is only required for memory embeddings
-        let api_key = if memory.is_enabled() {
-            api_key_env
-                .ok_or_else(|| ConfigError::MissingEnvVar("OPENROUTER_API_KEY".to_string()))?
-        } else {
-            api_key_env.unwrap_or_default()
-        };
-
         let console_ssh = ConsoleSshConfig {
             host: std::env::var("CONSOLE_SSH_HOST").unwrap_or_else(|_| "127.0.0.1".to_string()),
             port: std::env::var("CONSOLE_SSH_PORT")
@@ -598,7 +582,6 @@ impl Config {
         let library_remote = std::env::var("LIBRARY_REMOTE").ok();
 
         Ok(Self {
-            api_key,
             default_model,
             working_dir,
             host,
@@ -621,10 +604,9 @@ impl Config {
     }
 
     /// Create a config with custom values (useful for testing).
-    pub fn new(api_key: String, default_model: String, working_dir: PathBuf) -> Self {
+    pub fn new(default_model: String, working_dir: PathBuf) -> Self {
         let library_path = working_dir.join(".openagent/library");
         Self {
-            api_key,
             default_model,
             working_dir,
             host: "127.0.0.1".to_string(),

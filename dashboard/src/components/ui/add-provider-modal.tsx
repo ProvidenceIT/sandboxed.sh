@@ -6,7 +6,6 @@ import { toast } from 'sonner';
 import { cn } from '@/lib/utils';
 import {
   createAIProvider,
-  deleteAIProvider,
   oauthAuthorize,
   oauthCallback,
   AIProviderType,
@@ -65,7 +64,6 @@ export function AddProviderModal({ open, onClose, onSuccess, providerTypes }: Ad
   const [apiKey, setApiKey] = useState('');
   const [oauthResponse, setOauthResponse] = useState<OAuthAuthorizeResponse | null>(null);
   const [oauthCode, setOauthCode] = useState('');
-  const [createdProviderId, setCreatedProviderId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
   // Get selected provider info
@@ -82,7 +80,6 @@ export function AddProviderModal({ open, onClose, onSuccess, providerTypes }: Ad
       setApiKey('');
       setOauthResponse(null);
       setOauthCode('');
-      setCreatedProviderId(null);
       setLoading(false);
     }
   }, [open]);
@@ -112,14 +109,6 @@ export function AddProviderModal({ open, onClose, onSuccess, providerTypes }: Ad
   }, [open, loading]);
 
   const handleClose = async () => {
-    // Clean up any created provider if we're canceling mid-flow
-    if (createdProviderId && step === 'oauth-callback') {
-      try {
-        await deleteAIProvider(createdProviderId);
-      } catch {
-        // Ignore cleanup errors
-      }
-    }
     onClose();
   };
 
@@ -147,22 +136,12 @@ export function AddProviderModal({ open, onClose, onSuccess, providerTypes }: Ad
       // Start OAuth flow
       setLoading(true);
       try {
-        const created = await createAIProvider({
-          provider_type: selectedProvider!,
-          name: selectedTypeInfo?.name || selectedProvider!,
-        });
-        setCreatedProviderId(created.id);
-
-        const response = await oauthAuthorize(created.id, methodIndex);
+        const response = await oauthAuthorize(selectedProvider!, methodIndex);
         setOauthResponse(response);
         setStep('oauth-callback');
         window.open(response.url, '_blank');
       } catch (err) {
         toast.error(`Failed: ${err instanceof Error ? err.message : 'Unknown error'}`);
-        // Clean up
-        if (createdProviderId) {
-          await deleteAIProvider(createdProviderId).catch(() => {});
-        }
       } finally {
         setLoading(false);
       }
@@ -190,11 +169,11 @@ export function AddProviderModal({ open, onClose, onSuccess, providerTypes }: Ad
   };
 
   const handleSubmitOAuthCode = async () => {
-    if (!oauthCode.trim() || !createdProviderId || selectedMethodIndex === null) return;
+    if (!oauthCode.trim() || !selectedProvider || selectedMethodIndex === null) return;
 
     setLoading(true);
     try {
-      await oauthCallback(createdProviderId, selectedMethodIndex, oauthCode);
+      await oauthCallback(selectedProvider, selectedMethodIndex, oauthCode);
       toast.success('Provider connected');
       onSuccess();
       onClose();
