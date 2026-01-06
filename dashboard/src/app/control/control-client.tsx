@@ -1031,14 +1031,27 @@ export default function ControlClient() {
   };
 
   // Convert mission history to chat items
-  // Helper to check if mission history contains a desktop session start
+  // Helper to check if mission history has an active desktop session
+  // A session is active if there's a start without a subsequent close
   const missionHasDesktopSession = useCallback((mission: Mission): boolean => {
-    // Check if any history entry mentions desktop_start_session
-    // This handles both tool calls and results containing the desktop session
-    return mission.history.some((entry) =>
-      entry.content.includes("desktop_start_session") ||
-      entry.content.includes("desktop_desktop_start_session")
-    );
+    let hasSession = false;
+    for (const entry of mission.history) {
+      // Check for session start
+      if (
+        entry.content.includes("desktop_start_session") ||
+        entry.content.includes("desktop_desktop_start_session")
+      ) {
+        hasSession = true;
+      }
+      // Check for session close (must come after start check to handle same entry)
+      if (
+        entry.content.includes("desktop_close_session") ||
+        entry.content.includes("desktop_desktop_close_session")
+      ) {
+        hasSession = false;
+      }
+    }
+    return hasSession;
   }, []);
 
   const missionHistoryToItems = useCallback((mission: Mission): ChatItem[] => {
