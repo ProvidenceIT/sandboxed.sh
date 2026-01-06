@@ -139,10 +139,17 @@ export default function SkillsPage() {
 
   const handleSkillSave = async () => {
     if (!selectedSkill) return;
+    const contentBeingSaved = skillContent;
     try {
       setSkillSaving(true);
-      await saveLibrarySkill(selectedSkill.name, skillContent);
-      setSkillDirty(false);
+      await saveLibrarySkill(selectedSkill.name, contentBeingSaved);
+      // Only clear dirty if content hasn't changed during save
+      setSkillContent((current) => {
+        if (current === contentBeingSaved) {
+          setSkillDirty(false);
+        }
+        return current;
+      });
       await loadData();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save skill');

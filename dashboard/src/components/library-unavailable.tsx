@@ -141,6 +141,7 @@ export function LibraryUnavailable({ message, onConfigured }: LibraryUnavailable
     setError('Failed to initialize library. The repository may not be accessible.');
     setStep('select');
     setSaving(false);
+    setCreating(false);
   };
 
   const handleRepoSelect = async (repo?: GitHubRepo) => {

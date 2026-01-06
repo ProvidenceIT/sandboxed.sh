@@ -105,6 +105,8 @@ export default function LibraryPage() {
       setCommands(commandsData);
       setMcps(mcpsData);
       setMcpJsonContent(JSON.stringify(mcpsData, null, 2));
+      // Reset dirty flag since we loaded fresh server data
+      setMcpDirty(false);
     } catch (err) {
       if (err instanceof LibraryUnavailableError) {
         setLibraryUnavailable(true);
@@ -186,12 +188,19 @@ export default function LibraryPage() {
 
   const handleMcpSave = async () => {
     if (mcpParseError) return;
+    const contentBeingSaved = mcpJsonContent;
     try {
       setMcpSaving(true);
-      const parsed = JSON.parse(mcpJsonContent);
+      const parsed = JSON.parse(contentBeingSaved);
       await saveLibraryMcps(parsed);
       setMcps(parsed);
-      setMcpDirty(false);
+      // Only clear dirty if content hasn't changed during save
+      setMcpJsonContent((current) => {
+        if (current === contentBeingSaved) {
+          setMcpDirty(false);
+        }
+        return current;
+      });
       // Refresh status only (not data since we just saved the new state)
       const statusData = await getLibraryStatus();
       setStatus(statusData);
@@ -219,10 +228,17 @@ export default function LibraryPage() {
 
   const handleSkillSave = async () => {
     if (!selectedSkill) return;
+    const contentBeingSaved = skillContent;
     try {
       setSkillSaving(true);
-      await saveLibrarySkill(selectedSkill.name, skillContent);
-      setSkillDirty(false);
+      await saveLibrarySkill(selectedSkill.name, contentBeingSaved);
+      // Only clear dirty if content hasn't changed during save
+      setSkillContent((current) => {
+        if (current === contentBeingSaved) {
+          setSkillDirty(false);
+        }
+        return current;
+      });
       await loadData();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save skill');
@@ -285,10 +301,17 @@ Describe what this skill does.
 
   const handleCommandSave = async () => {
     if (!selectedCommand) return;
+    const contentBeingSaved = commandContent;
     try {
       setCommandSaving(true);
-      await saveLibraryCommand(selectedCommand.name, commandContent);
-      setCommandDirty(false);
+      await saveLibraryCommand(selectedCommand.name, contentBeingSaved);
+      // Only clear dirty if content hasn't changed during save
+      setCommandContent((current) => {
+        if (current === contentBeingSaved) {
+          setCommandDirty(false);
+        }
+        return current;
+      });
       await loadData();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save command');
