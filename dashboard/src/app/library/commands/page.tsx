@@ -143,18 +143,15 @@ export default function CommandsPage() {
     try {
       setCommandSaving(true);
       await saveLibraryCommand(selectedCommand.name, contentBeingSaved);
-      // Only clear dirty if content hasn't changed during save
-      setCommandContent((current) => {
-        if (current === contentBeingSaved) {
-          setCommandDirty(false);
-        }
-        return current;
-      });
       await loadData();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save command');
     } finally {
       setCommandSaving(false);
+      // Only clear dirty if content hasn't changed during save
+      if (commandContent === contentBeingSaved) {
+        setCommandDirty(false);
+      }
     }
   };
 
