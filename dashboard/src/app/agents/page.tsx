@@ -114,6 +114,8 @@ export default function AgentsPage() {
 
   const handleSaveAgent = async () => {
     if (!editedAgent || !selectedAgent) return;
+    // Capture the state being saved for comparison after save completes
+    const agentBeingSaved = { ...editedAgent };
     try {
       setSaving(true);
       await updateAgent(editedAgent.id, {
@@ -123,9 +125,17 @@ export default function AgentsPage() {
         skills: editedAgent.skills,
         commands: editedAgent.commands,
       });
-      setDirty(false);
       await loadData();
-      await loadAgent(editedAgent.id);
+      // Only clear dirty and reload if state hasn't changed during save
+      setEditedAgent((current) => {
+        if (current && JSON.stringify(current) === JSON.stringify(agentBeingSaved)) {
+          // State unchanged - safe to reload and clear dirty
+          loadAgent(agentBeingSaved.id);
+          setDirty(false);
+        }
+        // If state changed during save, keep current state and dirty flag
+        return current;
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save agent');
     } finally {

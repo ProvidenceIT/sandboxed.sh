@@ -139,10 +139,17 @@ export default function CommandsPage() {
 
   const handleCommandSave = async () => {
     if (!selectedCommand) return;
+    const contentBeingSaved = commandContent;
     try {
       setCommandSaving(true);
-      await saveLibraryCommand(selectedCommand.name, commandContent);
-      setCommandDirty(false);
+      await saveLibraryCommand(selectedCommand.name, contentBeingSaved);
+      // Only clear dirty if content hasn't changed during save
+      setCommandContent((current) => {
+        if (current === contentBeingSaved) {
+          setCommandDirty(false);
+        }
+        return current;
+      });
       await loadData();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save command');
