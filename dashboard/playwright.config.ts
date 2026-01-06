@@ -7,6 +7,7 @@ export default defineConfig({
   retries: process.env.CI ? 2 : 0,
   workers: process.env.CI ? 1 : undefined,
   reporter: 'html',
+  timeout: 30000, // 30 seconds per test
   use: {
     baseURL: 'http://localhost:3001',
     trace: 'on-first-retry',
@@ -23,5 +24,6 @@ export default defineConfig({
     command: 'bun dev',
     url: 'http://localhost:3001',
     reuseExistingServer: !process.env.CI,
+    timeout: 120000, // 2 minutes for server to start
   },
 });
