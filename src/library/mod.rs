@@ -334,6 +334,129 @@ impl LibraryStore {
         Ok(())
     }
 
+    /// Delete a reference file from a skill.
+    pub async fn delete_skill_reference(&self, skill_name: &str, ref_path: &str) -> Result<()> {
+        Self::validate_name(skill_name)?;
+        let skill_dir = self.path.join("skills").join(skill_name);
+        let file_path = skill_dir.join(ref_path);
+
+        // Validate path doesn't escape skill directory
+        self.validate_path_within(&skill_dir, &file_path)?;
+
+        // Don't allow deleting SKILL.md via this method
+        if ref_path == "SKILL.md" || ref_path.ends_with("/SKILL.md") {
+            anyhow::bail!("Cannot delete SKILL.md via reference API - use delete_skill instead");
+        }
+
+        if !file_path.exists() {
+            anyhow::bail!("Reference file not found: {}/{}", skill_name, ref_path);
+        }
+
+        // Check if it's a directory
+        let metadata = fs::metadata(&file_path).await?;
+        if metadata.is_dir() {
+            fs::remove_dir_all(&file_path)
+                .await
+                .context("Failed to delete directory")?;
+        } else {
+            fs::remove_file(&file_path)
+                .await
+                .context("Failed to delete reference file")?;
+        }
+
+        Ok(())
+    }
+
+    /// Import a skill from a Git repository URL.
+    /// Clones the specified path from the repo into the skills directory.
+    pub async fn import_skill_from_git(
+        &self,
+        git_url: &str,
+        skill_path: Option<&str>,
+        target_name: &str,
+    ) -> Result<Skill> {
+        Self::validate_name(target_name)?;
+
+        let skills_dir = self.path.join("skills");
+        let target_dir = skills_dir.join(target_name);
+
+        if target_dir.exists() {
+            anyhow::bail!("Skill '{}' already exists", target_name);
+        }
+
+        // Ensure skills directory exists
+        fs::create_dir_all(&skills_dir).await?;
+
+        // Create a temp directory for cloning
+        let temp_dir = self.path.join(".tmp-import");
+        if temp_dir.exists() {
+            fs::remove_dir_all(&temp_dir).await?;
+        }
+
+        // Clone the repository (sparse checkout if path specified)
+        let clone_result = if let Some(path) = skill_path {
+            // For paths like "owner/repo/path/to/skill", we need to handle GitHub URLs
+            git::sparse_clone(&temp_dir, git_url, path).await
+        } else {
+            git::clone(&temp_dir, git_url).await
+        };
+
+        if let Err(e) = clone_result {
+            // Clean up temp dir on failure
+            let _ = fs::remove_dir_all(&temp_dir).await;
+            return Err(e);
+        }
+
+        // Find the SKILL.md file
+        let source_dir = if let Some(path) = skill_path {
+            temp_dir.join(path)
+        } else {
+            temp_dir.clone()
+        };
+
+        let skill_md = source_dir.join("SKILL.md");
+        if !skill_md.exists() {
+            let _ = fs::remove_dir_all(&temp_dir).await;
+            anyhow::bail!("No SKILL.md found at the specified path");
+        }
+
+        // Move the skill directory to target
+        Self::copy_dir_recursive(&source_dir, &target_dir).await?;
+
+        // Clean up temp directory
+        let _ = fs::remove_dir_all(&temp_dir).await;
+
+        // Return the imported skill
+        self.get_skill(target_name).await
+    }
+
+    /// Recursively copy a directory.
+    #[async_recursion::async_recursion]
+    async fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+        fs::create_dir_all(dst).await?;
+
+        let mut entries = fs::read_dir(src).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let entry_path = entry.path();
+            let file_name = entry.file_name();
+            let dst_path = dst.join(&file_name);
+
+            // Skip .git directory
+            if file_name == ".git" {
+                continue;
+            }
+
+            let metadata = fs::metadata(&entry_path).await?;
+            if metadata.is_dir() {
+                Self::copy_dir_recursive(&entry_path, &dst_path).await?;
+            } else {
+                fs::copy(&entry_path, &dst_path).await?;
+            }
+        }
+
+        Ok(())
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // Commands (commands/*.md)
     // ─────────────────────────────────────────────────────────────────────────

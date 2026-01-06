@@ -43,9 +43,12 @@ pub mod library;
 pub mod llm;
 pub mod mcp;
 pub mod opencode;
+pub mod opencode_config;
+pub mod secrets;
 pub mod task;
 pub mod tools;
 pub mod workspace;
 
 pub use agent_config::{AgentConfig, AgentStore};
 pub use config::Config;
+pub use opencode_config::{OpenCodeConnection, OpenCodeStore};

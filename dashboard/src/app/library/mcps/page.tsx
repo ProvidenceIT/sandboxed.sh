@@ -199,6 +199,17 @@ function McpDetailPanel({
   const args = entry.def.type === 'stdio' ? entry.def.args ?? [] : [];
   const envEntries = entry.def.type === 'stdio' ? Object.entries(entry.def.env ?? {}) : [];
 
+  // Handle Escape key to close panel
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        onClose();
+      }
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [onClose]);
+
   return (
     <>
       <div

@@ -50,6 +50,12 @@ libc = "0.2"
 # Auth (JWT)
 jsonwebtoken = "9"
 
+# Cryptography for secrets
+aes-gcm = "0.10"
+pbkdf2 = "0.12"
+sha2 = "0.10"
+rand = "0.8"
+
 # Remote console / file manager
 base64 = "0.22"
 bytes = "1"

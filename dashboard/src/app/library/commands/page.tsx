@@ -253,8 +253,8 @@ Describe what this command does.
           )}
 
           {/* Commands Editor */}
-          <div className="flex-1 min-h-0 rounded-xl bg-white/[0.02] border border-white/[0.06] overflow-hidden">
-            <div className="flex flex-1 min-h-0 items-stretch">
+          <div className="flex-1 min-h-0 rounded-xl bg-white/[0.02] border border-white/[0.06] overflow-hidden flex flex-col">
+            <div className="flex flex-1 min-h-0">
               {/* Commands List */}
               <div className="w-64 border-r border-white/[0.06] flex flex-col min-h-0">
                 <div className="p-3 border-b border-white/[0.06] flex items-center justify-between">

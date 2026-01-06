@@ -89,11 +89,13 @@ pub fn routes() -> Router<Arc<super::routes::AppState>> {
         .route("/mcps", put(save_mcps))
         // Skills
         .route("/skills", get(list_skills))
+        .route("/skills/import", post(import_skill))
         .route("/skills/:name", get(get_skill))
         .route("/skills/:name", put(save_skill))
         .route("/skills/:name", delete(delete_skill))
         .route("/skills/:name/references/*path", get(get_skill_reference))
         .route("/skills/:name/references/*path", put(save_skill_reference))
+        .route("/skills/:name/references/*path", delete(delete_skill_reference))
         // Commands
         .route("/commands", get(list_commands))
         .route("/commands/:name", get(get_command))
@@ -113,6 +115,16 @@ pub struct CommitRequest {
 #[derive(Debug, Deserialize)]
 pub struct SaveContentRequest {
     content: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ImportSkillRequest {
+    /// Git repository URL
+    url: String,
+    /// Optional path within the repository (for monorepos)
+    path: Option<String>,
+    /// Target skill name (defaults to last path component)
+    name: Option<String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -302,6 +314,66 @@ async fn save_skill_reference(
         .await
         .map(|_| (StatusCode::OK, "Reference saved successfully".to_string()))
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+/// DELETE /api/library/skills/:name/references/*path - Delete a reference file.
+async fn delete_skill_reference(
+    State(state): State<Arc<super::routes::AppState>>,
+    Path((name, path)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<(StatusCode, String), (StatusCode, String)> {
+    let library = ensure_library(&state, &headers).await?;
+    library
+        .delete_skill_reference(&name, &path)
+        .await
+        .map(|_| (StatusCode::OK, "Reference deleted successfully".to_string()))
+        .map_err(|e| {
+            if e.to_string().contains("not found") {
+                (StatusCode::NOT_FOUND, e.to_string())
+            } else if e.to_string().contains("Cannot delete SKILL.md") {
+                (StatusCode::BAD_REQUEST, e.to_string())
+            } else {
+                (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+            }
+        })
+}
+
+/// POST /api/library/skills/import - Import a skill from a Git URL.
+async fn import_skill(
+    State(state): State<Arc<super::routes::AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<ImportSkillRequest>,
+) -> Result<Json<Skill>, (StatusCode, String)> {
+    let library = ensure_library(&state, &headers).await?;
+
+    // Determine target name
+    let target_name = req.name.clone().unwrap_or_else(|| {
+        // Extract from path or URL
+        if let Some(ref path) = req.path {
+            path.rsplit('/').next().unwrap_or("imported-skill").to_string()
+        } else {
+            req.url
+                .rsplit('/')
+                .next()
+                .map(|s| s.trim_end_matches(".git"))
+                .unwrap_or("imported-skill")
+                .to_string()
+        }
+    });
+
+    library
+        .import_skill_from_git(&req.url, req.path.as_deref(), &target_name)
+        .await
+        .map(Json)
+        .map_err(|e| {
+            if e.to_string().contains("already exists") {
+                (StatusCode::CONFLICT, e.to_string())
+            } else if e.to_string().contains("No SKILL.md found") {
+                (StatusCode::BAD_REQUEST, e.to_string())
+            } else {
+                (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+            }
+        })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

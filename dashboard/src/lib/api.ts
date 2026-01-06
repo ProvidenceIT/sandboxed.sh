@@ -1286,6 +1286,84 @@ export async function deleteLibrarySkill(name: string): Promise<void> {
   await ensureLibraryResponse(res, "Failed to delete skill");
 }
 
+// Get skill reference file
+export async function getSkillReference(
+  skillName: string,
+  refPath: string
+): Promise<string> {
+  const res = await apiFetch(
+    `/api/library/skills/${encodeURIComponent(skillName)}/references/${refPath}`
+  );
+  await ensureLibraryResponse(res, "Failed to fetch reference file");
+  return res.text();
+}
+
+// Save skill reference file
+export async function saveSkillReference(
+  skillName: string,
+  refPath: string,
+  content: string
+): Promise<void> {
+  const res = await apiFetch(
+    `/api/library/skills/${encodeURIComponent(skillName)}/references/${refPath}`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content }),
+    }
+  );
+  await ensureLibraryResponse(res, "Failed to save reference file");
+}
+
+// Delete skill reference file
+export async function deleteSkillReference(
+  skillName: string,
+  refPath: string
+): Promise<void> {
+  const res = await apiFetch(
+    `/api/library/skills/${encodeURIComponent(skillName)}/references/${refPath}`,
+    { method: "DELETE" }
+  );
+  await ensureLibraryResponse(res, "Failed to delete reference file");
+}
+
+// Import skill from Git URL
+export interface ImportSkillRequest {
+  url: string;
+  path?: string;
+  name?: string;
+}
+
+export async function importSkill(request: ImportSkillRequest): Promise<Skill> {
+  const res = await apiFetch("/api/library/skills/import", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  });
+  await ensureLibraryResponse(res, "Failed to import skill");
+  return res.json();
+}
+
+// Validate skill name (matches backend pattern)
+export function validateSkillName(name: string): { valid: boolean; error?: string } {
+  if (!name || name.length === 0) {
+    return { valid: false, error: "Name cannot be empty" };
+  }
+  if (name.length > 64) {
+    return { valid: false, error: "Name must be 64 characters or less" };
+  }
+  if (name.startsWith("-") || name.endsWith("-")) {
+    return { valid: false, error: "Name cannot start or end with a hyphen" };
+  }
+  if (name.includes("--")) {
+    return { valid: false, error: "Name cannot contain consecutive hyphens" };
+  }
+  if (!/^[a-z0-9]+(-[a-z0-9]+)*$/.test(name)) {
+    return { valid: false, error: "Name must be lowercase alphanumeric with single hyphens" };
+  }
+  return { valid: true };
+}
+
 // List commands
 export async function listLibraryCommands(): Promise<CommandSummary[]> {
   const res = await apiFetch("/api/library/commands");
@@ -1441,4 +1519,232 @@ export async function updateAgent(
 export async function deleteAgent(id: string): Promise<void> {
   const res = await apiFetch(`/api/agents/${id}`, { method: "DELETE" });
   if (!res.ok) throw new Error("Failed to delete agent");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OpenCode Connection API
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface OpenCodeConnection {
+  id: string;
+  name: string;
+  base_url: string;
+  agent: string | null;
+  permissive: boolean;
+  enabled: boolean;
+  is_default: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TestConnectionResponse {
+  success: boolean;
+  message: string;
+  version: string | null;
+}
+
+// List all OpenCode connections
+export async function listOpenCodeConnections(): Promise<OpenCodeConnection[]> {
+  const res = await apiFetch("/api/opencode/connections");
+  if (!res.ok) throw new Error("Failed to list OpenCode connections");
+  return res.json();
+}
+
+// Get connection by ID
+export async function getOpenCodeConnection(id: string): Promise<OpenCodeConnection> {
+  const res = await apiFetch(`/api/opencode/connections/${id}`);
+  if (!res.ok) throw new Error("Failed to get OpenCode connection");
+  return res.json();
+}
+
+// Create new connection
+export async function createOpenCodeConnection(data: {
+  name: string;
+  base_url: string;
+  agent?: string | null;
+  permissive?: boolean;
+  enabled?: boolean;
+}): Promise<OpenCodeConnection> {
+  const res = await apiFetch("/api/opencode/connections", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) throw new Error("Failed to create OpenCode connection");
+  return res.json();
+}
+
+// Update connection
+export async function updateOpenCodeConnection(
+  id: string,
+  data: {
+    name?: string;
+    base_url?: string;
+    agent?: string | null;
+    permissive?: boolean;
+    enabled?: boolean;
+  }
+): Promise<OpenCodeConnection> {
+  const res = await apiFetch(`/api/opencode/connections/${id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) throw new Error("Failed to update OpenCode connection");
+  return res.json();
+}
+
+// Delete connection
+export async function deleteOpenCodeConnection(id: string): Promise<void> {
+  const res = await apiFetch(`/api/opencode/connections/${id}`, { method: "DELETE" });
+  if (!res.ok) throw new Error("Failed to delete OpenCode connection");
+}
+
+// Test connection
+export async function testOpenCodeConnection(id: string): Promise<TestConnectionResponse> {
+  const res = await apiFetch(`/api/opencode/connections/${id}/test`, { method: "POST" });
+  if (!res.ok) throw new Error("Failed to test OpenCode connection");
+  return res.json();
+}
+
+// Set default connection
+export async function setDefaultOpenCodeConnection(id: string): Promise<OpenCodeConnection> {
+  const res = await apiFetch(`/api/opencode/connections/${id}/default`, { method: "POST" });
+  if (!res.ok) throw new Error("Failed to set default OpenCode connection");
+  return res.json();
+}
+
+// ============================================================================
+// Secrets API
+// ============================================================================
+
+export interface SecretsStatus {
+  initialized: boolean;
+  can_decrypt: boolean;
+  registries: RegistryInfo[];
+  default_key: string | null;
+}
+
+export interface RegistryInfo {
+  name: string;
+  description: string | null;
+  secret_count: number;
+  updated_at: string;
+}
+
+export interface SecretInfo {
+  key: string;
+  secret_type: 'oauth_access_token' | 'oauth_refresh_token' | 'api_key' | 'password' | 'generic' | null;
+  expires_at: number | null;
+  labels: Record<string, string>;
+  is_expired: boolean;
+}
+
+export interface SecretMetadata {
+  type?: 'oauth_access_token' | 'oauth_refresh_token' | 'api_key' | 'password' | 'generic';
+  expires_at?: number;
+  labels?: Record<string, string>;
+}
+
+// Get secrets status
+export async function getSecretsStatus(): Promise<SecretsStatus> {
+  const res = await apiFetch('/api/secrets/status');
+  if (!res.ok) throw new Error('Failed to get secrets status');
+  return res.json();
+}
+
+// Initialize secrets system
+export async function initializeSecrets(keyId: string = 'default'): Promise<{ key_id: string; message: string }> {
+  const res = await apiFetch('/api/secrets/initialize', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ key_id: keyId }),
+  });
+  if (!res.ok) throw new Error('Failed to initialize secrets');
+  return res.json();
+}
+
+// Unlock secrets with passphrase
+export async function unlockSecrets(passphrase: string): Promise<void> {
+  const res = await apiFetch('/api/secrets/unlock', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ passphrase }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || 'Invalid passphrase');
+  }
+}
+
+// Lock secrets
+export async function lockSecrets(): Promise<void> {
+  const res = await apiFetch('/api/secrets/lock', { method: 'POST' });
+  if (!res.ok) throw new Error('Failed to lock secrets');
+}
+
+// List registries
+export async function listSecretRegistries(): Promise<RegistryInfo[]> {
+  const res = await apiFetch('/api/secrets/registries');
+  if (!res.ok) throw new Error('Failed to list registries');
+  return res.json();
+}
+
+// List secrets in a registry
+export async function listSecrets(registryName: string): Promise<SecretInfo[]> {
+  const res = await apiFetch(`/api/secrets/registries/${encodeURIComponent(registryName)}`);
+  if (!res.ok) throw new Error('Failed to list secrets');
+  return res.json();
+}
+
+// Get secret metadata (not the value)
+export async function getSecretInfo(registryName: string, key: string): Promise<SecretInfo> {
+  const res = await apiFetch(`/api/secrets/registries/${encodeURIComponent(registryName)}/${encodeURIComponent(key)}`);
+  if (!res.ok) throw new Error('Failed to get secret info');
+  return res.json();
+}
+
+// Reveal (decrypt) a secret value
+export async function revealSecret(registryName: string, key: string): Promise<string> {
+  const res = await apiFetch(`/api/secrets/registries/${encodeURIComponent(registryName)}/${encodeURIComponent(key)}/reveal`);
+  if (!res.ok) {
+    if (res.status === 401) throw new Error('Secrets are locked');
+    throw new Error('Failed to reveal secret');
+  }
+  const data = await res.json();
+  return data.value;
+}
+
+// Set a secret
+export async function setSecret(
+  registryName: string,
+  key: string,
+  value: string,
+  metadata?: SecretMetadata
+): Promise<void> {
+  const res = await apiFetch(`/api/secrets/registries/${encodeURIComponent(registryName)}/${encodeURIComponent(key)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ value, metadata }),
+  });
+  if (!res.ok) {
+    if (res.status === 401) throw new Error('Secrets are locked');
+    throw new Error('Failed to set secret');
+  }
+}
+
+// Delete a secret
+export async function deleteSecret(registryName: string, key: string): Promise<void> {
+  const res = await apiFetch(`/api/secrets/registries/${encodeURIComponent(registryName)}/${encodeURIComponent(key)}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) throw new Error('Failed to delete secret');
+}
+
+// Delete a registry
+export async function deleteSecretRegistry(registryName: string): Promise<void> {
+  const res = await apiFetch(`/api/secrets/registries/${encodeURIComponent(registryName)}`, {
+    method: 'DELETE',
+  });
+  if (!res.ok) throw new Error('Failed to delete registry');
 }

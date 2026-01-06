@@ -36,6 +36,8 @@ use super::desktop_stream;
 use super::fs;
 use super::library as library_api;
 use super::mcp as mcp_api;
+use super::opencode as opencode_api;
+use super::secrets as secrets_api;
 use super::types::*;
 use super::workspaces as workspaces_api;
 
@@ -59,6 +61,10 @@ pub struct AppState {
     pub workspaces: workspace::SharedWorkspaceStore,
     /// Agent configuration store
     pub agents: Arc<crate::agent_config::AgentStore>,
+    /// OpenCode connection store
+    pub opencode_connections: Arc<crate::opencode_config::OpenCodeStore>,
+    /// Secrets store for encrypted credentials
+    pub secrets: Option<Arc<crate::secrets::SecretsStore>>,
 }
 
 /// Start the HTTP server.
@@ -89,6 +95,23 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     let agents = Arc::new(crate::agent_config::AgentStore::new(
         config.working_dir.join(".openagent/agents.json"),
     ).await);
+
+    // Initialize OpenCode connection store
+    let opencode_connections = Arc::new(crate::opencode_config::OpenCodeStore::new(
+        config.working_dir.join(".openagent/opencode_connections.json"),
+    ).await);
+
+    // Initialize secrets store
+    let secrets = match crate::secrets::SecretsStore::new(&config.working_dir).await {
+        Ok(store) => {
+            tracing::info!("Secrets store initialized");
+            Some(Arc::new(store))
+        }
+        Err(e) => {
+            tracing::warn!("Failed to initialize secrets store: {}", e);
+            None
+        }
+    };
 
     // Spawn the single global control session actor.
     let control_state = control::ControlHub::new(
@@ -131,6 +154,8 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         library,
         workspaces,
         agents,
+        opencode_connections,
+        secrets,
     });
 
     let public_routes = Router::new()
@@ -252,6 +277,10 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         .nest("/api/workspaces", workspaces_api::routes())
         // Agent configuration endpoints
         .nest("/api/agents", super::agents::routes())
+        // OpenCode connection endpoints
+        .nest("/api/opencode/connections", opencode_api::routes())
+        // Secrets management endpoints
+        .nest("/api/secrets", secrets_api::routes())
         .layer(middleware::from_fn_with_state(
             Arc::clone(&state),
             auth::require_auth,
