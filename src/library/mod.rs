@@ -326,8 +326,15 @@ impl LibraryStore {
     /// Save a skill's SKILL.md content.
     pub async fn save_skill(&self, name: &str, content: &str) -> Result<()> {
         Self::validate_name(name)?;
-        // Always use new directory structure for new/updated skills
-        let skill_dir = self.path.join(SKILL_DIR).join(name);
+
+        // Check if skill exists in legacy directory first
+        let legacy_dir = self.path.join(LEGACY_SKILLS_DIR).join(name);
+        let skill_dir = if legacy_dir.exists() {
+            legacy_dir
+        } else {
+            // Use current skills directory for new skills
+            self.skills_dir().join(name)
+        };
         let skill_md = skill_dir.join("SKILL.md");
 
         // Ensure directory exists
@@ -446,8 +453,13 @@ impl LibraryStore {
         content: &str,
     ) -> Result<()> {
         Self::validate_name(skill_name)?;
-        // Use new path for saving
-        let skill_dir = self.path.join(SKILL_DIR).join(skill_name);
+        // Check if skill exists in legacy directory first
+        let legacy_dir = self.path.join(LEGACY_SKILLS_DIR).join(skill_name);
+        let skill_dir = if legacy_dir.exists() {
+            legacy_dir
+        } else {
+            self.skills_dir().join(skill_name)
+        };
         let file_path = skill_dir.join(ref_path);
 
         // Validate path doesn't escape skill directory
@@ -541,7 +553,17 @@ impl LibraryStore {
 
         // Find the SKILL.md file
         let source_dir = if let Some(path) = skill_path {
-            temp_dir.join(path)
+            let joined = temp_dir.join(path);
+            // Validate path doesn't escape temp_dir via traversal
+            let canonical_temp = temp_dir.canonicalize()?;
+            let canonical_source = joined.canonicalize().map_err(|_| {
+                anyhow::anyhow!("Skill path '{}' not found in repository", path)
+            })?;
+            if !canonical_source.starts_with(&canonical_temp) {
+                let _ = fs::remove_dir_all(&temp_dir).await;
+                anyhow::bail!("Invalid skill path: path traversal detected");
+            }
+            joined
         } else {
             temp_dir.clone()
         };
@@ -552,8 +574,11 @@ impl LibraryStore {
             anyhow::bail!("No SKILL.md found at the specified path");
         }
 
-        // Move the skill directory to target
-        Self::copy_dir_recursive(&source_dir, &target_dir).await?;
+        // Copy the skill directory to target
+        if let Err(e) = Self::copy_dir_recursive(&source_dir, &target_dir).await {
+            let _ = fs::remove_dir_all(&temp_dir).await;
+            return Err(e);
+        }
 
         // Clean up temp directory
         let _ = fs::remove_dir_all(&temp_dir).await;
