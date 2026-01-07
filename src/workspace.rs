@@ -530,7 +530,8 @@ fn ensure_skill_name_in_frontmatter(content: &str, skill_name: &str) -> String {
         }
 
         // Insert name field after the opening ---
-        return format!("---\nname: {}\n{}{}", skill_name, frontmatter.trim(), rest);
+        // Ensure there's a newline before the closing ---
+        return format!("---\nname: {}\n{}\n{}", skill_name, frontmatter.trim(), rest.trim_start_matches('\n'));
     }
 
     // Malformed frontmatter, return as-is
