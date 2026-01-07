@@ -690,11 +690,17 @@ export function streamControl(
 
 // ==================== MCP Management ====================
 
-export type McpStatus = "connected" | "disconnected" | "error" | "disabled";
+export type McpStatus = "connected" | "connecting" | "disconnected" | "error" | "disabled";
+
+export interface McpTransport {
+  http?: { endpoint: string };
+  stdio?: { command: string; args: string[]; env: Record<string, string> };
+}
 
 export interface McpServerConfig {
   id: string;
   name: string;
+  transport: McpTransport;
   endpoint: string;
   description: string | null;
   enabled: boolean;
@@ -771,6 +777,24 @@ export async function disableMcp(id: string): Promise<McpServerState> {
 export async function refreshMcp(id: string): Promise<McpServerState> {
   const res = await apiFetch(`/api/mcp/${id}/refresh`, { method: "POST" });
   if (!res.ok) throw new Error("Failed to refresh MCP");
+  return res.json();
+}
+
+// Update an MCP server configuration
+export interface UpdateMcpRequest {
+  name?: string;
+  description?: string;
+  enabled?: boolean;
+  transport?: McpTransport;
+}
+
+export async function updateMcp(id: string, data: UpdateMcpRequest): Promise<McpServerState> {
+  const res = await apiFetch(`/api/mcp/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) throw new Error("Failed to update MCP");
   return res.json();
 }
 

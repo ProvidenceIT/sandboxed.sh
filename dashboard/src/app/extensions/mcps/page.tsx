@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
-import { type McpServerDef, type McpServerState, listMcps, enableMcp, disableMcp, refreshMcp } from '@/lib/api';
+import { type McpServerDef, type McpServerState, type McpTransport, type McpStatus, listMcps, enableMcp, disableMcp, refreshMcp, updateMcp } from '@/lib/api';
 import {
   AlertCircle,
   Check,
@@ -221,29 +221,35 @@ function McpCard({
 
 function RuntimeMcpCard({
   mcp,
+  isSelected,
+  onSelect,
   onToggle,
   onRefresh,
 }: {
   mcp: McpServerState;
+  isSelected: boolean;
+  onSelect: (mcp: McpServerState | null) => void;
   onToggle: (id: string, enabled: boolean) => Promise<void>;
   onRefresh: (id: string) => Promise<void>;
 }) {
   const [toggling, setToggling] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
 
-  const statusColor = {
+  const statusColor: Record<McpStatus, string> = {
     connected: 'text-emerald-400',
     connecting: 'text-amber-400',
     disconnected: 'text-white/40',
+    disabled: 'text-white/40',
     error: 'text-red-400',
-  }[mcp.status];
+  };
 
-  const statusLabel = {
+  const statusLabel: Record<McpStatus, string> = {
     connected: 'Connected',
     connecting: 'Connecting...',
     disconnected: 'Disconnected',
+    disabled: 'Disabled',
     error: 'Error',
-  }[mcp.status];
+  };
 
   const handleToggle = async (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -266,11 +272,14 @@ function RuntimeMcpCard({
   };
 
   return (
-    <div
+    <button
+      onClick={() => onSelect(isSelected ? null : mcp)}
       className={cn(
         'w-full rounded-xl p-4 text-left transition-all',
         'bg-white/[0.02] border hover:bg-white/[0.04]',
-        'border-white/[0.04] hover:border-white/[0.08]'
+        isSelected
+          ? 'border-cyan-500/40 bg-cyan-500/5'
+          : 'border-white/[0.04] hover:border-white/[0.08]'
       )}
     >
       <div className="flex items-start gap-3 mb-3">
@@ -305,7 +314,7 @@ function RuntimeMcpCard({
 
       <div className="flex items-center justify-between pt-3 border-t border-white/[0.04]">
         <div className="flex items-center gap-2">
-          <span className={cn('text-[10px]', statusColor)}>{statusLabel}</span>
+          <span className={cn('text-[10px]', statusColor[mcp.status])}>{statusLabel[mcp.status]}</span>
           {mcp.error && (
             <span className="text-[10px] text-red-400 truncate max-w-[120px]" title={mcp.error}>
               {mcp.error}
@@ -336,7 +345,274 @@ function RuntimeMcpCard({
           </button>
         </div>
       </div>
-    </div>
+    </button>
+  );
+}
+
+function RuntimeMcpDetailPanel({
+  mcp,
+  onClose,
+  onUpdate,
+  onRefresh,
+}: {
+  mcp: McpServerState;
+  onClose: () => void;
+  onUpdate: (id: string, transport: McpTransport) => Promise<void>;
+  onRefresh: (id: string) => Promise<void>;
+}) {
+  const isStdio = 'stdio' in (mcp.transport ?? {});
+  const stdioConfig = isStdio ? (mcp.transport as { stdio: { command: string; args: string[]; env: Record<string, string> } }).stdio : null;
+
+  const [envVars, setEnvVars] = useState<Array<{ key: string; value: string }>>(
+    () => Object.entries(stdioConfig?.env ?? {}).map(([key, value]) => ({ key, value }))
+  );
+  const [newKey, setNewKey] = useState('');
+  const [newValue, setNewValue] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+
+  // Handle Escape key to close panel
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        onClose();
+      }
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [onClose]);
+
+  const handleAddEnvVar = () => {
+    if (!newKey.trim()) return;
+    setEnvVars((prev) => [...prev, { key: newKey.trim(), value: newValue }]);
+    setNewKey('');
+    setNewValue('');
+  };
+
+  const handleRemoveEnvVar = (index: number) => {
+    setEnvVars((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const handleUpdateEnvVar = (index: number, field: 'key' | 'value', value: string) => {
+    setEnvVars((prev) =>
+      prev.map((item, i) => (i === index ? { ...item, [field]: value } : item))
+    );
+  };
+
+  const handleSave = async () => {
+    if (!stdioConfig) return;
+    setSaving(true);
+    try {
+      const newEnv: Record<string, string> = {};
+      envVars.forEach(({ key, value }) => {
+        if (key.trim()) {
+          newEnv[key.trim()] = value;
+        }
+      });
+      const transport: McpTransport = {
+        stdio: {
+          command: stdioConfig.command,
+          args: stdioConfig.args,
+          env: newEnv,
+        },
+      };
+      await onUpdate(mcp.id, transport);
+      toast.success('Saved environment variables');
+    } catch {
+      toast.error('Failed to save');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleRefresh = async () => {
+    setRefreshing(true);
+    try {
+      await onRefresh(mcp.id);
+      toast.success('Refreshed MCP');
+    } catch {
+      toast.error('Failed to refresh');
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  const statusColor = {
+    connected: 'text-emerald-400',
+    connecting: 'text-amber-400',
+    disconnected: 'text-white/40',
+    disabled: 'text-white/40',
+    error: 'text-red-400',
+  }[mcp.status];
+
+  return (
+    <>
+      <div
+        className="fixed inset-0 z-40 bg-black/40 backdrop-blur-sm animate-fade-in"
+        onClick={onClose}
+      />
+      <div
+        className="fixed right-0 top-0 z-50 h-full w-96 flex flex-col glass-panel border-l border-white/[0.06] animate-slide-in-right"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-start justify-between border-b border-white/[0.06] p-4">
+          <div>
+            <div className="flex items-center gap-2">
+              <h2 className="text-lg font-semibold text-white">{mcp.name}</h2>
+              <span className="tag bg-cyan-500/10 text-cyan-400 border-cyan-500/20">Runtime</span>
+            </div>
+            <div className="flex items-center gap-2 mt-1">
+              <span className={cn('text-xs', statusColor)}>
+                {mcp.status.charAt(0).toUpperCase() + mcp.status.slice(1)}
+              </span>
+              {mcp.version && <span className="text-xs text-white/30">v{mcp.version}</span>}
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            className="flex h-8 w-8 items-center justify-center rounded-lg text-white/50 hover:bg-white/[0.04] hover:text-white transition-colors"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-4 space-y-4">
+          {isStdio && stdioConfig && (
+            <>
+              <div className="rounded-xl bg-white/[0.02] border border-white/[0.06] p-4">
+                <p className="text-xs text-white/40 mb-2">Command</p>
+                <div className="flex flex-wrap gap-1">
+                  <span className="tag">{stdioConfig.command}</span>
+                  {stdioConfig.args.map((arg, idx) => (
+                    <span key={idx} className="tag">
+                      {arg}
+                    </span>
+                  ))}
+                </div>
+              </div>
+
+              <div className="rounded-xl bg-white/[0.02] border border-white/[0.06] p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <p className="text-xs text-white/40">Environment Variables</p>
+                </div>
+
+                {envVars.length === 0 ? (
+                  <p className="text-sm text-white/40 mb-3">No environment variables configured</p>
+                ) : (
+                  <div className="space-y-2 mb-3">
+                    {envVars.map((item, idx) => (
+                      <div key={idx} className="flex items-center gap-2">
+                        <input
+                          type="text"
+                          value={item.key}
+                          onChange={(e) => handleUpdateEnvVar(idx, 'key', e.target.value)}
+                          placeholder="KEY"
+                          className="flex-1 min-w-0 rounded-lg border border-white/[0.06] bg-white/[0.02] px-2 py-1.5 text-xs text-white placeholder-white/30 focus:border-cyan-500/50 focus:outline-none"
+                        />
+                        <input
+                          type="text"
+                          value={item.value}
+                          onChange={(e) => handleUpdateEnvVar(idx, 'value', e.target.value)}
+                          placeholder="value"
+                          className="flex-[2] min-w-0 rounded-lg border border-white/[0.06] bg-white/[0.02] px-2 py-1.5 text-xs text-white placeholder-white/30 focus:border-cyan-500/50 focus:outline-none"
+                        />
+                        <button
+                          onClick={() => handleRemoveEnvVar(idx)}
+                          className="flex h-7 w-7 items-center justify-center rounded-lg text-white/40 hover:bg-red-500/10 hover:text-red-400 transition-colors"
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                <div className="flex items-center gap-2 pt-2 border-t border-white/[0.04]">
+                  <input
+                    type="text"
+                    value={newKey}
+                    onChange={(e) => setNewKey(e.target.value)}
+                    placeholder="NEW_KEY"
+                    className="flex-1 min-w-0 rounded-lg border border-white/[0.06] bg-white/[0.02] px-2 py-1.5 text-xs text-white placeholder-white/30 focus:border-cyan-500/50 focus:outline-none"
+                    onKeyDown={(e) => e.key === 'Enter' && handleAddEnvVar()}
+                  />
+                  <input
+                    type="text"
+                    value={newValue}
+                    onChange={(e) => setNewValue(e.target.value)}
+                    placeholder="value"
+                    className="flex-[2] min-w-0 rounded-lg border border-white/[0.06] bg-white/[0.02] px-2 py-1.5 text-xs text-white placeholder-white/30 focus:border-cyan-500/50 focus:outline-none"
+                    onKeyDown={(e) => e.key === 'Enter' && handleAddEnvVar()}
+                  />
+                  <button
+                    onClick={handleAddEnvVar}
+                    disabled={!newKey.trim()}
+                    className="flex h-7 w-7 items-center justify-center rounded-lg bg-cyan-500/10 text-cyan-400 hover:bg-cyan-500/20 transition-colors disabled:opacity-50"
+                  >
+                    <Plus className="h-3 w-3" />
+                  </button>
+                </div>
+              </div>
+            </>
+          )}
+
+          {!isStdio && (
+            <div className="rounded-xl bg-white/[0.02] border border-white/[0.06] p-4">
+              <p className="text-xs text-white/40 mb-2">Endpoint</p>
+              <div className="flex items-center gap-2 group">
+                <p className="text-sm text-white break-all">
+                  {mcp.endpoint || 'HTTP transport'}
+                </p>
+                {mcp.endpoint && <CopyButton text={mcp.endpoint} showOnHover label="Copied endpoint" />}
+              </div>
+            </div>
+          )}
+
+          <div className="rounded-xl bg-white/[0.02] border border-white/[0.06] p-4">
+            <p className="text-xs text-white/40 mb-2">Tools ({mcp.tools.length})</p>
+            {mcp.tools.length === 0 ? (
+              <p className="text-sm text-white/40">No tools discovered</p>
+            ) : (
+              <div className="flex flex-wrap gap-1 max-h-32 overflow-y-auto">
+                {mcp.tools.map((tool) => (
+                  <span key={tool} className="tag">
+                    {tool}
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {mcp.error && (
+            <div className="rounded-xl bg-red-500/10 border border-red-500/20 p-4">
+              <p className="text-xs text-red-400 mb-1">Error</p>
+              <p className="text-sm text-red-300">{mcp.error}</p>
+            </div>
+          )}
+        </div>
+
+        <div className="border-t border-white/[0.06] p-4 flex items-center gap-2">
+          {isStdio && (
+            <button
+              onClick={handleSave}
+              disabled={saving}
+              className="flex-1 flex items-center justify-center gap-2 rounded-lg bg-cyan-500/10 hover:bg-cyan-500/20 border border-cyan-500/20 px-3 py-2 text-sm text-cyan-300 transition-colors disabled:opacity-50"
+            >
+              {saving ? <Loader className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
+              Save
+            </button>
+          )}
+          <button
+            onClick={handleRefresh}
+            disabled={refreshing}
+            className="flex items-center justify-center gap-2 rounded-lg bg-white/[0.04] hover:bg-white/[0.08] border border-white/[0.06] px-3 py-2 text-sm text-white/80 transition-colors disabled:opacity-50"
+          >
+            <RefreshCw className={cn('h-4 w-4', refreshing && 'animate-spin')} />
+            Refresh
+          </button>
+        </div>
+      </div>
+    </>
   );
 }
 
@@ -723,6 +999,7 @@ export default function McpsPage() {
   // Runtime MCPs state
   const [runtimeMcps, setRuntimeMcps] = useState<McpServerState[]>([]);
   const [runtimeLoading, setRuntimeLoading] = useState(true);
+  const [selectedRuntimeMcp, setSelectedRuntimeMcp] = useState<McpServerState | null>(null);
 
   // Fetch runtime MCPs
   useEffect(() => {
@@ -753,10 +1030,18 @@ export default function McpsPage() {
     try {
       const updated = await refreshMcp(id);
       setRuntimeMcps((prev) => prev.map((m) => (m.id === id ? updated : m)));
+      // Also update selected if it's the same
+      setSelectedRuntimeMcp((prev) => (prev?.id === id ? updated : prev));
       toast.success('Refreshed MCP');
     } catch {
       toast.error('Failed to refresh MCP');
     }
+  };
+
+  const handleUpdateRuntimeMcp = async (id: string, transport: McpTransport) => {
+    const updated = await updateMcp(id, { transport });
+    setRuntimeMcps((prev) => prev.map((m) => (m.id === id ? updated : m)));
+    setSelectedRuntimeMcp((prev) => (prev?.id === id ? updated : prev));
   };
 
   const filteredRuntimeMcps = useMemo(() => {
@@ -1017,6 +1302,8 @@ export default function McpsPage() {
                   <RuntimeMcpCard
                     key={mcp.id}
                     mcp={mcp}
+                    isSelected={selectedRuntimeMcp?.id === mcp.id}
+                    onSelect={setSelectedRuntimeMcp}
                     onToggle={handleToggleRuntimeMcp}
                     onRefresh={handleRefreshRuntimeMcp}
                   />
@@ -1079,6 +1366,15 @@ export default function McpsPage() {
               onClose={() => setSelectedName(null)}
               onEdit={() => setShowEditModal(true)}
               onDelete={() => requestDelete(selectedEntry)}
+            />
+          )}
+
+          {selectedRuntimeMcp && (
+            <RuntimeMcpDetailPanel
+              mcp={selectedRuntimeMcp}
+              onClose={() => setSelectedRuntimeMcp(null)}
+              onUpdate={handleUpdateRuntimeMcp}
+              onRefresh={handleRefreshRuntimeMcp}
             />
           )}
 

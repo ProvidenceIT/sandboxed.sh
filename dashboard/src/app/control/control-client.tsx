@@ -706,14 +706,13 @@ export default function ControlClient() {
   const [showNewMissionDialog, setShowNewMissionDialog] = useState(false);
   const [newMissionWorkspace, setNewMissionWorkspace] = useState("");
   const [newMissionAgent, setNewMissionAgent] = useState("");
-  const [newMissionHooks, setNewMissionHooks] = useState<string[]>([]);
   const newMissionDialogRef = useRef<HTMLDivElement>(null);
 
   // Workspaces for mission creation
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
 
-  // Library context for plugins (hooks) and agents
-  const { plugins, libraryAgents } = useLibrary();
+  // Library context for agents
+  const { libraryAgents } = useLibrary();
 
   // Parallel missions state
   const [runningMissions, setRunningMissions] = useState<RunningMissionInfo[]>(
@@ -1321,14 +1320,12 @@ export default function ControlClient() {
   const handleNewMission = async (options?: {
     workspaceId?: string;
     agent?: string;
-    hooks?: string[];
   }) => {
     try {
       setMissionLoading(true);
       const mission = await createMission({
         workspaceId: options?.workspaceId,
         agent: options?.agent,
-        hooks: options?.hooks,
       });
       setCurrentMission(mission);
       setViewingMission(mission);
@@ -2060,47 +2057,12 @@ export default function ControlClient() {
                     </p>
                   </div>
 
-                  {/* Hooks (Plugins) */}
-                  <div>
-                    <label className="block text-xs text-white/50 mb-1.5">
-                      Hooks
-                    </label>
-                    <div className="space-y-1.5">
-                      {Object.entries(plugins)
-                        .filter(([_, plugin]) => plugin.enabled)
-                        .map(([id, plugin]) => (
-                          <label key={id} className="flex items-center gap-2 cursor-pointer">
-                            <input
-                              type="checkbox"
-                              checked={newMissionHooks.includes(id)}
-                              onChange={(e) => {
-                                if (e.target.checked) {
-                                  setNewMissionHooks([...newMissionHooks, id]);
-                                } else {
-                                  setNewMissionHooks(newMissionHooks.filter((h) => h !== id));
-                                }
-                              }}
-                              className="rounded border-white/20 bg-white/5 text-indigo-500 focus:ring-indigo-500/50"
-                            />
-                            <span className="text-sm text-white/80">{plugin.ui?.label || id}</span>
-                            {plugin.ui?.hint && (
-                              <span className="text-xs text-white/40">({plugin.ui.hint})</span>
-                            )}
-                          </label>
-                        ))}
-                      {Object.keys(plugins).filter(id => plugins[id].enabled).length === 0 && (
-                        <p className="text-xs text-white/40">No plugins available. Add plugins in Library → Plugins.</p>
-                      )}
-                    </div>
-                  </div>
-
                   <div className="flex gap-2 pt-1">
                     <button
                       onClick={() => {
                         setShowNewMissionDialog(false);
                         setNewMissionWorkspace("");
                         setNewMissionAgent("");
-                        setNewMissionHooks([]);
                       }}
                       className="flex-1 rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-sm text-white/70 hover:bg-white/[0.04] transition-colors"
                     >
@@ -2111,12 +2073,10 @@ export default function ControlClient() {
                         handleNewMission({
                           workspaceId: newMissionWorkspace || undefined,
                           agent: newMissionAgent || undefined,
-                          hooks: newMissionHooks.length > 0 ? newMissionHooks : undefined,
                         });
                         setShowNewMissionDialog(false);
                         setNewMissionWorkspace("");
                         setNewMissionAgent("");
-                        setNewMissionHooks([]);
                       }}
                       disabled={missionLoading}
                       className="flex-1 rounded-lg bg-indigo-500 px-3 py-2 text-sm font-medium text-white hover:bg-indigo-600 transition-colors disabled:opacity-50"

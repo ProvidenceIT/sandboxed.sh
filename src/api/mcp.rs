@@ -11,7 +11,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::mcp::{AddMcpRequest, McpServerState};
+use crate::mcp::{AddMcpRequest, McpServerState, UpdateMcpRequest};
 use crate::tools::ToolRegistry;
 use crate::workspace;
 
@@ -64,6 +64,21 @@ pub async fn remove_mcp(
         .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
     let _ = workspace::sync_all_workspaces(&state.config, &state.mcp).await;
     Ok(Json(serde_json::json!({ "success": true })))
+}
+
+/// Update an MCP server configuration.
+pub async fn update_mcp(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<UpdateMcpRequest>,
+) -> Result<Json<McpServerState>, (StatusCode, String)> {
+    let updated = state
+        .mcp
+        .update(id, req)
+        .await
+        .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
+    let _ = workspace::sync_all_workspaces(&state.config, &state.mcp).await;
+    Ok(Json(updated))
 }
 
 /// Enable an MCP server.

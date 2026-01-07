@@ -256,6 +256,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         .route("/api/mcp/refresh", post(mcp_api::refresh_all_mcps))
         .route("/api/mcp/:id", get(mcp_api::get_mcp))
         .route("/api/mcp/:id", axum::routing::delete(mcp_api::remove_mcp))
+        .route("/api/mcp/:id", axum::routing::patch(mcp_api::update_mcp))
         .route("/api/mcp/:id/enable", post(mcp_api::enable_mcp))
         .route("/api/mcp/:id/disable", post(mcp_api::disable_mcp))
         .route("/api/mcp/:id/refresh", post(mcp_api::refresh_mcp))

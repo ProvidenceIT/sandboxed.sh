@@ -45,6 +45,11 @@ const statusConfig: Record<
     bg: "bg-emerald-500/10",
     label: "Connected",
   },
+  connecting: {
+    color: "text-amber-400",
+    bg: "bg-amber-500/10",
+    label: "Connecting...",
+  },
   disconnected: {
     color: "text-white/40",
     bg: "bg-white/[0.04]",

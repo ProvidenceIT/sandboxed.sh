@@ -499,6 +499,69 @@ impl McpRegistry {
             .ok_or_else(|| anyhow::anyhow!("MCP not found"))
     }
 
+    /// Update an MCP server configuration (name, description, transport/env).
+    /// Note: If transport changes, a refresh is recommended.
+    pub async fn update(
+        &self,
+        id: Uuid,
+        req: super::types::UpdateMcpRequest,
+    ) -> anyhow::Result<McpServerState> {
+        // Kill existing stdio process if transport might change
+        if req.transport.is_some() {
+            let mut processes = self.stdio_processes.write().await;
+            if let Some(process) = processes.remove(&id) {
+                let mut proc = process.lock().await;
+                let _ = proc.child.kill().await;
+            }
+        }
+
+        // Update persistent config
+        let config = self
+            .config_store
+            .update(id, |c| {
+                if let Some(name) = &req.name {
+                    c.name = name.clone();
+                }
+                if let Some(description) = &req.description {
+                    c.description = Some(description.clone());
+                }
+                if let Some(enabled) = req.enabled {
+                    c.enabled = enabled;
+                }
+                if let Some(transport) = &req.transport {
+                    c.transport = transport.clone();
+                    // Update deprecated endpoint field for backwards compat
+                    if let McpTransport::Http { endpoint } = transport {
+                        c.endpoint = endpoint.clone();
+                    } else {
+                        c.endpoint = String::new();
+                    }
+                }
+            })
+            .await?;
+
+        // Update runtime state
+        {
+            let mut states = self.states.write().await;
+            if let Some(state) = states.get_mut(&id) {
+                state.config = config;
+                // Reset status if transport changed
+                if req.transport.is_some() {
+                    state.status = if state.config.enabled {
+                        McpStatus::Disconnected
+                    } else {
+                        McpStatus::Disabled
+                    };
+                    state.error = None;
+                }
+            }
+        }
+
+        self.get(id)
+            .await
+            .ok_or_else(|| anyhow::anyhow!("MCP not found"))
+    }
+
     /// Helper to update state with error - retries a few times to handle lock contention
     async fn update_state_error(&self, id: Uuid, error_msg: String) {
         // Try up to 5 times with small delays to handle temporary lock contention
