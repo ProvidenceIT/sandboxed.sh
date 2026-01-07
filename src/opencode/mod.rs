@@ -4,12 +4,10 @@
 //! OpenCode server, with real-time event streaming.
 
 use anyhow::Context;
-use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
 
 /// Default timeout for OpenCode HTTP requests (10 minutes).
@@ -144,23 +142,25 @@ impl OpenCodeClient {
 
         // Create a dedicated SSE client with HTTP/1.1 only and no connection pooling
         // This is critical for SSE to work correctly
+        // Important: NO timeout on the client - SSE connections must stay open indefinitely
         let sse_client = reqwest::Client::builder()
             .http1_only()
             .pool_max_idle_per_host(0)
             .tcp_nodelay(true)
+            .no_proxy()  // Avoid proxy issues with streaming
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
 
-        // Spawn SSE event consumer task using raw bytes_stream
+        // Spawn SSE event consumer task using response.chunk() for streaming
         let sse_handle = tokio::spawn(async move {
             let mut last_event_time = std::time::Instant::now();
             let mut event_count = 0u64;
-            let mut line_buffer = String::new();
+            let mut buffer = String::new();
 
-            tracing::warn!(session_id = %session_id_clone, "SSE consumer task started with raw reqwest (HTTP/1.1)");
+            tracing::warn!(session_id = %session_id_clone, "SSE consumer task started with chunk() streaming");
 
             // Make the SSE request
-            let response = match sse_client
+            let mut response = match sse_client
                 .get(&event_url)
                 .header("Accept", "text/event-stream")
                 .header("Cache-Control", "no-cache")
@@ -177,74 +177,70 @@ impl OpenCodeClient {
 
             tracing::warn!(session_id = %session_id_clone, status = %response.status(), "SSE connection established");
 
-            // Convert to byte stream and wrap in BufReader for line-by-line reading
-            let stream = response.bytes_stream();
-            let stream_reader = tokio_util::io::StreamReader::new(
-                stream.map(|result| result.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e)))
-            );
-            let mut reader = BufReader::new(stream_reader);
-
             loop {
                 tokio::select! {
                     biased;
-                    result = reader.read_line(&mut line_buffer) => {
-                        match result {
-                            Ok(0) => {
-                                tracing::debug!(session_id = %session_id_clone, "SSE stream EOF");
-                                break;
-                            }
-                            Ok(bytes_read) => {
-                                tracing::debug!(
-                                    session_id = %session_id_clone,
-                                    bytes_read = bytes_read,
-                                    line_raw = ?line_buffer,
-                                    "SSE read_line returned"
-                                );
-                                let line = line_buffer.trim_end();
+                    chunk_result = response.chunk() => {
+                        match chunk_result {
+                            Ok(Some(chunk)) => {
+                                last_event_time = std::time::Instant::now();
 
-                                // Skip empty lines (SSE delimiter)
-                                if line.is_empty() {
-                                    line_buffer.clear();
-                                    continue;
-                                }
+                                // Convert chunk to string and add to buffer
+                                if let Ok(text) = std::str::from_utf8(&chunk) {
+                                    buffer.push_str(text);
 
-                                // Process SSE data lines
-                                if line.starts_with("data: ") {
-                                    last_event_time = std::time::Instant::now();
-                                    let data = &line[6..]; // Skip "data: " prefix
-
-                                    tracing::warn!(
+                                    tracing::debug!(
                                         session_id = %session_id_clone,
-                                        data_len = data.len(),
-                                        data_preview = %data.chars().take(100).collect::<String>(),
-                                        "SSE data received"
+                                        chunk_len = chunk.len(),
+                                        chunk_preview = %text.chars().take(100).collect::<String>(),
+                                        "SSE chunk received"
                                     );
 
-                                    if let Some(event) = parse_sse_event(line, &session_id_clone, &mut sse_state) {
-                                        event_count += 1;
-                                        let is_complete = matches!(event, OpenCodeEvent::MessageComplete { .. });
+                                    // Process complete lines in buffer
+                                    while let Some(newline_pos) = buffer.find('\n') {
+                                        let line = buffer[..newline_pos].trim_end();
 
-                                        if event_tx.send(event).await.is_err() {
-                                            tracing::debug!(session_id = %session_id_clone, "SSE receiver dropped");
-                                            line_buffer.clear();
-                                            return;
-                                        }
-                                        if is_complete {
-                                            tracing::info!(
+                                        // Process SSE data lines
+                                        if line.starts_with("data: ") {
+                                            let line_owned = format!("data: {}", &line[6..]);
+
+                                            tracing::warn!(
                                                 session_id = %session_id_clone,
-                                                event_count = event_count,
-                                                "OpenCode message completed"
+                                                data_len = line.len() - 6,
+                                                data_preview = %line[6..].chars().take(100).collect::<String>(),
+                                                "SSE data received"
                                             );
-                                            line_buffer.clear();
-                                            return;
+
+                                            if let Some(event) = parse_sse_event(&line_owned, &session_id_clone, &mut sse_state) {
+                                                event_count += 1;
+                                                let is_complete = matches!(event, OpenCodeEvent::MessageComplete { .. });
+
+                                                if event_tx.send(event).await.is_err() {
+                                                    tracing::debug!(session_id = %session_id_clone, "SSE receiver dropped");
+                                                    return;
+                                                }
+                                                if is_complete {
+                                                    tracing::info!(
+                                                        session_id = %session_id_clone,
+                                                        event_count = event_count,
+                                                        "OpenCode message completed"
+                                                    );
+                                                    return;
+                                                }
+                                            }
                                         }
+
+                                        // Remove processed line from buffer (including newline)
+                                        buffer = buffer[newline_pos + 1..].to_string();
                                     }
                                 }
-
-                                line_buffer.clear();
+                            }
+                            Ok(None) => {
+                                tracing::debug!(session_id = %session_id_clone, "SSE stream ended (no more chunks)");
+                                break;
                             }
                             Err(e) => {
-                                tracing::warn!(session_id = %session_id_clone, error = %e, "SSE read error");
+                                tracing::warn!(session_id = %session_id_clone, error = %e, "SSE chunk read error");
                                 break;
                             }
                         }
