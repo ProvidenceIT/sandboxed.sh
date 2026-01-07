@@ -402,7 +402,29 @@ async fn handle_new_session(mut socket: WebSocket, state: Arc<AppState>, session
     // Store in pool
     {
         let mut sessions = state.console_pool.sessions.write().await;
-        // Remove any old session with the same key
+        // Check if there's an existing session with the same key that is currently in use
+        let existing_in_use = if let Some(old_session) = sessions.get(&session_key) {
+            old_session.try_lock().map(|s| s.in_use).unwrap_or(false)
+        } else {
+            false
+        };
+
+        if existing_in_use {
+            // Session is in use by another tab, don't kill it
+            // Just drop the new session we created
+            tracing::debug!("Session {} is in use, not replacing", session_key);
+            drop(sessions);
+            // Clean up the new session we just created
+            if let Ok(mut child_guard) = child_killer.try_lock() {
+                if let Some(mut child) = child_guard.take() {
+                    let _ = child.kill();
+                }
+            }
+            let _ = socket.close().await;
+            return;
+        }
+
+        // Now safe to remove and kill the old session (if any)
         if let Some(old_session) = sessions.remove(&session_key) {
             if let Ok(s) = old_session.try_lock() {
                 if let Ok(mut child_guard) = s.child_killer.try_lock() {

@@ -371,6 +371,14 @@ function RuntimeMcpDetailPanel({
   const [saving, setSaving] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
 
+  // Sync envVars state when mcp prop changes (e.g., after refresh)
+  useEffect(() => {
+    const newStdioConfig = 'stdio' in (mcp.transport ?? {})
+      ? (mcp.transport as { stdio: { command: string; args: string[]; env: Record<string, string> } }).stdio
+      : null;
+    setEnvVars(Object.entries(newStdioConfig?.env ?? {}).map(([key, value]) => ({ key, value })));
+  }, [mcp.transport]);
+
   // Handle Escape key to close panel
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
