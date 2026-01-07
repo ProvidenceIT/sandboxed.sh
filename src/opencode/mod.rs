@@ -193,7 +193,13 @@ impl OpenCodeClient {
                                 tracing::debug!(session_id = %session_id_clone, "SSE stream EOF");
                                 break;
                             }
-                            Ok(_) => {
+                            Ok(bytes_read) => {
+                                tracing::debug!(
+                                    session_id = %session_id_clone,
+                                    bytes_read = bytes_read,
+                                    line_raw = ?line_buffer,
+                                    "SSE read_line returned"
+                                );
                                 let line = line_buffer.trim_end();
 
                                 // Skip empty lines (SSE delimiter)
