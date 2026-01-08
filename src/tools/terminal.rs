@@ -6,11 +6,15 @@
 //! - `run_command("ls")` → lists workspace contents
 //! - `run_command("cat output/report.md")` → reads workspace file
 
-use std::path::Path;
-use std::process::Stdio;
+use std::collections::HashMap;
+use std::env;
+use std::path::{Path, PathBuf};
+use std::process::{Output, Stdio};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 use super::{resolve_path_simple as resolve_path, Tool};
@@ -107,6 +111,204 @@ fn validate_command(cmd: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn chroot_root_from_env() -> Option<PathBuf> {
+    let workspace_type = env::var("OPEN_AGENT_WORKSPACE_TYPE").ok()?;
+    if workspace_type != "chroot" {
+        return None;
+    }
+    let root = env::var("OPEN_AGENT_WORKSPACE_ROOT").ok()?;
+    Some(PathBuf::from(root))
+}
+
+fn sh_quote(value: &str) -> String {
+    let escaped = value.replace('\'', "'\\''");
+    format!("'{}'", escaped)
+}
+
+#[derive(Debug, Clone)]
+struct CommandOptions {
+    timeout: Duration,
+    env: HashMap<String, String>,
+    clear_env: bool,
+    stdin: Option<String>,
+    shell: Option<String>,
+    max_output_chars: usize,
+    raw_output: bool,
+}
+
+const DEFAULT_MAX_OUTPUT_CHARS: usize = 10_000;
+const MAX_OUTPUT_CHARS_LIMIT: usize = 50_000;
+
+fn parse_timeout(args: &Value) -> Duration {
+    if let Some(ms) = args.get("timeout_ms").and_then(|v| v.as_u64()) {
+        return Duration::from_millis(ms.max(1));
+    }
+    if let Some(secs) = args.get("timeout_secs").and_then(|v| v.as_u64()) {
+        return Duration::from_secs(secs.max(1));
+    }
+    if let Some(secs) = args.get("timeout").and_then(|v| v.as_f64()) {
+        if secs > 0.0 {
+            return Duration::from_secs_f64(secs);
+        }
+    }
+    Duration::from_secs(60)
+}
+
+fn parse_env(args: &Value) -> HashMap<String, String> {
+    let mut envs = HashMap::new();
+    let Some(obj) = args.get("env").and_then(|v| v.as_object()) else {
+        return envs;
+    };
+    for (key, value) in obj.iter() {
+        if let Some(val) = value.as_str() {
+            envs.insert(key.clone(), val.to_string());
+        }
+    }
+    envs
+}
+
+fn parse_max_output_chars(args: &Value) -> usize {
+    let max = args
+        .get("max_output_chars")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize)
+        .unwrap_or(DEFAULT_MAX_OUTPUT_CHARS);
+    max.clamp(1, MAX_OUTPUT_CHARS_LIMIT)
+}
+
+fn parse_command_options(args: &Value) -> CommandOptions {
+    CommandOptions {
+        timeout: parse_timeout(args),
+        env: parse_env(args),
+        clear_env: args.get("clear_env").and_then(|v| v.as_bool()).unwrap_or(false),
+        stdin: args.get("stdin").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        shell: args.get("shell").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        max_output_chars: parse_max_output_chars(args),
+        raw_output: args.get("raw").and_then(|v| v.as_bool()).unwrap_or(false),
+    }
+}
+
+fn shell_exists(shell: &str, chroot_root: Option<&Path>) -> bool {
+    if let Some(root) = chroot_root {
+        let rel = shell.strip_prefix('/').unwrap_or(shell);
+        return root.join(rel).exists();
+    }
+    Path::new(shell).exists()
+}
+
+fn resolve_shell(shell: Option<&str>, chroot_root: Option<&Path>) -> String {
+    if let Some(shell) = shell {
+        if shell_exists(shell, chroot_root) {
+            return shell.to_string();
+        }
+        // Fall back to /bin/sh if requested shell isn't available.
+        if shell_exists("/bin/sh", chroot_root) {
+            return "/bin/sh".to_string();
+        }
+        return shell.to_string();
+    }
+
+    if shell_exists("/bin/sh", chroot_root) {
+        return "/bin/sh".to_string();
+    }
+
+    "/bin/sh".to_string()
+}
+
+async fn run_shell_command(
+    program: &str,
+    args: &[String],
+    cwd: Option<&Path>,
+    options: &CommandOptions,
+) -> anyhow::Result<Output> {
+    let mut cmd = Command::new(program);
+    cmd.args(args);
+    if let Some(cwd) = cwd {
+        cmd.current_dir(cwd);
+    }
+    if options.clear_env {
+        cmd.env_clear();
+    }
+    if !options.env.is_empty() {
+        cmd.envs(&options.env);
+    }
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = cmd.spawn().map_err(|e| anyhow::anyhow!("Failed to execute command: {}", e))?;
+
+    if let Some(input) = options.stdin.as_deref() {
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(input.as_bytes())
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to write to stdin: {}", e))?;
+        }
+    }
+
+    let output = tokio::time::timeout(options.timeout, child.wait_with_output()).await;
+
+    match output {
+        Ok(Ok(output)) => Ok(output),
+        Ok(Err(e)) => Err(anyhow::anyhow!("Failed to execute command: {}", e)),
+        Err(_) => Err(anyhow::anyhow!(
+            "Command timed out after {} seconds",
+            options.timeout.as_secs_f64()
+        )),
+    }
+}
+
+async fn run_host_command(
+    cwd: &Path,
+    command: &str,
+    options: &CommandOptions,
+) -> anyhow::Result<Output> {
+    let (shell, shell_arg) = if cfg!(target_os = "windows") {
+        ("cmd".to_string(), "/C".to_string())
+    } else {
+        (resolve_shell(options.shell.as_deref(), None), "-c".to_string())
+    };
+    let args = vec![shell_arg, command.to_string()];
+    run_shell_command(&shell, &args, Some(cwd), options).await
+}
+
+async fn run_chroot_command(
+    chroot_root: &Path,
+    cwd: &Path,
+    command: &str,
+    options: &CommandOptions,
+) -> anyhow::Result<Output> {
+    let root = chroot_root
+        .canonicalize()
+        .unwrap_or_else(|_| chroot_root.to_path_buf());
+    let cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+
+    if !cwd.starts_with(&root) {
+        return Err(anyhow::anyhow!(
+            "Working directory is outside chroot root: {}",
+            cwd.display()
+        ));
+    }
+
+    let rel = cwd.strip_prefix(&root).unwrap_or_else(|_| Path::new(""));
+    let rel_str = if rel.as_os_str().is_empty() {
+        "/".to_string()
+    } else {
+        format!("/{}", rel.to_string_lossy())
+    };
+
+    let wrapped = format!("cd {} && {}", sh_quote(&rel_str), command);
+    let shell = resolve_shell(options.shell.as_deref(), Some(&root));
+    let args = vec![
+        root.to_string_lossy().to_string(),
+        shell,
+        "-c".to_string(),
+        wrapped,
+    ];
+    run_shell_command("chroot", &args, None, options).await
+}
+
 /// Run a shell command.
 pub struct RunCommand;
 
@@ -134,7 +336,40 @@ impl Tool for RunCommand {
                 },
                 "timeout_secs": {
                     "type": "integer",
-                    "description": "Timeout in seconds (default: 60)"
+                    "description": "Timeout in seconds (default: 60)."
+                },
+                "timeout_ms": {
+                    "type": "integer",
+                    "description": "Timeout in milliseconds (overrides timeout_secs)."
+                },
+                "timeout": {
+                    "type": "number",
+                    "description": "Timeout in seconds (float allowed)."
+                },
+                "env": {
+                    "type": "object",
+                    "description": "Environment variables to set for the command.",
+                    "additionalProperties": { "type": "string" }
+                },
+                "clear_env": {
+                    "type": "boolean",
+                    "description": "If true, clear the environment before applying env vars."
+                },
+                "stdin": {
+                    "type": "string",
+                    "description": "Optional: string to pass to stdin."
+                },
+                "shell": {
+                    "type": "string",
+                    "description": "Optional: shell executable path (default: /bin/sh)."
+                },
+                "max_output_chars": {
+                    "type": "integer",
+                    "description": "Maximum output characters to return (default: 10000)."
+                },
+                "raw": {
+                    "type": "boolean",
+                    "description": "Return combined stdout/stderr only (no headers or exit code)."
                 }
             },
             "required": ["command"]
@@ -156,42 +391,15 @@ impl Tool for RunCommand {
             .as_str()
             .map(|p| resolve_path(p, working_dir))
             .unwrap_or_else(|| working_dir.to_path_buf());
-        let timeout_secs = args["timeout_secs"].as_u64().unwrap_or(60);
+        let options = parse_command_options(&args);
 
         tracing::info!("Executing command in {:?}: {}", cwd, command);
 
-        // Determine shell based on OS - use absolute paths to ensure shell is found
-        let (shell, shell_arg) = if cfg!(target_os = "windows") {
-            ("cmd", "/C")
-        } else {
-            // Use absolute path to shell to avoid PATH issues
-            ("/bin/sh", "-c")
-        };
-
-        let output = match tokio::time::timeout(
-            std::time::Duration::from_secs(timeout_secs),
-            Command::new(shell)
-                .arg(shell_arg)
-                .arg(command)
-                .current_dir(&cwd)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .output(),
-        )
-        .await
-        {
-            Ok(Ok(output)) => output,
-            Ok(Err(e)) => {
-                tracing::error!("Command execution failed: {}", e);
-                return Err(anyhow::anyhow!("Failed to execute command: {}", e));
+        let output = match chroot_root_from_env() {
+            Some(chroot_root) => {
+                run_chroot_command(&chroot_root, &cwd, command, &options).await?
             }
-            Err(_) => {
-                tracing::error!("Command timed out after {} seconds", timeout_secs);
-                return Err(anyhow::anyhow!(
-                    "Command timed out after {} seconds",
-                    timeout_secs
-                ));
-            }
+            None => run_host_command(&cwd, command, &options).await?,
         };
 
         let stdout = sanitize_output(&output.stdout);
@@ -205,28 +413,44 @@ impl Tool for RunCommand {
             stderr.len()
         );
 
-        let mut result = String::new();
+        let result = if options.raw_output {
+            let mut raw = String::new();
+            if !stdout.is_empty() {
+                raw.push_str(&stdout);
+            }
+            if !stderr.is_empty() {
+                if !raw.is_empty() {
+                    raw.push('\n');
+                }
+                raw.push_str(&stderr);
+            }
+            raw
+        } else {
+            let mut result = String::new();
 
-        result.push_str(&format!("Exit code: {}\n", exit_code));
+            result.push_str(&format!("Exit code: {}\n", exit_code));
 
-        // Add hint when non-zero exit but output exists (common with tools that warn but succeed)
-        if exit_code != 0 && !stdout.is_empty() {
-            result.push_str("Note: Non-zero exit code but output was produced. The command may have succeeded with warnings - verify output files exist.\n");
-        }
+            // Add hint when non-zero exit but output exists (common with tools that warn but succeed)
+            if exit_code != 0 && !stdout.is_empty() {
+                result.push_str("Note: Non-zero exit code but output was produced. The command may have succeeded with warnings - verify output files exist.\n");
+            }
 
-        if !stdout.is_empty() {
-            result.push_str("\n--- stdout ---\n");
-            result.push_str(&stdout);
-        }
+            if !stdout.is_empty() {
+                result.push_str("\n--- stdout ---\n");
+                result.push_str(&stdout);
+            }
 
-        if !stderr.is_empty() {
-            result.push_str("\n--- stderr ---\n");
-            result.push_str(&stderr);
-        }
+            if !stderr.is_empty() {
+                result.push_str("\n--- stderr ---\n");
+                result.push_str(&stderr);
+            }
 
-        // Truncate if too long
-        if result.len() > 10000 {
-            result.truncate(10000);
+            result
+        };
+
+        let mut result = result;
+        if result.len() > options.max_output_chars {
+            result.truncate(options.max_output_chars);
             result.push_str("\n... [output truncated]");
         }
 

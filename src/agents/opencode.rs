@@ -226,6 +226,7 @@ impl OpenCodeAgent {
             OpenCodeEvent::Error { message } => AgentEvent::Error {
                 message: message.clone(),
                 mission_id: ctx.mission_id,
+                resumable: ctx.mission_id.is_some(), // Can resume if within a mission
             },
             OpenCodeEvent::MessageComplete { .. } => return, // Don't forward completion marker
         };
@@ -452,6 +453,7 @@ impl Agent for OpenCodeAgent {
                                                         e
                                                     ),
                                                     mission_id: ctx.mission_id,
+                                                    resumable: ctx.mission_id.is_some(),
                                                 });
                                             }
                                         }
@@ -587,6 +589,7 @@ impl Agent for OpenCodeAgent {
                                                         e
                                                     ),
                                                     mission_id: ctx.mission_id,
+                                                    resumable: ctx.mission_id.is_some(),
                                                 });
                                             }
                                         }

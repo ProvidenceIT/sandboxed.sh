@@ -1,12 +1,16 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import {
   listWorkspaces,
   getWorkspace,
   createWorkspace,
   deleteWorkspace,
+  buildWorkspace,
+  CHROOT_DISTROS,
   type Workspace,
+  type ChrootDistro,
 } from '@/lib/api';
 import {
   Plus,
@@ -17,10 +21,16 @@ import {
   Server,
   FolderOpen,
   Clock,
+  Hammer,
+  Terminal,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
+// The nil UUID represents the default "host" workspace which cannot be deleted
+const DEFAULT_WORKSPACE_ID = '00000000-0000-0000-0000-000000000000';
+
 export default function WorkspacesPage() {
+  const router = useRouter();
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [selectedWorkspace, setSelectedWorkspace] = useState<Workspace | null>(null);
   const [loading, setLoading] = useState(true);
@@ -30,6 +40,10 @@ export default function WorkspacesPage() {
   const [showNewWorkspaceDialog, setShowNewWorkspaceDialog] = useState(false);
   const [newWorkspaceName, setNewWorkspaceName] = useState('');
   const [newWorkspaceType, setNewWorkspaceType] = useState<'host' | 'chroot'>('chroot');
+
+  // Build state
+  const [building, setBuilding] = useState(false);
+  const [selectedDistro, setSelectedDistro] = useState<ChrootDistro>('ubuntu-noble');
 
   const loadData = async () => {
     try {
@@ -100,10 +114,34 @@ export default function WorkspacesPage() {
     }
   };
 
+  const handleBuildWorkspace = async () => {
+    if (!selectedWorkspace) return;
+    try {
+      setBuilding(true);
+      setError(null);
+      const updated = await buildWorkspace(selectedWorkspace.id, selectedDistro);
+      setSelectedWorkspace(updated);
+      await loadData();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to build workspace');
+      // Refresh to get latest status
+      await loadData();
+      if (selectedWorkspace) {
+        const refreshed = await getWorkspace(selectedWorkspace.id);
+        setSelectedWorkspace(refreshed);
+      }
+    } finally {
+      setBuilding(false);
+    }
+  };
+
   const formatDate = (dateStr: string) => {
     const date = new Date(dateStr);
     return date.toLocaleDateString() + ' ' + date.toLocaleTimeString();
   };
+
+  const formatWorkspaceType = (type: Workspace['workspace_type']) =>
+    type === 'host' ? 'host' : 'isolated';
 
   if (loading) {
     return (
@@ -160,22 +198,24 @@ export default function WorkspacesPage() {
                   <Server className="h-5 w-5 text-indigo-400" />
                   <h3 className="text-sm font-medium text-white">{workspace.name}</h3>
                 </div>
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    handleDeleteWorkspace(workspace.id, workspace.name);
-                  }}
-                  className="p-1 rounded-lg text-red-400 hover:bg-red-500/10 transition-colors"
-                  title="Delete workspace"
-                >
-                  <Trash2 className="h-4 w-4" />
-                </button>
+                {workspace.id !== DEFAULT_WORKSPACE_ID && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleDeleteWorkspace(workspace.id, workspace.name);
+                    }}
+                    className="p-1 rounded-lg text-red-400 hover:bg-red-500/10 transition-colors"
+                    title="Delete workspace"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </button>
+                )}
               </div>
 
               <div className="space-y-2">
                 <div className="flex items-center gap-2 text-xs text-white/60">
                   <span className="px-2 py-0.5 rounded bg-white/[0.04] border border-white/[0.08] font-mono">
-                    {workspace.workspace_type}
+                    {formatWorkspaceType(workspace.workspace_type)}
                   </span>
                   <span
                     className={cn(
@@ -243,7 +283,7 @@ export default function WorkspacesPage() {
                 <div>
                   <label className="text-xs text-white/40 block mb-1">Type</label>
                   <span className="px-2 py-1 rounded bg-white/[0.04] border border-white/[0.08] font-mono text-sm text-white">
-                    {selectedWorkspace.workspace_type}
+                    {formatWorkspaceType(selectedWorkspace.workspace_type)}
                   </span>
                 </div>
                 <div>
@@ -292,6 +332,64 @@ export default function WorkspacesPage() {
                   </div>
                 </div>
               )}
+
+              {/* Build Section - shown for isolated workspaces that are pending or errored */}
+              {selectedWorkspace.workspace_type === 'chroot' &&
+                (selectedWorkspace.status === 'pending' || selectedWorkspace.status === 'error') && (
+                <div className="pt-4 mt-4 border-t border-white/[0.06]">
+                  <label className="text-xs text-white/40 block mb-2">Build Environment</label>
+                  <div className="flex gap-3 items-end">
+                    <div className="flex-1">
+                      <label className="text-xs text-white/50 block mb-1">Linux Distribution</label>
+                      <select
+                        value={selectedDistro}
+                        onChange={(e) => setSelectedDistro(e.target.value as ChrootDistro)}
+                        disabled={building}
+                        className="w-full px-3 py-2 rounded-lg bg-white/[0.04] border border-white/[0.08] text-sm text-white focus:outline-none focus:border-indigo-500/50 disabled:opacity-50"
+                      >
+                        {CHROOT_DISTROS.map((distro) => (
+                          <option key={distro.value} value={distro.value}>
+                            {distro.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <button
+                      onClick={handleBuildWorkspace}
+                      disabled={building}
+                      className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-indigo-500 hover:bg-indigo-600 rounded-lg disabled:opacity-50 transition-colors"
+                    >
+                      {building ? (
+                        <>
+                          <Loader className="h-4 w-4 animate-spin" />
+                          Building...
+                        </>
+                      ) : (
+                        <>
+                          <Hammer className="h-4 w-4" />
+                          Build
+                        </>
+                      )}
+                    </button>
+                  </div>
+                  <p className="text-xs text-white/40 mt-2">
+                    This will create an isolated Linux filesystem using debootstrap (Ubuntu/Debian) or pacstrap (Arch). Build may take a few minutes.
+                  </p>
+                </div>
+              )}
+
+              {/* Building status indicator */}
+              {selectedWorkspace.status === 'building' && (
+                <div className="pt-4 mt-4 border-t border-white/[0.06]">
+                  <div className="flex items-center gap-3 text-amber-400">
+                    <Loader className="h-5 w-5 animate-spin" />
+                    <span className="text-sm">Building isolated environment...</span>
+                  </div>
+                  <p className="text-xs text-white/40 mt-2">
+                    This may take several minutes. The filesystem is being created with debootstrap/pacstrap.
+                  </p>
+                </div>
+              )}
             </div>
 
             <div className="flex justify-end gap-2 mt-6">
@@ -301,15 +399,29 @@ export default function WorkspacesPage() {
               >
                 Close
               </button>
-              <button
-                onClick={() => {
-                  handleDeleteWorkspace(selectedWorkspace.id, selectedWorkspace.name);
-                  setSelectedWorkspace(null);
-                }}
-                className="px-4 py-2 text-sm font-medium text-white bg-red-500 hover:bg-red-600 rounded-lg"
-              >
-                Delete Workspace
-              </button>
+              {/* Open Shell button - only shown for ready workspaces */}
+              {selectedWorkspace.status === 'ready' && (
+                <button
+                  onClick={() => {
+                    router.push(`/console?workspace=${selectedWorkspace.id}&name=${encodeURIComponent(selectedWorkspace.name)}`);
+                  }}
+                  className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-indigo-500 hover:bg-indigo-600 rounded-lg"
+                >
+                  <Terminal className="h-4 w-4" />
+                  Open Shell
+                </button>
+              )}
+              {selectedWorkspace.id !== DEFAULT_WORKSPACE_ID && (
+                <button
+                  onClick={() => {
+                    handleDeleteWorkspace(selectedWorkspace.id, selectedWorkspace.name);
+                    setSelectedWorkspace(null);
+                  }}
+                  className="px-4 py-2 text-sm font-medium text-white bg-red-500 hover:bg-red-600 rounded-lg"
+                >
+                  Delete Workspace
+                </button>
+              )}
             </div>
           </div>
         </div>
@@ -339,12 +451,12 @@ export default function WorkspacesPage() {
                   className="w-full px-4 py-2 rounded-lg bg-white/[0.04] border border-white/[0.08] text-white focus:outline-none focus:border-indigo-500/50"
                 >
                   <option value="host">Host (uses main filesystem)</option>
-                  <option value="chroot">Chroot (isolated environment)</option>
+                  <option value="chroot">Isolated (root filesystem)</option>
                 </select>
                 <p className="text-xs text-white/40 mt-1.5">
                   {newWorkspaceType === 'host'
                     ? 'Runs directly on the host machine filesystem'
-                    : 'Creates an isolated chroot environment for better security'}
+                    : 'Creates an isolated root filesystem for running missions'}
                 </p>
               </div>
             </div>

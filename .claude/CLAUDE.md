@@ -1,4 +1,4 @@
-# Open Agent Panel – Project Guide
+# Open Agent – Project Guide
 
 Open Agent is a managed control plane for OpenCode-based agents. The backend **does not** run model inference or autonomous logic; it delegates execution to an OpenCode server and focuses on orchestration, telemetry, and workspace/library management.
 

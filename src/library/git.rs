@@ -184,8 +184,21 @@ pub async fn pull(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Git author configuration for commits.
+#[derive(Debug, Clone, Default)]
+pub struct GitAuthor {
+    pub name: Option<String>,
+    pub email: Option<String>,
+}
+
+impl GitAuthor {
+    pub fn new(name: Option<String>, email: Option<String>) -> Self {
+        Self { name, email }
+    }
+}
+
 /// Commit all changes with a message.
-pub async fn commit(path: &Path, message: &str) -> Result<()> {
+pub async fn commit(path: &Path, message: &str, author: Option<&GitAuthor>) -> Result<()> {
     tracing::info!(path = %path.display(), message = %message, "Committing library changes");
 
     // Stage all changes
@@ -201,13 +214,25 @@ pub async fn commit(path: &Path, message: &str) -> Result<()> {
         anyhow::bail!("git add failed: {}", stderr);
     }
 
-    // Commit
-    let output = Command::new("git")
-        .current_dir(path)
-        .args(["commit", "-m", message])
-        .output()
-        .await
-        .context("Failed to execute git commit")?;
+    // Build commit command with optional author
+    let mut cmd = Command::new("git");
+    cmd.current_dir(path);
+    cmd.args(["commit", "-m", message]);
+
+    // Add author and committer if both name and email are provided
+    // We set both --author flag and GIT_COMMITTER_* env vars to ensure
+    // git doesn't require global user.name/user.email config
+    if let Some(author) = author {
+        if let (Some(name), Some(email)) = (&author.name, &author.email) {
+            let author_string = format!("{} <{}>", name, email);
+            cmd.args(["--author", &author_string]);
+            // Also set committer identity via environment variables
+            cmd.env("GIT_COMMITTER_NAME", name);
+            cmd.env("GIT_COMMITTER_EMAIL", email);
+        }
+    }
+
+    let output = cmd.output().await.context("Failed to execute git commit")?;
 
     // Exit code 1 means nothing to commit, which is fine
     if !output.status.success() && output.status.code() != Some(1) {

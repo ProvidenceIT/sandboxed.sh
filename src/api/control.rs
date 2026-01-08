@@ -190,6 +190,9 @@ pub enum AgentEvent {
         /// Files shared in this message (images, documents, etc.)
         #[serde(skip_serializing_if = "Option::is_none")]
         shared_files: Option<Vec<SharedFile>>,
+        /// Whether the mission can be resumed after this failure (only relevant when success=false)
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        resumable: bool,
     },
     /// Agent thinking/reasoning (streaming)
     Thinking {
@@ -222,6 +225,9 @@ pub enum AgentEvent {
         /// Mission this error belongs to (for parallel execution)
         #[serde(skip_serializing_if = "Option::is_none")]
         mission_id: Option<Uuid>,
+        /// Whether the mission can be resumed after this error
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        resumable: bool,
     },
     /// Mission status changed (by agent or user)
     MissionStatusChanged {
@@ -1576,7 +1582,7 @@ pub async fn stream(
                         Err(broadcast::error::RecvError::Lagged(_)) => {
                             let sse = Event::default()
                                 .event("error")
-                                .json_data(AgentEvent::Error { message: "event stream lagged; some events were dropped".to_string(), mission_id: None })
+                                .json_data(AgentEvent::Error { message: "event stream lagged; some events were dropped".to_string(), mission_id: None, resumable: false })
                                 .unwrap();
                             yield Ok(sse);
                         }
@@ -2124,15 +2130,17 @@ async fn control_actor_loop(
                     ControlCommand::ToolResult { tool_call_id, name, result } => {
                         // Deliver to the tool hub. The executor emits ToolResult events when it receives it.
                         if tool_hub.resolve(&tool_call_id, result).await.is_err() {
-                            let _ = events_tx.send(AgentEvent::Error { message: format!("Unknown tool_call_id '{}' for tool '{}'", tool_call_id, name), mission_id: None });
+                            let _ = events_tx.send(AgentEvent::Error { message: format!("Unknown tool_call_id '{}' for tool '{}'", tool_call_id, name), mission_id: None, resumable: false });
                         }
                     }
                     ControlCommand::Cancel => {
                         if let Some(token) = &running_cancel {
                             token.cancel();
-                            let _ = events_tx.send(AgentEvent::Error { message: "Cancellation requested".to_string(), mission_id: None });
+                            // Don't send Error event here - the task will complete and send
+                            // an AssistantMessage with the cancellation result when it finishes.
+                            // Sending both causes duplicate UI messages.
                         } else {
-                            let _ = events_tx.send(AgentEvent::Error { message: "No running task to cancel".to_string(), mission_id: None });
+                            let _ = events_tx.send(AgentEvent::Error { message: "No running task to cancel".to_string(), mission_id: None, resumable: false });
                         }
                     }
                     ControlCommand::LoadMission { id, respond } => {
@@ -2289,6 +2297,7 @@ async fn control_actor_loop(
                             let _ = events_tx.send(AgentEvent::Error {
                                 message: format!("Parallel mission {} cancelled", mission_id),
                                 mission_id: Some(mission_id),
+                                resumable: true, // Cancelled missions can be resumed
                             });
                             parallel_runners.remove(&mission_id);
                             let _ = respond.send(Ok(()));
@@ -2300,10 +2309,9 @@ async fn control_actor_loop(
                                 // Cancel the current execution
                                 if let Some(token) = &running_cancel {
                                     token.cancel();
-                                    let _ = events_tx.send(AgentEvent::Error {
-                                        message: format!("Mission {} cancelled", mission_id),
-                                        mission_id: Some(mission_id),
-                                    });
+                                    // Don't send Error event here - the task will complete and send
+                                    // an AssistantMessage with resumable=true when it finishes.
+                                    // Sending both causes duplicate UI messages.
                                     let _ = respond.send(Ok(()));
                                 } else {
                                     let _ = respond.send(Err("Mission not currently executing".to_string()));
@@ -2720,6 +2728,8 @@ async fn control_actor_loop(
                                 }
                             }
 
+                            // Mark failures as resumable so UI can show a resume button
+                            let resumable = !agent_result.success && completed_mission_id.is_some();
                             let _ = events_tx.send(AgentEvent::AssistantMessage {
                                 id: Uuid::new_v4(),
                                 content: agent_result.output.clone(),
@@ -2728,12 +2738,14 @@ async fn control_actor_loop(
                                 model: agent_result.model_used,
                                 mission_id: completed_mission_id,
                                 shared_files: None,
+                                resumable,
                             });
                         }
                         Err(e) => {
                             let _ = events_tx.send(AgentEvent::Error {
                                 message: format!("Control session task join failed: {}", e),
                                 mission_id: completed_mission_id,
+                                resumable: completed_mission_id.is_some(), // Can resume if mission exists
                             });
                         }
                     }
@@ -2833,6 +2845,8 @@ async fn control_actor_loop(
                             );
 
                             // Emit completion event with mission_id
+                            // Mark failures as resumable
+                            let resumable = !result.success;
                             let _ = events_tx.send(AgentEvent::AssistantMessage {
                                 id: msg_id,
                                 content: result.output.clone(),
@@ -2841,6 +2855,7 @@ async fn control_actor_loop(
                                 model: result.model_used.clone(),
                                 mission_id: Some(*mission_id),
                                 shared_files: None,
+                                resumable,
                             });
 
                             // Persist history for this mission
@@ -2924,21 +2939,38 @@ async fn run_single_control_turn(
     workspace_id: Option<Uuid>,
 ) -> crate::agents::AgentResult {
     // Ensure a workspace directory for this mission (if applicable).
-    let working_dir_path = if let Some(mid) = mission_id {
+    let (working_dir_path, runtime_workspace) = if let Some(mid) = mission_id {
         let ws = workspace::resolve_workspace(&workspaces, &config, workspace_id).await;
         // Get library for skill syncing
         let lib_guard = library.read().await;
         let lib_ref = lib_guard.as_ref().map(|l| l.as_ref());
-        match workspace::prepare_mission_workspace_with_skills(&ws, &mcp, lib_ref, mid).await {
+        let dir = match workspace::prepare_mission_workspace_with_skills(&ws, &mcp, lib_ref, mid).await {
             Ok(dir) => dir,
             Err(e) => {
                 tracing::warn!("Failed to prepare mission workspace: {}", e);
                 ws.path.clone()
             }
-        }
+        };
+        (dir, Some(ws))
     } else {
-        config.working_dir.clone()
+        (
+            config.working_dir.clone(),
+            Some(workspace::Workspace::default_host(config.working_dir.clone())),
+        )
     };
+
+    if let Some(ws) = runtime_workspace.as_ref() {
+        if let Err(e) = workspace::write_runtime_workspace_state(
+            &config.working_dir,
+            ws,
+            &working_dir_path,
+            mission_id,
+        )
+        .await
+        {
+            tracing::warn!("Failed to write runtime workspace state: {}", e);
+        }
+    }
 
     // Build a task prompt that includes conversation context with size limits.
     let history_for_prompt = match history.last() {

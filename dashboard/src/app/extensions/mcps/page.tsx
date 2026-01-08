@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import { toast } from 'sonner';
+import { toast } from '@/components/toast';
 import { type McpServerDef, type McpServerState, type McpTransport, type McpStatus, listMcps, enableMcp, disableMcp, refreshMcp, updateMcp } from '@/lib/api';
 import {
   AlertCircle,
@@ -314,6 +314,14 @@ function RuntimeMcpCard({
 
       <div className="flex items-center justify-between pt-3 border-t border-white/[0.04]">
         <div className="flex items-center gap-2">
+          <span className={cn(
+            'h-2 w-2 rounded-full',
+            mcp.status === 'connected' && 'bg-emerald-400',
+            mcp.status === 'connecting' && 'bg-amber-400 animate-pulse',
+            mcp.status === 'disconnected' && 'bg-white/40',
+            mcp.status === 'disabled' && 'bg-white/40',
+            mcp.status === 'error' && 'bg-red-400'
+          )} />
           <span className={cn('text-[10px]', statusColor[mcp.status])}>{statusLabel[mcp.status]}</span>
           {mcp.error && (
             <span className="text-[10px] text-red-400 truncate max-w-[120px]" title={mcp.error}>
@@ -470,6 +478,14 @@ function RuntimeMcpDetailPanel({
               <span className="tag bg-cyan-500/10 text-cyan-400 border-cyan-500/20">Runtime</span>
             </div>
             <div className="flex items-center gap-2 mt-1">
+              <span className={cn(
+                'h-2 w-2 rounded-full',
+                mcp.status === 'connected' && 'bg-emerald-400',
+                mcp.status === 'connecting' && 'bg-amber-400 animate-pulse',
+                mcp.status === 'disconnected' && 'bg-white/40',
+                mcp.status === 'disabled' && 'bg-white/40',
+                mcp.status === 'error' && 'bg-red-400'
+              )} />
               <span className={cn('text-xs', statusColorMap[mcp.status])}>
                 {mcp.status.charAt(0).toUpperCase() + mcp.status.slice(1)}
               </span>
@@ -981,14 +997,12 @@ export default function McpsPage() {
     status,
     mcps,
     loading,
-    error,
     libraryUnavailable,
     libraryUnavailableMessage,
     refresh,
     sync,
     commit,
     push,
-    clearError,
     saveMcps,
     syncing,
     committing,
@@ -1009,7 +1023,7 @@ export default function McpsPage() {
   const [runtimeLoading, setRuntimeLoading] = useState(true);
   const [selectedRuntimeMcp, setSelectedRuntimeMcp] = useState<McpServerState | null>(null);
 
-  // Fetch runtime MCPs
+  // Fetch runtime MCPs with polling for status updates
   useEffect(() => {
     const fetchRuntimeMcps = async () => {
       try {
@@ -1022,6 +1036,24 @@ export default function McpsPage() {
       }
     };
     fetchRuntimeMcps();
+
+    // Poll every 5 seconds for status updates
+    const interval = setInterval(async () => {
+      try {
+        const mcps = await listMcps();
+        setRuntimeMcps(mcps);
+        // Update selected MCP if it changed
+        setSelectedRuntimeMcp((prev) => {
+          if (!prev) return null;
+          const updated = mcps.find((m) => m.id === prev.id);
+          return updated ?? null;
+        });
+      } catch (err) {
+        console.error('Failed to poll runtime MCPs:', err);
+      }
+    }, 5000);
+
+    return () => clearInterval(interval);
   }, []);
 
   const handleToggleRuntimeMcp = async (id: string, enabled: boolean) => {
@@ -1195,16 +1227,6 @@ export default function McpsPage() {
         <LibraryUnavailable message={libraryUnavailableMessage} onConfigured={refresh} />
       ) : (
         <>
-          {error && (
-            <div className="p-4 rounded-lg bg-red-500/10 border border-red-500/20 text-red-400 flex items-center gap-2">
-              <AlertCircle className="h-4 w-4 flex-shrink-0" />
-              {error}
-              <button onClick={clearError} className="ml-auto">
-                <X className="h-4 w-4" />
-              </button>
-            </div>
-          )}
-
           {status && (
             <div className="p-4 rounded-xl bg-white/[0.02] border border-white/[0.06]">
               <div className="flex items-center justify-between">

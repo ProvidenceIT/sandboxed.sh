@@ -34,6 +34,7 @@ use super::desktop_stream;
 use super::fs;
 use super::library as library_api;
 use super::mcp as mcp_api;
+use super::monitoring;
 use super::opencode as opencode_api;
 use super::secrets as secrets_api;
 use super::types::*;
@@ -72,6 +73,9 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
 
     // Initialize MCP registry
     let mcp = Arc::new(McpRegistry::new(&config.working_dir).await);
+    if let Err(e) = crate::opencode_config::ensure_global_config(&mcp).await {
+        tracing::warn!("Failed to ensure OpenCode global config: {}", e);
+    }
     // Refresh all MCPs in background
     {
         let mcp_clone = Arc::clone(&mcp);
@@ -160,10 +164,20 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         .route("/api/auth/login", post(auth::login))
         // WebSocket console uses subprotocol-based auth (browser can't set Authorization header)
         .route("/api/console/ws", get(console::console_ws))
+        // WebSocket workspace shell uses subprotocol-based auth
+        .route(
+            "/api/workspaces/:id/shell",
+            get(console::workspace_shell_ws),
+        )
         // WebSocket desktop stream uses subprotocol-based auth
         .route(
             "/api/desktop/stream",
             get(desktop_stream::desktop_stream_ws),
+        )
+        // WebSocket system monitoring uses subprotocol-based auth
+        .route(
+            "/api/monitoring/ws",
+            get(monitoring::monitoring_ws),
         );
 
     // File upload routes with increased body limit (10GB)

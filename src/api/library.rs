@@ -23,15 +23,17 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::library::{
-    Command, CommandSummary, LibraryAgent, LibraryAgentSummary, LibraryStatus, LibraryStore,
-    LibraryTool, LibraryToolSummary, McpServer, MigrationReport, Plugin, Rule, RuleSummary, Skill,
-    SkillSummary,
+    Command, CommandSummary, GitAuthor, LibraryAgent, LibraryAgentSummary, LibraryStatus,
+    LibraryStore, LibraryTool, LibraryToolSummary, McpServer, MigrationReport, Plugin, Rule,
+    RuleSummary, Skill, SkillSummary,
 };
 
 /// Shared library state.
 pub type SharedLibrary = Arc<RwLock<Option<Arc<LibraryStore>>>>;
 
 const LIBRARY_REMOTE_HEADER: &str = "x-openagent-library-remote";
+const GIT_AUTHOR_NAME_HEADER: &str = "x-openagent-git-author-name";
+const GIT_AUTHOR_EMAIL_HEADER: &str = "x-openagent-git-author-email";
 
 fn extract_library_remote(headers: &HeaderMap) -> Option<String> {
     headers
@@ -40,6 +42,26 @@ fn extract_library_remote(headers: &HeaderMap) -> Option<String> {
         .map(|value| value.trim())
         .filter(|value| !value.is_empty())
         .map(|value| value.to_string())
+}
+
+fn extract_git_author(headers: &HeaderMap) -> Option<GitAuthor> {
+    let name = headers
+        .get(GIT_AUTHOR_NAME_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    let email = headers
+        .get(GIT_AUTHOR_EMAIL_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    if name.is_some() || email.is_some() {
+        Some(GitAuthor::new(name, email))
+    } else {
+        None
+    }
 }
 
 async fn ensure_library(
@@ -205,8 +227,9 @@ async fn commit_library(
     Json(req): Json<CommitRequest>,
 ) -> Result<(StatusCode, String), (StatusCode, String)> {
     let library = ensure_library(&state, &headers).await?;
+    let author = extract_git_author(&headers);
     library
-        .commit(&req.message)
+        .commit(&req.message, author.as_ref())
         .await
         .map(|_| (StatusCode::OK, "Committed successfully".to_string()))
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))

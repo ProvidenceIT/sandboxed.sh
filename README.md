@@ -1,14 +1,13 @@
-# Open Agent Panel
+# Open Agent
 
-A managed control panel for OpenCode-based agents. Install it on your server to run missions in isolated workspaces, stream live telemetry to the dashboards, and keep all agent configs synced through a Git-backed Library.
+A managed control plane for OpenCode-based agents. Install it on your server to run agents in isolated workspaces and keep all configs synced through a Git-backed Library.
 
 ## What it does
 
-- **Mission control**: start, stop, and monitor missions on a remote machine.
+- **Mission control**: start, stop, and monitor agents on a remote machine.
 - **Workspace isolation**: host or chroot workspaces with per-mission directories.
 - **Library sync**: Git-backed configs for skills, commands, agents, and MCPs.
 - **Provider management**: manage OpenCode auth/providers from the dashboard.
-- **Live telemetry**: stream thinking/tool events to web and iOS clients.
 
 ## Architecture
 
@@ -33,7 +32,7 @@ A managed control panel for OpenCode-based agents. Install it on your server to 
 - **Library**: Git repo containing agent configs (skills, commands, MCPs, tools).
 - **Workspaces**: Execution environments (host or chroot) with their own skills and plugins. Skills are synced to `.opencode/skill/` for OpenCode to discover.
 - **Agents**: Library-defined capabilities (model, permissions, rules). Selected per-mission.
-- **Missions**: Agent selection + workspace + conversation with streaming telemetry.
+- **Missions**: Agent selection + workspace + conversation.
 - **MCPs**: Global MCP servers run on the host machine (not inside chroots).
 
 ## Quick start

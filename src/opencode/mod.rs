@@ -17,6 +17,12 @@ const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
 /// Interval for logging heartbeat while waiting for SSE events (30 seconds).
 const HEARTBEAT_LOG_INTERVAL: Duration = Duration::from_secs(30);
 
+/// Number of retries for transient network failures.
+const NETWORK_RETRY_COUNT: u32 = 3;
+
+/// Delay between retries (with exponential backoff).
+const NETWORK_RETRY_BASE_DELAY: Duration = Duration::from_millis(500);
+
 #[derive(Clone)]
 pub struct OpenCodeClient {
     base_url: String,
@@ -80,23 +86,46 @@ impl OpenCodeClient {
             );
         }
 
-        let resp = self
-            .client
-            .post(&url)
-            .json(&body)
-            .send()
-            .await
-            .context("Failed to call OpenCode /session")?;
+        let mut last_error = None;
+        for attempt in 0..NETWORK_RETRY_COUNT {
+            if attempt > 0 {
+                let delay = NETWORK_RETRY_BASE_DELAY * 2u32.pow(attempt - 1);
+                tracing::warn!(
+                    attempt = attempt + 1,
+                    max_attempts = NETWORK_RETRY_COUNT,
+                    delay_ms = delay.as_millis(),
+                    "Retrying OpenCode session creation after transient failure"
+                );
+                tokio::time::sleep(delay).await;
+            }
 
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        if !status.is_success() {
-            anyhow::bail!("OpenCode /session failed: {} - {}", status, text);
+            match self.client.post(&url).json(&body).send().await {
+                Ok(resp) => {
+                    let status = resp.status();
+                    let text = resp.text().await.unwrap_or_default();
+                    if !status.is_success() {
+                        anyhow::bail!("OpenCode /session failed: {} - {}", status, text);
+                    }
+
+                    let session: OpenCodeSession = serde_json::from_str(&text)
+                        .with_context(|| format!("Failed to parse OpenCode session response: {}", text))?;
+                    return Ok(session);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        attempt = attempt + 1,
+                        error = %e,
+                        "OpenCode session creation failed"
+                    );
+                    last_error = Some(e);
+                }
+            }
         }
 
-        let session: OpenCodeSession = serde_json::from_str(&text)
-            .with_context(|| format!("Failed to parse OpenCode session response: {}", text))?;
-        Ok(session)
+        Err(last_error
+            .map(|e| anyhow::anyhow!(e))
+            .unwrap_or_else(|| anyhow::anyhow!("Unknown error"))
+            .context("Failed to call OpenCode /session after retries"))
     }
 
     /// Send a message and stream events in real-time.
@@ -338,23 +367,76 @@ impl OpenCodeClient {
             }
         }
 
-        let resp = self
-            .client
-            .post(&url)
-            .json(&body)
-            .send()
-            .await
-            .context("Failed to call OpenCode /session/{id}/message")?;
+        let mut last_error = None;
+        for attempt in 0..NETWORK_RETRY_COUNT {
+            if attempt > 0 {
+                let delay = NETWORK_RETRY_BASE_DELAY * 2u32.pow(attempt - 1);
+                tracing::warn!(
+                    session_id = %session_id,
+                    attempt = attempt + 1,
+                    max_attempts = NETWORK_RETRY_COUNT,
+                    delay_ms = delay.as_millis(),
+                    "Retrying OpenCode message send after transient failure"
+                );
+                tokio::time::sleep(delay).await;
+            }
 
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        if !status.is_success() {
-            anyhow::bail!("OpenCode message failed: {} - {}", status, text);
+            match self.client.post(&url).json(&body).send().await {
+                Ok(resp) => {
+                    let status = resp.status();
+                    let text = resp.text().await.unwrap_or_default();
+                    if !status.is_success() {
+                        anyhow::bail!("OpenCode message failed: {} - {}", status, text);
+                    }
+                    return self.parse_message_response(&text);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        attempt = attempt + 1,
+                        error = %e,
+                        "OpenCode message send failed"
+                    );
+                    last_error = Some(e);
+                }
+            }
         }
 
-        let message: OpenCodeMessageResponse = serde_json::from_str(&text)
+        Err(last_error
+            .map(|e| anyhow::anyhow!(e))
+            .unwrap_or_else(|| anyhow::anyhow!("Unknown error"))
+            .context(format!("Failed to call OpenCode /session/{}/message after retries", session_id)))
+    }
+
+    /// Parse a message response from OpenCode, handling various response shapes.
+    fn parse_message_response(&self, text: &str) -> anyhow::Result<OpenCodeMessageResponse> {
+        if text.trim().is_empty() {
+            // Newer OpenCode servers may return an empty body for message POSTs.
+            return Ok(OpenCodeMessageResponse::empty());
+        }
+
+        // Try the legacy response shape first.
+        if let Ok(message) = serde_json::from_str::<OpenCodeMessageResponse>(text) {
+            return Ok(message);
+        }
+
+        // Fallback to wrapped response shapes (e.g., { "message": { ... } } or { "data": { ... } }).
+        let value: serde_json::Value = serde_json::from_str(text)
             .with_context(|| format!("Failed to parse OpenCode message response: {}", text))?;
-        Ok(message)
+        let maybe_message = value
+            .get("message")
+            .or_else(|| value.get("data"))
+            .or_else(|| value.get("result"));
+        if let Some(inner) = maybe_message {
+            let message: OpenCodeMessageResponse = serde_json::from_value(inner.clone())
+                .with_context(|| format!("Failed to parse wrapped OpenCode message response: {}", text))?;
+            return Ok(message);
+        }
+
+        Err(anyhow::anyhow!(
+            "Failed to parse OpenCode message response: {}",
+            text
+        ))
     }
 
     /// Legacy non-streaming send_message for backwards compatibility.
@@ -872,6 +954,25 @@ pub struct OpenCodeAssistantInfo {
     pub model_id: Option<String>,
     #[serde(default)]
     pub error: Option<serde_json::Value>,
+}
+
+impl Default for OpenCodeAssistantInfo {
+    fn default() -> Self {
+        Self {
+            provider_id: None,
+            model_id: None,
+            error: None,
+        }
+    }
+}
+
+impl OpenCodeMessageResponse {
+    pub fn empty() -> Self {
+        Self {
+            info: OpenCodeAssistantInfo::default(),
+            parts: Vec::new(),
+        }
+    }
 }
 
 pub fn extract_text(parts: &[serde_json::Value]) -> String {

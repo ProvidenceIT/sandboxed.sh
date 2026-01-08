@@ -23,11 +23,9 @@ export default function AgentsPage() {
     status,
     libraryAgents,
     loading,
-    error,
     libraryUnavailable,
     libraryUnavailableMessage,
     refresh,
-    clearError,
     getLibraryAgent,
     saveLibraryAgent,
     removeLibraryAgent,
@@ -185,16 +183,6 @@ Agent instructions here.
 
   return (
     <div className="min-h-screen flex flex-col p-6 max-w-7xl mx-auto space-y-4" onKeyDown={handleKeyDown}>
-      {error && (
-        <div className="p-4 rounded-lg bg-red-500/10 border border-red-500/20 text-red-400 flex items-center gap-2">
-          <AlertCircle className="h-4 w-4 flex-shrink-0" />
-          {error}
-          <button onClick={clearError} className="ml-auto">
-            <X className="h-4 w-4" />
-          </button>
-        </div>
-      )}
-
       {/* Git Status Bar */}
       {status && (
         <div className="p-4 rounded-xl bg-white/[0.02] border border-white/[0.06]">

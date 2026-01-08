@@ -3,6 +3,9 @@
 //! Features session pooling to allow fast reconnection - sessions are kept alive
 //! for a configurable timeout after disconnect, allowing seamless reconnection
 //! without re-establishing SSH connections.
+//!
+//! Also provides workspace shell support - PTY sessions that run directly in
+//! workspace directories (using chroot for isolated workspaces).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -11,6 +14,7 @@ use std::time::{Duration, Instant};
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
+        Path as AxumPath,
         State,
     },
     http::{HeaderMap, StatusCode},
@@ -20,10 +24,12 @@ use futures::{SinkExt, StreamExt};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use serde::Deserialize;
 use tokio::sync::{mpsc, Mutex, RwLock};
+use uuid::Uuid;
 
 use super::auth;
 use super::routes::AppState;
 use super::ssh_util::materialize_private_key;
+use crate::workspace::WorkspaceType;
 
 /// How long to keep a session alive after disconnect before cleanup.
 const SESSION_POOL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -488,6 +494,330 @@ async fn handle_new_session(mut socket: WebSocket, state: Arc<AppState>, session
     // Note: We don't kill the child or clean up tasks here anymore.
     // The cleanup task will handle expired sessions.
     // Writer and reader tasks will continue running in the background.
+    let _ = writer_task;
+    let _ = reader_task;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Workspace Shell WebSocket
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// WebSocket endpoint for workspace shell sessions.
+/// This spawns a PTY directly in the workspace (using chroot for isolated workspaces).
+pub async fn workspace_shell_ws(
+    ws: WebSocketUpgrade,
+    State(state): State<Arc<AppState>>,
+    AxumPath(workspace_id): AxumPath<Uuid>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    // Enforce auth in non-dev mode
+    let session_key = if state.config.auth.auth_required(state.config.dev_mode) {
+        let token = match extract_jwt_from_protocols(&headers) {
+            Some(t) => t,
+            None => return (StatusCode::UNAUTHORIZED, "Missing websocket JWT").into_response(),
+        };
+        if !auth::verify_token_for_config(&token, &state.config) {
+            return (StatusCode::UNAUTHORIZED, "Invalid or expired token").into_response();
+        }
+        format!("workspace:{}:{:x}", workspace_id, md5::compute(&token))
+    } else {
+        format!("workspace:{}:dev", workspace_id)
+    };
+
+    // Verify workspace exists
+    let workspace = match state.workspaces.get(workspace_id).await {
+        Some(ws) => ws,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                format!("Workspace {} not found", workspace_id),
+            )
+                .into_response()
+        }
+    };
+
+    // For chroot workspaces, verify it's ready
+    if workspace.workspace_type == WorkspaceType::Chroot
+        && workspace.status != crate::workspace::WorkspaceStatus::Ready
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!(
+                "Workspace {} is not ready (status: {:?})",
+                workspace_id, workspace.status
+            ),
+        )
+            .into_response();
+    }
+
+    ws.protocols(["openagent"])
+        .on_upgrade(move |socket| handle_workspace_shell(socket, state, workspace_id, session_key))
+}
+
+async fn handle_workspace_shell(
+    socket: WebSocket,
+    state: Arc<AppState>,
+    workspace_id: Uuid,
+    session_key: String,
+) {
+    // Try to reuse an existing session from the pool
+    let existing_session = {
+        let sessions = state.console_pool.sessions.read().await;
+        sessions.get(&session_key).cloned()
+    };
+
+    if let Some(session) = existing_session {
+        let mut s = session.lock().await;
+        if !s.in_use && !s.to_pty_tx.is_closed() {
+            s.in_use = true;
+            s.disconnected_at = None;
+            tracing::debug!("Reusing pooled workspace shell session: {}", session_key);
+            drop(s);
+            handle_existing_session(socket, session, state, session_key).await;
+            return;
+        }
+    }
+
+    tracing::debug!("Creating new workspace shell session: {}", session_key);
+    handle_new_workspace_shell(socket, state, workspace_id, session_key).await;
+}
+
+async fn handle_new_workspace_shell(
+    mut socket: WebSocket,
+    state: Arc<AppState>,
+    workspace_id: Uuid,
+    session_key: String,
+) {
+    // Get workspace info
+    let workspace = match state.workspaces.get(workspace_id).await {
+        Some(ws) => ws,
+        None => {
+            let _ = socket
+                .send(Message::Text(format!(
+                    "Workspace {} not found",
+                    workspace_id
+                )))
+                .await;
+            let _ = socket.close().await;
+            return;
+        }
+    };
+
+    let pty_system = native_pty_system();
+    let pair = match pty_system.openpty(PtySize {
+        rows: 24,
+        cols: 80,
+        pixel_width: 0,
+        pixel_height: 0,
+    }) {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = socket
+                .send(Message::Text(format!("Failed to open PTY: {}", e)))
+                .await;
+            let _ = socket.close().await;
+            return;
+        }
+    };
+
+    // Build command based on workspace type
+    let mut cmd = match workspace.workspace_type {
+        WorkspaceType::Chroot => {
+            // For chroot workspaces, use chroot to enter the isolated environment
+            let mut cmd = CommandBuilder::new("chroot");
+            cmd.arg(workspace.path.to_string_lossy().to_string());
+            // Try to use bash if available, fallback to sh
+            let bash_path = workspace.path.join("bin/bash");
+            if bash_path.exists() {
+                cmd.arg("/bin/bash");
+                cmd.arg("--login");
+            } else {
+                cmd.arg("/bin/sh");
+            }
+            cmd
+        }
+        WorkspaceType::Host => {
+            // For host workspaces, just spawn a shell in the workspace directory
+            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+            let mut cmd = CommandBuilder::new(&shell);
+            cmd.arg("--login");
+            cmd.cwd(&workspace.path);
+            cmd
+        }
+    };
+
+    cmd.env("TERM", "xterm-256color");
+    cmd.env("WORKSPACE_ID", workspace_id.to_string());
+    cmd.env("WORKSPACE_NAME", &workspace.name);
+
+    let mut child = match pair.slave.spawn_command(cmd) {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = socket
+                .send(Message::Text(format!("Failed to spawn shell: {}", e)))
+                .await;
+            let _ = socket.close().await;
+            return;
+        }
+    };
+    drop(pair.slave);
+
+    let mut reader = match pair.master.try_clone_reader() {
+        Ok(r) => r,
+        Err(_) => {
+            let _ = child.kill();
+            let _ = socket.close().await;
+            return;
+        }
+    };
+
+    let (to_pty_tx, mut to_pty_rx) = mpsc::unbounded_channel::<ClientMsg>();
+    let (from_pty_tx, from_pty_rx) = mpsc::unbounded_channel::<String>();
+
+    let master_for_writer = pair.master;
+    let mut writer = match master_for_writer.take_writer() {
+        Ok(w) => w,
+        Err(_) => {
+            let _ = child.kill();
+            let _ = socket.close().await;
+            return;
+        }
+    };
+
+    let child_killer: Arc<Mutex<Option<Box<dyn portable_pty::Child + Send>>>> =
+        Arc::new(Mutex::new(Some(child)));
+
+    let writer_task = {
+        let master = master_for_writer;
+        tokio::task::spawn_blocking(move || {
+            use std::io::Write;
+            while let Some(msg) = to_pty_rx.blocking_recv() {
+                match msg {
+                    ClientMsg::Input { d } => {
+                        let _ = writer.write_all(d.as_bytes());
+                        let _ = writer.flush();
+                    }
+                    ClientMsg::Resize { c, r } => {
+                        let _ = master.resize(PtySize {
+                            rows: r,
+                            cols: c,
+                            pixel_width: 0,
+                            pixel_height: 0,
+                        });
+                    }
+                }
+            }
+        })
+    };
+
+    let reader_task = tokio::task::spawn_blocking(move || {
+        use std::io::Read;
+        let mut buf = [0u8; 8192];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let s = String::from_utf8_lossy(&buf[..n]).to_string();
+                    if from_pty_tx.send(s).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    // Create pooled session
+    let from_pty_rx = Arc::new(Mutex::new(from_pty_rx));
+    let session = Arc::new(Mutex::new(PooledSession {
+        to_pty_tx: to_pty_tx.clone(),
+        from_pty_rx: from_pty_rx.clone(),
+        disconnected_at: None,
+        in_use: true,
+        child_killer: child_killer.clone(),
+    }));
+
+    // Store in pool
+    {
+        let mut sessions = state.console_pool.sessions.write().await;
+        let existing_in_use = if let Some(old_session) = sessions.get(&session_key) {
+            old_session.try_lock().map(|s| s.in_use).unwrap_or(false)
+        } else {
+            false
+        };
+
+        if existing_in_use {
+            tracing::debug!("Session {} is in use, not replacing", session_key);
+            drop(sessions);
+            if let Ok(mut child_guard) = child_killer.try_lock() {
+                if let Some(mut child) = child_guard.take() {
+                    let _ = child.kill();
+                }
+            }
+            let _ = socket.close().await;
+            return;
+        }
+
+        if let Some(old_session) = sessions.remove(&session_key) {
+            if let Ok(s) = old_session.try_lock() {
+                if let Ok(mut child_guard) = s.child_killer.try_lock() {
+                    if let Some(mut child) = child_guard.take() {
+                        let _ = child.kill();
+                    }
+                }
+            }
+        }
+        sessions.insert(session_key.clone(), session.clone());
+    }
+
+    let (mut ws_sender, mut ws_receiver) = socket.split();
+
+    // Pump PTY output to WS
+    let send_task = {
+        let from_pty_rx = from_pty_rx.clone();
+        tokio::spawn(async move {
+            loop {
+                let chunk = {
+                    let mut rx = from_pty_rx.lock().await;
+                    rx.recv().await
+                };
+                match chunk {
+                    Some(data) => {
+                        if ws_sender.send(Message::Text(data)).await.is_err() {
+                            break;
+                        }
+                    }
+                    None => break,
+                }
+            }
+        })
+    };
+
+    // WS -> PTY
+    while let Some(Ok(msg)) = ws_receiver.next().await {
+        match msg {
+            Message::Text(t) => {
+                if let Ok(parsed) = serde_json::from_str::<ClientMsg>(&t) {
+                    let _ = to_pty_tx.send(parsed);
+                }
+            }
+            Message::Binary(_) => {}
+            Message::Close(_) => break,
+            _ => {}
+        }
+    }
+
+    send_task.abort();
+
+    // Mark session as disconnected but keep in pool
+    {
+        let mut s = session.lock().await;
+        s.in_use = false;
+        s.disconnected_at = Some(Instant::now());
+    }
+
+    tracing::debug!("Workspace shell session returned to pool: {}", session_key);
+
     let _ = writer_task;
     let _ = reader_task;
 }

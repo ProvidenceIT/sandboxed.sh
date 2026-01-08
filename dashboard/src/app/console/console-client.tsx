@@ -1,9 +1,10 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState, useCallback } from "react";
+import { useSearchParams, useRouter } from "next/navigation";
 import { Terminal as XTerm } from "xterm";
 import { FitAddon } from "xterm-addon-fit";
-import { toast } from "sonner";
+import { toast } from "@/components/toast";
 import "xterm/css/xterm.css";
 
 import { authHeader, getValidJwt } from "@/lib/auth";
@@ -20,12 +21,15 @@ type FsEntry = {
   mtime: number;
 };
 
-type TabType = "terminal" | "files";
+type TabType = "terminal" | "files" | "workspace-shell";
 
 type Tab = {
   id: string;
   type: TabType;
   title: string;
+  // For workspace-shell tabs
+  workspaceId?: string;
+  workspaceName?: string;
 };
 
 function formatBytes(n: number) {
@@ -655,6 +659,228 @@ function TerminalTab({ tabId, isActive, onStatusChange }: { tabId: string; isAct
   );
 }
 
+// Workspace Shell Tab Component - Terminal connected to workspace shell
+function WorkspaceShellTab({
+  tabId,
+  isActive,
+  workspaceId,
+  workspaceName,
+  onStatusChange
+}: {
+  tabId: string;
+  isActive: boolean;
+  workspaceId: string;
+  workspaceName: string;
+  onStatusChange?: (status: "disconnected" | "connecting" | "connected" | "error", reconnect: () => void) => void;
+}) {
+  const termElRef = useRef<HTMLDivElement | null>(null);
+  const termRef = useRef<XTerm | null>(null);
+  const fitRef = useRef<FitAddon | null>(null);
+  const wsRef = useRef<WebSocket | null>(null);
+  const wsSeqRef = useRef(0);
+  const mountedRef = useRef(true);
+  const terminalInitializedRef = useRef(false);
+  const [wsStatus, setWsStatus] = useState<
+    "disconnected" | "connecting" | "connected" | "error"
+  >("disconnected");
+
+  const connectWebSocket = useCallback((term: XTerm, fit: FitAddon, isReconnect = false) => {
+    wsSeqRef.current += 1;
+    const seq = wsSeqRef.current;
+
+    const prev = wsRef.current;
+    if (prev) {
+      try {
+        prev.onopen = null;
+        prev.onmessage = null;
+        prev.onerror = null;
+        prev.onclose = null;
+      } catch { /* ignore */ }
+      try { prev.close(); } catch { /* ignore */ }
+    }
+
+    setWsStatus("connecting");
+    const jwt = getValidJwt()?.token ?? null;
+    const proto = jwt
+      ? (["openagent", `jwt.${jwt}`] as string[])
+      : (["openagent"] as string[]);
+    const API_BASE = getRuntimeApiBase();
+    // Connect to workspace-specific shell endpoint
+    const u = new URL(`${API_BASE}/api/workspaces/${workspaceId}/shell`);
+    u.protocol = u.protocol === "https:" ? "wss:" : "ws:";
+
+    let didOpen = false;
+    const ws = new WebSocket(u.toString(), proto);
+    wsRef.current = ws;
+
+    ws.onopen = () => {
+      if (!mountedRef.current || wsSeqRef.current !== seq) return;
+      didOpen = true;
+      setWsStatus("connected");
+      setTimeout(() => {
+        if (!mountedRef.current || wsSeqRef.current !== seq) return;
+        try {
+          fit.fit();
+          ws.send(JSON.stringify({ t: "r", c: term.cols, r: term.rows }));
+        } catch { /* ignore */ }
+      }, 50);
+    };
+    ws.onmessage = (evt) => {
+      if (!mountedRef.current || wsSeqRef.current !== seq) return;
+      term.write(typeof evt.data === "string" ? evt.data : "");
+    };
+    ws.onerror = () => {
+      if (mountedRef.current && wsSeqRef.current === seq) {
+        setWsStatus("error");
+      }
+    };
+    ws.onclose = (e) => {
+      if (mountedRef.current && wsSeqRef.current === seq) {
+        setWsStatus("disconnected");
+        if (e.code === 1006 && !didOpen) {
+          term.writeln(`\x1b[90mConnection to workspace "${workspaceName}" failed.\x1b[0m`);
+        } else if (e.code !== 1000 && e.code !== 1001 && didOpen) {
+          term.writeln("\x1b[90mDisconnected.\x1b[0m");
+        }
+      }
+    };
+
+    return ws;
+  }, [workspaceId, workspaceName]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+
+    if (!isActive) return;
+
+    const container = termElRef.current;
+    if (!container) return;
+
+    if (!terminalInitializedRef.current) {
+      terminalInitializedRef.current = true;
+
+      const term = new XTerm({
+        cursorBlink: true,
+        theme: {
+          background: "#0a0a0c",
+          foreground: "#e0e0e0",
+          cursor: "#e0e0e0",
+          cursorAccent: "#0a0a0c",
+          selectionBackground: "#3d4556",
+          black: "#0d0d0d",
+          brightBlack: "#4a4a4a",
+          red: "#ff5555",
+          brightRed: "#ff6e6e",
+          green: "#50fa7b",
+          brightGreen: "#69ff94",
+          yellow: "#f1fa8c",
+          brightYellow: "#ffffa5",
+          blue: "#6272a4",
+          brightBlue: "#8be9fd",
+          magenta: "#bd93f9",
+          brightMagenta: "#d6acff",
+          cyan: "#8be9fd",
+          brightCyan: "#a4ffff",
+          white: "#bfbfbf",
+          brightWhite: "#ffffff",
+        },
+        fontFamily: 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace',
+        fontSize: 14,
+        scrollback: 10000,
+      });
+      termRef.current = term;
+
+      const fit = new FitAddon();
+      fitRef.current = fit;
+      term.loadAddon(fit);
+      term.open(container);
+      fit.fit();
+
+      term.writeln(`\x1b[90mConnecting to workspace: ${workspaceName}...\x1b[0m`);
+
+      // Forward terminal input to WebSocket
+      const onDataDisposable = term.onData((data) => {
+        const ws = wsRef.current;
+        if (ws?.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ t: "i", d: data }));
+        }
+      });
+
+      // Resize handler
+      const onResize = () => {
+        if (!mountedRef.current) return;
+        try {
+          fit.fit();
+          const ws = wsRef.current;
+          if (ws?.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ t: "r", c: term.cols, r: term.rows }));
+          }
+        } catch { /* ignore */ }
+      };
+      window.addEventListener("resize", onResize);
+
+      connectWebSocket(term, fit, false);
+
+      return () => {
+        mountedRef.current = false;
+        wsSeqRef.current += 1;
+        window.removeEventListener("resize", onResize);
+        try { onDataDisposable.dispose(); } catch { /* ignore */ }
+        const ws = wsRef.current;
+        if (ws) {
+          try {
+            ws.onopen = null;
+            ws.onmessage = null;
+            ws.onerror = null;
+            ws.onclose = null;
+          } catch { /* ignore */ }
+          try { ws.close(); } catch { /* ignore */ }
+        }
+        try { term.dispose(); } catch { /* ignore */ }
+        wsRef.current = null;
+        termRef.current = null;
+        fitRef.current = null;
+        terminalInitializedRef.current = false;
+      };
+    }
+
+    return () => { mountedRef.current = false; };
+  }, [isActive, connectWebSocket, workspaceName]);
+
+  const reconnect = useCallback(() => {
+    const term = termRef.current;
+    const fit = fitRef.current;
+    if (!term || !fit || !mountedRef.current) return;
+    connectWebSocket(term, fit, true);
+  }, [connectWebSocket]);
+
+  useEffect(() => {
+    if (isActive && fitRef.current) {
+      const timer = setTimeout(() => {
+        try { fitRef.current?.fit(); } catch { /* ignore */ }
+      }, 50);
+      return () => clearTimeout(timer);
+    }
+  }, [isActive]);
+
+  useEffect(() => {
+    if (isActive && onStatusChange) {
+      onStatusChange(wsStatus, reconnect);
+    }
+  }, [wsStatus, reconnect, isActive, onStatusChange]);
+
+  return (
+    <div
+      className={[
+        "absolute inset-0 h-full min-h-0",
+        isActive ? "opacity-100" : "pointer-events-none opacity-0",
+      ].join(" ")}
+      aria-label={`workspace-shell-tab-${tabId}`}
+      ref={termElRef}
+    />
+  );
+}
+
 // Files Tab Component - Clean file explorer with drag-drop support
 function FilesTab({ isActive }: { tabId: string; isActive: boolean }) {
   const [cwd, setCwd] = useState("/root/context");
@@ -1209,11 +1435,17 @@ function getInitialTabsState(): { tabs: Tab[]; activeTabId: string } {
 }
 
 export default function ConsoleClient() {
+  const searchParams = useSearchParams();
+  const router = useRouter();
+
   // Initialize tabs and activeTabId from a single source to avoid race conditions
   const [{ tabs: initialTabs, activeTabId: initialActiveTabId }] = useState(getInitialTabsState);
   const [tabs, setTabs] = useState<Tab[]>(initialTabs);
   const [activeTabId, setActiveTabId] = useState<string>(initialActiveTabId);
   const [showNewTabMenu, setShowNewTabMenu] = useState(false);
+
+  // Track if we've already processed URL params to avoid duplicate tab creation
+  const processedWorkspaceRef = useRef<string | null>(null);
 
   // Terminal status tracking (for the active terminal tab)
   const [terminalStatus, setTerminalStatus] = useState<{
@@ -1222,7 +1454,7 @@ export default function ConsoleClient() {
   } | null>(null);
 
   const activeTab = tabs.find(t => t.id === activeTabId);
-  const isTerminalActive = activeTab?.type === "terminal";
+  const isTerminalActive = activeTab?.type === "terminal" || activeTab?.type === "workspace-shell";
 
   const handleTerminalStatusChange = useCallback((
     status: "disconnected" | "connecting" | "connected" | "error",
@@ -1230,6 +1462,41 @@ export default function ConsoleClient() {
   ) => {
     setTerminalStatus({ status, reconnect });
   }, []);
+
+  // Handle workspace URL parameter - create a workspace shell tab
+  useEffect(() => {
+    const workspaceId = searchParams.get('workspace');
+    const workspaceName = searchParams.get('name');
+
+    if (workspaceId && workspaceName && processedWorkspaceRef.current !== workspaceId) {
+      processedWorkspaceRef.current = workspaceId;
+
+      // Check if we already have a tab for this workspace
+      const existingTab = tabs.find(
+        t => t.type === 'workspace-shell' && t.workspaceId === workspaceId
+      );
+
+      if (existingTab) {
+        // Just activate the existing tab
+        setActiveTabId(existingTab.id);
+      } else {
+        // Create a new workspace shell tab
+        const newTabId = generateTabId();
+        const newTab: Tab = {
+          id: newTabId,
+          type: 'workspace-shell',
+          title: workspaceName,
+          workspaceId,
+          workspaceName,
+        };
+        setTabs(prev => [...prev, newTab]);
+        setActiveTabId(newTabId);
+      }
+
+      // Clear the URL params after processing
+      router.replace('/console', { scroll: false });
+    }
+  }, [searchParams, tabs, router]);
 
   // Save tabs to localStorage whenever they change
   useEffect(() => {
@@ -1280,7 +1547,7 @@ export default function ConsoleClient() {
                 onClick={() => setActiveTabId(tab.id)}
               >
                 <span className="text-sm opacity-70">
-                  {tab.type === "terminal" ? "⌨️" : "📁"}
+                  {tab.type === "terminal" ? "⌨️" : tab.type === "workspace-shell" ? "🖥️" : "📁"}
                 </span>
                 <span>{tab.title}</span>
                 {tabs.length > 1 && (
@@ -1392,6 +1659,15 @@ export default function ConsoleClient() {
                 key={tab.id}
                 tabId={tab.id}
                 isActive={activeTabId === tab.id}
+                onStatusChange={handleTerminalStatusChange}
+              />
+            ) : tab.type === "workspace-shell" && tab.workspaceId && tab.workspaceName ? (
+              <WorkspaceShellTab
+                key={tab.id}
+                tabId={tab.id}
+                isActive={activeTabId === tab.id}
+                workspaceId={tab.workspaceId}
+                workspaceName={tab.workspaceName}
                 onStatusChange={handleTerminalStatusChange}
               />
             ) : (

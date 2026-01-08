@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
-import { toast } from 'sonner';
+import { toast } from '@/components/toast';
 import { StatsCard } from '@/components/stats-card';
 import { ConnectionStatus } from '@/components/connection-status';
 import { RecentTasks } from '@/components/recent-tasks';
@@ -10,6 +10,7 @@ import { ShimmerStat } from '@/components/ui/shimmer';
 import { getStats, StatsResponse } from '@/lib/api';
 import { Activity, CheckCircle, DollarSign, Zap, Plus } from 'lucide-react';
 import { formatCents } from '@/lib/utils';
+import { SystemMonitor } from '@/components/system-monitor';
 
 export default function OverviewPage() {
   const [stats, setStats] = useState<StatsResponse | null>(null);
@@ -83,45 +84,9 @@ export default function OverviewPage() {
           </Link>
         </div>
 
-        {/* Visualization Area (placeholder for radar/globe) - takes remaining space */}
-        <div className="flex-1 flex items-center justify-center rounded-2xl bg-white/[0.01] border border-white/[0.04] mb-6 min-h-[300px]">
-          {/* Circular radar visualization */}
-          <div className="relative">
-            {/* Outer rings */}
-            <div className="absolute inset-0 flex items-center justify-center">
-              <div className="h-64 w-64 rounded-full border border-white/[0.06]" />
-            </div>
-            <div className="absolute inset-0 flex items-center justify-center">
-              <div className="h-48 w-48 rounded-full border border-white/[0.05]" />
-            </div>
-            <div className="absolute inset-0 flex items-center justify-center">
-              <div className="h-32 w-32 rounded-full border border-white/[0.04]" />
-            </div>
-            <div className="absolute inset-0 flex items-center justify-center">
-              <div className="h-16 w-16 rounded-full border border-white/[0.03]" />
-            </div>
-            
-            {/* Cross lines */}
-            <div className="absolute inset-0 flex items-center justify-center">
-              <div className="h-64 w-[1px] bg-white/[0.04]" />
-            </div>
-            <div className="absolute inset-0 flex items-center justify-center">
-              <div className="h-[1px] w-64 bg-white/[0.04]" />
-            </div>
-            
-            {/* Center dot */}
-            <div className="relative h-64 w-64 flex items-center justify-center">
-              <div className={`h-3 w-3 rounded-full ${isActive ? 'bg-emerald-400 animate-pulse' : 'bg-white/20'}`} />
-              
-              {/* Activity dots (mock) */}
-              {isActive && (
-                <>
-                  <div className="absolute top-1/4 left-1/3 h-2 w-2 rounded-full bg-indigo-400/60 animate-pulse-subtle" />
-                  <div className="absolute bottom-1/3 right-1/4 h-2 w-2 rounded-full bg-emerald-400/60 animate-pulse-subtle" style={{ animationDelay: '0.5s' }} />
-                </>
-              )}
-            </div>
-          </div>
+        {/* System Metrics Area */}
+        <div className="flex-1 flex items-center justify-center rounded-2xl bg-white/[0.01] border border-white/[0.04] mb-6 min-h-[300px] p-6">
+          <SystemMonitor className="w-full max-w-4xl" />
         </div>
 
         {/* Stats grid - at bottom */}

@@ -1,5 +1,5 @@
 import { authHeader, clearJwt, signalAuthRequired } from "./auth";
-import { getRuntimeApiBase, getRuntimeLibraryRemote } from "./settings";
+import { getRuntimeApiBase, getRuntimeLibraryRemote, getGitAuthorName, getGitAuthorEmail } from "./settings";
 
 function apiUrl(pathOrUrl: string): string {
   if (/^https?:\/\//i.test(pathOrUrl)) return pathOrUrl;
@@ -55,6 +55,14 @@ async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
   const libraryRemote = getRuntimeLibraryRemote();
   if (libraryRemote) {
     headers["x-openagent-library-remote"] = libraryRemote;
+  }
+  const gitAuthorName = getGitAuthorName();
+  if (gitAuthorName) {
+    headers["x-openagent-git-author-name"] = gitAuthorName;
+  }
+  const gitAuthorEmail = getGitAuthorEmail();
+  if (gitAuthorEmail) {
+    headers["x-openagent-git-author-email"] = gitAuthorEmail;
   }
 
   const res = await fetch(apiUrl(path), { ...init, headers });
@@ -1167,7 +1175,6 @@ export interface LibraryAgent {
   model: string | null;
   tools: Record<string, boolean>;
   permissions: Record<string, string>;
-  skills: string[];
   rules: string[];
 }
 
@@ -1632,6 +1639,37 @@ export async function syncWorkspace(id: string): Promise<Workspace> {
 export async function deleteWorkspace(id: string): Promise<void> {
   const res = await apiFetch(`/api/workspaces/${id}`, { method: "DELETE" });
   if (!res.ok) throw new Error("Failed to delete workspace");
+}
+
+// Supported Linux distributions for chroot workspaces
+export type ChrootDistro =
+  | "ubuntu-noble"
+  | "ubuntu-jammy"
+  | "debian-bookworm"
+  | "arch-linux";
+
+export const CHROOT_DISTROS: { value: ChrootDistro; label: string }[] = [
+  { value: "ubuntu-noble", label: "Ubuntu 24.04 LTS (Noble)" },
+  { value: "ubuntu-jammy", label: "Ubuntu 22.04 LTS (Jammy)" },
+  { value: "debian-bookworm", label: "Debian 12 (Bookworm)" },
+  { value: "arch-linux", label: "Arch Linux (Base)" },
+];
+
+// Build a chroot workspace
+export async function buildWorkspace(
+  id: string,
+  distro?: ChrootDistro
+): Promise<Workspace> {
+  const res = await apiFetch(`/api/workspaces/${id}/build`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: distro ? JSON.stringify({ distro }) : undefined,
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || "Failed to build workspace");
+  }
+  return res.json();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

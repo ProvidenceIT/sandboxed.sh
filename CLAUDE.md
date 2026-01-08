@@ -1,4 +1,4 @@
-# Open Agent Panel – Project Guide
+# Open Agent – Project Guide
 
 Open Agent is a managed control plane for OpenCode-based agents. The backend **does not** run model inference or autonomous logic; it delegates execution to an OpenCode server and focuses on orchestration, telemetry, and workspace/library management.
 
@@ -49,6 +49,29 @@ cd dashboard
 bun install
 bun dev
 ```
+
+## Testing
+
+Backend testing must happen on Linux (desktop MCP). Deploy as root on `95.216.112.253` with SSH key `cursor`. Always use debug builds for speed (never release).
+
+```bash
+# from macOS
+rsync -az --delete \
+  --exclude target --exclude .git --exclude dashboard/node_modules \
+  /Users/thomas/conductor/workspaces/open_agent/vaduz-v1/ \
+  root@95.216.112.253:/opt/open_agent/vaduz-v1/
+
+# on host
+cd /opt/open_agent/vaduz-v1
+cargo build --bin open_agent
+# restart services when needed:
+# - OpenCode server: `opencode.service`
+# - Open Agent backend: `open_agent.service`
+```
+
+Notes to avoid common deploy pitfalls:
+- Always include the SSH key in rsync: `-e "ssh -i ~/.ssh/cursor"` (otherwise auth will fail in non-interactive shells).
+- The host uses rustup; build with `source /root/.cargo/env` so the newer toolchain is on PATH.
 
 ## Notes
 

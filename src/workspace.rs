@@ -48,6 +48,15 @@ impl Default for WorkspaceType {
     }
 }
 
+impl WorkspaceType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Host => "host",
+            Self::Chroot => "chroot",
+        }
+    }
+}
+
 /// Status of a workspace.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -445,7 +454,32 @@ pub fn task_workspace_dir_for_root(root: &Path, task_id: Uuid) -> PathBuf {
     workspaces_root_for(root).join(format!("task-{}", short_id))
 }
 
-fn opencode_entry_from_mcp(config: &McpServerConfig, workspace_dir: &Path) -> serde_json::Value {
+fn opencode_entry_from_mcp(
+    config: &McpServerConfig,
+    workspace_dir: &Path,
+    workspace_root: &Path,
+    workspace_type: WorkspaceType,
+) -> serde_json::Value {
+    fn resolve_command_path(cmd: &str) -> String {
+        let cmd_path = Path::new(cmd);
+        if cmd_path.is_absolute() || cmd.contains('/') {
+            return cmd.to_string();
+        }
+
+        let candidates = [
+            Path::new("/usr/local/bin").join(cmd),
+            Path::new("/usr/bin").join(cmd),
+        ];
+
+        for candidate in candidates.iter() {
+            if candidate.exists() {
+                return candidate.to_string_lossy().to_string();
+            }
+        }
+
+        cmd.to_string()
+    }
+
     match &config.transport {
         McpTransport::Http { endpoint } => json!({
             "type": "http",
@@ -455,7 +489,7 @@ fn opencode_entry_from_mcp(config: &McpServerConfig, workspace_dir: &Path) -> se
         McpTransport::Stdio { command, args, env } => {
             let mut entry = serde_json::Map::new();
             entry.insert("type".to_string(), json!("local"));
-            let mut cmd = vec![command.clone()];
+            let mut cmd = vec![resolve_command_path(command)];
             cmd.extend(args.clone());
             entry.insert("command".to_string(), json!(cmd));
             entry.insert("enabled".to_string(), json!(config.enabled));
@@ -463,6 +497,12 @@ fn opencode_entry_from_mcp(config: &McpServerConfig, workspace_dir: &Path) -> se
             merged_env
                 .entry("OPEN_AGENT_WORKSPACE".to_string())
                 .or_insert_with(|| workspace_dir.to_string_lossy().to_string());
+            merged_env
+                .entry("OPEN_AGENT_WORKSPACE_ROOT".to_string())
+                .or_insert_with(|| workspace_root.to_string_lossy().to_string());
+            merged_env
+                .entry("OPEN_AGENT_WORKSPACE_TYPE".to_string())
+                .or_insert_with(|| workspace_type.as_str().to_string());
             if !merged_env.is_empty() {
                 entry.insert("environment".to_string(), json!(merged_env));
             }
@@ -474,23 +514,63 @@ fn opencode_entry_from_mcp(config: &McpServerConfig, workspace_dir: &Path) -> se
 async fn write_opencode_config(
     workspace_dir: &Path,
     mcp_configs: Vec<McpServerConfig>,
+    workspace_root: &Path,
+    workspace_type: WorkspaceType,
 ) -> anyhow::Result<()> {
     let mut mcp_map = serde_json::Map::new();
     let mut used = std::collections::HashSet::new();
 
-    for config in mcp_configs.into_iter().filter(|c| c.enabled) {
-        let base = sanitize_key(&config.name);
-        let key = unique_key(&base, &mut used);
-        mcp_map.insert(key, opencode_entry_from_mcp(&config, workspace_dir));
-    }
-
-    let config_json = json!({
-        "$schema": "https://opencode.ai/config.json",
-        "mcp": mcp_map,
+    let filtered_configs = mcp_configs.into_iter().filter(|c| {
+        if !c.enabled {
+            return false;
+        }
+        if workspace_type == WorkspaceType::Chroot {
+            return c.name != "desktop" && c.name != "playwright";
+        }
+        true
     });
 
+    for config in filtered_configs {
+        let base = sanitize_key(&config.name);
+        let key = unique_key(&base, &mut used);
+        mcp_map.insert(
+            key,
+            opencode_entry_from_mcp(&config, workspace_dir, workspace_root, workspace_type),
+        );
+    }
+
+    let mut config_json = serde_json::Map::new();
+    config_json.insert(
+        "$schema".to_string(),
+        json!("https://opencode.ai/config.json"),
+    );
+    config_json.insert("mcp".to_string(), serde_json::Value::Object(mcp_map));
+
+    // Prevent OpenCode's builtin bash tool from running on the host when we're
+    // targeting an isolated workspace. This forces tool usage through MCP,
+    // which we route via chroot.
+    if workspace_type == WorkspaceType::Chroot {
+        let mut tools = serde_json::Map::new();
+        tools.insert("bash".to_string(), json!(false));
+        tools.insert("desktop_*".to_string(), json!(false));
+        tools.insert("playwright_*".to_string(), json!(false));
+        tools.insert("browser_*".to_string(), json!(false));
+        tools.insert("host_*".to_string(), json!(true));
+        config_json.insert("tools".to_string(), serde_json::Value::Object(tools));
+    }
+
+    let config_value = serde_json::Value::Object(config_json);
+    let config_payload = serde_json::to_string_pretty(&config_value)?;
+
+    // Write to workspace root
     let config_path = workspace_dir.join("opencode.json");
-    tokio::fs::write(config_path, serde_json::to_string_pretty(&config_json)?).await?;
+    tokio::fs::write(&config_path, &config_payload).await?;
+
+    // Also write to .opencode/ for OpenCode config discovery
+    let opencode_dir = workspace_dir.join(".opencode");
+    tokio::fs::create_dir_all(&opencode_dir).await?;
+    let opencode_config_path = opencode_dir.join("opencode.json");
+    tokio::fs::write(opencode_config_path, config_payload).await?;
     Ok(())
 }
 
@@ -659,7 +739,13 @@ pub async fn prepare_custom_workspace(
 ) -> anyhow::Result<PathBuf> {
     prepare_workspace_dir(&workspace_dir).await?;
     let mcp_configs = mcp.list_configs().await;
-    write_opencode_config(&workspace_dir, mcp_configs).await?;
+    write_opencode_config(
+        &workspace_dir,
+        mcp_configs,
+        &workspace_dir,
+        WorkspaceType::Host,
+    )
+    .await?;
     Ok(workspace_dir)
 }
 
@@ -669,19 +755,20 @@ pub async fn prepare_mission_workspace(
     mcp: &McpRegistry,
     mission_id: Uuid,
 ) -> anyhow::Result<PathBuf> {
-    prepare_mission_workspace_in(&config.working_dir, mcp, mission_id).await
+    let default_workspace = Workspace::default_host(config.working_dir.clone());
+    prepare_mission_workspace_in(&default_workspace, mcp, mission_id).await
 }
 
 /// Prepare a workspace directory for a mission under a specific workspace root.
 pub async fn prepare_mission_workspace_in(
-    workspace_root: &Path,
+    workspace: &Workspace,
     mcp: &McpRegistry,
     mission_id: Uuid,
 ) -> anyhow::Result<PathBuf> {
-    let dir = mission_workspace_dir_for_root(workspace_root, mission_id);
+    let dir = mission_workspace_dir_for_root(&workspace.path, mission_id);
     prepare_workspace_dir(&dir).await?;
     let mcp_configs = mcp.list_configs().await;
-    write_opencode_config(&dir, mcp_configs).await?;
+    write_opencode_config(&dir, mcp_configs, &workspace.path, workspace.workspace_type).await?;
     Ok(dir)
 }
 
@@ -696,7 +783,7 @@ pub async fn prepare_mission_workspace_with_skills(
     let dir = mission_workspace_dir_for_root(&workspace.path, mission_id);
     prepare_workspace_dir(&dir).await?;
     let mcp_configs = mcp.list_configs().await;
-    write_opencode_config(&dir, mcp_configs).await?;
+    write_opencode_config(&dir, mcp_configs, &workspace.path, workspace.workspace_type).await?;
 
     // Sync skills from workspace to mission directory
     if let Some(lib) = library {
@@ -731,8 +818,36 @@ pub async fn prepare_task_workspace(
     let dir = task_workspace_dir_for_root(&config.working_dir, task_id);
     prepare_workspace_dir(&dir).await?;
     let mcp_configs = mcp.list_configs().await;
-    write_opencode_config(&dir, mcp_configs).await?;
+    write_opencode_config(
+        &dir,
+        mcp_configs,
+        &config.working_dir,
+        WorkspaceType::Host,
+    )
+    .await?;
     Ok(dir)
+}
+
+/// Write the current workspace context to a runtime file for MCP tools.
+pub async fn write_runtime_workspace_state(
+    working_dir_root: &Path,
+    workspace: &Workspace,
+    working_dir: &Path,
+    mission_id: Option<Uuid>,
+) -> anyhow::Result<()> {
+    let runtime_dir = working_dir_root.join(".openagent").join("runtime");
+    tokio::fs::create_dir_all(&runtime_dir).await?;
+    let payload = json!({
+        "workspace_id": workspace.id,
+        "workspace_name": workspace.name,
+        "workspace_type": workspace.workspace_type.as_str(),
+        "workspace_root": workspace.path,
+        "working_dir": working_dir,
+        "mission_id": mission_id,
+    });
+    let path = runtime_dir.join("current_workspace.json");
+    tokio::fs::write(path, serde_json::to_string_pretty(&payload)?).await?;
+    Ok(())
 }
 
 /// Regenerate `opencode.json` for all workspace directories.
@@ -751,7 +866,7 @@ pub async fn sync_all_workspaces(config: &Config, mcp: &McpRegistry) -> anyhow::
         if !path.is_dir() {
             continue;
         }
-        if write_opencode_config(&path, mcp_configs.clone())
+        if write_opencode_config(&path, mcp_configs.clone(), &config.working_dir, WorkspaceType::Host)
             .await
             .is_ok()
         {
@@ -814,17 +929,38 @@ pub async fn build_chroot_workspace(
         ));
     }
 
-    // Check if already built
-    if chroot::is_chroot_created(&workspace.path).await {
-        tracing::info!("Chroot already exists at {}", workspace.path.display());
-        workspace.status = WorkspaceStatus::Ready;
-        return Ok(());
-    }
-
     // Update status to building
     workspace.status = WorkspaceStatus::Building;
 
     let distro = distro.unwrap_or_default();
+
+    // Check if already built with the right distro
+    if chroot::is_chroot_created(&workspace.path).await {
+        if let Some(existing) = chroot::detect_chroot_distro(&workspace.path).await {
+            if existing == distro {
+                tracing::info!(
+                    "Chroot already exists at {} with distro {}",
+                    workspace.path.display(),
+                    distro.as_str()
+                );
+                workspace.status = WorkspaceStatus::Ready;
+                return Ok(());
+            }
+            tracing::info!(
+                "Chroot exists at {} with distro {}, rebuilding to {}",
+                workspace.path.display(),
+                existing.as_str(),
+                distro.as_str()
+            );
+        } else {
+            tracing::info!(
+                "Chroot exists at {} with unknown distro, rebuilding to {}",
+                workspace.path.display(),
+                distro.as_str()
+            );
+        }
+        chroot::destroy_chroot(&workspace.path).await?;
+    }
 
     tracing::info!(
         "Building chroot workspace at {} with distro {}",

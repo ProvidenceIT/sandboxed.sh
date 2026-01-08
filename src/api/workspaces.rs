@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use uuid::Uuid;
 
+use crate::chroot::ChrootDistro;
 use crate::workspace::{self, Workspace, WorkspaceStatus, WorkspaceType};
 
 /// Create workspace routes.
@@ -197,11 +198,26 @@ async fn create_workspace(
     // Validate workspace name for path traversal
     validate_workspace_name(&req.name)?;
 
+    // Host workspaces require a custom path - the root working directory is reserved
+    // for the default host workspace (which is created automatically).
+    if req.workspace_type == WorkspaceType::Host && req.path.is_none() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Host workspaces require a custom path. The root working directory is reserved for the default host workspace.".to_string(),
+        ));
+    }
+
     // Determine path
     let path = match &req.path {
         Some(custom_path) => resolve_custom_path(&state.config.working_dir, custom_path)?,
         None => match req.workspace_type {
-            WorkspaceType::Host => state.config.working_dir.clone(),
+            WorkspaceType::Host => {
+                // This should be unreachable due to the check above, but keeping for safety
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "Host workspaces require a custom path".to_string(),
+                ));
+            }
             WorkspaceType::Chroot => {
                 // Chroot workspaces go in a dedicated directory
                 state
@@ -410,10 +426,32 @@ async fn delete_workspace(
     }
 }
 
+#[derive(Debug, Deserialize)]
+pub struct BuildWorkspaceRequest {
+    /// Linux distribution to use (defaults to "ubuntu-noble")
+    /// Options: "ubuntu-noble", "ubuntu-jammy", "debian-bookworm", "arch-linux"
+    pub distro: Option<String>,
+}
+
+/// Parse a distro string into a ChrootDistro enum.
+fn parse_distro(s: &str) -> Result<ChrootDistro, String> {
+    match s {
+        "ubuntu-noble" | "noble" => Ok(ChrootDistro::UbuntuNoble),
+        "ubuntu-jammy" | "jammy" => Ok(ChrootDistro::UbuntuJammy),
+        "debian-bookworm" | "bookworm" => Ok(ChrootDistro::DebianBookworm),
+        "arch-linux" | "archlinux" | "arch" => Ok(ChrootDistro::ArchLinux),
+        _ => Err(format!(
+            "Unknown distro '{}'. Supported: ubuntu-noble, ubuntu-jammy, debian-bookworm, arch-linux",
+            s
+        )),
+    }
+}
+
 /// POST /api/workspaces/:id/build - Build a chroot workspace.
 async fn build_workspace(
     State(state): State<Arc<super::routes::AppState>>,
     AxumPath(id): AxumPath<Uuid>,
+    body: Option<Json<BuildWorkspaceRequest>>,
 ) -> Result<Json<WorkspaceResponse>, (StatusCode, String)> {
     let mut workspace = state
         .workspaces
@@ -428,6 +466,12 @@ async fn build_workspace(
         ));
     }
 
+    // Parse distro from request
+    let distro = body
+        .and_then(|b| b.distro.as_ref().map(|d| parse_distro(d)))
+        .transpose()
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+
     // Check if already building (prevents concurrent builds)
     if workspace.status == WorkspaceStatus::Building {
         return Err((
@@ -436,8 +480,8 @@ async fn build_workspace(
         ));
     }
 
-    // Check if already ready
-    if workspace.status == WorkspaceStatus::Ready {
+    // If ready and no distro override requested, no-op
+    if workspace.status == WorkspaceStatus::Ready && distro.is_none() {
         return Ok(Json(workspace.into()));
     }
 
@@ -446,7 +490,7 @@ async fn build_workspace(
     state.workspaces.update(workspace.clone()).await;
 
     // Build the chroot
-    match crate::workspace::build_chroot_workspace(&mut workspace, None).await {
+    match crate::workspace::build_chroot_workspace(&mut workspace, distro).await {
         Ok(()) => {
             // Update in store
             state.workspaces.update(workspace.clone()).await;

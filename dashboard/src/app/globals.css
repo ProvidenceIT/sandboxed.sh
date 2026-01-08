@@ -73,6 +73,30 @@
   box-sizing: border-box;
 }
 
+/* =========================================================================
+   Pointer Cursor for Interactive Elements
+   ========================================================================= */
+button,
+[role="button"],
+[type="button"],
+[type="submit"],
+[type="reset"],
+select,
+summary,
+a[href],
+label[for],
+input[type="checkbox"],
+input[type="radio"],
+input[type="file"],
+input[type="range"] {
+  cursor: pointer;
+}
+
+button:disabled,
+[disabled] {
+  cursor: not-allowed;
+}
+
 body {
   background-color: rgb(var(--background));
   color: rgb(var(--foreground));
@@ -178,6 +202,39 @@ select:focus-visible {
   }
 }
 
+@keyframes scale-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateX(16px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+  }
+}
+
+@keyframes toast-out {
+  from {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translateX(16px) scale(0.96);
+  }
+}
+
 .animate-fade-in {
   animation: fade-in 150ms ease-out forwards;
 }
@@ -192,6 +249,18 @@ select:focus-visible {
 
 .animate-pulse-subtle {
   animation: pulse-subtle 2s ease-in-out infinite;
+}
+
+.animate-scale-in {
+  animation: scale-in 200ms ease-out forwards;
+}
+
+.animate-toast-in {
+  animation: toast-in 200ms ease-out forwards;
+}
+
+.animate-toast-out {
+  animation: toast-out 200ms ease-out forwards;
 }
 
 /* =========================================================================

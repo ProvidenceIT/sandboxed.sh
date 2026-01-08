@@ -24,14 +24,12 @@ export default function RulesPage() {
     status,
     rules,
     loading,
-    error,
     libraryUnavailable,
     libraryUnavailableMessage,
     refresh,
     sync,
     commit,
     push,
-    clearError,
     saveRule,
     removeRule,
     syncing,
@@ -193,16 +191,6 @@ Describe what this rule does.
         <LibraryUnavailable message={libraryUnavailableMessage} onConfigured={refresh} />
       ) : (
         <>
-          {error && (
-            <div className="p-4 rounded-lg bg-red-500/10 border border-red-500/20 text-red-400 flex items-center gap-2">
-              <AlertCircle className="h-4 w-4 flex-shrink-0" />
-              {error}
-              <button onClick={clearError} className="ml-auto">
-                <X className="h-4 w-4" />
-              </button>
-            </div>
-          )}
-
           {/* Git Status Bar */}
           {status && (
             <div className="p-4 rounded-xl bg-white/[0.02] border border-white/[0.06]">
@@ -273,10 +261,7 @@ Describe what this rule does.
 
           {/* Header */}
           <div className="flex items-center justify-between">
-            <div>
-              <h1 className="text-xl font-semibold text-white">Rules</h1>
-              <p className="text-sm text-white/40">AGENTS.md-style instructions for agents</p>
-            </div>
+            <h1 className="text-xl font-semibold text-white">Rules</h1>
           </div>
 
           {/* Rules Editor */}

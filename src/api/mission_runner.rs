@@ -428,10 +428,10 @@ async fn run_mission_turn(
     };
 
     // Ensure mission workspace exists and is configured for OpenCode.
-    let workspace_root =
-        workspace::resolve_workspace_root(&workspaces, &config, workspace_id).await;
+    let workspace = workspace::resolve_workspace(&workspaces, &config, workspace_id).await;
+    let workspace_root = workspace.path.clone();
     let mission_work_dir =
-        match workspace::prepare_mission_workspace_in(&workspace_root, &mcp, mission_id).await {
+        match workspace::prepare_mission_workspace_in(&workspace, &mcp, mission_id).await {
             Ok(dir) => {
                 tracing::info!(
                     "Mission {} workspace directory: {}",

@@ -101,14 +101,16 @@ impl McpRegistry {
             desktop_env.insert("DESKTOP_RESOLUTION".to_string(), "1920x1080".to_string());
         }
 
-        let repo_desktop = working_dir
-            .join("target")
-            .join("release")
-            .join("desktop-mcp");
-        let desktop_command = if repo_desktop.exists() {
-            repo_desktop.to_string_lossy().to_string()
-        } else {
-            "desktop-mcp".to_string()
+        let desktop_command = {
+            let release = working_dir.join("target").join("release").join("desktop-mcp");
+            let debug = working_dir.join("target").join("debug").join("desktop-mcp");
+            if release.exists() {
+                release.to_string_lossy().to_string()
+            } else if debug.exists() {
+                debug.to_string_lossy().to_string()
+            } else {
+                "desktop-mcp".to_string()
+            }
         };
         let desktop = McpServerConfig::new_stdio(
             "desktop".to_string(),
@@ -116,11 +118,16 @@ impl McpRegistry {
             Vec::new(),
             desktop_env,
         );
-        let repo_host = working_dir.join("target").join("release").join("host-mcp");
-        let host_command = if repo_host.exists() {
-            repo_host.to_string_lossy().to_string()
-        } else {
-            "host-mcp".to_string()
+        let host_command = {
+            let release = working_dir.join("target").join("release").join("host-mcp");
+            let debug = working_dir.join("target").join("debug").join("host-mcp");
+            if release.exists() {
+                release.to_string_lossy().to_string()
+            } else if debug.exists() {
+                debug.to_string_lossy().to_string()
+            } else {
+                "host-mcp".to_string()
+            }
         };
         let host = McpServerConfig::new_stdio(
             "host".to_string(),
@@ -138,7 +145,22 @@ impl McpRegistry {
             ],
             HashMap::new(),
         );
-        vec![host, desktop, playwright]
+
+        // GitHub MCP - requires GITHUB_PERSONAL_ACCESS_TOKEN env var
+        let mut github_env = HashMap::new();
+        if let Ok(token) = std::env::var("GITHUB_PERSONAL_ACCESS_TOKEN") {
+            if !token.trim().is_empty() {
+                github_env.insert("GITHUB_PERSONAL_ACCESS_TOKEN".to_string(), token);
+            }
+        }
+        let github = McpServerConfig::new_stdio(
+            "github".to_string(),
+            "mcp-server-github".to_string(),
+            Vec::new(),
+            github_env,
+        );
+
+        vec![host, desktop, playwright, github]
     }
 
     async fn ensure_defaults(
@@ -146,6 +168,18 @@ impl McpRegistry {
         mut configs: Vec<McpServerConfig>,
         working_dir: &Path,
     ) -> Vec<McpServerConfig> {
+        fn resolve_local_binary(working_dir: &Path, name: &str) -> Option<String> {
+            let release = working_dir.join("target").join("release").join(name);
+            if release.exists() {
+                return Some(release.to_string_lossy().to_string());
+            }
+            let debug = working_dir.join("target").join("debug").join(name);
+            if debug.exists() {
+                return Some(debug.to_string_lossy().to_string());
+            }
+            None
+        }
+
         let defaults = Self::default_configs(working_dir);
         for config in defaults {
             if configs.iter().any(|c| c.name == config.name) {
@@ -194,6 +228,33 @@ impl McpRegistry {
                     }
                 })
                 .await;
+        }
+
+        // Prefer repo-local MCP binaries for host/desktop (debug or release),
+        // so default configs work without installing to PATH.
+        for config in configs.iter_mut() {
+            let binary_name = match config.name.as_str() {
+                "host" => Some("host-mcp"),
+                "desktop" => Some("desktop-mcp"),
+                _ => None,
+            };
+
+            let Some(binary_name) = binary_name else { continue };
+            let Some(resolved) = resolve_local_binary(working_dir, binary_name) else { continue };
+
+            if let McpTransport::Stdio { command, .. } = &mut config.transport {
+                if command != &resolved {
+                    *command = resolved.clone();
+                    let id = config.id;
+                    let _ = config_store
+                        .update(id, |c| {
+                            if let McpTransport::Stdio { command, .. } = &mut c.transport {
+                                *command = resolved.clone();
+                            }
+                        })
+                        .await;
+                }
+            }
         }
 
         configs

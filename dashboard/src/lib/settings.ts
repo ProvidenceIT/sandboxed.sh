@@ -1,6 +1,8 @@
 export type SavedSettings = Partial<{
   apiUrl: string;
   libraryRepo: string;
+  gitAuthorName: string;
+  gitAuthorEmail: string;
 }>;
 
 const STORAGE_KEY = 'settings';
@@ -14,6 +16,8 @@ export function readSavedSettings(): SavedSettings {
     const out: SavedSettings = {};
     if (typeof parsed.apiUrl === 'string') out.apiUrl = parsed.apiUrl;
     if (typeof parsed.libraryRepo === 'string') out.libraryRepo = parsed.libraryRepo;
+    if (typeof parsed.gitAuthorName === 'string') out.gitAuthorName = parsed.gitAuthorName;
+    if (typeof parsed.gitAuthorEmail === 'string') out.gitAuthorEmail = parsed.gitAuthorEmail;
     return out;
   } catch {
     return {};
@@ -32,10 +36,15 @@ function normalizeBaseUrl(url: string): string {
 }
 
 export function getRuntimeApiBase(): string {
-  const envBase = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:3000';
-  if (typeof window === 'undefined') return normalizeBaseUrl(envBase);
+  const envBase = process.env.NEXT_PUBLIC_API_URL;
+  if (typeof window === 'undefined') {
+    return normalizeBaseUrl(envBase || 'http://127.0.0.1:3000');
+  }
   const saved = readSavedSettings().apiUrl;
-  return normalizeBaseUrl(saved || envBase);
+  if (saved) return normalizeBaseUrl(saved);
+  if (envBase) return normalizeBaseUrl(envBase);
+  const { protocol, hostname } = window.location;
+  return normalizeBaseUrl(`${protocol}//${hostname}:3000`);
 }
 
 export function getRuntimeLibraryRemote(): string | undefined {
@@ -45,6 +54,19 @@ export function getRuntimeLibraryRemote(): string | undefined {
   return trimmed ? trimmed : undefined;
 }
 
+export function getGitAuthorName(): string | undefined {
+  if (typeof window === 'undefined') return undefined;
+  const saved = readSavedSettings().gitAuthorName;
+  const trimmed = saved?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+export function getGitAuthorEmail(): string | undefined {
+  if (typeof window === 'undefined') return undefined;
+  const saved = readSavedSettings().gitAuthorEmail;
+  const trimmed = saved?.trim();
+  return trimmed ? trimmed : undefined;
+}
 
 
 

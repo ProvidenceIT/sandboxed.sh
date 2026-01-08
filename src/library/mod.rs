@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use tokio::fs;
 use tracing::info;
 
+pub use git::GitAuthor;
 pub use types::*;
 
 // Directory constants (OpenCode-aligned structure)
@@ -77,9 +78,9 @@ impl LibraryStore {
         git::pull(&self.path).await
     }
 
-    /// Commit all changes with a message.
-    pub async fn commit(&self, message: &str) -> Result<()> {
-        git::commit(&self.path, message).await
+    /// Commit all changes with a message and optional author.
+    pub async fn commit(&self, message: &str, author: Option<&git::GitAuthor>) -> Result<()> {
+        git::commit(&self.path, message, author).await
     }
 
     /// Push changes to remote.
@@ -974,7 +975,6 @@ impl LibraryStore {
         let model = extract_model(&frontmatter);
         let tools = extract_tools(&frontmatter);
         let permissions = extract_permissions(&frontmatter);
-        let skills = extract_string_array(&frontmatter, "skills");
         let rules = extract_string_array(&frontmatter, "rules");
 
         Ok(LibraryAgent {
@@ -985,7 +985,6 @@ impl LibraryStore {
             model,
             tools,
             permissions,
-            skills,
             rules,
         })
     }

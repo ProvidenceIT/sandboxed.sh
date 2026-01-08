@@ -21,6 +21,7 @@ mod console;
 pub mod control;
 mod desktop_stream;
 mod fs;
+mod monitoring;
 pub mod library;
 pub mod mcp;
 pub mod mission_runner;

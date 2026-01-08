@@ -138,9 +138,6 @@ pub struct LibraryAgent {
     /// Permission levels: {"bash": "ask", "write": "allow"}
     #[serde(default)]
     pub permissions: HashMap<String, String>,
-    /// Skills to include by name
-    #[serde(default)]
-    pub skills: Vec<String>,
     /// Rules to include by name
     #[serde(default)]
     pub rules: Vec<String>,

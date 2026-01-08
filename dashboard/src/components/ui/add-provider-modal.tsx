@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect } from 'react';
 import { X, ExternalLink, Key, Loader, Cpu } from 'lucide-react';
-import { toast } from 'sonner';
+import { toast } from '@/components/toast';
 import { cn } from '@/lib/utils';
 import {
   createAIProvider,

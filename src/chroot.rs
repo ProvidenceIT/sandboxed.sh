@@ -11,8 +11,14 @@ pub enum ChrootError {
     #[error("Failed to create chroot directory: {0}")]
     DirectoryCreation(#[from] std::io::Error),
 
+    #[error("Failed to remove chroot directory: {0}")]
+    DirectoryRemoval(std::io::Error),
+
     #[error("Debootstrap failed: {0}")]
     Debootstrap(String),
+
+    #[error("Pacstrap failed: {0}")]
+    Pacstrap(String),
 
     #[error("Mount operation failed: {0}")]
     Mount(String),
@@ -27,7 +33,7 @@ pub enum ChrootError {
 pub type ChrootResult<T> = Result<T, ChrootError>;
 
 /// Supported Linux distributions for chroot environments
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChrootDistro {
     /// Ubuntu Noble (24.04 LTS)
     UbuntuNoble,
@@ -35,6 +41,8 @@ pub enum ChrootDistro {
     UbuntuJammy,
     /// Debian Bookworm (12)
     DebianBookworm,
+    /// Arch Linux (base)
+    ArchLinux,
 }
 
 impl ChrootDistro {
@@ -43,6 +51,7 @@ impl ChrootDistro {
             Self::UbuntuNoble => "noble",
             Self::UbuntuJammy => "jammy",
             Self::DebianBookworm => "bookworm",
+            Self::ArchLinux => "arch-linux",
         }
     }
 
@@ -50,6 +59,7 @@ impl ChrootDistro {
         match self {
             Self::UbuntuNoble | Self::UbuntuJammy => "http://archive.ubuntu.com/ubuntu",
             Self::DebianBookworm => "http://deb.debian.org/debian",
+            Self::ArchLinux => "https://geo.mirror.pkgbuild.com/",
         }
     }
 }
@@ -60,7 +70,7 @@ impl Default for ChrootDistro {
     }
 }
 
-/// Create a minimal chroot environment using debootstrap
+/// Create a minimal chroot environment using debootstrap or pacstrap
 pub async fn create_chroot(
     chroot_path: &Path,
     distro: ChrootDistro,
@@ -74,24 +84,87 @@ pub async fn create_chroot(
         distro.as_str()
     );
 
-    // Run debootstrap to create minimal root filesystem
-    let output = tokio::process::Command::new("debootstrap")
-        .arg("--variant=minbase")
-        .arg(distro.as_str())
-        .arg(chroot_path)
-        .arg(distro.mirror_url())
-        .output()
-        .await?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(ChrootError::Debootstrap(stderr.to_string()));
+    match distro {
+        ChrootDistro::ArchLinux => create_arch_chroot(chroot_path).await?,
+        _ => create_debootstrap_chroot(chroot_path, distro).await?,
     }
 
     tracing::info!("Chroot created successfully at {}", chroot_path.display());
 
     // Mount necessary filesystems
     mount_chroot_filesystems(chroot_path).await?;
+
+    Ok(())
+}
+
+async fn create_debootstrap_chroot(
+    chroot_path: &Path,
+    distro: ChrootDistro,
+) -> ChrootResult<()> {
+    let output = tokio::process::Command::new("debootstrap")
+        .arg("--variant=minbase")
+        .arg(distro.as_str())
+        .arg(chroot_path)
+        .arg(distro.mirror_url())
+        .output()
+        .await
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                ChrootError::Debootstrap(
+                    "debootstrap not found. Install debootstrap on the host.".to_string(),
+                )
+            } else {
+                ChrootError::Debootstrap(e.to_string())
+            }
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(ChrootError::Debootstrap(stderr.to_string()));
+    }
+
+    Ok(())
+}
+
+async fn create_arch_chroot(chroot_path: &Path) -> ChrootResult<()> {
+    let pacman_conf = std::env::temp_dir().join("open_agent_pacman.conf");
+    let pacman_conf_contents = r#"[options]
+Architecture = auto
+SigLevel = Never
+
+[core]
+Include = /etc/pacman.d/mirrorlist
+
+[extra]
+Include = /etc/pacman.d/mirrorlist
+"#;
+    tokio::fs::write(&pacman_conf, pacman_conf_contents).await?;
+
+    let output = tokio::process::Command::new("pacstrap")
+        .arg("-C")
+        .arg(&pacman_conf)
+        .arg("-c")
+        .arg(chroot_path)
+        .arg("base")
+        .output()
+        .await
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                ChrootError::Pacstrap(
+                    "pacstrap not found. Install arch-install-scripts (and pacman) on the host."
+                        .to_string(),
+                )
+            } else {
+                ChrootError::Pacstrap(e.to_string())
+            }
+        })?;
+
+    let _ = tokio::fs::remove_file(&pacman_conf).await;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(ChrootError::Pacstrap(stderr.to_string()));
+    }
 
     Ok(())
 }
@@ -133,6 +206,14 @@ async fn mount_chroot_filesystems(chroot_path: &Path) -> ChrootResult<()> {
 
 /// Unmount filesystems from chroot environment
 pub async fn unmount_chroot_filesystems(chroot_path: &Path) -> ChrootResult<()> {
+    if !chroot_path.exists() {
+        tracing::info!(
+            "Chroot path {} does not exist, skipping unmount",
+            chroot_path.display()
+        );
+        return Ok(());
+    }
+
     let targets = vec!["/dev/shm", "/dev/pts", "/sys", "/proc"];
 
     for target in targets {
@@ -208,15 +289,71 @@ pub async fn is_chroot_created(chroot_path: &Path) -> bool {
     true
 }
 
+fn parse_os_release_value(line: &str, key: &str) -> Option<String> {
+    let prefix = format!("{}=", key);
+    if !line.starts_with(&prefix) {
+        return None;
+    }
+    let value = line[prefix.len()..].trim().trim_matches('"');
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
+/// Detect the distro of an existing chroot by inspecting /etc/os-release.
+pub async fn detect_chroot_distro(chroot_path: &Path) -> Option<ChrootDistro> {
+    let os_release_path = chroot_path.join("etc/os-release");
+    let contents = tokio::fs::read_to_string(os_release_path).await.ok()?;
+    let mut id: Option<String> = None;
+    let mut codename: Option<String> = None;
+
+    for line in contents.lines() {
+        if id.is_none() {
+            id = parse_os_release_value(line, "ID");
+        }
+        if codename.is_none() {
+            codename = parse_os_release_value(line, "VERSION_CODENAME");
+        }
+    }
+
+    match id.as_deref()? {
+        "ubuntu" => match codename.as_deref()? {
+            "noble" => Some(ChrootDistro::UbuntuNoble),
+            "jammy" => Some(ChrootDistro::UbuntuJammy),
+            _ => None,
+        },
+        "debian" => match codename.as_deref()? {
+            "bookworm" => Some(ChrootDistro::DebianBookworm),
+            _ => None,
+        },
+        "arch" | "archlinux" => Some(ChrootDistro::ArchLinux),
+        _ => None,
+    }
+}
+
 /// Clean up a chroot environment
 pub async fn destroy_chroot(chroot_path: &Path) -> ChrootResult<()> {
     tracing::info!("Destroying chroot at {}", chroot_path.display());
+
+    if !chroot_path.exists() {
+        tracing::info!(
+            "Chroot path {} does not exist, nothing to destroy",
+            chroot_path.display()
+        );
+        return Ok(());
+    }
 
     // Unmount filesystems first
     unmount_chroot_filesystems(chroot_path).await?;
 
     // Remove the chroot directory
-    tokio::fs::remove_dir_all(chroot_path).await?;
+    match tokio::fs::remove_dir_all(chroot_path).await {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(ChrootError::DirectoryRemoval(e)),
+    }
 
     tracing::info!("Chroot destroyed successfully");
 
