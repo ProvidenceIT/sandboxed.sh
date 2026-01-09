@@ -258,13 +258,13 @@ impl OpenCodeClient {
                             continue;
                         }
 
-                        if let Some(rest) = trimmed.strip_prefix("event: ") {
-                            current_event = Some(rest.to_string());
+                        if let Some(rest) = trimmed.strip_prefix("event:") {
+                            current_event = Some(rest.trim_start().to_string());
                             continue;
                         }
 
-                        if let Some(rest) = trimmed.strip_prefix("data: ") {
-                            data_lines.push(rest.to_string());
+                        if let Some(rest) = trimmed.strip_prefix("data:") {
+                            data_lines.push(rest.trim_start().to_string());
                             continue;
                         }
 

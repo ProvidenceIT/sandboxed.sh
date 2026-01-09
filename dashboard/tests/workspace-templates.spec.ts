@@ -28,13 +28,13 @@ test.describe('Workspace Templates Flow', () => {
 
     // Open workspace modal
     await page.getByRole('heading', { name: seedWorkspaceName }).click();
-    await expect(page.getByText('Workspace details & runtime settings')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Overview' })).toBeVisible();
 
     // Switch to Env & Init tab
     await page.getByRole('button', { name: 'Env & Init' }).click();
 
     // Add env var
-    await page.getByRole('button', { name: /Add variable/i }).click();
+    await page.getByRole('button', { name: /\+ Add/i }).click();
     await page.getByPlaceholder('KEY').first().fill(envKey);
     await page.getByPlaceholder('value').first().fill(envValue);
 
@@ -43,7 +43,7 @@ test.describe('Workspace Templates Flow', () => {
     await page.getByPlaceholder(/#!\/usr\/bin\/env bash/).fill(initScript);
 
     // Save workspace settings
-    const saveSettingsButton = page.getByRole('button', { name: /Save Settings/i });
+    const saveSettingsButton = page.getByRole('button', { name: /^Save$/i }).first();
     await saveSettingsButton.scrollIntoViewIfNeeded();
     await saveSettingsButton.evaluate((button: HTMLButtonElement) => button.click());
 
@@ -55,11 +55,10 @@ test.describe('Workspace Templates Flow', () => {
     await saveTemplateButton.evaluate((button: HTMLButtonElement) => button.click());
 
     // Close modal
-    const closeButton = page.getByRole('button', { name: /Close/i });
-    await closeButton.scrollIntoViewIfNeeded();
-    await closeButton.evaluate((button: HTMLButtonElement) => button.click());
+    const closeButton = page.getByRole('button', { name: /^Close$/i });
+    await closeButton.click();
     await page.keyboard.press('Escape');
-    await expect(page.locator('.backdrop-blur-sm')).toHaveCount(0);
+    await expect(page.locator('.backdrop-blur-md')).toHaveCount(0);
     await page.reload();
     await expect(page.getByRole('heading', { name: 'Workspaces' })).toBeVisible();
 
