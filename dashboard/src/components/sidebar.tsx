@@ -23,6 +23,7 @@ import {
   Puzzle,
   ScrollText,
   Wrench,
+  LayoutGrid,
 } from 'lucide-react';
 
 type NavItem = {
@@ -46,6 +47,7 @@ const navigation: NavItem[] = [
       { name: 'Commands', href: '/config/commands', icon: Terminal },
       { name: 'Skills', href: '/config/skills', icon: FileCode },
       { name: 'Rules', href: '/config/rules', icon: ScrollText },
+      { name: 'Workspaces', href: '/config/workspace-templates', icon: LayoutGrid },
     ],
   },
   {

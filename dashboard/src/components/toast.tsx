@@ -117,11 +117,6 @@ export function useToast() {
   return context;
 }
 
-// Alias for backwards compatibility with ErrorToastProvider
-export const useErrorToast = () => {
-  const { showError } = useToast();
-  return { showError };
-};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Toast Item Component
@@ -419,6 +414,3 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     </ToastContext.Provider>
   );
 }
-
-// Re-export for backwards compatibility with error-toast.tsx imports
-export { ToastProvider as ErrorToastProvider };

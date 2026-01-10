@@ -16,8 +16,6 @@ mod composite;
 mod desktop;
 mod directory;
 mod file_ops;
-mod git;
-mod github;
 mod index;
 pub mod mission;
 mod search;
@@ -28,7 +26,6 @@ mod web;
 
 pub use directory::{ListDirectory, SearchFiles};
 pub use file_ops::{DeleteFile, ReadFile, WriteFile};
-pub use git::{GitCommit, GitDiff, GitLog, GitStatus};
 pub use search::GrepSearch;
 pub use terminal::RunCommand;
 pub use web::{FetchUrl, WebSearch};
@@ -135,7 +132,6 @@ pub fn safe_truncate_index(s: &str, max: usize) -> usize {
 use async_trait::async_trait;
 use serde_json::Value;
 
-
 /// Information about a tool for display purposes.
 #[derive(Debug, Clone)]
 pub struct ToolInfo {
@@ -215,34 +211,12 @@ impl ToolRegistry {
         tools.insert("web_search".to_string(), Arc::new(web::WebSearch));
         tools.insert("fetch_url".to_string(), Arc::new(web::FetchUrl));
 
-        // Git
-        tools.insert("git_status".to_string(), Arc::new(git::GitStatus));
-        tools.insert("git_diff".to_string(), Arc::new(git::GitDiff));
-        tools.insert("git_commit".to_string(), Arc::new(git::GitCommit));
-        tools.insert("git_log".to_string(), Arc::new(git::GitLog));
-
-        // GitHub (uses `gh` CLI)
-        tools.insert("github_clone".to_string(), Arc::new(github::GitHubClone));
-        tools.insert(
-            "github_list_repos".to_string(),
-            Arc::new(github::GitHubListRepos),
-        );
-        tools.insert(
-            "github_get_file".to_string(),
-            Arc::new(github::GitHubGetFile),
-        );
-        tools.insert(
-            "github_search_code".to_string(),
-            Arc::new(github::GitHubSearchCode),
-        );
-
         // Frontend Tool UI (schemas for rich rendering in the dashboard)
         tools.insert("ui_optionList".to_string(), Arc::new(ui::UiOptionList));
         tools.insert("ui_dataTable".to_string(), Arc::new(ui::UiDataTable));
 
         // Storage (file sharing - requires Supabase)
         tools.insert("share_file".to_string(), Arc::new(storage::ShareFile));
-        tools.insert("upload_image".to_string(), Arc::new(storage::UploadImage)); // Legacy alias
 
         // Composite tools (higher-level workflow operations)
         tools.insert(

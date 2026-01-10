@@ -17,7 +17,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tokio::fs;
-use tracing::info;
 
 pub use git::GitAuthor;
 pub use types::*;
@@ -46,10 +45,6 @@ const TOOL_DIR: &str = "tool";
 const RULE_DIR: &str = "rule";
 const PLUGINS_FILE: &str = "plugins.json";
 const WORKSPACE_TEMPLATE_DIR: &str = "workspace-template";
-
-// Legacy directory names (for migration)
-const LEGACY_SKILLS_DIR: &str = "skills";
-const LEGACY_COMMANDS_DIR: &str = "commands";
 
 /// Store for managing the configuration library.
 pub struct LibraryStore {
@@ -156,37 +151,14 @@ impl LibraryStore {
     // Skills (skill/*/SKILL.md with additional .md files)
     // ─────────────────────────────────────────────────────────────────────────
 
-    /// Get the skills directory path (checks new path first, then legacy).
+    /// Get the skills directory path.
     fn skills_dir(&self) -> PathBuf {
-        let new_path = self.path.join(SKILL_DIR);
-        if new_path.exists() {
-            return new_path;
-        }
-        let legacy_path = self.path.join(LEGACY_SKILLS_DIR);
-        if legacy_path.exists() {
-            return legacy_path;
-        }
-        // Default to new path for creation
-        new_path
-    }
-
-    /// Get the directory name being used for skills (for path formatting).
-    fn skills_dir_name(&self) -> &'static str {
-        let new_path = self.path.join(SKILL_DIR);
-        if new_path.exists() {
-            return SKILL_DIR;
-        }
-        let legacy_path = self.path.join(LEGACY_SKILLS_DIR);
-        if legacy_path.exists() {
-            return LEGACY_SKILLS_DIR;
-        }
-        SKILL_DIR
+        self.path.join(SKILL_DIR)
     }
 
     /// List all skills with their summaries.
     pub async fn list_skills(&self) -> Result<Vec<SkillSummary>> {
         let skills_dir = self.skills_dir();
-        let dir_name = self.skills_dir_name();
 
         if !skills_dir.exists() {
             return Ok(Vec::new());
@@ -222,7 +194,7 @@ impl LibraryStore {
             skills.push(SkillSummary {
                 name,
                 description,
-                path: format!("{}/{}", dir_name, entry.file_name().to_string_lossy()),
+                path: format!("{}/{}", SKILL_DIR, entry.file_name().to_string_lossy()),
             });
         }
 
@@ -235,9 +207,7 @@ impl LibraryStore {
     /// Get a skill by name with full content.
     pub async fn get_skill(&self, name: &str) -> Result<Skill> {
         Self::validate_name(name)?;
-        let skills_dir = self.skills_dir();
-        let dir_name = self.skills_dir_name();
-        let skill_dir = skills_dir.join(name);
+        let skill_dir = self.skills_dir().join(name);
         let skill_md = skill_dir.join("SKILL.md");
 
         if !skill_md.exists() {
@@ -257,7 +227,7 @@ impl LibraryStore {
         Ok(Skill {
             name: name.to_string(),
             description,
-            path: format!("{}/{}", dir_name, name),
+            path: format!("{}/{}", SKILL_DIR, name),
             content,
             files,
             references,
@@ -270,8 +240,14 @@ impl LibraryStore {
         let mut references = Vec::new();
         let mut visited = HashSet::new();
 
-        self.collect_skill_files_recursive(skill_dir, skill_dir, &mut md_files, &mut references, &mut visited)
-            .await?;
+        self.collect_skill_files_recursive(
+            skill_dir,
+            skill_dir,
+            &mut md_files,
+            &mut references,
+            &mut visited,
+        )
+        .await?;
 
         // Sort for consistent ordering
         md_files.sort_by(|a, b| a.name.cmp(&b.name));
@@ -320,8 +296,14 @@ impl LibraryStore {
             };
 
             if metadata.is_dir() {
-                self.collect_skill_files_recursive(base_dir, &entry_path, md_files, references, visited)
-                    .await?;
+                self.collect_skill_files_recursive(
+                    base_dir,
+                    &entry_path,
+                    md_files,
+                    references,
+                    visited,
+                )
+                .await?;
             } else if metadata.is_file() {
                 let relative_path = entry_path
                     .strip_prefix(base_dir)
@@ -332,7 +314,8 @@ impl LibraryStore {
                 if file_name.ends_with(".md") {
                     // Skip SKILL.md from the files list (it's in the content field)
                     if file_name != "SKILL.md" {
-                        let file_content = fs::read_to_string(&entry_path).await.unwrap_or_default();
+                        let file_content =
+                            fs::read_to_string(&entry_path).await.unwrap_or_default();
                         md_files.push(SkillFile {
                             name: file_name,
                             path: relative_path,
@@ -353,14 +336,7 @@ impl LibraryStore {
     pub async fn save_skill(&self, name: &str, content: &str) -> Result<()> {
         Self::validate_name(name)?;
 
-        // Check if skill exists in legacy directory first
-        let legacy_dir = self.path.join(LEGACY_SKILLS_DIR).join(name);
-        let skill_dir = if legacy_dir.exists() {
-            legacy_dir
-        } else {
-            // Use current skills directory for new skills
-            self.skills_dir().join(name)
-        };
+        let skill_dir = self.skills_dir().join(name);
         let skill_md = skill_dir.join("SKILL.md");
 
         // Ensure directory exists
@@ -377,17 +353,10 @@ impl LibraryStore {
     pub async fn delete_skill(&self, name: &str) -> Result<()> {
         Self::validate_name(name)?;
 
-        // Check both paths
-        let new_dir = self.path.join(SKILL_DIR).join(name);
-        let legacy_dir = self.path.join(LEGACY_SKILLS_DIR).join(name);
+        let skill_dir = self.skills_dir().join(name);
 
-        if new_dir.exists() {
-            fs::remove_dir_all(&new_dir)
-                .await
-                .context("Failed to delete skill directory")?;
-        }
-        if legacy_dir.exists() {
-            fs::remove_dir_all(&legacy_dir)
+        if skill_dir.exists() {
+            fs::remove_dir_all(&skill_dir)
                 .await
                 .context("Failed to delete skill directory")?;
         }
@@ -479,13 +448,7 @@ impl LibraryStore {
         content: &str,
     ) -> Result<()> {
         Self::validate_name(skill_name)?;
-        // Check if skill exists in legacy directory first
-        let legacy_dir = self.path.join(LEGACY_SKILLS_DIR).join(skill_name);
-        let skill_dir = if legacy_dir.exists() {
-            legacy_dir
-        } else {
-            self.skills_dir().join(skill_name)
-        };
+        let skill_dir = self.skills_dir().join(skill_name);
         let file_path = skill_dir.join(ref_path);
 
         // Validate path doesn't escape skill directory
@@ -582,9 +545,9 @@ impl LibraryStore {
             let joined = temp_dir.join(path);
             // Validate path doesn't escape temp_dir via traversal
             let canonical_temp = temp_dir.canonicalize()?;
-            let canonical_source = joined.canonicalize().map_err(|_| {
-                anyhow::anyhow!("Skill path '{}' not found in repository", path)
-            })?;
+            let canonical_source = joined
+                .canonicalize()
+                .map_err(|_| anyhow::anyhow!("Skill path '{}' not found in repository", path))?;
             if !canonical_source.starts_with(&canonical_temp) {
                 let _ = fs::remove_dir_all(&temp_dir).await;
                 anyhow::bail!("Invalid skill path: path traversal detected");
@@ -644,36 +607,14 @@ impl LibraryStore {
     // Commands (command/*.md)
     // ─────────────────────────────────────────────────────────────────────────
 
-    /// Get the commands directory path (checks new path first, then legacy).
+    /// Get the commands directory path.
     fn commands_dir(&self) -> PathBuf {
-        let new_path = self.path.join(COMMAND_DIR);
-        if new_path.exists() {
-            return new_path;
-        }
-        let legacy_path = self.path.join(LEGACY_COMMANDS_DIR);
-        if legacy_path.exists() {
-            return legacy_path;
-        }
-        new_path
-    }
-
-    /// Get the directory name being used for commands.
-    fn commands_dir_name(&self) -> &'static str {
-        let new_path = self.path.join(COMMAND_DIR);
-        if new_path.exists() {
-            return COMMAND_DIR;
-        }
-        let legacy_path = self.path.join(LEGACY_COMMANDS_DIR);
-        if legacy_path.exists() {
-            return LEGACY_COMMANDS_DIR;
-        }
-        COMMAND_DIR
+        self.path.join(COMMAND_DIR)
     }
 
     /// List all commands with their summaries.
     pub async fn list_commands(&self) -> Result<Vec<CommandSummary>> {
         let commands_dir = self.commands_dir();
-        let dir_name = self.commands_dir_name();
 
         if !commands_dir.exists() {
             return Ok(Vec::new());
@@ -708,7 +649,7 @@ impl LibraryStore {
             commands.push(CommandSummary {
                 name,
                 description,
-                path: format!("{}/{}", dir_name, file_name),
+                path: format!("{}/{}", COMMAND_DIR, file_name),
             });
         }
 
@@ -721,9 +662,7 @@ impl LibraryStore {
     /// Get a command by name with full content.
     pub async fn get_command(&self, name: &str) -> Result<Command> {
         Self::validate_name(name)?;
-        let commands_dir = self.commands_dir();
-        let dir_name = self.commands_dir_name();
-        let command_path = commands_dir.join(format!("{}.md", name));
+        let command_path = self.commands_dir().join(format!("{}.md", name));
 
         if !command_path.exists() {
             anyhow::bail!("Command not found: {}", name);
@@ -739,7 +678,7 @@ impl LibraryStore {
         Ok(Command {
             name: name.to_string(),
             description,
-            path: format!("{}/{}.md", dir_name, name),
+            path: format!("{}/{}.md", COMMAND_DIR, name),
             content,
         })
     }
@@ -747,7 +686,6 @@ impl LibraryStore {
     /// Save a command's content.
     pub async fn save_command(&self, name: &str, content: &str) -> Result<()> {
         Self::validate_name(name)?;
-        // Use same directory as list_commands for consistency (respects legacy path)
         let commands_dir = self.commands_dir();
         let command_path = commands_dir.join(format!("{}.md", name));
 
@@ -765,17 +703,10 @@ impl LibraryStore {
     pub async fn delete_command(&self, name: &str) -> Result<()> {
         Self::validate_name(name)?;
 
-        // Check both paths
-        let new_path = self.path.join(COMMAND_DIR).join(format!("{}.md", name));
-        let legacy_path = self.path.join(LEGACY_COMMANDS_DIR).join(format!("{}.md", name));
+        let command_path = self.commands_dir().join(format!("{}.md", name));
 
-        if new_path.exists() {
-            fs::remove_file(&new_path)
-                .await
-                .context("Failed to delete command file")?;
-        }
-        if legacy_path.exists() {
-            fs::remove_file(&legacy_path)
+        if command_path.exists() {
+            fs::remove_file(&command_path)
                 .await
                 .context("Failed to delete command file")?;
         }
@@ -803,10 +734,7 @@ impl LibraryStore {
         match serde_json::from_str::<HashMap<String, Plugin>>(&content) {
             Ok(plugins) => Ok(plugins),
             Err(e) => {
-                tracing::warn!(
-                    "Failed to parse plugins.json, returning empty map: {}",
-                    e
-                );
+                tracing::warn!("Failed to parse plugins.json, returning empty map: {}", e);
                 Ok(HashMap::new())
             }
         }
@@ -1244,8 +1172,8 @@ impl LibraryStore {
             .await
             .context("Failed to read workspace template file")?;
 
-        let config: WorkspaceTemplateConfig = serde_json::from_str(&content)
-            .context("Failed to parse workspace template file")?;
+        let config: WorkspaceTemplateConfig =
+            serde_json::from_str(&content).context("Failed to parse workspace template file")?;
 
         Ok(WorkspaceTemplate {
             name: config.name.unwrap_or_else(|| name.to_string()),
@@ -1308,55 +1236,18 @@ impl LibraryStore {
     // Migration
     // ─────────────────────────────────────────────────────────────────────────
 
-    /// Migrate library structure from legacy to new format.
-    /// Renames: skills/ → skill/, commands/ → command/
+    /// Ensure library directory structure exists.
     pub async fn migrate_structure(&self) -> Result<MigrationReport> {
         let mut report = MigrationReport::default();
 
-        // Migrate skills/ → skill/
-        let legacy_skills = self.path.join(LEGACY_SKILLS_DIR);
-        let new_skills = self.path.join(SKILL_DIR);
-        if legacy_skills.exists() && !new_skills.exists() {
-            match fs::rename(&legacy_skills, &new_skills).await {
-                Ok(_) => {
-                    info!("Migrated {} → {}", LEGACY_SKILLS_DIR, SKILL_DIR);
-                    report.directories_renamed.push((
-                        LEGACY_SKILLS_DIR.to_string(),
-                        SKILL_DIR.to_string(),
-                    ));
-                }
-                Err(e) => {
-                    report.errors.push(format!("Failed to rename skills/: {}", e));
-                }
-            }
-        }
-
-        // Migrate commands/ → command/
-        let legacy_commands = self.path.join(LEGACY_COMMANDS_DIR);
-        let new_commands = self.path.join(COMMAND_DIR);
-        if legacy_commands.exists() && !new_commands.exists() {
-            match fs::rename(&legacy_commands, &new_commands).await {
-                Ok(_) => {
-                    info!("Migrated {} → {}", LEGACY_COMMANDS_DIR, COMMAND_DIR);
-                    report.directories_renamed.push((
-                        LEGACY_COMMANDS_DIR.to_string(),
-                        COMMAND_DIR.to_string(),
-                    ));
-                }
-                Err(e) => {
-                    report.errors.push(format!("Failed to rename commands/: {}", e));
-                }
-            }
-        }
-
-        // Ensure new directories exist
+        // Ensure directories exist
         let _ = fs::create_dir_all(self.path.join(SKILL_DIR)).await;
         let _ = fs::create_dir_all(self.path.join(COMMAND_DIR)).await;
         let _ = fs::create_dir_all(self.path.join(AGENT_DIR)).await;
         let _ = fs::create_dir_all(self.path.join(TOOL_DIR)).await;
         let _ = fs::create_dir_all(self.path.join(RULE_DIR)).await;
 
-        report.success = report.errors.is_empty();
+        report.success = true;
         Ok(report)
     }
 

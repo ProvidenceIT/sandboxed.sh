@@ -161,7 +161,7 @@ export default function SettingsPage() {
       // Use defaults if API fails
       setProviderTypes([
         { id: 'anthropic', name: 'Anthropic', uses_oauth: true, env_var: 'ANTHROPIC_API_KEY' },
-        { id: 'openai', name: 'OpenAI', uses_oauth: false, env_var: 'OPENAI_API_KEY' },
+        { id: 'openai', name: 'OpenAI', uses_oauth: true, env_var: 'OPENAI_API_KEY' },
         { id: 'google', name: 'Google AI', uses_oauth: false, env_var: 'GOOGLE_API_KEY' },
         { id: 'open-router', name: 'OpenRouter', uses_oauth: false, env_var: 'OPENROUTER_API_KEY' },
         { id: 'groq', name: 'Groq', uses_oauth: false, env_var: 'GROQ_API_KEY' },

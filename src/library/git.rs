@@ -99,7 +99,12 @@ pub async fn ensure_remote(path: &Path, remote: &str) -> Result<()> {
     tracing::info!(branch = %default_branch, "Resetting to remote's default branch");
     let output = Command::new("git")
         .current_dir(path)
-        .args(["checkout", "-B", &default_branch, &format!("origin/{}", default_branch)])
+        .args([
+            "checkout",
+            "-B",
+            &default_branch,
+            &format!("origin/{}", default_branch),
+        ])
         .output()
         .await
         .context("Failed to execute git checkout")?;
@@ -361,7 +366,9 @@ pub async fn sparse_clone(path: &Path, remote: &str, subpath: &str) -> Result<()
     }
 
     // Try to checkout the default branch
-    let default_branch = detect_default_branch(path).await.unwrap_or_else(|_| "main".to_string());
+    let default_branch = detect_default_branch(path)
+        .await
+        .unwrap_or_else(|_| "main".to_string());
 
     let output = Command::new("git")
         .current_dir(path)

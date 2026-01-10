@@ -20,10 +20,10 @@ use tokio::sync::RwLock;
 use tracing::warn;
 use uuid::Uuid;
 
-use crate::nspawn::{self, NspawnDistro};
 use crate::config::Config;
 use crate::library::LibraryStore;
 use crate::mcp::{McpRegistry, McpScope, McpServerConfig, McpTransport};
+use crate::nspawn::{self, NspawnDistro};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Workspace Types
@@ -270,9 +270,8 @@ impl WorkspaceStore {
     /// Scan for container directories that exist on disk but aren't in the store.
     async fn scan_orphaned_containers(&self, known: &HashMap<Uuid, Workspace>) -> Vec<Workspace> {
         let containers_dir = self.working_dir.join(".openagent/containers");
-        let legacy_chroots_dir = self.working_dir.join(".openagent/chroots");
 
-        if !containers_dir.exists() && !legacy_chroots_dir.exists() {
+        if !containers_dir.exists() {
             return Vec::new();
         }
 
@@ -285,8 +284,7 @@ impl WorkspaceStore {
 
         let mut orphaned = Vec::new();
 
-        let roots = [containers_dir, legacy_chroots_dir];
-        for root in roots {
+        for root in [containers_dir] {
             if !root.exists() {
                 continue;
             }
@@ -294,7 +292,11 @@ impl WorkspaceStore {
             let entries = match std::fs::read_dir(&root) {
                 Ok(entries) => entries,
                 Err(e) => {
-                    tracing::warn!("Failed to read containers directory {}: {}", root.display(), e);
+                    tracing::warn!(
+                        "Failed to read containers directory {}: {}",
+                        root.display(),
+                        e
+                    );
                     continue;
                 }
             };
@@ -545,7 +547,9 @@ fn opencode_entry_from_mcp(
             let mut merged_env = env.clone();
             if !workspace_env.is_empty() {
                 for (key, value) in workspace_env {
-                    merged_env.entry(key.clone()).or_insert_with(|| value.clone());
+                    merged_env
+                        .entry(key.clone())
+                        .or_insert_with(|| value.clone());
                 }
                 let workspace_env_json =
                     serde_json::to_string(workspace_env).unwrap_or_else(|_| "{}".to_string());
@@ -563,8 +567,8 @@ fn opencode_entry_from_mcp(
                 .entry("OPEN_AGENT_WORKSPACE_TYPE".to_string())
                 .or_insert_with(|| workspace_type.as_str().to_string());
 
-            let use_nspawn = config.scope == McpScope::Workspace
-                && workspace_type == WorkspaceType::Chroot;
+            let use_nspawn =
+                config.scope == McpScope::Workspace && workspace_type == WorkspaceType::Chroot;
 
             if use_nspawn {
                 let rel = workspace_dir
@@ -589,6 +593,7 @@ fn opencode_entry_from_mcp(
                     "--chdir".to_string(),
                     rel_str,
                 ];
+                cmd.extend(nspawn::tailscale_nspawn_extra_args(&merged_env));
                 for (key, value) in &nspawn_env {
                     cmd.push(format!("--setenv={}={}", key, value));
                 }
@@ -741,7 +746,12 @@ fn ensure_skill_name_in_frontmatter(content: &str, skill_name: &str) -> String {
 
         // Insert name field after the opening ---
         // Ensure there's a newline before the closing ---
-        return format!("---\nname: {}\n{}\n{}", skill_name, frontmatter.trim(), rest.trim_start_matches('\n'));
+        return format!(
+            "---\nname: {}\n{}\n{}",
+            skill_name,
+            frontmatter.trim(),
+            rest.trim_start_matches('\n')
+        );
     }
 
     // Malformed frontmatter, return as-is
@@ -820,7 +830,10 @@ async fn resolve_workspace_skill_names(
 
 /// Sync skills from library to workspace's `.opencode/skill/` directory.
 /// Called when workspace is created, updated, or before mission execution.
-pub async fn sync_workspace_skills(workspace: &Workspace, library: &LibraryStore) -> anyhow::Result<()> {
+pub async fn sync_workspace_skills(
+    workspace: &Workspace,
+    library: &LibraryStore,
+) -> anyhow::Result<()> {
     let skill_names = resolve_workspace_skill_names(workspace, library).await?;
     sync_skills_to_dir(&workspace.path, &skill_names, &workspace.name, library).await
 }
@@ -887,6 +900,93 @@ pub struct ToolContent {
     pub content: String,
 }
 
+/// Agent content to be written to the workspace.
+pub struct AgentContent {
+    /// Agent name (filename without .md)
+    pub name: String,
+    /// Full markdown content (frontmatter + body)
+    pub content: String,
+}
+
+/// Write agent files to the workspace's `.opencode/agent/` directory.
+/// This makes library agents available to OpenCode when running in this workspace.
+pub async fn write_agents_to_workspace(
+    workspace_dir: &Path,
+    agents: &[AgentContent],
+) -> anyhow::Result<()> {
+    if agents.is_empty() {
+        return Ok(());
+    }
+
+    let agents_dir = workspace_dir.join(".opencode").join("agent");
+    tokio::fs::create_dir_all(&agents_dir).await?;
+
+    for agent in agents {
+        let agent_path = agents_dir.join(format!("{}.md", agent.name));
+        tokio::fs::write(&agent_path, &agent.content).await?;
+
+        tracing::debug!(
+            agent = %agent.name,
+            workspace = %workspace_dir.display(),
+            "Wrote agent to workspace"
+        );
+    }
+
+    tracing::info!(
+        count = agents.len(),
+        workspace = %workspace_dir.display(),
+        "Wrote agents to workspace"
+    );
+
+    Ok(())
+}
+
+/// Sync library agents to a specific directory's `.opencode/agent/` folder.
+pub async fn sync_agents_to_dir(
+    target_dir: &Path,
+    agent_names: &[String],
+    context_name: &str,
+    library: &LibraryStore,
+) -> anyhow::Result<()> {
+    if agent_names.is_empty() {
+        tracing::debug!(
+            context = %context_name,
+            "No agents to sync"
+        );
+        return Ok(());
+    }
+
+    let mut agents_to_write = Vec::new();
+    for agent_name in agent_names {
+        match library.get_library_agent(agent_name).await {
+            Ok(agent) => {
+                agents_to_write.push(AgentContent {
+                    name: agent.name,
+                    content: agent.content,
+                });
+            }
+            Err(e) => {
+                tracing::warn!(
+                    agent = %agent_name,
+                    context = %context_name,
+                    error = %e,
+                    "Failed to load library agent, skipping"
+                );
+            }
+        }
+    }
+
+    write_agents_to_workspace(target_dir, &agents_to_write).await?;
+
+    tracing::info!(
+        context = %context_name,
+        agents = ?agent_names,
+        target = %target_dir.display(),
+        "Synced agents to directory"
+    );
+
+    Ok(())
+}
 /// Write tool files to the workspace's `.opencode/tool/` directory.
 /// This makes custom tools available to OpenCode when running in this workspace.
 /// OpenCode looks for tools in `.opencode/tool/*.ts`
@@ -923,7 +1023,10 @@ pub async fn write_tools_to_workspace(
 
 /// Sync tools from library to workspace's `.opencode/tool/` directory.
 /// Called when workspace is created, updated, or before mission execution.
-pub async fn sync_workspace_tools(workspace: &Workspace, library: &LibraryStore) -> anyhow::Result<()> {
+pub async fn sync_workspace_tools(
+    workspace: &Workspace,
+    library: &LibraryStore,
+) -> anyhow::Result<()> {
     sync_tools_to_dir(&workspace.path, &workspace.tools, &workspace.name, library).await
 }
 
@@ -1104,6 +1207,30 @@ pub async fn prepare_mission_workspace_with_skills(
                 );
             }
         }
+
+        // Sync library agents (used by mission agent selection)
+        let agent_names = match lib.list_library_agents().await {
+            Ok(agents) => agents.into_iter().map(|agent| agent.name).collect(),
+            Err(e) => {
+                tracing::warn!(
+                    mission = %mission_id,
+                    workspace = %workspace.name,
+                    error = %e,
+                    "Failed to list library agents"
+                );
+                Vec::new()
+            }
+        };
+        if !agent_names.is_empty() {
+            if let Err(e) = sync_agents_to_dir(&dir, &agent_names, &context, lib).await {
+                tracing::warn!(
+                    mission = %mission_id,
+                    workspace = %workspace.name,
+                    error = %e,
+                    "Failed to sync agents to mission directory"
+                );
+            }
+        }
     }
 
     Ok(dir)
@@ -1178,8 +1305,8 @@ pub async fn sync_all_workspaces(config: &Config, mcp: &McpRegistry) -> anyhow::
             &workspace_env,
             None,
         )
-            .await
-            .is_ok()
+        .await
+        .is_ok()
         {
             count += 1;
         }
@@ -1220,10 +1347,7 @@ pub async fn resolve_workspace(
     match workspaces.get(id).await {
         Some(ws) => ws,
         None => {
-            warn!(
-                "Workspace {} not found; using default host workspace",
-                id
-            );
+            warn!("Workspace {} not found; using default host workspace", id);
             Workspace::default_host(config.working_dir.clone())
         }
     }
@@ -1236,9 +1360,7 @@ pub async fn build_chroot_workspace(
     force_rebuild: bool,
 ) -> anyhow::Result<()> {
     if workspace.workspace_type != WorkspaceType::Chroot {
-        return Err(anyhow::anyhow!(
-            "Workspace is not a container type"
-        ));
+        return Err(anyhow::anyhow!("Workspace is not a container type"));
     }
 
     // Update status to building
@@ -1372,12 +1494,13 @@ async fn run_workspace_init_script(workspace: &Workspace) -> anyhow::Result<()> 
 /// Destroy a container workspace.
 pub async fn destroy_chroot_workspace(workspace: &Workspace) -> anyhow::Result<()> {
     if workspace.workspace_type != WorkspaceType::Chroot {
-        return Err(anyhow::anyhow!(
-            "Workspace is not a container type"
-        ));
+        return Err(anyhow::anyhow!("Workspace is not a container type"));
     }
 
-    tracing::info!("Destroying container workspace at {}", workspace.path.display());
+    tracing::info!(
+        "Destroying container workspace at {}",
+        workspace.path.display()
+    );
 
     nspawn::destroy_container(&workspace.path).await?;
 

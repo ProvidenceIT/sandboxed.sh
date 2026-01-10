@@ -18,6 +18,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 use super::{resolve_path_simple as resolve_path, Tool};
+use crate::nspawn;
 
 /// Sanitize command output to be safe for LLM consumption.
 /// Removes binary garbage while preserving valid text.
@@ -189,9 +190,18 @@ fn parse_command_options(args: &Value) -> CommandOptions {
     CommandOptions {
         timeout: parse_timeout(args),
         env: parse_env(args),
-        clear_env: args.get("clear_env").and_then(|v| v.as_bool()).unwrap_or(false),
-        stdin: args.get("stdin").and_then(|v| v.as_str()).map(|s| s.to_string()),
-        shell: args.get("shell").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        clear_env: args
+            .get("clear_env")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        stdin: args
+            .get("stdin")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        shell: args
+            .get("shell")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
         max_output_chars: parse_max_output_chars(args),
         raw_output: args.get("raw").and_then(|v| v.as_bool()).unwrap_or(false),
     }
@@ -245,7 +255,9 @@ async fn run_shell_command(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    let mut child = cmd.spawn().map_err(|e| anyhow::anyhow!("Failed to execute command: {}", e))?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("Failed to execute command: {}", e))?;
 
     if let Some(input) = options.stdin.as_deref() {
         if let Some(mut stdin) = child.stdin.take() {
@@ -276,7 +288,10 @@ async fn run_host_command(
     let (shell, shell_arg) = if cfg!(target_os = "windows") {
         ("cmd".to_string(), "/C".to_string())
     } else {
-        (resolve_shell(options.shell.as_deref(), None), "-c".to_string())
+        (
+            resolve_shell(options.shell.as_deref(), None),
+            "-c".to_string(),
+        )
     };
     let args = vec![shell_arg, command.to_string()];
     run_shell_command(&shell, &args, Some(cwd), options).await
@@ -374,6 +389,10 @@ async fn run_container_command(
 
     let mut merged_env = workspace_env_vars();
     merged_env.extend(options.env.clone());
+
+    for arg in nspawn::tailscale_nspawn_extra_args(&merged_env) {
+        args.push(arg);
+    }
 
     for (key, value) in &merged_env {
         args.push(format!("--setenv={}={}", key, value));

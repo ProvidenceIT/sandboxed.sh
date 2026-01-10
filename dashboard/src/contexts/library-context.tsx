@@ -9,7 +9,7 @@ import {
   useMemo,
   type ReactNode,
 } from 'react';
-import { useErrorToast } from '@/components/toast';
+import { useToast } from '@/components/toast';
 import {
   getLibraryStatus,
   getLibraryMcps,
@@ -129,7 +129,7 @@ interface LibraryProviderProps {
 }
 
 export function LibraryProvider({ children }: LibraryProviderProps) {
-  const { showError } = useErrorToast();
+  const { showError } = useToast();
   const [status, setStatus] = useState<LibraryStatus | null>(null);
   const [mcps, setMcps] = useState<Record<string, McpServerDef>>({});
   const [skills, setSkills] = useState<SkillSummary[]>([]);

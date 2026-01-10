@@ -35,6 +35,14 @@ A managed control plane for OpenCode-based agents. Install it on your server to 
 - **Missions**: Agent selection + workspace + conversation.
 - **MCPs**: Global MCP servers run on the host machine (not inside containers).
 
+## oh-my-opencode integration
+
+Open Agent can sync Library plugins into OpenCode’s global config so agent packs like `oh-my-opencode` stay installed.
+
+- If `oh-my-opencode` is installed, **Sisyphus** becomes the OpenCode default agent. Leave `OPENCODE_AGENT` unset (or set it to `Sisyphus`) to keep that behavior.
+- You can still pick a different agent per mission in the dashboard; the selected agent is passed directly to OpenCode.
+- Plugin syncing is managed by Open Agent whenever the Library is synced or plugins are saved.
+
 ## Quick start
 
 ### Prerequisites
@@ -49,7 +57,7 @@ A managed control plane for OpenCode-based agents. Install it on your server to 
 export OPENCODE_BASE_URL="http://127.0.0.1:4096"
 
 # Optional defaults
-export DEFAULT_MODEL="claude-opus-4-5-20251101"
+export DEFAULT_MODEL="anthropic/claude-opus-4-5-20251101"
 export WORKING_DIR="/root"
 export LIBRARY_REMOTE="git@github.com:Th0rgal/openagent-library-template.git"
 

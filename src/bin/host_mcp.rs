@@ -115,9 +115,7 @@ fn container_root_from_path(path: &Path) -> Option<PathBuf> {
     let mut components = path.components();
     while let Some(component) = components.next() {
         prefix.push(component.as_os_str());
-        if component.as_os_str() == std::ffi::OsStr::new("containers")
-            || component.as_os_str() == std::ffi::OsStr::new("chroots")
-        {
+        if component.as_os_str() == std::ffi::OsStr::new("containers") {
             if let Some(next) = components.next() {
                 prefix.push(next.as_os_str());
                 return Some(prefix);
@@ -137,14 +135,20 @@ fn hydrate_workspace_env(override_path: Option<PathBuf>) -> PathBuf {
     });
 
     if std::env::var("OPEN_AGENT_WORKSPACE").is_err() {
-        std::env::set_var("OPEN_AGENT_WORKSPACE", workspace.to_string_lossy().to_string());
+        std::env::set_var(
+            "OPEN_AGENT_WORKSPACE",
+            workspace.to_string_lossy().to_string(),
+        );
     }
 
     if std::env::var("OPEN_AGENT_WORKSPACE_TYPE").is_err() {
         if let Some(root) = container_root_from_path(&workspace) {
             std::env::set_var("OPEN_AGENT_WORKSPACE_TYPE", "chroot");
             if std::env::var("OPEN_AGENT_WORKSPACE_ROOT").is_err() {
-                std::env::set_var("OPEN_AGENT_WORKSPACE_ROOT", root.to_string_lossy().to_string());
+                std::env::set_var(
+                    "OPEN_AGENT_WORKSPACE_ROOT",
+                    root.to_string_lossy().to_string(),
+                );
             }
         } else {
             std::env::set_var("OPEN_AGENT_WORKSPACE_TYPE", "host");
@@ -275,30 +279,17 @@ fn tool_set() -> HashMap<String, Arc<dyn Tool>> {
     let mut tools: HashMap<String, Arc<dyn Tool>> = HashMap::new();
 
     tools.insert("read_file".to_string(), Arc::new(tools::ReadFile));
-    tools.insert(
-        "write_file".to_string(),
-        Arc::new(tools::WriteFile),
-    );
-    tools.insert(
-        "delete_file".to_string(),
-        Arc::new(tools::DeleteFile),
-    );
-    tools.insert(
-        "list_directory".to_string(),
-        Arc::new(tools::ListDirectory),
-    );
-    tools.insert(
-        "search_files".to_string(),
-        Arc::new(tools::SearchFiles),
-    );
+    tools.insert("write_file".to_string(), Arc::new(tools::WriteFile));
+    tools.insert("delete_file".to_string(), Arc::new(tools::DeleteFile));
+    tools.insert("list_directory".to_string(), Arc::new(tools::ListDirectory));
+    tools.insert("search_files".to_string(), Arc::new(tools::SearchFiles));
     tools.insert("grep_search".to_string(), Arc::new(tools::GrepSearch));
-    tools.insert("bash".to_string(), Arc::new(BashTool {
-        delegate: tools::RunCommand,
-    }));
-    tools.insert("git_status".to_string(), Arc::new(tools::GitStatus));
-    tools.insert("git_diff".to_string(), Arc::new(tools::GitDiff));
-    tools.insert("git_commit".to_string(), Arc::new(tools::GitCommit));
-    tools.insert("git_log".to_string(), Arc::new(tools::GitLog));
+    tools.insert(
+        "bash".to_string(),
+        Arc::new(BashTool {
+            delegate: tools::RunCommand,
+        }),
+    );
     tools.insert("web_search".to_string(), Arc::new(tools::WebSearch));
     tools.insert("fetch_url".to_string(), Arc::new(tools::FetchUrl));
 
@@ -325,15 +316,7 @@ fn execute_tool(
     args: &Value,
     working_dir: &Path,
 ) -> ToolResult {
-    let tool = tools.get(name).or_else(|| {
-        if name == "run_command" {
-            tools.get("bash")
-        } else {
-            None
-        }
-    });
-
-    let Some(tool) = tool else {
+    let Some(tool) = tools.get(name) else {
         return ToolResult {
             content: vec![ToolContent::Text {
                 text: format!("Unknown tool: {}", name),
@@ -392,7 +375,10 @@ fn handle_request(
         "notifications/initialized" | "initialized" => None,
         "tools/list" => {
             let defs = tool_definitions(tools);
-            Some(JsonRpcResponse::success(request.id.clone(), json!({ "tools": defs })))
+            Some(JsonRpcResponse::success(
+                request.id.clone(),
+                json!({ "tools": defs }),
+            ))
         }
         "tools/call" => {
             debug_log("tools/call", &request.params);

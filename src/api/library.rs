@@ -117,7 +117,7 @@ pub fn routes() -> Router<Arc<super::routes::AppState>> {
         // MCP servers
         .route("/mcps", get(get_mcps))
         .route("/mcps", put(save_mcps))
-        // Skills (new path: /skill, also supports legacy /skills)
+        // Skills
         .route("/skill", get(list_skills))
         .route("/skill/import", post(import_skill))
         .route("/skill/:name", get(get_skill))
@@ -126,7 +126,7 @@ pub fn routes() -> Router<Arc<super::routes::AppState>> {
         .route("/skill/:name/files/*path", get(get_skill_reference))
         .route("/skill/:name/files/*path", put(save_skill_reference))
         .route("/skill/:name/files/*path", delete(delete_skill_reference))
-        // Legacy skills routes (backwards compatibility)
+        // Legacy skills routes (dashboard still calls /skills)
         .route("/skills", get(list_skills))
         .route("/skills/import", post(import_skill))
         .route("/skills/:name", get(get_skill))
@@ -135,12 +135,12 @@ pub fn routes() -> Router<Arc<super::routes::AppState>> {
         .route("/skills/:name/references/*path", get(get_skill_reference))
         .route("/skills/:name/references/*path", put(save_skill_reference))
         .route("/skills/:name/references/*path", delete(delete_skill_reference))
-        // Commands (new path: /command, also supports legacy /commands)
+        // Commands
         .route("/command", get(list_commands))
         .route("/command/:name", get(get_command))
         .route("/command/:name", put(save_command))
         .route("/command/:name", delete(delete_command))
-        // Legacy commands routes (backwards compatibility)
+        // Legacy commands routes (dashboard still calls /commands)
         .route("/commands", get(list_commands))
         .route("/commands/:name", get(get_command))
         .route("/commands/:name", put(save_command))
@@ -167,7 +167,10 @@ pub fn routes() -> Router<Arc<super::routes::AppState>> {
         .route("/workspace-template", get(list_workspace_templates))
         .route("/workspace-template/:name", get(get_workspace_template))
         .route("/workspace-template/:name", put(save_workspace_template))
-        .route("/workspace-template/:name", delete(delete_workspace_template))
+        .route(
+            "/workspace-template/:name",
+            delete(delete_workspace_template),
+        )
         // Migration
         .route("/migrate", post(migrate_library))
 }
@@ -246,8 +249,17 @@ async fn sync_library(
     library
         .sync()
         .await
-        .map(|_| (StatusCode::OK, "Synced successfully".to_string()))
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let plugins = library
+        .get_plugins()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    crate::opencode_config::sync_global_plugins(&plugins)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok((StatusCode::OK, "Synced successfully".to_string()))
 }
 
 /// POST /api/library/commit - Commit all changes.
@@ -333,17 +345,13 @@ async fn get_skill(
     headers: HeaderMap,
 ) -> Result<Json<Skill>, (StatusCode, String)> {
     let library = ensure_library(&state, &headers).await?;
-    library
-        .get_skill(&name)
-        .await
-        .map(Json)
-        .map_err(|e| {
-            if e.to_string().contains("not found") {
-                (StatusCode::NOT_FOUND, e.to_string())
-            } else {
-                (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
-            }
-        })
+    library.get_skill(&name).await.map(Json).map_err(|e| {
+        if e.to_string().contains("not found") {
+            (StatusCode::NOT_FOUND, e.to_string())
+        } else {
+            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+        }
+    })
 }
 
 /// PUT /api/library/skills/:name - Save a skill.
@@ -444,7 +452,10 @@ async fn import_skill(
     let target_name = req.name.clone().unwrap_or_else(|| {
         // Extract from path or URL
         if let Some(ref path) = req.path {
-            path.rsplit('/').next().unwrap_or("imported-skill").to_string()
+            path.rsplit('/')
+                .next()
+                .unwrap_or("imported-skill")
+                .to_string()
         } else {
             req.url
                 .rsplit('/')
@@ -494,17 +505,13 @@ async fn get_command(
     headers: HeaderMap,
 ) -> Result<Json<Command>, (StatusCode, String)> {
     let library = ensure_library(&state, &headers).await?;
-    library
-        .get_command(&name)
-        .await
-        .map(Json)
-        .map_err(|e| {
-            if e.to_string().contains("not found") {
-                (StatusCode::NOT_FOUND, e.to_string())
-            } else {
-                (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
-            }
-        })
+    library.get_command(&name).await.map(Json).map_err(|e| {
+        if e.to_string().contains("not found") {
+            (StatusCode::NOT_FOUND, e.to_string())
+        } else {
+            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+        }
+    })
 }
 
 /// PUT /api/library/commands/:name - Save a command.
@@ -563,8 +570,13 @@ async fn save_plugins(
     library
         .save_plugins(&plugins)
         .await
-        .map(|_| (StatusCode::OK, "Plugins saved successfully".to_string()))
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    crate::opencode_config::sync_global_plugins(&plugins)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok((StatusCode::OK, "Plugins saved successfully".to_string()))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -591,17 +603,13 @@ async fn get_rule(
     headers: HeaderMap,
 ) -> Result<Json<Rule>, (StatusCode, String)> {
     let library = ensure_library(&state, &headers).await?;
-    library
-        .get_rule(&name)
-        .await
-        .map(Json)
-        .map_err(|e| {
-            if e.to_string().contains("not found") {
-                (StatusCode::NOT_FOUND, e.to_string())
-            } else {
-                (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
-            }
-        })
+    library.get_rule(&name).await.map(Json).map_err(|e| {
+        if e.to_string().contains("not found") {
+            (StatusCode::NOT_FOUND, e.to_string())
+        } else {
+            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+        }
+    })
 }
 
 /// PUT /api/library/rule/:name - Save a rule.
@@ -836,7 +844,12 @@ async fn save_workspace_template(
     library
         .save_workspace_template(&name, &template)
         .await
-        .map(|_| (StatusCode::OK, "Workspace template saved successfully".to_string()))
+        .map(|_| {
+            (
+                StatusCode::OK,
+                "Workspace template saved successfully".to_string(),
+            )
+        })
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
@@ -850,7 +863,12 @@ async fn delete_workspace_template(
     library
         .delete_workspace_template(&name)
         .await
-        .map(|_| (StatusCode::OK, "Workspace template deleted successfully".to_string()))
+        .map(|_| {
+            (
+                StatusCode::OK,
+                "Workspace template deleted successfully".to_string(),
+            )
+        })
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 

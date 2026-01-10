@@ -119,7 +119,7 @@ test.describe("AI Providers", () => {
     await expect(page.getByRole("button", { name: /Enter API Key/i })).toBeVisible();
   });
 
-  test("shows API key field for OpenAI provider", async ({ page }) => {
+  test("shows OAuth options for OpenAI provider", async ({ page }) => {
     test.skip(!apiAvailable, 'API not available');
 
     // Open modal
@@ -128,11 +128,12 @@ test.describe("AI Providers", () => {
     // Select OpenAI
     await page.getByRole("button", { name: "OpenAI" }).click();
 
-    // Should show API key field
-    await expect(page.getByPlaceholder("sk-...")).toBeVisible();
-
-    // Add button should be disabled without key
-    await expect(page.getByRole("button", { name: "Add Provider" })).toBeDisabled();
+    // Should show auth methods
+    await expect(page.getByRole("heading", { name: /Connect OpenAI/i })).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: /ChatGPT Plus\/Pro/i })
+    ).toBeVisible();
+    await expect(page.getByRole("button", { name: /Enter API Key/i })).toBeVisible();
   });
 
   test("can cancel add provider modal", async ({ page }) => {
@@ -151,6 +152,12 @@ test.describe("AI Providers", () => {
     // Open modal and pick OpenAI
     await page.click("text=Add Provider");
     await page.getByRole("button", { name: "OpenAI" }).click();
+
+    // Select API key method
+    await page.getByRole("button", { name: /Enter API Key/i }).click();
+
+    // Should show API key field
+    await expect(page.getByPlaceholder("sk-...")).toBeVisible();
 
     const addButton = page.getByRole("button", { name: "Add Provider" });
     await expect(addButton).toBeDisabled();

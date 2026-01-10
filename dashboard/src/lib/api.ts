@@ -157,6 +157,13 @@ export async function listTasks(): Promise<TaskState[]> {
   return res.json();
 }
 
+// List OpenCode agents
+export async function listOpenCodeAgents(): Promise<unknown> {
+  const res = await apiFetch("/api/opencode/agents");
+  if (!res.ok) throw new Error("Failed to fetch OpenCode agents");
+  return res.json();
+}
+
 // Get a specific task
 export async function getTask(id: string): Promise<TaskState> {
   const res = await apiFetch(`/api/task/${id}`);
@@ -323,11 +330,22 @@ export interface MissionHistoryEntry {
   content: string;
 }
 
+export interface DesktopSessionInfo {
+  display: string;
+  resolution?: string;
+  started_at: string;
+  stopped_at?: string;
+  screenshots_dir?: string;
+  browser?: string;
+  url?: string;
+}
+
 export interface Mission {
   id: string;
   status: MissionStatus;
   title: string | null;
   history: MissionHistoryEntry[];
+  desktop_sessions?: DesktopSessionInfo[];
   created_at: string;
   updated_at: string;
   interrupted_at?: string;
@@ -361,6 +379,8 @@ export interface CreateMissionOptions {
   workspaceId?: string;
   /** Agent name from library (e.g., "code-reviewer") */
   agent?: string;
+  /** Override model for this mission (provider/model) */
+  modelOverride?: string;
 }
 
 export async function createMission(
@@ -370,11 +390,13 @@ export async function createMission(
     title?: string;
     workspace_id?: string;
     agent?: string;
+    model_override?: string;
   } = {};
 
   if (options?.title) body.title = options.title;
   if (options?.workspaceId) body.workspace_id = options.workspaceId;
   if (options?.agent) body.agent = options.agent;
+  if (options?.modelOverride) body.model_override = options.modelOverride;
 
   const res = await apiFetch("/api/control/missions", {
     method: "POST",

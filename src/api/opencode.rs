@@ -16,7 +16,9 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use crate::opencode_config::OpenCodeConnection;
@@ -31,6 +33,14 @@ pub fn routes() -> Router<Arc<super::routes::AppState>> {
         .route("/:id", delete(delete_connection))
         .route("/:id/test", post(test_connection))
         .route("/:id/default", post(set_default))
+}
+
+const AGENTS_CACHE_TTL: Duration = Duration::from_secs(20);
+
+#[derive(Debug, Default)]
+pub struct OpenCodeAgentsCache {
+    pub fetched_at: Option<Instant>,
+    pub payload: Option<Value>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -102,6 +112,77 @@ pub struct TestConnectionResponse {
 // Handlers
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// GET /api/opencode/agents - Proxy OpenCode agent list.
+pub async fn list_agents(
+    State(state): State<Arc<super::routes::AppState>>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let now = Instant::now();
+    if let Some(payload) = {
+        let cache = state.opencode_agents_cache.read().await;
+        if let (Some(payload), Some(fetched_at)) = (&cache.payload, cache.fetched_at) {
+            if now.duration_since(fetched_at) < AGENTS_CACHE_TTL {
+                Some(payload.clone())
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } {
+        return Ok(Json(payload));
+    }
+
+    let base_url = if let Some(connection) = state.opencode_connections.get_default().await {
+        connection.base_url
+    } else {
+        state.config.opencode_base_url.clone()
+    };
+    let base_url = base_url.trim_end_matches('/').to_string();
+    if base_url.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "OpenCode base URL is not configured".to_string(),
+        ));
+    }
+
+    let url = format!("{}/agent", base_url);
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
+    let resp = client.get(&url).send().await.map_err(|e| {
+        (
+            StatusCode::BAD_GATEWAY,
+            format!("OpenCode request failed: {}", e),
+        )
+    })?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            format!("OpenCode /agent failed: {} - {}", status, text),
+        ));
+    }
+
+    let payload: Value = resp.json().await.map_err(|e| {
+        (
+            StatusCode::BAD_GATEWAY,
+            format!("Invalid agent payload: {}", e),
+        )
+    })?;
+
+    {
+        let mut cache = state.opencode_agents_cache.write().await;
+        cache.payload = Some(payload.clone());
+        cache.fetched_at = Some(Instant::now());
+    }
+
+    Ok(Json(payload))
+}
+
 /// GET /api/opencode/connections - List all connections.
 async fn list_connections(
     State(state): State<Arc<super::routes::AppState>>,
@@ -129,10 +210,7 @@ async fn create_connection(
 
     // Validate URL format
     if url::Url::parse(&req.base_url).is_err() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Invalid URL format".to_string(),
-        ));
+        return Err((StatusCode::BAD_REQUEST, "Invalid URL format".to_string()));
     }
 
     let mut connection = OpenCodeConnection::new(req.name, req.base_url);
@@ -145,7 +223,11 @@ async fn create_connection(
     tracing::info!("Created OpenCode connection: {} ({})", connection.name, id);
 
     // Refresh the connection to get updated is_default flag
-    let updated = state.opencode_connections.get(id).await.unwrap_or(connection);
+    let updated = state
+        .opencode_connections
+        .get(id)
+        .await
+        .unwrap_or(connection);
 
     Ok(Json(updated.into()))
 }
@@ -160,7 +242,12 @@ async fn get_connection(
         .get(id)
         .await
         .map(|c| Json(c.into()))
-        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Connection {} not found", id)))
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                format!("Connection {} not found", id),
+            )
+        })
 }
 
 /// PUT /api/opencode/connections/:id - Update a connection.
@@ -169,11 +256,12 @@ async fn update_connection(
     AxumPath(id): AxumPath<Uuid>,
     Json(req): Json<UpdateConnectionRequest>,
 ) -> Result<Json<ConnectionResponse>, (StatusCode, String)> {
-    let mut connection = state
-        .opencode_connections
-        .get(id)
-        .await
-        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Connection {} not found", id)))?;
+    let mut connection = state.opencode_connections.get(id).await.ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            format!("Connection {} not found", id),
+        )
+    })?;
 
     if let Some(name) = req.name {
         if name.is_empty() {
@@ -190,10 +278,7 @@ async fn update_connection(
             ));
         }
         if url::Url::parse(&base_url).is_err() {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "Invalid URL format".to_string(),
-            ));
+            return Err((StatusCode::BAD_REQUEST, "Invalid URL format".to_string()));
         }
         connection.base_url = base_url;
     }
@@ -214,7 +299,12 @@ async fn update_connection(
         .opencode_connections
         .update(id, connection)
         .await
-        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Connection {} not found", id)))?;
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                format!("Connection {} not found", id),
+            )
+        })?;
 
     tracing::info!("Updated OpenCode connection: {} ({})", updated.name, id);
 
@@ -232,7 +322,10 @@ async fn delete_connection(
             format!("Connection {} deleted successfully", id),
         ))
     } else {
-        Err((StatusCode::NOT_FOUND, format!("Connection {} not found", id)))
+        Err((
+            StatusCode::NOT_FOUND,
+            format!("Connection {} not found", id),
+        ))
     }
 }
 
@@ -241,11 +334,12 @@ async fn test_connection(
     State(state): State<Arc<super::routes::AppState>>,
     AxumPath(id): AxumPath<Uuid>,
 ) -> Result<Json<TestConnectionResponse>, (StatusCode, String)> {
-    let connection = state
-        .opencode_connections
-        .get(id)
-        .await
-        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Connection {} not found", id)))?;
+    let connection = state.opencode_connections.get(id).await.ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            format!("Connection {} not found", id),
+        )
+    })?;
 
     // Try to connect to the OpenCode server
     let client = reqwest::Client::builder()
@@ -260,11 +354,11 @@ async fn test_connection(
         Ok(resp) => {
             if resp.status().is_success() {
                 // Try to parse version from response
-                let version = resp
-                    .json::<serde_json::Value>()
-                    .await
-                    .ok()
-                    .and_then(|v| v.get("version").and_then(|v| v.as_str()).map(|s| s.to_string()));
+                let version = resp.json::<serde_json::Value>().await.ok().and_then(|v| {
+                    v.get("version")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                });
 
                 Ok(Json(TestConnectionResponse {
                     success: true,
@@ -291,13 +385,11 @@ async fn test_connection(
                         version: None,
                     }))
                 }
-                Err(_) => {
-                    Ok(Json(TestConnectionResponse {
-                        success: false,
-                        message: format!("Connection failed: {}", e),
-                        version: None,
-                    }))
-                }
+                Err(_) => Ok(Json(TestConnectionResponse {
+                    success: false,
+                    message: format!("Connection failed: {}", e),
+                    version: None,
+                })),
             }
         }
     }
@@ -309,16 +401,24 @@ async fn set_default(
     AxumPath(id): AxumPath<Uuid>,
 ) -> Result<Json<ConnectionResponse>, (StatusCode, String)> {
     if !state.opencode_connections.set_default(id).await {
-        return Err((StatusCode::NOT_FOUND, format!("Connection {} not found", id)));
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("Connection {} not found", id),
+        ));
     }
 
-    let connection = state
-        .opencode_connections
-        .get(id)
-        .await
-        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Connection {} not found", id)))?;
+    let connection = state.opencode_connections.get(id).await.ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            format!("Connection {} not found", id),
+        )
+    })?;
 
-    tracing::info!("Set default OpenCode connection: {} ({})", connection.name, id);
+    tracing::info!(
+        "Set default OpenCode connection: {} ({})",
+        connection.name,
+        id
+    );
 
     Ok(Json(connection.into()))
 }

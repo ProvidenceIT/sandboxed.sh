@@ -107,8 +107,10 @@ impl OpenCodeClient {
                         anyhow::bail!("OpenCode /session failed: {} - {}", status, text);
                     }
 
-                    let session: OpenCodeSession = serde_json::from_str(&text)
-                        .with_context(|| format!("Failed to parse OpenCode session response: {}", text))?;
+                    let session: OpenCodeSession =
+                        serde_json::from_str(&text).with_context(|| {
+                            format!("Failed to parse OpenCode session response: {}", text)
+                        })?;
                     return Ok(session);
                 }
                 Err(e) => {
@@ -161,8 +163,12 @@ impl OpenCodeClient {
 
         let (event_tx, event_rx) = mpsc::channel::<OpenCodeEvent>(256);
 
-        // Subscribe to SSE events (global stream, filter by session ID locally)
-        let event_url = format!("{}/event", self.base_url);
+        // Subscribe to SSE events (scoped to the session directory, filter by session ID locally)
+        let mut event_url = format!("{}/event", self.base_url);
+        if !directory.is_empty() {
+            event_url.push_str("?directory=");
+            event_url.push_str(&urlencoding::encode(&directory));
+        }
         tracing::debug!(url = %event_url, "Connecting to OpenCode SSE endpoint");
 
         let session_id_clone = session_id.clone();
@@ -178,10 +184,12 @@ impl OpenCodeClient {
             // Use tokio::process to spawn curl for SSE
             let mut child = match tokio::process::Command::new("curl")
                 .args([
-                    "-N",                      // No buffering
-                    "-s",                      // Silent
-                    "-H", "Accept: text/event-stream",
-                    "-H", "Cache-Control: no-cache",
+                    "-N", // No buffering
+                    "-s", // Silent
+                    "-H",
+                    "Accept: text/event-stream",
+                    "-H",
+                    "Cache-Control: no-cache",
                     &event_url,
                 ])
                 .stdout(std::process::Stdio::piped())
@@ -232,9 +240,15 @@ impl OpenCodeClient {
                                     "SSE event block received"
                                 );
 
-                                if let Some(event) = parse_sse_event(&data, event_name, &session_id_clone, &mut sse_state) {
+                                if let Some(event) = parse_sse_event(
+                                    &data,
+                                    event_name,
+                                    &session_id_clone,
+                                    &mut sse_state,
+                                ) {
                                     event_count += 1;
-                                    let is_complete = matches!(event, OpenCodeEvent::MessageComplete { .. });
+                                    let is_complete =
+                                        matches!(event, OpenCodeEvent::MessageComplete { .. });
 
                                     if event_tx.send(event).await.is_err() {
                                         tracing::debug!(session_id = %session_id_clone, "SSE receiver dropped");
@@ -409,7 +423,10 @@ impl OpenCodeClient {
         Err(last_error
             .map(|e| anyhow::anyhow!(e))
             .unwrap_or_else(|| anyhow::anyhow!("Unknown error"))
-            .context(format!("Failed to call OpenCode /session/{}/message after retries", session_id)))
+            .context(format!(
+                "Failed to call OpenCode /session/{}/message after retries",
+                session_id
+            )))
     }
 
     /// Parse a message response from OpenCode, handling various response shapes.
@@ -433,7 +450,12 @@ impl OpenCodeClient {
             .or_else(|| value.get("result"));
         if let Some(inner) = maybe_message {
             let message: OpenCodeMessageResponse = serde_json::from_value(inner.clone())
-                .with_context(|| format!("Failed to parse wrapped OpenCode message response: {}", text))?;
+                .with_context(|| {
+                    format!(
+                        "Failed to parse wrapped OpenCode message response: {}",
+                        text
+                    )
+                })?;
             return Ok(message);
         }
 
@@ -484,7 +506,10 @@ impl OpenCodeClient {
 
     /// Get the status of an OpenCode session for debugging.
     /// Returns session info and the latest messages with their tool states.
-    pub async fn get_session_status(&self, session_id: &str) -> anyhow::Result<OpenCodeSessionStatus> {
+    pub async fn get_session_status(
+        &self,
+        session_id: &str,
+    ) -> anyhow::Result<OpenCodeSessionStatus> {
         // Get session info
         let session_url = format!("{}/session/{}", self.base_url, session_id);
         let session_resp = self
@@ -574,6 +599,86 @@ impl OpenCodeClient {
             running_tools,
             completed_tools,
         })
+    }
+
+    /// Fetch all messages for a session (newest last).
+    pub async fn get_session_messages(
+        &self,
+        session_id: &str,
+    ) -> anyhow::Result<Vec<serde_json::Value>> {
+        let messages_url = format!("{}/session/{}/message", self.base_url, session_id);
+        let resp = self
+            .client
+            .get(&messages_url)
+            .header("Accept", "application/json")
+            .send()
+            .await
+            .context("Failed to get OpenCode messages")?;
+
+        if !resp.status().is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            anyhow::bail!("OpenCode messages query failed: {}", text);
+        }
+
+        let messages: Vec<serde_json::Value> = resp
+            .json()
+            .await
+            .context("Failed to parse OpenCode messages")?;
+        Ok(messages)
+    }
+
+    pub async fn list_questions(&self, directory: &str) -> anyhow::Result<Vec<serde_json::Value>> {
+        let mut url = format!("{}/question", self.base_url);
+        if !directory.is_empty() {
+            url.push_str("?directory=");
+            url.push_str(&urlencoding::encode(directory));
+        }
+        let resp = self
+            .client
+            .get(&url)
+            .header("Accept", "application/json")
+            .send()
+            .await
+            .context("Failed to get OpenCode questions")?;
+
+        if !resp.status().is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            anyhow::bail!("OpenCode question list failed: {}", text);
+        }
+
+        let questions: Vec<serde_json::Value> = resp
+            .json()
+            .await
+            .context("Failed to parse OpenCode questions")?;
+        Ok(questions)
+    }
+
+    pub async fn reply_question(
+        &self,
+        directory: &str,
+        request_id: &str,
+        answers: serde_json::Value,
+    ) -> anyhow::Result<()> {
+        let mut url = format!("{}/question/{}/reply", self.base_url, request_id);
+        if !directory.is_empty() {
+            url.push_str("?directory=");
+            url.push_str(&urlencoding::encode(directory));
+        }
+
+        let resp = self
+            .client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .json(&json!({ "answers": answers }))
+            .send()
+            .await
+            .context("Failed to reply to OpenCode question")?;
+
+        if !resp.status().is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            anyhow::bail!("OpenCode question reply failed: {}", text);
+        }
+        Ok(())
     }
 }
 
@@ -834,12 +939,35 @@ fn parse_sse_event(
     session_id: &str,
     state: &mut SseState,
 ) -> Option<OpenCodeEvent> {
-    let json: serde_json::Value = serde_json::from_str(data_str).ok()?;
+    let json: serde_json::Value = match serde_json::from_str(data_str) {
+        Ok(value) => value,
+        Err(err) => {
+            if data_str.contains('\n') {
+                let compact = data_str.replace('\n', "");
+                match serde_json::from_str(&compact) {
+                    Ok(value) => value,
+                    Err(second_err) => {
+                        tracing::warn!(
+                            error = %err,
+                            secondary_error = %second_err,
+                            data_preview = %data_str.chars().take(200).collect::<String>(),
+                            "Failed to parse OpenCode SSE JSON payload"
+                        );
+                        return None;
+                    }
+                }
+            } else {
+                tracing::warn!(
+                    error = %err,
+                    data_preview = %data_str.chars().take(200).collect::<String>(),
+                    "Failed to parse OpenCode SSE JSON payload"
+                );
+                return None;
+            }
+        }
+    };
 
-    let event_type = json
-        .get("type")
-        .and_then(|v| v.as_str())
-        .or(event_name)?;
+    let event_type = json.get("type").and_then(|v| v.as_str()).or(event_name)?;
     let props = json.get("properties").cloned().unwrap_or(json!({}));
 
     // Log all event types for debugging
@@ -896,7 +1024,10 @@ fn parse_sse_event(
 
         // Message part streaming events
         "message.part.updated" => {
-            let part_type = props.get("part").and_then(|p| p.get("type")).and_then(|v| v.as_str());
+            let part_type = props
+                .get("part")
+                .and_then(|p| p.get("type"))
+                .and_then(|v| v.as_str());
             tracing::info!(
                 part_type = ?part_type,
                 has_delta = props.get("delta").is_some(),

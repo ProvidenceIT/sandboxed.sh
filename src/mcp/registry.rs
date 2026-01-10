@@ -33,6 +33,38 @@ fn sanitize_mcp_prefix(name: &str) -> String {
         .replace('-', "_")
 }
 
+fn command_exists(command: &str) -> bool {
+    if command.trim().is_empty() {
+        return false;
+    }
+
+    let path = Path::new(command);
+    if path.is_absolute() || command.contains('/') {
+        return path.exists();
+    }
+
+    let Some(paths) = std::env::var_os("PATH") else {
+        return false;
+    };
+
+    for dir in std::env::split_paths(&paths) {
+        let candidate = dir.join(command);
+        if candidate.is_file() {
+            return true;
+        }
+        #[cfg(windows)]
+        {
+            for ext in ["exe", "cmd", "bat"] {
+                if candidate.with_extension(ext).is_file() {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
+}
+
 /// Handle for a stdio MCP process
 struct StdioProcess {
     child: Child,
@@ -102,7 +134,10 @@ impl McpRegistry {
         }
 
         let desktop_command = {
-            let release = working_dir.join("target").join("release").join("desktop-mcp");
+            let release = working_dir
+                .join("target")
+                .join("release")
+                .join("desktop-mcp");
             let debug = working_dir.join("target").join("debug").join("desktop-mcp");
             if release.exists() {
                 release.to_string_lossy().to_string()
@@ -135,9 +170,15 @@ impl McpRegistry {
             Vec::new(),
             HashMap::new(),
         );
+        // Prefer bunx (Bun) when present, but fall back to npx for compatibility.
+        let js_runner = if command_exists("bunx") {
+            "bunx"
+        } else {
+            "npx"
+        };
         let mut playwright = McpServerConfig::new_stdio(
             "playwright".to_string(),
-            "npx".to_string(),
+            js_runner.to_string(),
             vec![
                 "@playwright/mcp@latest".to_string(),
                 "--isolated".to_string(),
@@ -236,8 +277,12 @@ impl McpRegistry {
                 _ => None,
             };
 
-            let Some(binary_name) = binary_name else { continue };
-            let Some(resolved) = resolve_local_binary(working_dir, binary_name) else { continue };
+            let Some(binary_name) = binary_name else {
+                continue;
+            };
+            let Some(resolved) = resolve_local_binary(working_dir, binary_name) else {
+                continue;
+            };
 
             if let McpTransport::Stdio { command, .. } = &mut config.transport {
                 if command != &resolved {
@@ -485,9 +530,7 @@ impl McpRegistry {
     /// Add a new MCP server.
     /// Note: This does NOT automatically attempt to connect. Use refresh() after adding.
     pub async fn add(&self, req: AddMcpRequest) -> anyhow::Result<McpServerState> {
-        let transport = req.effective_transport();
-
-        let mut config = match &transport {
+        let mut config = match &req.transport {
             McpTransport::Http { endpoint, .. } => {
                 McpServerConfig::new(req.name.clone(), endpoint.clone())
             }
@@ -624,12 +667,6 @@ impl McpRegistry {
                 }
                 if let Some(transport) = &req.transport {
                     c.transport = transport.clone();
-                    // Update deprecated endpoint field for backwards compat
-                    if let McpTransport::Http { endpoint, .. } = transport {
-                        c.endpoint = endpoint.clone();
-                    } else {
-                        c.endpoint = String::new();
-                    }
                 }
             })
             .await?;
@@ -1101,5 +1138,4 @@ impl McpRegistry {
             prefixed_name.to_string()
         }
     }
-
 }

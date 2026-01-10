@@ -51,12 +51,8 @@ pub struct ProvidersConfig {
 /// Load providers configuration from file.
 fn load_providers_config(working_dir: &str) -> ProvidersConfig {
     let config_path = format!("{}/.openagent/providers.json", working_dir);
-    let legacy_path = format!("{}/.open_agent/providers.json", working_dir);
 
-    let contents =
-        std::fs::read_to_string(&config_path).or_else(|_| std::fs::read_to_string(&legacy_path));
-
-    match contents {
+    match std::fs::read_to_string(&config_path) {
         Ok(contents) => match serde_json::from_str(&contents) {
             Ok(config) => config,
             Err(e) => {
@@ -66,9 +62,8 @@ fn load_providers_config(working_dir: &str) -> ProvidersConfig {
         },
         Err(_) => {
             tracing::info!(
-                "No providers.json found at {} or {}. Using defaults.",
-                config_path,
-                legacy_path
+                "No providers.json found at {}. Using defaults.",
+                config_path
             );
             default_providers_config()
         }
@@ -78,29 +73,71 @@ fn load_providers_config(working_dir: &str) -> ProvidersConfig {
 /// Default provider configuration.
 fn default_providers_config() -> ProvidersConfig {
     ProvidersConfig {
-        providers: vec![Provider {
-            id: "anthropic".to_string(),
-            name: "Claude (Subscription)".to_string(),
-            billing: "subscription".to_string(),
-            description: "Included in Claude Max".to_string(),
-            models: vec![
-                ProviderModel {
-                    id: "claude-opus-4-5-20251101".to_string(),
-                    name: "Claude Opus 4.5".to_string(),
-                    description: Some("Most capable, recommended for complex tasks".to_string()),
-                },
-                ProviderModel {
-                    id: "claude-sonnet-4-20250514".to_string(),
-                    name: "Claude Sonnet 4".to_string(),
-                    description: Some("Good balance of speed and capability".to_string()),
-                },
-                ProviderModel {
-                    id: "claude-3-5-haiku-20241022".to_string(),
-                    name: "Claude Haiku 3.5".to_string(),
-                    description: Some("Fastest, most economical".to_string()),
-                },
-            ],
-        }],
+        providers: vec![
+            Provider {
+                id: "anthropic".to_string(),
+                name: "Claude (Subscription)".to_string(),
+                billing: "subscription".to_string(),
+                description: "Included in Claude Max".to_string(),
+                models: vec![
+                    ProviderModel {
+                        id: "claude-opus-4-5-20251101".to_string(),
+                        name: "Claude Opus 4.5".to_string(),
+                        description: Some(
+                            "Most capable, recommended for complex tasks".to_string(),
+                        ),
+                    },
+                    ProviderModel {
+                        id: "claude-sonnet-4-20250514".to_string(),
+                        name: "Claude Sonnet 4".to_string(),
+                        description: Some("Good balance of speed and capability".to_string()),
+                    },
+                    ProviderModel {
+                        id: "claude-3-5-haiku-20241022".to_string(),
+                        name: "Claude Haiku 3.5".to_string(),
+                        description: Some("Fastest, most economical".to_string()),
+                    },
+                ],
+            },
+            Provider {
+                id: "openai".to_string(),
+                name: "OpenAI (Subscription)".to_string(),
+                billing: "subscription".to_string(),
+                description: "ChatGPT Plus/Pro via OAuth".to_string(),
+                models: vec![
+                    ProviderModel {
+                        id: "gpt-5.2-codex".to_string(),
+                        name: "GPT-5.2 Codex".to_string(),
+                        description: Some("Optimized for coding workflows".to_string()),
+                    },
+                    ProviderModel {
+                        id: "gpt-5.1-codex".to_string(),
+                        name: "GPT-5.1 Codex".to_string(),
+                        description: Some("Balanced capability and speed".to_string()),
+                    },
+                    ProviderModel {
+                        id: "gpt-5.1-codex-max".to_string(),
+                        name: "GPT-5.1 Codex Max".to_string(),
+                        description: Some("Highest reasoning capacity".to_string()),
+                    },
+                    ProviderModel {
+                        id: "gpt-5.1-codex-mini".to_string(),
+                        name: "GPT-5.1 Codex Mini".to_string(),
+                        description: Some("Fast and economical".to_string()),
+                    },
+                    ProviderModel {
+                        id: "gpt-5.2".to_string(),
+                        name: "GPT-5.2".to_string(),
+                        description: Some("General-purpose GPT-5.2".to_string()),
+                    },
+                    ProviderModel {
+                        id: "gpt-5.1".to_string(),
+                        name: "GPT-5.1".to_string(),
+                        description: Some("General-purpose GPT-5.1".to_string()),
+                    },
+                ],
+            },
+        ],
     }
 }
 

@@ -1,7 +1,7 @@
 //! Configuration management for Open Agent.
 //!
 //! Open Agent uses OpenCode as its execution backend. Configuration can be set via environment variables:
-//! - `DEFAULT_MODEL` - Optional. Default OpenCode model to request (e.g. `claude-opus-4-5-20251101`).
+//! - `DEFAULT_MODEL` - Optional. Default OpenCode model to request (provider/model, e.g. `anthropic/claude-opus-4-5-20251101`).
 //! - `WORKING_DIR` - Optional. Default working directory for relative paths. Defaults to `/root` in production, current directory in dev.
 //! - `HOST` - Optional. Server host. Defaults to `127.0.0.1`.
 //! - `PORT` - Optional. Server port. Defaults to `3000`.

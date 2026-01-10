@@ -679,10 +679,7 @@ async fn build_workspace(
         ));
     }
 
-    let force_rebuild = body
-        .as_ref()
-        .and_then(|b| b.rebuild)
-        .unwrap_or(false);
+    let force_rebuild = body.as_ref().and_then(|b| b.rebuild).unwrap_or(false);
 
     // Parse distro from request (or stored workspace default)
     let distro_override = body
@@ -754,8 +751,14 @@ mod tests {
         let base = Path::new("/tmp/working_dir");
         // Even if the literal path doesn't exist, the .. components should be rejected
         assert!(!path_within(base, Path::new("/tmp/working_dir/../etc")));
-        assert!(!path_within(base, Path::new("/tmp/working_dir/../../etc/passwd")));
-        assert!(!path_within(base, Path::new("/tmp/working_dir/subdir/../../../etc")));
+        assert!(!path_within(
+            base,
+            Path::new("/tmp/working_dir/../../etc/passwd")
+        ));
+        assert!(!path_within(
+            base,
+            Path::new("/tmp/working_dir/subdir/../../../etc")
+        ));
     }
 
     #[test]

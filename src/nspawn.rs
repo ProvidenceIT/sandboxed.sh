@@ -3,6 +3,7 @@
 //! This module provides functionality to create isolated container environments
 //! for workspace execution using debootstrap/pacstrap and systemd-nspawn.
 
+use std::collections::HashMap;
 use std::path::Path;
 use thiserror::Error;
 
@@ -68,7 +69,12 @@ impl NspawnDistro {
     }
 
     pub fn supported_values() -> &'static [&'static str] {
-        &["ubuntu-noble", "ubuntu-jammy", "debian-bookworm", "arch-linux"]
+        &[
+            "ubuntu-noble",
+            "ubuntu-jammy",
+            "debian-bookworm",
+            "arch-linux",
+        ]
     }
 
     pub fn as_str(&self) -> &'static str {
@@ -112,6 +118,8 @@ pub struct NspawnConfig {
     pub network_mode: NetworkMode,
     pub ephemeral: bool,
     pub env: std::collections::HashMap<String, String>,
+    pub binds: Vec<String>,
+    pub capabilities: Vec<String>,
 }
 
 impl Default for NspawnConfig {
@@ -122,8 +130,47 @@ impl Default for NspawnConfig {
             network_mode: NetworkMode::Host,
             ephemeral: false,
             env: std::collections::HashMap::new(),
+            binds: Vec::new(),
+            capabilities: Vec::new(),
         }
     }
+}
+
+pub fn tailscale_enabled(env: &HashMap<String, String>) -> bool {
+    env.iter().any(|(key, value)| {
+        (key == "TS_AUTHKEY" || key == "TS_EXIT_NODE") && !value.trim().is_empty()
+    })
+}
+
+pub fn apply_tailscale_to_config(config: &mut NspawnConfig, env: &HashMap<String, String>) {
+    if !tailscale_enabled(env) {
+        return;
+    }
+
+    config.network_mode = NetworkMode::Private;
+
+    if !config.capabilities.iter().any(|cap| cap == "CAP_NET_ADMIN") {
+        config.capabilities.push("CAP_NET_ADMIN".to_string());
+    }
+
+    if Path::new("/dev/net/tun").exists() && !config.binds.iter().any(|bind| bind == "/dev/net/tun")
+    {
+        config.binds.push("/dev/net/tun".to_string());
+    }
+}
+
+pub fn tailscale_nspawn_extra_args(env: &HashMap<String, String>) -> Vec<String> {
+    if !tailscale_enabled(env) {
+        return Vec::new();
+    }
+
+    let mut args = Vec::new();
+    args.push("--network-veth".to_string());
+    args.push("--capability=CAP_NET_ADMIN".to_string());
+    if Path::new("/dev/net/tun").exists() {
+        args.push("--bind=/dev/net/tun".to_string());
+    }
+    args
 }
 
 /// Create a minimal container environment using debootstrap or pacstrap.
@@ -244,9 +291,7 @@ pub async fn execute_in_container(
     config: &NspawnConfig,
 ) -> NspawnResult<std::process::Output> {
     if command.is_empty() {
-        return Err(NspawnError::NspawnExecution(
-            "Empty command".to_string(),
-        ));
+        return Err(NspawnError::NspawnExecution("Empty command".to_string()));
     }
 
     let mut cmd = tokio::process::Command::new("systemd-nspawn");
@@ -265,6 +310,23 @@ pub async fn execute_in_container(
 
     if config.ephemeral {
         cmd.arg("--ephemeral");
+    }
+
+    for capability in &config.capabilities {
+        if capability.trim().is_empty() {
+            continue;
+        }
+        cmd.arg(format!("--capability={}", capability));
+    }
+
+    for bind in &config.binds {
+        if bind.trim().is_empty() {
+            continue;
+        }
+        let has_dest = bind.contains(':');
+        if has_dest || Path::new(bind).exists() {
+            cmd.arg(format!("--bind={}", bind));
+        }
     }
 
     if config.bind_x11 && Path::new("/tmp/.X11-unix").exists() {

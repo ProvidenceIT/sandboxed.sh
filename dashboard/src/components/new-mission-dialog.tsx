@@ -2,27 +2,59 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { Plus } from 'lucide-react';
-import type { Workspace } from '@/lib/api';
+import { listOpenCodeAgents } from '@/lib/api';
+import type { Provider, Workspace } from '@/lib/api';
 import type { LibraryAgentSummary } from '@/contexts/library-context';
 
 interface NewMissionDialogProps {
   workspaces: Workspace[];
   libraryAgents: LibraryAgentSummary[];
+  providers: Provider[];
   disabled?: boolean;
-  onCreate: (options?: { workspaceId?: string; agent?: string }) => Promise<void> | void;
+  onCreate: (options?: {
+    workspaceId?: string;
+    agent?: string;
+    modelOverride?: string;
+  }) => Promise<void> | void;
 }
 
 export function NewMissionDialog({
   workspaces,
   libraryAgents,
+  providers,
   disabled = false,
   onCreate,
 }: NewMissionDialogProps) {
   const [open, setOpen] = useState(false);
   const [newMissionWorkspace, setNewMissionWorkspace] = useState('');
   const [newMissionAgent, setNewMissionAgent] = useState('');
+  const [newMissionModelOverride, setNewMissionModelOverride] = useState('');
+  const [opencodeAgents, setOpencodeAgents] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const dialogRef = useRef<HTMLDivElement>(null);
+
+  const parseAgentNames = (payload: unknown): string[] => {
+    const normalizeEntry = (entry: unknown): string | null => {
+      if (typeof entry === 'string') return entry;
+      if (entry && typeof entry === 'object') {
+        const name = (entry as { name?: unknown }).name;
+        if (typeof name === 'string') return name;
+        const id = (entry as { id?: unknown }).id;
+        if (typeof id === 'string') return id;
+      }
+      return null;
+    };
+
+    const raw = Array.isArray(payload)
+      ? payload
+      : (payload as { agents?: unknown })?.agents;
+    if (!Array.isArray(raw)) return [];
+
+    const names = raw
+      .map(normalizeEntry)
+      .filter((name): name is string => Boolean(name));
+    return Array.from(new Set(names));
+  };
 
   const formatWorkspaceType = (type: Workspace['workspace_type']) =>
     type === 'host' ? 'host' : 'isolated';
@@ -40,9 +72,32 @@ export function NewMissionDialog({
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [open]);
 
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+
+    const loadAgents = async () => {
+      try {
+        const payload = await listOpenCodeAgents();
+        if (cancelled) return;
+        setOpencodeAgents(parseAgentNames(payload));
+      } catch {
+        if (!cancelled) {
+          setOpencodeAgents([]);
+        }
+      }
+    };
+
+    void loadAgents();
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
+
   const resetForm = () => {
     setNewMissionWorkspace('');
     setNewMissionAgent('');
+    setNewMissionModelOverride('');
   };
 
   const handleCancel = () => {
@@ -57,6 +112,7 @@ export function NewMissionDialog({
       await onCreate({
         workspaceId: newMissionWorkspace || undefined,
         agent: newMissionAgent || undefined,
+        modelOverride: newMissionModelOverride || undefined,
       });
       setOpen(false);
       resetForm();
@@ -66,6 +122,9 @@ export function NewMissionDialog({
   };
 
   const isBusy = disabled || submitting;
+  const defaultAgentLabel = opencodeAgents.includes('Sisyphus')
+    ? 'Default (Sisyphus)'
+    : 'Default (OpenCode default)';
 
   return (
     <div className="relative" ref={dialogRef}>
@@ -139,16 +198,67 @@ export function NewMissionDialog({
                 }}
               >
                 <option value="" className="bg-[#1a1a1a]">
-                  Default (no agent)
+                  {defaultAgentLabel}
                 </option>
-                {libraryAgents.map((agent) => (
-                  <option key={agent.name} value={agent.name} className="bg-[#1a1a1a]">
-                    {agent.name}
-                  </option>
+                {libraryAgents.length > 0 && (
+                  <optgroup label="Library Agents" className="bg-[#1a1a1a]">
+                    {libraryAgents.map((agent) => (
+                      <option key={agent.name} value={agent.name} className="bg-[#1a1a1a]">
+                        {agent.name}
+                      </option>
+                    ))}
+                  </optgroup>
+                )}
+                {opencodeAgents.length > 0 && (
+                  <optgroup label="OpenCode Agents" className="bg-[#1a1a1a]">
+                    {opencodeAgents.map((agent) => (
+                      <option key={agent} value={agent} className="bg-[#1a1a1a]">
+                        {agent}
+                      </option>
+                    ))}
+                  </optgroup>
+                )}
+              </select>
+              <p className="text-xs text-white/30 mt-1.5">
+                Library agents are editable configs; OpenCode agents come from plugins
+              </p>
+            </div>
+
+            {/* Model override */}
+            <div>
+              <label className="block text-xs text-white/50 mb-1.5">Model Override</label>
+              <select
+                value={newMissionModelOverride}
+                onChange={(e) => setNewMissionModelOverride(e.target.value)}
+                className="w-full rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2.5 text-sm text-white focus:border-indigo-500/50 focus:outline-none appearance-none cursor-pointer"
+                style={{
+                  backgroundImage:
+                    "url(\"data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e\")",
+                  backgroundPosition: 'right 0.5rem center',
+                  backgroundRepeat: 'no-repeat',
+                  backgroundSize: '1.5em 1.5em',
+                  paddingRight: '2.5rem',
+                }}
+              >
+                <option value="" className="bg-[#1a1a1a]">
+                  Default (agent or global)
+                </option>
+                {providers.map((provider) => (
+                  <optgroup key={provider.id} label={provider.name} className="bg-[#1a1a1a]">
+                    {provider.models.map((model) => (
+                      <option
+                        key={`${provider.id}/${model.id}`}
+                        value={`${provider.id}/${model.id}`}
+                        className="bg-[#1a1a1a]"
+                      >
+                        {model.name || model.id}
+                      </option>
+                    ))}
+                  </optgroup>
                 ))}
               </select>
               <p className="text-xs text-white/30 mt-1.5">
-                Pre-configured model, tools & instructions from library
+                Overrides the model for this mission
               </p>
             </div>
 

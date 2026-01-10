@@ -76,6 +76,9 @@ pub struct MissionRunner {
     /// Current state
     pub state: MissionRunState,
 
+    /// Agent override for this mission
+    pub agent_override: Option<String>,
+
     /// Message queue for this mission
     pub queue: VecDeque<QueuedMessage>,
 
@@ -106,11 +109,12 @@ pub struct MissionRunner {
 
 impl MissionRunner {
     /// Create a new mission runner.
-    pub fn new(mission_id: Uuid, workspace_id: Uuid) -> Self {
+    pub fn new(mission_id: Uuid, workspace_id: Uuid, agent_override: Option<String>) -> Self {
         Self {
             mission_id,
             workspace_id,
             state: MissionRunState::Queued,
+            agent_override,
             queue: VecDeque::new(),
             history: Vec::new(),
             cancel_token: None,
@@ -186,10 +190,7 @@ impl MissionRunner {
 
     /// Queue a message for this mission.
     pub fn queue_message(&mut self, id: Uuid, content: String) {
-        self.queue.push_back(QueuedMessage {
-            id,
-            content,
-        });
+        self.queue.push_back(QueuedMessage { id, content });
     }
 
     /// Cancel the current execution.
@@ -235,6 +236,7 @@ impl MissionRunner {
         let progress_ref = Arc::clone(&self.progress_snapshot);
         let mission_id = self.mission_id;
         let workspace_id = self.workspace_id;
+        let agent_override = self.agent_override.clone();
         let user_message = msg.content.clone();
         let msg_id = msg.id;
 
@@ -270,6 +272,7 @@ impl MissionRunner {
                 progress_ref,
                 mission_id,
                 Some(workspace_id),
+                agent_override,
             )
             .await;
             (msg_id, user_message, result)
@@ -371,7 +374,13 @@ async fn run_mission_turn(
     progress_snapshot: Arc<RwLock<ExecutionProgress>>,
     mission_id: Uuid,
     workspace_id: Option<Uuid>,
+    agent_override: Option<String>,
 ) -> AgentResult {
+    let mut config = config;
+    if let Some(agent) = agent_override {
+        config.opencode_agent = Some(agent);
+    }
+
     // Build context with history
     let max_history_chars = config.context.max_history_total_chars;
     let history_context = build_history_context(&history, max_history_chars);
@@ -435,25 +444,25 @@ async fn run_mission_turn(
     // Ensure mission workspace exists and is configured for OpenCode.
     let workspace = workspace::resolve_workspace(&workspaces, &config, workspace_id).await;
     let workspace_root = workspace.path.clone();
-    let mission_work_dir =
-        match {
-            let lib_guard = library.read().await;
-            let lib_ref = lib_guard.as_ref().map(|l| l.as_ref());
-            workspace::prepare_mission_workspace_with_skills(&workspace, &mcp, lib_ref, mission_id).await
-        } {
-            Ok(dir) => {
-                tracing::info!(
-                    "Mission {} workspace directory: {}",
-                    mission_id,
-                    dir.display()
-                );
-                dir
-            }
-            Err(e) => {
-                tracing::warn!("Failed to prepare mission workspace, using default: {}", e);
-                workspace_root
-            }
-        };
+    let mission_work_dir = match {
+        let lib_guard = library.read().await;
+        let lib_ref = lib_guard.as_ref().map(|l| l.as_ref());
+        workspace::prepare_mission_workspace_with_skills(&workspace, &mcp, lib_ref, mission_id)
+            .await
+    } {
+        Ok(dir) => {
+            tracing::info!(
+                "Mission {} workspace directory: {}",
+                mission_id,
+                dir.display()
+            );
+            dir
+        }
+        Err(e) => {
+            tracing::warn!("Failed to prepare mission workspace, using default: {}", e);
+            workspace_root
+        }
+    };
 
     let mut ctx = AgentContext::new(config.clone(), mission_work_dir);
     ctx.mission_control = mission_control;

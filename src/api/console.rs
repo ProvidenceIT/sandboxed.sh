@@ -9,14 +9,13 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::{env, path::PathBuf};
 use std::time::{Duration, Instant};
+use std::{env, path::PathBuf};
 
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Path as AxumPath,
-        State,
+        Path as AxumPath, State,
     },
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
@@ -31,6 +30,7 @@ use uuid::Uuid;
 use super::auth;
 use super::routes::AppState;
 use super::ssh_util::materialize_private_key;
+use crate::nspawn;
 use crate::workspace::WorkspaceType;
 
 /// How long to keep a session alive after disconnect before cleanup.
@@ -179,7 +179,10 @@ async fn handle_console(socket: WebSocket, state: Arc<AppState>, session_key: St
     if let Some(session) = existing_session {
         let (can_reuse, child_killer) = {
             let s = session.lock().await;
-            (!s.in_use && !s.to_pty_tx.is_closed(), s.child_killer.clone())
+            (
+                !s.in_use && !s.to_pty_tx.is_closed(),
+                s.child_killer.clone(),
+            )
         };
 
         if can_reuse {
@@ -697,7 +700,10 @@ async fn handle_workspace_shell(
     if let Some(session) = existing_session {
         let (can_reuse, child_killer) = {
             let s = session.lock().await;
-            (!s.in_use && !s.to_pty_tx.is_closed(), s.child_killer.clone())
+            (
+                !s.in_use && !s.to_pty_tx.is_closed(),
+                s.child_killer.clone(),
+            )
         };
 
         if can_reuse {
@@ -773,6 +779,9 @@ async fn handle_new_workspace_shell(
             // Register with a consistent machine name so we can detect/terminate it later
             cmd.arg(format!("--machine={}", workspace.name));
             cmd.arg("--quiet");
+            for arg in nspawn::tailscale_nspawn_extra_args(&workspace.env_vars) {
+                cmd.arg(arg);
+            }
 
             if let Some(display) = read_runtime_display() {
                 if std::path::Path::new("/tmp/.X11-unix").exists() {

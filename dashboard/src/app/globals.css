@@ -292,13 +292,6 @@ select:focus-visible {
   backdrop-filter: blur(20px) saturate(180%);
 }
 
-/* Legacy panel class - maps to glass-panel */
-.panel {
-  background: rgba(255, 255, 255, 0.03);
-  backdrop-filter: blur(20px) saturate(180%);
-  border: 1px solid rgba(255, 255, 255, 0.06);
-}
-
 /* =========================================================================
    Cards - elevation via color, not shadows
    ========================================================================= */

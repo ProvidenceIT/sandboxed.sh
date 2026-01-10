@@ -207,9 +207,7 @@ impl MonitoringState {
 static MONITORING_STATE: std::sync::OnceLock<Arc<MonitoringState>> = std::sync::OnceLock::new();
 
 fn get_monitoring_state() -> Arc<MonitoringState> {
-    MONITORING_STATE
-        .get_or_init(MonitoringState::new)
-        .clone()
+    MONITORING_STATE.get_or_init(MonitoringState::new).clone()
 }
 
 /// Initialize the monitoring background collector at server startup.

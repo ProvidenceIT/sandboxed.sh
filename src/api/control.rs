@@ -134,7 +134,12 @@ pub enum SharedFileKind {
 
 impl SharedFile {
     /// Create a new SharedFile, inferring kind from content_type.
-    pub fn new(name: impl Into<String>, url: impl Into<String>, content_type: impl Into<String>, size_bytes: Option<u64>) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        url: impl Into<String>,
+        content_type: impl Into<String>,
+        size_bytes: Option<u64>,
+    ) -> Self {
         let content_type = content_type.into();
         let kind = Self::infer_kind(&content_type);
         Self {
@@ -150,11 +155,21 @@ impl SharedFile {
     fn infer_kind(content_type: &str) -> SharedFileKind {
         if content_type.starts_with("image/") {
             SharedFileKind::Image
-        } else if content_type.starts_with("text/") || content_type.contains("json") || content_type.contains("xml") {
+        } else if content_type.starts_with("text/")
+            || content_type.contains("json")
+            || content_type.contains("xml")
+        {
             SharedFileKind::Code
-        } else if content_type.contains("pdf") || content_type.contains("document") || content_type.contains("word") {
+        } else if content_type.contains("pdf")
+            || content_type.contains("document")
+            || content_type.contains("word")
+        {
             SharedFileKind::Document
-        } else if content_type.contains("zip") || content_type.contains("tar") || content_type.contains("gzip") || content_type.contains("compress") {
+        } else if content_type.contains("zip")
+            || content_type.contains("tar")
+            || content_type.contains("gzip")
+            || content_type.contains("compress")
+        {
             SharedFileKind::Archive
         } else {
             SharedFileKind::Other
@@ -379,6 +394,8 @@ pub enum ControlCommand {
         workspace_id: Option<Uuid>,
         /// Agent name from library (e.g., "code-reviewer")
         agent: Option<String>,
+        /// Optional model override (provider/model)
+        model_override: Option<String>,
         respond: oneshot::Sender<Result<Mission, String>>,
     },
     /// Update mission status
@@ -457,6 +474,9 @@ pub struct Mission {
     /// Agent name from library (e.g., "code-reviewer")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
+    /// Optional model override (provider/model)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_override: Option<String>,
     pub history: Vec<MissionHistoryEntry>,
     pub created_at: String,
     pub updated_at: String,
@@ -466,6 +486,9 @@ pub struct Mission {
     /// Whether this mission can be resumed
     #[serde(default)]
     pub resumable: bool,
+    /// Desktop sessions started during this mission (used for reconnect/stream resume)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub desktop_sessions: Vec<DesktopSessionInfo>,
 }
 
 fn default_workspace_id() -> Uuid {
@@ -477,6 +500,23 @@ fn default_workspace_id() -> Uuid {
 pub struct MissionHistoryEntry {
     pub role: String,
     pub content: String,
+}
+
+/// Metadata for a desktop session started during a mission.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DesktopSessionInfo {
+    pub display: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolution: Option<String>,
+    pub started_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stopped_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub screenshots_dir: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub browser: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
 }
 
 /// Request to set mission status.
@@ -499,12 +539,18 @@ trait MissionStore: Send + Sync {
         title: Option<&str>,
         workspace_id: Option<Uuid>,
         agent: Option<&str>,
+        model_override: Option<&str>,
     ) -> Result<Mission, String>;
     async fn update_mission_status(&self, id: Uuid, status: MissionStatus) -> Result<(), String>;
     async fn update_mission_history(
         &self,
         id: Uuid,
         history: &[MissionHistoryEntry],
+    ) -> Result<(), String>;
+    async fn update_mission_desktop_sessions(
+        &self,
+        id: Uuid,
+        sessions: &[DesktopSessionInfo],
     ) -> Result<(), String>;
     async fn update_mission_title(&self, id: Uuid, title: &str) -> Result<(), String>;
     async fn update_mission_tree(&self, id: Uuid, tree: &AgentTreeNode) -> Result<(), String>;
@@ -642,6 +688,7 @@ impl MissionStore for InMemoryMissionStore {
         title: Option<&str>,
         workspace_id: Option<Uuid>,
         agent: Option<&str>,
+        model_override: Option<&str>,
     ) -> Result<Mission, String> {
         let now = now_string();
         let mission = Mission {
@@ -650,11 +697,13 @@ impl MissionStore for InMemoryMissionStore {
             title: title.map(|s| s.to_string()),
             workspace_id: workspace_id.unwrap_or(crate::workspace::DEFAULT_WORKSPACE_ID),
             agent: agent.map(|s| s.to_string()),
+            model_override: model_override.map(|s| s.to_string()),
             history: vec![],
             created_at: now.clone(),
             updated_at: now,
             interrupted_at: None,
             resumable: false,
+            desktop_sessions: Vec::new(),
         };
         self.missions
             .write()
@@ -691,6 +740,20 @@ impl MissionStore for InMemoryMissionStore {
             .get_mut(&id)
             .ok_or_else(|| format!("Mission {} not found", id))?;
         mission.history = history.to_vec();
+        mission.updated_at = now_string();
+        Ok(())
+    }
+
+    async fn update_mission_desktop_sessions(
+        &self,
+        id: Uuid,
+        sessions: &[DesktopSessionInfo],
+    ) -> Result<(), String> {
+        let mut missions = self.missions.write().await;
+        let mission = missions
+            .get_mut(&id)
+            .ok_or_else(|| format!("Mission {} not found", id))?;
+        mission.desktop_sessions = sessions.to_vec();
         mission.updated_at = now_string();
         Ok(())
     }
@@ -811,6 +874,7 @@ impl MissionStore for FileMissionStore {
         title: Option<&str>,
         workspace_id: Option<Uuid>,
         agent: Option<&str>,
+        model_override: Option<&str>,
     ) -> Result<Mission, String> {
         let now = now_string();
         let mission = Mission {
@@ -819,11 +883,13 @@ impl MissionStore for FileMissionStore {
             title: title.map(|s| s.to_string()),
             workspace_id: workspace_id.unwrap_or(crate::workspace::DEFAULT_WORKSPACE_ID),
             agent: agent.map(|s| s.to_string()),
+            model_override: model_override.map(|s| s.to_string()),
             history: vec![],
             created_at: now.clone(),
             updated_at: now,
             interrupted_at: None,
             resumable: false,
+            desktop_sessions: Vec::new(),
         };
         self.missions
             .write()
@@ -862,6 +928,21 @@ impl MissionStore for FileMissionStore {
             .get_mut(&id)
             .ok_or_else(|| format!("Mission {} not found", id))?;
         mission.history = history.to_vec();
+        mission.updated_at = now_string();
+        drop(missions);
+        self.persist().await
+    }
+
+    async fn update_mission_desktop_sessions(
+        &self,
+        id: Uuid,
+        sessions: &[DesktopSessionInfo],
+    ) -> Result<(), String> {
+        let mut missions = self.missions.write().await;
+        let mission = missions
+            .get_mut(&id)
+            .ok_or_else(|| format!("Mission {} not found", id))?;
+        mission.desktop_sessions = sessions.to_vec();
         mission.updated_at = now_string();
         drop(missions);
         self.persist().await
@@ -1053,10 +1134,7 @@ impl ControlHub {
             return existing;
         }
         let mission_store: Arc<dyn MissionStore> = match FileMissionStore::new(
-            self.config
-                .working_dir
-                .join(".openagent")
-                .join("missions"),
+            self.config.working_dir.join(".openagent").join("missions"),
             &user.id,
         )
         .await
@@ -1147,10 +1225,7 @@ pub async fn post_message(
     };
     control
         .cmd_tx
-        .send(ControlCommand::UserMessage {
-            id,
-            content,
-        })
+        .send(ControlCommand::UserMessage { id, content })
         .await
         .map_err(|_| {
             (
@@ -1259,6 +1334,8 @@ pub struct CreateMissionRequest {
     pub workspace_id: Option<Uuid>,
     /// Agent name from library (e.g., "code-reviewer")
     pub agent: Option<String>,
+    /// Optional model override (provider/model)
+    pub model_override: Option<String>,
 }
 
 pub async fn create_mission(
@@ -1268,9 +1345,16 @@ pub async fn create_mission(
 ) -> Result<Json<Mission>, (StatusCode, String)> {
     let (tx, rx) = oneshot::channel();
 
-    let (title, workspace_id, agent) = body
-        .map(|b| (b.title.clone(), b.workspace_id, b.agent.clone()))
-        .unwrap_or((None, None, None));
+    let (title, workspace_id, agent, model_override) = body
+        .map(|b| {
+            (
+                b.title.clone(),
+                b.workspace_id,
+                b.agent.clone(),
+                b.model_override.clone(),
+            )
+        })
+        .unwrap_or((None, None, None, None));
 
     let control = control_for_user(&state, &user).await;
     control
@@ -1279,6 +1363,7 @@ pub async fn create_mission(
             title,
             workspace_id,
             agent,
+            model_override,
             respond: tx,
         })
         .await
@@ -1484,36 +1569,34 @@ pub async fn get_opencode_diagnostics(
             let sessions: Vec<serde_json::Value> = resp.json().await.unwrap_or_default();
 
             // Find the most recent session
-            let most_recent = sessions
-                .iter()
-                .max_by_key(|s| {
-                    s.get("time")
-                        .and_then(|t| t.get("updated"))
-                        .and_then(|u| u.as_u64())
-                        .unwrap_or(0)
-                });
+            let most_recent = sessions.iter().max_by_key(|s| {
+                s.get("time")
+                    .and_then(|t| t.get("updated"))
+                    .and_then(|u| u.as_u64())
+                    .unwrap_or(0)
+            });
 
             if let Some(session) = most_recent {
-                let session_id = session.get("id").and_then(|id| id.as_str()).unwrap_or("unknown").to_string();
+                let session_id = session
+                    .get("id")
+                    .and_then(|id| id.as_str())
+                    .unwrap_or("unknown")
+                    .to_string();
 
                 // Get detailed status for this session
                 match client.get_session_status(&session_id).await {
-                    Ok(status) => {
-                        Ok(Json(OpenCodeDiagnostics {
-                            base_url: opencode_url,
-                            session_id: Some(session_id),
-                            session_status: Some(status),
-                            error: None,
-                        }))
-                    }
-                    Err(e) => {
-                        Ok(Json(OpenCodeDiagnostics {
-                            base_url: opencode_url,
-                            session_id: Some(session_id),
-                            session_status: None,
-                            error: Some(format!("Failed to get session status: {}", e)),
-                        }))
-                    }
+                    Ok(status) => Ok(Json(OpenCodeDiagnostics {
+                        base_url: opencode_url,
+                        session_id: Some(session_id),
+                        session_status: Some(status),
+                        error: None,
+                    })),
+                    Err(e) => Ok(Json(OpenCodeDiagnostics {
+                        base_url: opencode_url,
+                        session_id: Some(session_id),
+                        session_status: None,
+                        error: Some(format!("Failed to get session status: {}", e)),
+                    })),
                 }
             } else {
                 Ok(Json(OpenCodeDiagnostics {
@@ -1524,22 +1607,18 @@ pub async fn get_opencode_diagnostics(
                 }))
             }
         }
-        Ok(resp) => {
-            Ok(Json(OpenCodeDiagnostics {
-                base_url: opencode_url,
-                session_id: None,
-                session_status: None,
-                error: Some(format!("OpenCode returned status {}", resp.status())),
-            }))
-        }
-        Err(e) => {
-            Ok(Json(OpenCodeDiagnostics {
-                base_url: opencode_url,
-                session_id: None,
-                session_status: None,
-                error: Some(format!("Failed to connect to OpenCode: {}", e)),
-            }))
-        }
+        Ok(resp) => Ok(Json(OpenCodeDiagnostics {
+            base_url: opencode_url,
+            session_id: None,
+            session_status: None,
+            error: Some(format!("OpenCode returned status {}", resp.status())),
+        })),
+        Err(e) => Ok(Json(OpenCodeDiagnostics {
+            base_url: opencode_url,
+            session_id: None,
+            session_status: None,
+            error: Some(format!("Failed to connect to OpenCode: {}", e)),
+        })),
     }
 }
 
@@ -2111,6 +2190,18 @@ async fn control_actor_loop(
         }
     }
 
+    fn parse_tool_result_object(result: &serde_json::Value) -> Option<serde_json::Value> {
+        if result.is_object() {
+            return Some(result.clone());
+        }
+        if let Some(raw) = result.as_str() {
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(raw) {
+                return Some(parsed);
+            }
+        }
+        None
+    }
+
     // Helper to load a mission and return a Mission struct
     async fn load_mission_record(
         mission_store: &Arc<dyn MissionStore>,
@@ -2123,10 +2214,8 @@ async fn control_actor_loop(
     }
 
     // Helper to create a new mission
-    async fn create_new_mission(
-        mission_store: &Arc<dyn MissionStore>,
-    ) -> Result<Mission, String> {
-        create_new_mission_with_title(mission_store, None, None, None).await
+    async fn create_new_mission(mission_store: &Arc<dyn MissionStore>) -> Result<Mission, String> {
+        create_new_mission_with_title(mission_store, None, None, None, None).await
     }
 
     // Helper to create a new mission with title
@@ -2135,9 +2224,10 @@ async fn control_actor_loop(
         title: Option<&str>,
         workspace_id: Option<Uuid>,
         agent: Option<&str>,
+        model_override: Option<&str>,
     ) -> Result<Mission, String> {
         mission_store
-            .create_mission(title, workspace_id, agent)
+            .create_mission(title, workspace_id, agent, model_override)
             .await
     }
 
@@ -2364,15 +2454,19 @@ async fn control_actor_loop(
                                 let progress_ref = Arc::clone(&progress);
                                 // Capture which mission this task is working on
                                 let mission_id = current_mission.read().await.clone();
-                                let workspace_id = if let Some(mid) = mission_id {
+                                let (workspace_id, model_override, agent_override) = if let Some(mid) = mission_id {
                                     match mission_store.get_mission(mid).await {
-                                        Ok(Some(mission)) => Some(mission.workspace_id),
+                                        Ok(Some(mission)) => (
+                                            Some(mission.workspace_id),
+                                            mission.model_override.clone(),
+                                            mission.agent.clone(),
+                                        ),
                                         Ok(None) => {
                                             tracing::warn!(
                                                 "Mission {} not found while resolving workspace",
                                                 mid
                                             );
-                                            None
+                                            (None, None, None)
                                         }
                                         Err(e) => {
                                             tracing::warn!(
@@ -2380,11 +2474,11 @@ async fn control_actor_loop(
                                                 mid,
                                                 e
                                             );
-                                            None
+                                            (None, None, None)
                                         }
                                     }
                                 } else {
-                                    None
+                                    (None, None, None)
                                 };
                                 running_cancel = Some(cancel.clone());
                                 running_mission_id = mission_id;
@@ -2408,6 +2502,8 @@ async fn control_actor_loop(
                                         progress_ref,
                                         mission_id,
                                         workspace_id,
+                                        model_override,
+                                        agent_override,
                                     )
                                     .await;
                                     (mid, msg, result)
@@ -2461,7 +2557,7 @@ async fn control_actor_loop(
                             }
                         }
                     }
-                    ControlCommand::CreateMission { title, workspace_id, agent, respond } => {
+                    ControlCommand::CreateMission { title, workspace_id, agent, model_override, respond } => {
                         // First persist current mission history
                         persist_mission_history(
                             &mission_store,
@@ -2476,6 +2572,7 @@ async fn control_actor_loop(
                             title.as_deref(),
                             workspace_id,
                             agent.as_deref(),
+                            model_override.as_deref(),
                         )
                         .await {
                             Ok(mission) => {
@@ -2548,6 +2645,7 @@ async fn control_actor_loop(
                             let mut runner = super::mission_runner::MissionRunner::new(
                                 mission_id,
                                 mission.workspace_id,
+                                mission.agent.clone(),
                             );
 
                             // Load existing history into runner to preserve conversation context
@@ -2697,6 +2795,8 @@ async fn control_actor_loop(
                                         let tree_ref = Arc::clone(&current_tree);
                                         let progress_ref = Arc::clone(&progress);
                                         let workspace_id = Some(mission.workspace_id);
+                                        let model_override = mission.model_override.clone();
+                                        let agent_override = mission.agent.clone();
                                         running_cancel = Some(cancel.clone());
                                         // Capture which mission this task is working on (the resumed mission)
                                         running_mission_id = Some(mission_id);
@@ -2718,6 +2818,8 @@ async fn control_actor_loop(
                                                 progress_ref,
                                                 Some(mission_id),
                                                 workspace_id,
+                                                model_override,
+                                                agent_override,
                                             )
                                             .await;
                                             (mid, msg, result)
@@ -3072,15 +3174,19 @@ async fn control_actor_loop(
                     running_cancel = Some(cancel.clone());
                     // Capture which mission this task is working on
                     let mission_id = current_mission.read().await.clone();
-                    let workspace_id = if let Some(mid) = mission_id {
+                    let (workspace_id, model_override, agent_override) = if let Some(mid) = mission_id {
                         match mission_store.get_mission(mid).await {
-                            Ok(Some(mission)) => Some(mission.workspace_id),
+                            Ok(Some(mission)) => (
+                                Some(mission.workspace_id),
+                                mission.model_override.clone(),
+                                mission.agent.clone(),
+                            ),
                             Ok(None) => {
                                 tracing::warn!(
                                     "Mission {} not found while resolving workspace",
                                     mid
                                 );
-                                None
+                                (None, None, None)
                             }
                             Err(e) => {
                                 tracing::warn!(
@@ -3088,11 +3194,11 @@ async fn control_actor_loop(
                                     mid,
                                     e
                                 );
-                                None
+                                (None, None, None)
                             }
                         }
                     } else {
-                        None
+                        (None, None, None)
                     };
                     running_mission_id = mission_id;
                     // Reset activity timer when new task starts to avoid false stall warnings
@@ -3115,6 +3221,8 @@ async fn control_actor_loop(
                             progress_ref,
                             mission_id,
                             workspace_id,
+                            model_override,
+                            agent_override,
                         )
                         .await;
                         (mid, msg, result)
@@ -3205,6 +3313,109 @@ async fn control_actor_loop(
                             runner.touch();
                         }
                     }
+
+                    // Track desktop sessions for mission reconnect/resume.
+                    if let AgentEvent::ToolResult { name, result, mission_id, .. } = &event {
+                        let Some(mid) = mission_id else {
+                            continue;
+                        };
+
+                        let tool_name = name.as_str();
+                        let is_start = matches!(
+                            tool_name,
+                            "desktop_start_session" | "desktop_desktop_start_session"
+                        );
+                        let is_stop = matches!(
+                            tool_name,
+                            "desktop_stop_session"
+                                | "desktop_close_session"
+                                | "desktop_desktop_stop_session"
+                                | "desktop_desktop_close_session"
+                        );
+
+                        if !is_start && !is_stop {
+                            continue;
+                        }
+
+                        let Some(obj) = parse_tool_result_object(result) else {
+                            continue;
+                        };
+
+                        let Some(display) = obj
+                            .get("display")
+                            .and_then(|v| v.as_str())
+                            .map(|v| v.to_string())
+                        else {
+                            continue;
+                        };
+
+                        let Ok(Some(mission)) = mission_store.get_mission(*mid).await else {
+                            continue;
+                        };
+
+                        let mut sessions = mission.desktop_sessions.clone();
+                        let now = now_string();
+
+                        if is_start {
+                            let resolution = obj
+                                .get("resolution")
+                                .and_then(|v| v.as_str())
+                                .map(|v| v.to_string());
+                            let screenshots_dir = obj
+                                .get("screenshots_dir")
+                                .and_then(|v| v.as_str())
+                                .map(|v| v.to_string());
+                            let browser = obj
+                                .get("browser")
+                                .and_then(|v| v.as_str())
+                                .map(|v| v.to_string());
+                            let url = obj
+                                .get("url")
+                                .and_then(|v| v.as_str())
+                                .map(|v| v.to_string());
+
+                            if let Some(existing) = sessions
+                                .iter_mut()
+                                .rev()
+                                .find(|session| session.display == display && session.stopped_at.is_none())
+                            {
+                                existing.resolution = resolution;
+                                existing.screenshots_dir = screenshots_dir;
+                                existing.browser = browser;
+                                existing.url = url;
+                                existing.started_at = now.clone();
+                            } else {
+                                sessions.push(DesktopSessionInfo {
+                                    display,
+                                    resolution,
+                                    started_at: now.clone(),
+                                    stopped_at: None,
+                                    screenshots_dir,
+                                    browser,
+                                    url,
+                                });
+                            }
+                        } else {
+                            if let Some(existing) = sessions
+                                .iter_mut()
+                                .rev()
+                                .find(|session| session.display == display && session.stopped_at.is_none())
+                            {
+                                existing.stopped_at = Some(now.clone());
+                            }
+                        }
+
+                        if let Err(err) = mission_store
+                            .update_mission_desktop_sessions(*mid, &sessions)
+                            .await
+                        {
+                            tracing::warn!(
+                                "Failed to persist desktop session info for mission {}: {}",
+                                mid,
+                                err
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -3212,7 +3423,7 @@ async fn control_actor_loop(
 }
 
 async fn run_single_control_turn(
-    config: Config,
+    mut config: Config,
     root_agent: AgentRef,
     mcp: Arc<McpRegistry>,
     workspaces: workspace::SharedWorkspaceStore,
@@ -3228,25 +3439,36 @@ async fn run_single_control_turn(
     progress_snapshot: Arc<RwLock<ExecutionProgress>>,
     mission_id: Option<Uuid>,
     workspace_id: Option<Uuid>,
+    model_override: Option<String>,
+    agent_override: Option<String>,
 ) -> crate::agents::AgentResult {
+    if let Some(model) = model_override {
+        config.default_model = model;
+    }
+    if let Some(agent) = agent_override {
+        config.opencode_agent = Some(agent);
+    }
     // Ensure a workspace directory for this mission (if applicable).
     let (working_dir_path, runtime_workspace) = if let Some(mid) = mission_id {
         let ws = workspace::resolve_workspace(&workspaces, &config, workspace_id).await;
         // Get library for skill syncing
         let lib_guard = library.read().await;
         let lib_ref = lib_guard.as_ref().map(|l| l.as_ref());
-        let dir = match workspace::prepare_mission_workspace_with_skills(&ws, &mcp, lib_ref, mid).await {
-            Ok(dir) => dir,
-            Err(e) => {
-                tracing::warn!("Failed to prepare mission workspace: {}", e);
-                ws.path.clone()
-            }
-        };
+        let dir =
+            match workspace::prepare_mission_workspace_with_skills(&ws, &mcp, lib_ref, mid).await {
+                Ok(dir) => dir,
+                Err(e) => {
+                    tracing::warn!("Failed to prepare mission workspace: {}", e);
+                    ws.path.clone()
+                }
+            };
         (dir, Some(ws))
     } else {
         (
             config.working_dir.clone(),
-            Some(workspace::Workspace::default_host(config.working_dir.clone())),
+            Some(workspace::Workspace::default_host(
+                config.working_dir.clone(),
+            )),
         )
     };
 
@@ -3270,7 +3492,8 @@ async fn run_single_control_turn(
         }
         _ => history.as_slice(),
     };
-    let history_context = build_history_context(history_for_prompt, config.context.max_history_total_chars);
+    let history_context =
+        build_history_context(history_for_prompt, config.context.max_history_total_chars);
 
     let mut convo = String::new();
     convo.push_str(&history_context);

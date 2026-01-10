@@ -75,6 +75,7 @@ import {
   FolderOpen,
   Trash2,
   Monitor,
+  HelpCircle,
   PanelRightClose,
   PanelRight,
   Wifi,
@@ -188,6 +189,219 @@ type ChatItem =
       detail: string | null;
       agent: string | null;
     };
+
+type ToolItem = Extract<ChatItem, { kind: "tool" }>;
+
+type QuestionOption = {
+  label: string;
+  description?: string;
+};
+
+type QuestionInfo = {
+  header?: string;
+  question?: string;
+  options?: QuestionOption[];
+  multiple?: boolean;
+};
+
+function parseQuestionArgs(args: unknown): QuestionInfo[] {
+  if (!isRecord(args)) return [];
+  const raw = args["questions"];
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((entry) => (isRecord(entry) ? entry : null))
+    .filter((entry): entry is Record<string, unknown> => Boolean(entry))
+    .map((entry) => ({
+      header: typeof entry["header"] === "string" ? entry["header"] : undefined,
+      question: typeof entry["question"] === "string" ? entry["question"] : undefined,
+      options: Array.isArray(entry["options"])
+        ? entry["options"]
+            .map((opt) => (isRecord(opt) ? opt : null))
+            .filter((opt): opt is Record<string, unknown> => Boolean(opt))
+            .map((opt) => ({
+              label: String(opt["label"] ?? ""),
+              description:
+                typeof opt["description"] === "string" ? opt["description"] : undefined,
+            }))
+            .filter((opt) => opt.label.length > 0)
+        : [],
+      multiple: Boolean(entry["multiple"]),
+    }))
+    .filter((q) => (q.question?.length ?? 0) > 0);
+}
+
+function QuestionToolItem({
+  item,
+  onSubmit,
+}: {
+  item: ToolItem;
+  onSubmit: (toolCallId: string, answers: string[][]) => Promise<void>;
+}) {
+  const questions = useMemo(() => parseQuestionArgs(item.args), [item.args]);
+  const [answers, setAnswers] = useState<string[][]>(
+    () => questions.map(() => [])
+  );
+  const [otherText, setOtherText] = useState<Record<number, string>>({});
+  const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    setAnswers(questions.map(() => []));
+    setOtherText({});
+  }, [item.toolCallId, questions.length]);
+
+  const hasResult = item.result !== undefined;
+
+  const canSubmit = useMemo(() => {
+    if (questions.length === 0) return false;
+    return questions.every((_, idx) => (answers[idx] ?? []).length > 0);
+  }, [answers, questions]);
+
+  const handleToggle = (idx: number, label: string, multiple: boolean) => {
+    setAnswers((prev) => {
+      const next = [...prev];
+      const current = new Set(next[idx] ?? []);
+      if (multiple) {
+        if (current.has(label)) {
+          current.delete(label);
+        } else {
+          current.add(label);
+        }
+      } else {
+        current.clear();
+        current.add(label);
+      }
+      next[idx] = Array.from(current);
+      return next;
+    });
+  };
+
+  const handleSubmit = async () => {
+    if (!canSubmit || submitting || hasResult) return;
+    setSubmitting(true);
+    try {
+      const payload = questions.map((q, idx) => {
+        const selections = answers[idx] ?? [];
+        if (!selections.length) return [];
+        const otherLabel = q.options?.find((opt) =>
+          opt.label.toLowerCase().includes("other")
+        )?.label;
+        return selections.map((label) => {
+          if (otherLabel && label === otherLabel) {
+            const extra = otherText[idx]?.trim();
+            return extra ? `Other: ${extra}` : label;
+          }
+          return label;
+        });
+      });
+      await onSubmit(item.toolCallId, payload);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="flex justify-start gap-3">
+      <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-indigo-500/20">
+        <Bot className="h-4 w-4 text-indigo-400" />
+      </div>
+      <div className="max-w-[90%] rounded-2xl rounded-tl-md bg-white/[0.03] border border-white/[0.06] px-4 py-3">
+        <div className="mb-2 text-xs text-white/40">
+          Tool: <span className="font-mono text-indigo-400">question</span>
+        </div>
+        {questions.length === 0 ? (
+          <div className="rounded-lg bg-red-500/10 border border-red-500/20 p-3 text-sm text-red-400">
+            Failed to render question payload
+          </div>
+        ) : (
+          <div className="space-y-4">
+            {questions.map((q, idx) => {
+              const multiple = Boolean(q.multiple);
+              const selections = new Set(answers[idx] ?? []);
+              return (
+                <div key={`${item.toolCallId}-q-${idx}`} className="space-y-2">
+                  <div className="text-sm font-medium text-white/90">
+                    {q.header ? `${q.header}: ` : ""}
+                    {q.question}
+                  </div>
+                  <div className="space-y-2">
+                    {(q.options ?? []).map((opt) => {
+                      const checked = selections.has(opt.label);
+                      return (
+                        <label
+                          key={`${item.toolCallId}-q-${idx}-${opt.label}`}
+                          className={cn(
+                            "flex items-start gap-2 rounded-lg border px-3 py-2 text-sm transition-colors cursor-pointer",
+                            checked
+                              ? "border-indigo-500/40 bg-indigo-500/10"
+                              : "border-white/10 hover:border-white/20"
+                          )}
+                        >
+                          <input
+                            type={multiple ? "checkbox" : "radio"}
+                            checked={checked}
+                            disabled={hasResult || submitting}
+                            onChange={() => handleToggle(idx, opt.label, multiple)}
+                            className="mt-0.5"
+                          />
+                          <div>
+                            <div className="text-white/90">{opt.label}</div>
+                            {opt.description && (
+                              <div className="text-xs text-white/50">
+                                {opt.description}
+                              </div>
+                            )}
+                          </div>
+                        </label>
+                      );
+                    })}
+                  </div>
+                  {(q.options ?? []).some((opt) =>
+                    opt.label.toLowerCase().includes("other")
+                  ) &&
+                    selections.has(
+                      (q.options ?? []).find((opt) =>
+                        opt.label.toLowerCase().includes("other")
+                      )?.label ?? ""
+                    ) && (
+                        <input
+                          type="text"
+                          value={otherText[idx] ?? ""}
+                          onChange={(e) =>
+                            setOtherText((prev) => ({
+                              ...prev,
+                              [idx]: e.target.value,
+                            }))
+                          }
+                          placeholder="Add details…"
+                          disabled={hasResult || submitting}
+                          className="w-full rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 text-sm text-white/80 focus:border-indigo-500/40 focus:outline-none"
+                        />
+                    )}
+                </div>
+              );
+            })}
+            {hasResult ? (
+              <div className="text-xs text-green-400">Answer sent.</div>
+            ) : (
+              <button
+                onClick={handleSubmit}
+                disabled={!canSubmit || submitting}
+                className={cn(
+                  "inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-colors",
+                  !canSubmit || submitting
+                    ? "bg-white/5 text-white/30 cursor-not-allowed"
+                    : "bg-indigo-500/20 text-indigo-200 hover:bg-indigo-500/30"
+                )}
+              >
+                {submitting ? "Sending…" : "Submit Answer"}
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -1167,6 +1381,17 @@ export default function ControlClient() {
     return mission.seconds_since_activity;
   }, [viewingMissionId, runningMissions]);
 
+  const hasPendingQuestion = useMemo(
+    () =>
+      items.some(
+        (item) =>
+          item.kind === "tool" &&
+          item.name === "question" &&
+          item.result === undefined
+      ),
+    [items]
+  );
+
   const isViewingMissionStalled = viewingMissionStallSeconds >= 60;
   const isViewingMissionSeverelyStalled = viewingMissionStallSeconds >= 120;
 
@@ -1441,28 +1666,60 @@ export default function ControlClient() {
   };
 
   // Convert mission history to chat items
-  // Helper to check if mission history has an active desktop session
-  // A session is active if there's a start without a subsequent close
-  const missionHasDesktopSession = useCallback((mission: Mission): boolean => {
-    let hasSession = false;
-    for (const entry of mission.history) {
-      // Check for session start
-      if (
-        entry.content.includes("desktop_start_session") ||
-        entry.content.includes("desktop_desktop_start_session")
-      ) {
-        hasSession = true;
-      }
-      // Check for session close (must come after start check to handle same entry)
-      if (
-        entry.content.includes("desktop_close_session") ||
-        entry.content.includes("desktop_desktop_close_session")
-      ) {
-        hasSession = false;
+  const getActiveDesktopSession = useCallback((mission?: Mission | null) => {
+    if (!mission || !Array.isArray(mission.desktop_sessions)) {
+      return null;
+    }
+    for (let i = mission.desktop_sessions.length - 1; i >= 0; i -= 1) {
+      const session = mission.desktop_sessions[i];
+      if (!session?.stopped_at) {
+        return session;
       }
     }
-    return hasSession;
+    return null;
   }, []);
+
+  // Helper to check if mission history has an active desktop session
+  // A session is active if there's a start without a subsequent close
+  const missionHasDesktopSession = useCallback(
+    (mission: Mission): boolean => {
+      if (getActiveDesktopSession(mission)) {
+        return true;
+      }
+      let hasSession = false;
+      for (const entry of mission.history) {
+        // Check for session start
+        if (
+          entry.content.includes("desktop_start_session") ||
+          entry.content.includes("desktop_desktop_start_session")
+        ) {
+          hasSession = true;
+        }
+        // Check for session close (must come after start check to handle same entry)
+        if (
+          entry.content.includes("desktop_close_session") ||
+          entry.content.includes("desktop_desktop_close_session")
+        ) {
+          hasSession = false;
+        }
+      }
+      return hasSession;
+    },
+    [getActiveDesktopSession]
+  );
+
+  const applyDesktopSessionState = useCallback(
+    (mission: Mission) => {
+      const activeSession = getActiveDesktopSession(mission);
+      if (activeSession?.display) {
+        setDesktopDisplayId(activeSession.display);
+        setHasDesktopSession(true);
+        return;
+      }
+      setHasDesktopSession(missionHasDesktopSession(mission));
+    },
+    [getActiveDesktopSession, missionHasDesktopSession]
+  );
 
   const missionHistoryToItems = useCallback((mission: Mission): ChatItem[] => {
     // Estimate timestamps based on mission creation time
@@ -1523,7 +1780,7 @@ export default function ControlClient() {
         setCurrentMission(mission);
         setViewingMission(mission);
         setItems(missionHistoryToItems(mission));
-        setHasDesktopSession(missionHasDesktopSession(mission));
+        applyDesktopSessionState(mission);
       } catch (err) {
         if (cancelled || fetchingMissionIdRef.current !== id) return;
         console.error("Failed to load mission:", err);
@@ -1539,6 +1796,7 @@ export default function ControlClient() {
           setViewingMissionId(fallbackMission.id);
           setViewingMission(fallbackMission);
           setItems(missionHistoryToItems(fallbackMission));
+          applyDesktopSessionState(fallbackMission);
         } else {
           setViewingMissionId(null);
           setViewingMission(null);
@@ -1558,7 +1816,7 @@ export default function ControlClient() {
           setCurrentMission(mission);
           setViewingMission(mission);
           setItems(missionHistoryToItems(mission));
-          setHasDesktopSession(missionHasDesktopSession(mission));
+          applyDesktopSessionState(mission);
           router.replace(`/control?mission=${mission.id}`, { scroll: false });
           return;
         }
@@ -1582,7 +1840,14 @@ export default function ControlClient() {
     return () => {
       cancelled = true;
     };
-  }, [searchParams, router, missionHistoryToItems, authRetryTrigger, lastMissionId]);
+  }, [
+    searchParams,
+    router,
+    missionHistoryToItems,
+    applyDesktopSessionState,
+    authRetryTrigger,
+    lastMissionId,
+  ]);
 
   useEffect(() => {
     const id = viewingMission?.id ?? currentMission?.id;
@@ -1764,8 +2029,8 @@ export default function ControlClient() {
 
         const historyItems = missionHistoryToItems(mission);
         setItems(historyItems);
-        // Check if mission has an active desktop session in its history
-        setHasDesktopSession(missionHasDesktopSession(mission));
+        // Check if mission has an active desktop session (stored metadata or fallback to history)
+        applyDesktopSessionState(mission);
         // Update cache with fresh data
         setMissionItems((prev) => ({ ...prev, [missionId]: historyItems }));
         setViewingMission(mission);
@@ -1786,6 +2051,7 @@ export default function ControlClient() {
           setViewingMissionId(fallbackMission.id);
           setViewingMission(fallbackMission);
           setItems(missionHistoryToItems(fallbackMission));
+          applyDesktopSessionState(fallbackMission);
           router.replace(`/control?mission=${fallbackMission.id}`, { scroll: false });
         } else if (previousViewingId && missionItems[previousViewingId]) {
           setViewingMissionId(previousViewingId);
@@ -1801,7 +2067,7 @@ export default function ControlClient() {
         }
       }
     },
-    [missionItems, missionHistoryToItems, router]
+    [missionItems, missionHistoryToItems, applyDesktopSessionState, router]
   );
 
   // Sync viewingMissionId with currentMission only when there's no explicit viewing mission set
@@ -1822,12 +2088,14 @@ export default function ControlClient() {
   const handleNewMission = async (options?: {
     workspaceId?: string;
     agent?: string;
+    modelOverride?: string;
   }) => {
     try {
       setMissionLoading(true);
       const mission = await createMission({
         workspaceId: options?.workspaceId,
         agent: options?.agent,
+        modelOverride: options?.modelOverride,
       });
       setCurrentMission(mission);
       setViewingMission(mission);
@@ -2181,7 +2449,7 @@ export default function ControlClient() {
 
       if (event.type === "tool_call" && isRecord(data)) {
         const name = String(data["name"] ?? "");
-        const isUiTool = name.startsWith("ui_");
+        const isUiTool = name.startsWith("ui_") || name === "question";
 
         setItems((prev) => [
           ...prev,
@@ -2415,6 +2683,28 @@ export default function ControlClient() {
     e.preventDefault();
     const content = input.trim();
     if (!content) return;
+
+    const targetMissionId = viewingMissionIdRef.current;
+    const currentMissionId = currentMissionRef.current?.id ?? null;
+
+    if (targetMissionId && targetMissionId !== currentMissionId) {
+      try {
+        console.debug("[control] switching current mission before send", {
+          from: currentMissionId,
+          to: targetMissionId,
+        });
+        const mission = await loadMission(targetMissionId);
+        setCurrentMission(mission);
+        setViewingMission(mission);
+        setViewingMissionId(mission.id);
+        setItems(missionHistoryToItems(mission));
+        applyDesktopSessionState(mission);
+      } catch (err) {
+        console.error("Failed to switch mission before sending:", err);
+        toast.error("Failed to switch mission before sending");
+        return;
+      }
+    }
 
     setInput("");
     setDraftInput("");
@@ -2739,6 +3029,7 @@ export default function ControlClient() {
           <NewMissionDialog
             workspaces={workspaces}
             libraryAgents={libraryAgents}
+            providers={providers}
             disabled={missionLoading}
             onCreate={handleNewMission}
           />
@@ -3307,6 +3598,28 @@ export default function ControlClient() {
                 if (item.kind === "tool") {
                   // UI tools get special interactive rendering
                   if (item.isUiTool) {
+                    if (item.name === "question") {
+                      return (
+                        <QuestionToolItem
+                          key={item.id}
+                          item={item}
+                          onSubmit={async (toolCallId, answers) => {
+                            setItems((prev) =>
+                              prev.map((it) =>
+                                it.kind === "tool" && it.toolCallId === toolCallId
+                                  ? { ...it, result: { answers } }
+                                  : it
+                              )
+                            );
+                            await postControlToolResult({
+                              tool_call_id: toolCallId,
+                              name: item.name,
+                              result: { answers },
+                            });
+                          }}
+                        />
+                      );
+                    }
                     if (item.name === "ui_optionList") {
                       const toolCallId = item.toolCallId;
                       const rawArgs: Record<string, unknown> = isRecord(item.args)
@@ -3498,8 +3811,27 @@ export default function ControlClient() {
                   </div>
                 )}
 
+              {/* Waiting banner for question tool */}
+              {hasPendingQuestion && (
+                <div className="flex justify-center py-4 animate-fade-in">
+                  <div className="flex flex-col sm:flex-row items-start sm:items-center gap-3 rounded-xl px-5 py-4 bg-indigo-500/10 border border-indigo-500/20">
+                    <div className="flex items-center gap-3">
+                      <HelpCircle className="h-5 w-5 shrink-0 text-indigo-300" />
+                      <div className="text-sm">
+                        <span className="font-medium text-indigo-200">
+                          Waiting for your response
+                        </span>
+                        <p className="text-white/50">
+                          The agent asked a question and is paused until you answer.
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
               {/* Stall warning banner when agent hasn't reported activity for 60+ seconds */}
-              {isViewingMissionStalled && viewingMissionId && (
+              {isViewingMissionStalled && viewingMissionId && !hasPendingQuestion && (
                 <div className="flex justify-center py-4 animate-fade-in">
                   <div className={cn(
                     "flex flex-col sm:flex-row items-start sm:items-center gap-3 rounded-xl px-5 py-4",

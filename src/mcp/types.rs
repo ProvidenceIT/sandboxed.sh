@@ -177,9 +177,6 @@ pub struct McpServerConfig {
     /// Scope for this MCP (global or workspace-scoped)
     #[serde(default)]
     pub scope: McpScope,
-    /// Server endpoint URL (e.g., "http://127.0.0.1:4011") - DEPRECATED, use transport
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub endpoint: String,
     /// Optional description
     pub description: Option<String>,
     /// Whether this MCP is enabled
@@ -205,11 +202,10 @@ impl McpServerConfig {
             id: Uuid::new_v4(),
             name,
             transport: McpTransport::Http {
-                endpoint: endpoint.clone(),
+                endpoint,
                 headers: std::collections::HashMap::new(),
             },
             scope: McpScope::Global,
-            endpoint, // Keep for backwards compat
             description: None,
             enabled: true,
             version: None,
@@ -232,7 +228,6 @@ impl McpServerConfig {
             name,
             transport: McpTransport::Stdio { command, args, env },
             scope: McpScope::Global,
-            endpoint: String::new(),
             description: None,
             enabled: true,
             version: None,
@@ -240,14 +235,6 @@ impl McpServerConfig {
             tool_descriptors: Vec::new(),
             created_at: chrono::Utc::now(),
             last_connected_at: None,
-        }
-    }
-
-    /// Get the effective endpoint (for backwards compat)
-    pub fn effective_endpoint(&self) -> Option<&str> {
-        match &self.transport {
-            McpTransport::Http { endpoint, .. } => Some(endpoint.as_str()),
-            McpTransport::Stdio { .. } => None,
         }
     }
 }
@@ -304,38 +291,17 @@ pub struct McpTool {
 #[derive(Debug, Clone, Deserialize)]
 pub struct AddMcpRequest {
     pub name: String,
-    /// HTTP endpoint (for backwards compat, use transport instead)
-    #[serde(default)]
-    pub endpoint: Option<String>,
-    /// Transport configuration (preferred)
-    #[serde(default)]
-    pub transport: Option<McpTransport>,
+    /// Transport configuration
+    pub transport: McpTransport,
     pub description: Option<String>,
     #[serde(default)]
     pub scope: Option<McpScope>,
-}
-
-impl AddMcpRequest {
-    /// Get the effective transport from the request
-    pub fn effective_transport(&self) -> McpTransport {
-        if let Some(transport) = &self.transport {
-            transport.clone()
-        } else if let Some(endpoint) = &self.endpoint {
-            McpTransport::Http {
-                endpoint: endpoint.clone(),
-                headers: std::collections::HashMap::new(),
-            }
-        } else {
-            McpTransport::default()
-        }
-    }
 }
 
 /// Request to update an MCP server.
 #[derive(Debug, Clone, Deserialize)]
 pub struct UpdateMcpRequest {
     pub name: Option<String>,
-    pub endpoint: Option<String>,
     pub transport: Option<McpTransport>,
     pub description: Option<String>,
     pub enabled: Option<bool>,

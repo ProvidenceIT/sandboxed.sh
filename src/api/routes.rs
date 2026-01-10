@@ -56,10 +56,13 @@ pub struct AppState {
     pub workspaces: workspace::SharedWorkspaceStore,
     /// OpenCode connection store
     pub opencode_connections: Arc<crate::opencode_config::OpenCodeStore>,
+    /// Cached OpenCode agent list
+    pub opencode_agents_cache: RwLock<opencode_api::OpenCodeAgentsCache>,
     /// AI Provider store
     pub ai_providers: Arc<crate::ai_providers::AIProviderStore>,
     /// Pending OAuth state for provider authorization
-    pub pending_oauth: Arc<RwLock<HashMap<crate::ai_providers::ProviderType, crate::ai_providers::PendingOAuth>>>,
+    pub pending_oauth:
+        Arc<RwLock<HashMap<crate::ai_providers::ProviderType, crate::ai_providers::PendingOAuth>>>,
     /// Secrets store for encrypted credentials
     pub secrets: Option<Arc<crate::secrets::SecretsStore>>,
     /// Console session pool for WebSocket reconnection
@@ -91,14 +94,22 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     let workspaces = Arc::new(workspace::WorkspaceStore::new(config.working_dir.clone()).await);
 
     // Initialize OpenCode connection store
-    let opencode_connections = Arc::new(crate::opencode_config::OpenCodeStore::new(
-        config.working_dir.join(".openagent/opencode_connections.json"),
-    ).await);
+    let opencode_connections = Arc::new(
+        crate::opencode_config::OpenCodeStore::new(
+            config
+                .working_dir
+                .join(".openagent/opencode_connections.json"),
+        )
+        .await,
+    );
 
     // Initialize AI provider store
-    let ai_providers = Arc::new(crate::ai_providers::AIProviderStore::new(
-        config.working_dir.join(".openagent/ai_providers.json"),
-    ).await);
+    let ai_providers = Arc::new(
+        crate::ai_providers::AIProviderStore::new(
+            config.working_dir.join(".openagent/ai_providers.json"),
+        )
+        .await,
+    );
     let pending_oauth = Arc::new(RwLock::new(HashMap::new()));
 
     // Initialize secrets store
@@ -126,6 +137,12 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         tokio::spawn(async move {
             match crate::library::LibraryStore::new(library_path, &library_remote).await {
                 Ok(store) => {
+                    if let Ok(plugins) = store.get_plugins().await {
+                        if let Err(e) = crate::opencode_config::sync_global_plugins(&plugins).await
+                        {
+                            tracing::warn!("Failed to sync OpenCode plugins: {}", e);
+                        }
+                    }
                     tracing::info!("Configuration library initialized from {}", library_remote);
                     *library_clone.write().await = Some(Arc::new(store));
                 }
@@ -156,6 +173,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         library,
         workspaces,
         opencode_connections,
+        opencode_agents_cache: RwLock::new(opencode_api::OpenCodeAgentsCache::default()),
         ai_providers,
         pending_oauth,
         secrets,
@@ -178,10 +196,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
             get(desktop_stream::desktop_stream_ws),
         )
         // WebSocket system monitoring uses subprotocol-based auth
-        .route(
-            "/api/monitoring/ws",
-            get(monitoring::monitoring_ws),
-        );
+        .route("/api/monitoring/ws", get(monitoring::monitoring_ws));
 
     // File upload routes with increased body limit (10GB)
     let upload_route = Router::new()
@@ -205,7 +220,10 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         .route("/api/control/tree", get(control::get_tree))
         .route("/api/control/progress", get(control::get_progress))
         // Diagnostic endpoints
-        .route("/api/control/diagnostics/opencode", get(control::get_opencode_diagnostics))
+        .route(
+            "/api/control/diagnostics/opencode",
+            get(control::get_opencode_diagnostics),
+        )
         // Mission management endpoints
         .route("/api/control/missions", get(control::list_missions))
         .route("/api/control/missions", post(control::create_mission))
@@ -288,6 +306,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         .nest("/api/workspaces", workspaces_api::routes())
         // OpenCode connection endpoints
         .nest("/api/opencode/connections", opencode_api::routes())
+        .route("/api/opencode/agents", get(opencode_api::list_agents))
         // AI Provider endpoints
         .nest("/api/ai/providers", ai_providers_api::routes())
         // Secrets management endpoints
@@ -544,6 +563,7 @@ async fn create_task(
             model,
             budget_cents,
             working_dir,
+            None,
         )
         .await;
     });
@@ -563,6 +583,7 @@ async fn run_agent_task(
     requested_model: String,
     budget_cents: Option<u64>,
     working_dir: Option<std::path::PathBuf>,
+    agent_override: Option<String>,
 ) {
     // Update status to running
     {
@@ -615,8 +636,13 @@ async fn run_agent_task(
         }
     };
 
+    let mut config = state.config.clone();
+    if let Some(agent) = agent_override {
+        config.opencode_agent = Some(agent);
+    }
+
     // Create context with the specified working directory
-    let mut ctx = AgentContext::new(state.config.clone(), working_dir);
+    let mut ctx = AgentContext::new(config, working_dir);
     ctx.mcp = Some(Arc::clone(&state.mcp));
 
     // Run the hierarchical agent
@@ -763,9 +789,7 @@ pub struct ListRunsQuery {
 }
 
 /// List archived runs (stub - memory system removed).
-async fn list_runs(
-    Query(params): Query<ListRunsQuery>,
-) -> Json<serde_json::Value> {
+async fn list_runs(Query(params): Query<ListRunsQuery>) -> Json<serde_json::Value> {
     let limit = params.limit.unwrap_or(20);
     let offset = params.offset.unwrap_or(0);
     Json(serde_json::json!({
@@ -776,16 +800,15 @@ async fn list_runs(
 }
 
 /// Get a specific run (stub - memory system removed).
-async fn get_run(
-    Path(id): Path<Uuid>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    Err((StatusCode::NOT_FOUND, format!("Run {} not found (memory system disabled)", id)))
+async fn get_run(Path(id): Path<Uuid>) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    Err((
+        StatusCode::NOT_FOUND,
+        format!("Run {} not found (memory system disabled)", id),
+    ))
 }
 
 /// Get events for a run (stub - memory system removed).
-async fn get_run_events(
-    Path(id): Path<Uuid>,
-) -> Json<serde_json::Value> {
+async fn get_run_events(Path(id): Path<Uuid>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "run_id": id,
         "events": []
@@ -793,9 +816,7 @@ async fn get_run_events(
 }
 
 /// Get tasks for a run (stub - memory system removed).
-async fn get_run_tasks(
-    Path(id): Path<Uuid>,
-) -> Json<serde_json::Value> {
+async fn get_run_tasks(Path(id): Path<Uuid>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "run_id": id,
         "tasks": []
@@ -813,9 +834,7 @@ pub struct SearchMemoryQuery {
 }
 
 /// Search memory (stub - memory system removed).
-async fn search_memory(
-    Query(params): Query<SearchMemoryQuery>,
-) -> Json<serde_json::Value> {
+async fn search_memory(Query(params): Query<SearchMemoryQuery>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "query": params.q,
         "results": []
