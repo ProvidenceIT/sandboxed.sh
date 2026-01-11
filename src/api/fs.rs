@@ -352,7 +352,10 @@ pub async fn upload(
         };
 
         // Ensure the target directory exists
-        let target_dir = remote_path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| base.clone());
+        let target_dir = remote_path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| base.clone());
 
         tokio::fs::create_dir_all(&target_dir).await.map_err(|e| {
             (

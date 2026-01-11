@@ -1,6 +1,6 @@
 //! In-memory mission store (non-persistent).
 
-use super::{now_string, Mission, MissionHistoryEntry, MissionStore, MissionStatus};
+use super::{now_string, Mission, MissionHistoryEntry, MissionStatus, MissionStore};
 use crate::api::control::{AgentTreeNode, DesktopSessionInfo};
 use async_trait::async_trait;
 use chrono::Utc;

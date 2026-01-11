@@ -1,0 +1,14 @@
+Your job is to get a minecraft workspace to work inside Open Agent. By this I mean being able to start a Mission where
+Sisyphus (the default agent) has access to an isolated workspace you have created, where shard launcher CLI is installed 
+(see https://github.com/Th0rgal/shard/releases/tag/v0.1.14), and there is a profile in 1.21.11 with MC-CLI installed
+(see https://github.com/Th0rgal/mc-cli). You may check my local shard configuration on this computer to import my minecraft
+account session tokens. On this session, the agent would use the desktop MCP to start a desktop, then start Minecraft on
+it, connect to the minecraft server demo.oraxen.com, and share screenshots.
+
+You will do so using playwright and ensure the UI/UX is good. You will take screenshots regularly and also ensure that the 
+desktop is visible, and you can indeed see Minecraft. You may create many workspaces until it works (using the ubuntu template),
+you will also fix any bugs you find along the way, and find improvements that could be done to make the process better.
+You may edit the skills enabled in the workspace, edit the skills directly, etc.
+
+Deploy the backend on remote server (root@95.216.112.253), the test nextjs website is already running on port 3001 (for testing with playwright).
+You will probably need to redeploy many times (after each fix), to be able to test that it works.

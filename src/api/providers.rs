@@ -223,7 +223,11 @@ fn get_configured_provider_ids() -> HashSet<String> {
     ] {
         let auth_file = provider_auth_dir.join(format!("{}.json", provider_type.id()));
         if let Ok(contents) = std::fs::read_to_string(&auth_file) {
-            tracing::debug!("Found auth file for {}: {:?}", provider_type.id(), auth_file);
+            tracing::debug!(
+                "Found auth file for {}: {:?}",
+                provider_type.id(),
+                auth_file
+            );
             if let Ok(value) = serde_json::from_str::<serde_json::Value>(&contents) {
                 if has_valid_auth(&value) {
                     tracing::debug!(

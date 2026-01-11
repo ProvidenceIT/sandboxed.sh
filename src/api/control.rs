@@ -66,7 +66,6 @@ fn build_history_context(history: &[(String, String)], max_chars: usize) -> Stri
     result
 }
 
-
 /// Message posted by a user to the control session.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ControlMessageRequest {
@@ -1063,12 +1062,7 @@ pub async fn get_mission_events(
 
     let events = control
         .mission_store
-        .get_events(
-            mission_id,
-            types.as_deref(),
-            query.limit,
-            query.offset,
-        )
+        .get_events(mission_id, types.as_deref(), query.limit, query.offset)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 

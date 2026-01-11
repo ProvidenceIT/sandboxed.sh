@@ -60,14 +60,12 @@ pub async fn get_opencode_settings() -> Result<Json<Value>, (StatusCode, String)
         return Ok(Json(serde_json::json!({})));
     }
 
-    let contents = tokio::fs::read_to_string(&config_path)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to read oh-my-opencode.json: {}", e),
-            )
-        })?;
+    let contents = tokio::fs::read_to_string(&config_path).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to read oh-my-opencode.json: {}", e),
+        )
+    })?;
 
     let config: Value = serde_json::from_str(&contents).map_err(|e| {
         (
@@ -96,19 +94,17 @@ pub async fn update_opencode_settings(
     }
 
     // Write the config
-    let contents = serde_json::to_string_pretty(&config).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("Invalid JSON: {}", e),
-        )
-    })?;
+    let contents = serde_json::to_string_pretty(&config)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)))?;
 
-    tokio::fs::write(&config_path, contents).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to write oh-my-opencode.json: {}", e),
-        )
-    })?;
+    tokio::fs::write(&config_path, contents)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to write oh-my-opencode.json: {}", e),
+            )
+        })?;
 
     tracing::info!(path = %config_path.display(), "Updated oh-my-opencode settings");
 
@@ -225,9 +221,7 @@ pub struct TestConnectionResponse {
 
 /// Fetch agents from OpenCode (internal helper for library.rs).
 /// Returns the raw agent payload from OpenCode.
-pub async fn fetch_opencode_agents(
-    state: &super::routes::AppState,
-) -> Result<Value, String> {
+pub async fn fetch_opencode_agents(state: &super::routes::AppState) -> Result<Value, String> {
     let base_url = if let Some(connection) = state.opencode_connections.get_default().await {
         connection.base_url
     } else {

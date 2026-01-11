@@ -933,7 +933,11 @@ impl Agent for OpenCodeAgent {
             let part_types: Vec<String> = response
                 .parts
                 .iter()
-                .filter_map(|part| part.get("type").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                .filter_map(|part| {
+                    part.get("type")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                })
                 .collect();
             tracing::warn!(
                 session_id = %session.id,

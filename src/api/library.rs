@@ -208,7 +208,10 @@ pub fn routes() -> Router<Arc<super::routes::AppState>> {
         .route("/skills/:name", delete(delete_skill))
         .route("/skills/:name/references/*path", get(get_skill_reference))
         .route("/skills/:name/references/*path", put(save_skill_reference))
-        .route("/skills/:name/references/*path", delete(delete_skill_reference))
+        .route(
+            "/skills/:name/references/*path",
+            delete(delete_skill_reference),
+        )
         // Commands
         .route("/command", get(list_commands))
         .route("/command/:name", get(get_command))

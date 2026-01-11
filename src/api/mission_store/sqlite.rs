@@ -1,7 +1,7 @@
 //! SQLite-based mission store with full event logging.
 
 use super::{
-    now_string, sanitize_filename, Mission, MissionHistoryEntry, MissionStore, MissionStatus,
+    now_string, sanitize_filename, Mission, MissionHistoryEntry, MissionStatus, MissionStore,
     StoredEvent,
 };
 use crate::api::control::{AgentEvent, AgentTreeNode, DesktopSessionInfo};
@@ -379,12 +379,12 @@ impl MissionStore for SqliteMissionStore {
     async fn update_mission_status(&self, id: Uuid, status: MissionStatus) -> Result<(), String> {
         let conn = self.conn.clone();
         let now = now_string();
-        let interrupted_at = if matches!(status, MissionStatus::Interrupted | MissionStatus::Blocked)
-        {
-            Some(now.clone())
-        } else {
-            None
-        };
+        let interrupted_at =
+            if matches!(status, MissionStatus::Interrupted | MissionStatus::Blocked) {
+                Some(now.clone())
+            } else {
+                None
+            };
         let resumable = matches!(status, MissionStatus::Interrupted | MissionStatus::Blocked);
 
         tokio::task::spawn_blocking(move || {
@@ -575,7 +575,10 @@ impl MissionStore for SqliteMissionStore {
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
             let rows = conn
-                .execute("DELETE FROM missions WHERE id = ?1", params![id.to_string()])
+                .execute(
+                    "DELETE FROM missions WHERE id = ?1",
+                    params![id.to_string()],
+                )
                 .map_err(|e| e.to_string())?;
             Ok(rows > 0)
         })
@@ -722,7 +725,12 @@ impl MissionStore for SqliteMissionStore {
 
         // Extract event data
         let (event_type, event_id, tool_call_id, tool_name, content, metadata) = match event {
-            AgentEvent::UserMessage { id, content, queued, .. } => (
+            AgentEvent::UserMessage {
+                id,
+                content,
+                queued,
+                ..
+            } => (
                 "user_message",
                 Some(id.to_string()),
                 None,
@@ -872,7 +880,8 @@ impl MissionStore for SqliteMissionStore {
     ) -> Result<Vec<StoredEvent>, String> {
         let conn = self.conn.clone();
         let mid = mission_id.to_string();
-        let types: Option<Vec<String>> = event_types.map(|t| t.iter().map(|s| s.to_string()).collect());
+        let types: Option<Vec<String>> =
+            event_types.map(|t| t.iter().map(|s| s.to_string()).collect());
         let limit = limit.unwrap_or(1000) as i64;
         let offset = offset.unwrap_or(0) as i64;
 

@@ -524,10 +524,7 @@ async fn run_container_command(
     Ok(output)
 }
 
-async fn running_container_leader(
-    machine_name: &str,
-    options: &CommandOptions,
-) -> Option<String> {
+async fn running_container_leader(machine_name: &str, options: &CommandOptions) -> Option<String> {
     let machinectl = if Path::new("/usr/bin/machinectl").exists() {
         "/usr/bin/machinectl"
     } else {
@@ -540,7 +537,9 @@ async fn running_container_leader(
         "Leader".to_string(),
         "--value".to_string(),
     ];
-    let output = run_shell_command(machinectl, &args, None, options).await.ok()?;
+    let output = run_shell_command(machinectl, &args, None, options)
+        .await
+        .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -557,7 +556,10 @@ fn nsenter_command(rel_str: &str, command: &str) -> String {
     exports.push("export OPEN_AGENT_CONTEXT_ROOT=/root/context".to_string());
     if let Ok(context_dir) = env::var("OPEN_AGENT_CONTEXT_DIR_NAME") {
         if !context_dir.trim().is_empty() {
-            exports.push(format!("export OPEN_AGENT_CONTEXT_DIR_NAME={}", context_dir.trim()));
+            exports.push(format!(
+                "export OPEN_AGENT_CONTEXT_DIR_NAME={}",
+                context_dir.trim()
+            ));
         }
     }
     if let Ok(mission_id) = env::var("OPEN_AGENT_MISSION_ID") {

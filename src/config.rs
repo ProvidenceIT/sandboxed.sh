@@ -32,7 +32,6 @@ pub enum ConfigError {
     InvalidValue(String, String),
 }
 
-
 /// Context injection configuration.
 ///
 /// Controls how much context is injected into agent prompts

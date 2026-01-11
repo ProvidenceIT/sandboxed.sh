@@ -575,8 +575,7 @@ fn opencode_entry_from_mcp(
                     }
                 }
             }
-            if let Ok(runtime_workspace_file) = std::env::var("OPEN_AGENT_RUNTIME_WORKSPACE_FILE")
-            {
+            if let Ok(runtime_workspace_file) = std::env::var("OPEN_AGENT_RUNTIME_WORKSPACE_FILE") {
                 if !runtime_workspace_file.trim().is_empty() {
                     merged_env
                         .entry("OPEN_AGENT_RUNTIME_WORKSPACE_FILE".to_string())
@@ -621,7 +620,8 @@ fn opencode_entry_from_mcp(
                         );
                         if let Ok(dir_name) = std::env::var("OPEN_AGENT_CONTEXT_DIR_NAME") {
                             if !dir_name.trim().is_empty() {
-                                nspawn_env.insert("OPEN_AGENT_CONTEXT_DIR_NAME".to_string(), dir_name);
+                                nspawn_env
+                                    .insert("OPEN_AGENT_CONTEXT_DIR_NAME".to_string(), dir_name);
                             }
                         }
                     }
@@ -1514,6 +1514,18 @@ pub async fn build_chroot_workspace(
     // Create the container
     match nspawn::create_container(&workspace.path, distro).await {
         Ok(()) => {
+            match seed_shard_accounts(&workspace.path).await {
+                Ok(true) => {
+                    tracing::info!(workspace = %workspace.name, "Seeded Shard credentials into container workspace")
+                }
+                Ok(false) => {
+                    tracing::debug!(workspace = %workspace.name, "No Shard seed directory found to copy")
+                }
+                Err(e) => {
+                    tracing::warn!(workspace = %workspace.name, error = %e, "Failed to seed Shard data into container")
+                }
+            }
+
             if let Err(e) = run_workspace_init_script(workspace).await {
                 workspace.status = WorkspaceStatus::Error;
                 workspace.error_message = Some(format!("Init script failed: {}", e));
@@ -1532,6 +1544,57 @@ pub async fn build_chroot_workspace(
             Err(anyhow::anyhow!("Container build failed: {}", e))
         }
     }
+}
+
+async fn seed_shard_accounts(container_root: &Path) -> anyhow::Result<bool> {
+    let seed_dir = std::env::var("OPEN_AGENT_SHARD_SEED")
+        .ok()
+        .filter(|path| !path.trim().is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .map(|home| PathBuf::from(home).join(".shard"))
+        })
+        .or_else(|| {
+            let fallback = PathBuf::from("/root/.shard");
+            if fallback.exists() {
+                Some(fallback)
+            } else {
+                None
+            }
+        });
+
+    let Some(seed_dir) = seed_dir else {
+        return Ok(false);
+    };
+
+    if !seed_dir.exists() || !seed_dir.is_dir() {
+        return Ok(false);
+    }
+
+    let dest_dir = container_root.join("root/.shard");
+    tokio::fs::create_dir_all(&dest_dir).await?;
+
+    let mut copied = false;
+    for filename in ["accounts.json", "config.json", "profile-organization.json"] {
+        let src = seed_dir.join(filename);
+        if !src.exists() {
+            continue;
+        }
+        let dest = dest_dir.join(filename);
+        match tokio::fs::copy(&src, &dest).await {
+            Ok(_) => {
+                copied = true;
+                tracing::info!(source = %src.display(), dest = %dest.display(), "Seeded Shard file into container workspace");
+            }
+            Err(e) => {
+                tracing::warn!(source = %src.display(), dest = %dest.display(), error = %e, "Failed to copy Shard file into workspace");
+            }
+        }
+    }
+
+    Ok(copied)
 }
 
 async fn run_workspace_init_script(workspace: &Workspace) -> anyhow::Result<()> {

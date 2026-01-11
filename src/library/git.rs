@@ -371,7 +371,8 @@ pub async fn sparse_clone(path: &Path, remote: &str, subpath: &str) -> Result<()
 
     // Fetch and checkout
     let mut cmd = Command::new("git");
-    cmd.current_dir(path).args(["fetch", "--depth", "1", "origin"]);
+    cmd.current_dir(path)
+        .args(["fetch", "--depth", "1", "origin"]);
     apply_ssh_config(&mut cmd);
     let output = cmd.output().await.context("Failed to fetch")?;
 

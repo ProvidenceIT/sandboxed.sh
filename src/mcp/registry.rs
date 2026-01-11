@@ -147,12 +147,14 @@ impl McpRegistry {
                 "desktop-mcp".to_string()
             }
         };
-        let desktop = McpServerConfig::new_stdio(
+        let mut desktop = McpServerConfig::new_stdio(
             "desktop".to_string(),
             desktop_command,
             Vec::new(),
             desktop_env,
         );
+        desktop.scope = McpScope::Workspace;
+
         let host_command = {
             let release = working_dir.join("target").join("release").join("host-mcp");
             let debug = working_dir.join("target").join("debug").join("host-mcp");
@@ -164,12 +166,13 @@ impl McpRegistry {
                 "host-mcp".to_string()
             }
         };
-        let host = McpServerConfig::new_stdio(
+        let mut host = McpServerConfig::new_stdio(
             "host".to_string(),
             host_command,
             Vec::new(),
             HashMap::new(),
         );
+        host.scope = McpScope::Workspace;
         // Prefer bunx (Bun) when present, but fall back to npx for compatibility.
         let js_runner = if command_exists("bunx") {
             "bunx"
@@ -298,12 +301,12 @@ impl McpRegistry {
                 }
             }
 
-            if config.scope != McpScope::Global {
-                config.scope = McpScope::Global;
+            if config.scope != McpScope::Workspace {
+                config.scope = McpScope::Workspace;
                 let id = config.id;
                 let _ = config_store
                     .update(id, |c| {
-                        c.scope = McpScope::Global;
+                        c.scope = McpScope::Workspace;
                     })
                     .await;
             }

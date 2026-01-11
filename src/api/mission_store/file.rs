@@ -1,6 +1,8 @@
 //! JSON file-based mission store (legacy).
 
-use super::{now_string, sanitize_filename, Mission, MissionHistoryEntry, MissionStore, MissionStatus};
+use super::{
+    now_string, sanitize_filename, Mission, MissionHistoryEntry, MissionStatus, MissionStore,
+};
 use crate::api::control::{AgentTreeNode, DesktopSessionInfo};
 use async_trait::async_trait;
 use chrono::Utc;

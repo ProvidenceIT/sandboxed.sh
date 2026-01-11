@@ -807,7 +807,10 @@ fn handle_part_update(props: &serde_json::Value, state: &mut SseState) -> Option
         return None;
     };
 
-    if role.is_none() && matches!(part_type, "text" | "output_text") && looks_like_user_prompt(&content) {
+    if role.is_none()
+        && matches!(part_type, "text" | "output_text")
+        && looks_like_user_prompt(&content)
+    {
         return None;
     }
 
@@ -989,7 +992,10 @@ fn parse_sse_event(
     };
 
     let event_type = json.get("type").and_then(|v| v.as_str()).or(event_name)?;
-    let props = json.get("properties").cloned().unwrap_or_else(|| json.clone());
+    let props = json
+        .get("properties")
+        .cloned()
+        .unwrap_or_else(|| json.clone());
 
     // Log all event types for debugging
     tracing::warn!(
@@ -1049,11 +1055,9 @@ fn parse_sse_event(
                 content: buffer.clone(),
             })
         }
-        "response.completed" | "response.incomplete" => {
-            Some(OpenCodeEvent::MessageComplete {
-                session_id: session_id.to_string(),
-            })
-        }
+        "response.completed" | "response.incomplete" => Some(OpenCodeEvent::MessageComplete {
+            session_id: session_id.to_string(),
+        }),
         "response.output_item.added" => {
             if let Some(item) = props.get("item") {
                 if item.get("type").and_then(|v| v.as_str()) == Some("function_call") {
