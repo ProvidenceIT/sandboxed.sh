@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use thiserror::Error;
+use tokio::process::Command;
 
 #[derive(Debug, Error)]
 pub enum NspawnError {
@@ -421,6 +422,45 @@ pub async fn detect_container_distro(path: &Path) -> Option<NspawnDistro> {
 /// Clean up a container environment.
 pub async fn destroy_container(path: &Path) -> NspawnResult<()> {
     tracing::info!("Destroying container at {}", path.display());
+
+    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+        let machine_name = name.trim();
+        if !machine_name.is_empty() {
+            let machinectl = if Path::new("/usr/bin/machinectl").exists() {
+                "/usr/bin/machinectl"
+            } else {
+                "machinectl"
+            };
+            match Command::new(machinectl)
+                .arg("terminate")
+                .arg(machine_name)
+                .output()
+                .await
+            {
+                Ok(output) => {
+                    if output.status.success() {
+                        tracing::info!(
+                            machine = machine_name,
+                            "Terminated running container before removal"
+                        );
+                    } else {
+                        tracing::debug!(
+                            machine = machine_name,
+                            status = %output.status,
+                            "machinectl terminate returned non-zero"
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        machine = machine_name,
+                        error = %e,
+                        "Failed to terminate container before removal"
+                    );
+                }
+            }
+        }
+    }
 
     if !path.exists() {
         tracing::info!(
