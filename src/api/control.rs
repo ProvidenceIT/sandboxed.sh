@@ -70,6 +70,9 @@ fn build_history_context(history: &[(String, String)], max_chars: usize) -> Stri
 #[derive(Debug, Clone, Deserialize)]
 pub struct ControlMessageRequest {
     pub content: String,
+    /// Optional agent override for this specific message (e.g., from @agent mention)
+    #[serde(default)]
+    pub agent: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -392,6 +395,8 @@ pub enum ControlCommand {
     UserMessage {
         id: Uuid,
         content: String,
+        /// Optional agent override for this specific message
+        agent: Option<String>,
     },
     ToolResult {
         tool_call_id: String,
@@ -685,6 +690,7 @@ pub async fn post_message(
     }
 
     let id = Uuid::new_v4();
+    let agent = req.agent;
     let control = control_for_user(&state, &user).await;
     let queued = {
         let status = control.status.read().await;
@@ -696,11 +702,12 @@ pub async fn post_message(
         message_id = %id,
         queued,
         content_len = content.len(),
+        agent = ?agent,
         "Received control message"
     );
     control
         .cmd_tx
-        .send(ControlCommand::UserMessage { id, content })
+        .send(ControlCommand::UserMessage { id, content, agent })
         .await
         .map_err(|_| {
             (
@@ -1718,8 +1725,8 @@ async fn control_actor_loop(
     progress: Arc<RwLock<ExecutionProgress>>,
     mission_store: Arc<dyn MissionStore>,
 ) {
-    // Queue stores (id, content) for the current/primary mission
-    let mut queue: VecDeque<(Uuid, String)> = VecDeque::new();
+    // Queue stores (id, content, agent) for the current/primary mission
+    let mut queue: VecDeque<(Uuid, String, Option<String>)> = VecDeque::new();
     let mut history: Vec<(String, String)> = Vec::new(); // (role, content) pairs (user/assistant)
     let mut running: Option<tokio::task::JoinHandle<(Uuid, String, crate::agents::AgentResult)>> =
         None;
@@ -2006,7 +2013,7 @@ async fn control_actor_loop(
             cmd = cmd_rx.recv() => {
                 let Some(cmd) = cmd else { break };
                 match cmd {
-                    ControlCommand::UserMessage { id, content } => {
+                    ControlCommand::UserMessage { id, content, agent: msg_agent } => {
                         // Auto-create mission on first message if none exists
                         {
                             let mission_id = current_mission.read().await.clone();
@@ -2022,7 +2029,7 @@ async fn control_actor_loop(
 
                         let was_running = running.is_some();
                         let content_clone = content.clone();
-                        queue.push_back((id, content));
+                        queue.push_back((id, content, msg_agent));
                         set_and_emit_status(
                             &status,
                             &events_tx,
@@ -2039,7 +2046,7 @@ async fn control_actor_loop(
                             });
                         }
                         if running.is_none() {
-                            if let Some((mid, msg)) = queue.pop_front() {
+                            if let Some((mid, msg, per_msg_agent)) = queue.pop_front() {
                                 set_and_emit_status(&status, &events_tx, ControlRunState::Running, queue.len()).await;
                                 let current_mid = current_mission.read().await.clone();
                                 let _ = events_tx.send(AgentEvent::UserMessage { id: mid, content: msg.clone(), queued: false, mission_id: current_mid });
@@ -2067,7 +2074,7 @@ async fn control_actor_loop(
                                 let progress_ref = Arc::clone(&progress);
                                 // Capture which mission this task is working on
                                 let mission_id = current_mission.read().await.clone();
-                                let (workspace_id, model_override, agent_override) = if let Some(mid) = mission_id {
+                                let (workspace_id, model_override, mission_agent) = if let Some(mid) = mission_id {
                                     match mission_store.get_mission(mid).await {
                                         Ok(Some(mission)) => (
                                             Some(mission.workspace_id),
@@ -2093,6 +2100,8 @@ async fn control_actor_loop(
                                 } else {
                                     (None, None, None)
                                 };
+                                // Per-message agent overrides mission agent
+                                let agent_override = per_msg_agent.or(mission_agent);
                                 running_cancel = Some(cancel.clone());
                                 running_mission_id = mission_id;
                                 // Reset activity timer when new task starts to avoid false stall warnings
@@ -2382,13 +2391,13 @@ async fn control_actor_loop(
                                     tracing::warn!("Failed to resume mission {}: {}", mission_id, e);
                                 }
 
-                                // Queue the resume prompt as a message
+                                // Queue the resume prompt as a message (no per-message agent override)
                                 let msg_id = Uuid::new_v4();
-                                queue.push_back((msg_id, resume_prompt));
+                                queue.push_back((msg_id, resume_prompt, None));
 
                                 // Start execution if not already running
                                 if running.is_none() {
-                                    if let Some((mid, msg)) = queue.pop_front() {
+                                    if let Some((mid, msg, _per_msg_agent)) = queue.pop_front() {
                                         set_and_emit_status(&status, &events_tx, ControlRunState::Running, queue.len()).await;
                                         let _ = events_tx.send(AgentEvent::UserMessage { id: mid, content: msg.clone(), queued: false, mission_id: Some(mission_id) });
                                         let cfg = config.clone();
@@ -2409,6 +2418,7 @@ async fn control_actor_loop(
                                         let progress_ref = Arc::clone(&progress);
                                         let workspace_id = Some(mission.workspace_id);
                                         let model_override = mission.model_override.clone();
+                                        // Resume uses mission agent (no per-message override for resumes)
                                         let agent_override = mission.agent.clone();
                                         running_cancel = Some(cancel.clone());
                                         // Capture which mission this task is working on (the resumed mission)
@@ -2758,7 +2768,7 @@ async fn control_actor_loop(
                 }
 
                 // Start next queued message, if any.
-                if let Some((mid, msg)) = queue.pop_front() {
+                if let Some((mid, msg, per_msg_agent)) = queue.pop_front() {
                     set_and_emit_status(&status, &events_tx, ControlRunState::Running, queue.len()).await;
                     let current_mid = current_mission.read().await.clone();
                     let _ = events_tx.send(AgentEvent::UserMessage { id: mid, content: msg.clone(), queued: false, mission_id: current_mid });
@@ -2787,7 +2797,7 @@ async fn control_actor_loop(
                     running_cancel = Some(cancel.clone());
                     // Capture which mission this task is working on
                     let mission_id = current_mission.read().await.clone();
-                    let (workspace_id, model_override, agent_override) = if let Some(mid) = mission_id {
+                    let (workspace_id, model_override, mission_agent) = if let Some(mid) = mission_id {
                         match mission_store.get_mission(mid).await {
                             Ok(Some(mission)) => (
                                 Some(mission.workspace_id),
@@ -2813,6 +2823,8 @@ async fn control_actor_loop(
                     } else {
                         (None, None, None)
                     };
+                    // Per-message agent overrides mission agent
+                    let agent_override = per_msg_agent.or(mission_agent);
                     running_mission_id = mission_id;
                     // Reset activity timer when new task starts to avoid false stall warnings
                     main_runner_last_activity = std::time::Instant::now();

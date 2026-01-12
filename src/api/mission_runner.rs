@@ -63,6 +63,8 @@ pub enum MissionHealth {
 pub struct QueuedMessage {
     pub id: Uuid,
     pub content: String,
+    /// Optional agent override for this specific message (e.g., from @agent mention)
+    pub agent: Option<String>,
 }
 
 /// Isolated runner for a single mission.

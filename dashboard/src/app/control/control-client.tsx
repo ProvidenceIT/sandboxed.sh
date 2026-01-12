@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { toast } from "@/components/toast";
 import { MarkdownContent } from "@/components/markdown-content";
+import { EnhancedInput, type SubmitPayload } from "@/components/enhanced-input";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { cn } from "@/lib/utils";
@@ -3380,6 +3381,73 @@ export default function ControlClient() {
     }
   };
 
+  // Handler for EnhancedInput that takes a payload with content and optional agent
+  const handleEnhancedSubmit = useCallback(async (payload: SubmitPayload) => {
+    const { content, agent } = payload;
+    if (!content.trim()) return;
+
+    const targetMissionId = viewingMissionIdRef.current;
+    const currentMissionId = currentMissionRef.current?.id ?? null;
+
+    if (targetMissionId && targetMissionId !== currentMissionId) {
+      try {
+        console.debug("[control] switching current mission before send", {
+          from: currentMissionId,
+          to: targetMissionId,
+        });
+        const mission = await loadMission(targetMissionId);
+        setCurrentMission(mission);
+        setViewingMission(mission);
+        setViewingMissionId(mission.id);
+        setItems(missionHistoryToItems(mission));
+        applyDesktopSessionState(mission);
+      } catch (err) {
+        console.error("Failed to switch mission before sending:", err);
+        toast.error("Failed to switch mission before sending");
+        return;
+      }
+    }
+
+    setInput("");
+    setDraftInput("");
+
+    const tempId = `temp-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const timestamp = Date.now();
+    const hasExistingUserMessages = items.some((item) => item.kind === "user");
+    const willBeQueued = runState !== "idle" && hasExistingUserMessages;
+
+    // Display the original content with agent mention for UI
+    const displayContent = agent ? `@${agent} ${content}` : content;
+
+    setItems((prev) => [
+      ...prev,
+      {
+        kind: "user" as const,
+        id: tempId,
+        content: displayContent,
+        timestamp,
+        queued: willBeQueued,
+      },
+    ]);
+
+    try {
+      // Send content to API, with agent as separate parameter
+      const { id, queued } = await postControlMessage(content, agent ? { agent } : undefined);
+      setItems((prev) => {
+        const otherUserMessages = prev.filter((item) => item.kind === "user" && item.id !== tempId);
+        const isFirstMessage = otherUserMessages.length === 0;
+        const effectiveQueued = isFirstMessage ? false : queued;
+        return prev.map((item) =>
+          item.id === tempId ? { ...item, id, queued: effectiveQueued } : item
+        );
+      });
+    } catch (err) {
+      console.error(err);
+      setItems((prev) => prev.filter((item) => item.id !== tempId));
+      toast.error("Failed to send message");
+    }
+  }, [items, runState, applyDesktopSessionState, missionHistoryToItems]);
+
   const handleStop = async () => {
     try {
       await cancelControl();
@@ -4466,7 +4534,7 @@ export default function ControlClient() {
             </div>
           ) : (
             <form
-              onSubmit={handleSubmit}
+              onSubmit={(e) => e.preventDefault()}
               className="mx-auto flex max-w-3xl gap-3 items-end"
             >
               <div className="flex gap-1">
@@ -4488,22 +4556,11 @@ export default function ControlClient() {
                 </button>
               </div>
 
-              <textarea
-                ref={textareaRef}
+              <EnhancedInput
                 value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.shiftKey) {
-                    e.preventDefault();
-                    if (input.trim()) {
-                      handleSubmit(e);
-                    }
-                  }
-                }}
+                onChange={setInput}
+                onSubmit={handleEnhancedSubmit}
                 placeholder="Message the root agent… (paste files to upload)"
-                rows={1}
-                className="flex-1 rounded-xl border border-white/[0.06] bg-white/[0.02] px-4 py-3 text-sm text-white placeholder-white/30 focus:border-indigo-500/50 focus:outline-none transition-[border-color,height] duration-150 ease-out resize-none overflow-y-auto leading-5"
-                style={{ minHeight: "46px" }}
               />
 
               {isBusy ? (

@@ -567,12 +567,17 @@ export type ControlAgentEvent =
   | { type: "error"; message: string; mission_id?: string };
 
 export async function postControlMessage(
-  content: string
+  content: string,
+  options?: { agent?: string }
 ): Promise<{ id: string; queued: boolean }> {
+  const body: { content: string; agent?: string } = { content };
+  if (options?.agent) {
+    body.agent = options.agent;
+  }
   const res = await apiFetch("/api/control/message", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ content }),
+    body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error("Failed to post control message");
   return res.json();
