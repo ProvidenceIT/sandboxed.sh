@@ -33,6 +33,10 @@ pub fn routes() -> Router<Arc<super::routes::AppState>> {
         .route("/:id/build", post(build_workspace))
         .route("/:id/sync", post(sync_workspace))
         .route("/:id/exec", post(exec_workspace_command))
+        // Debug endpoints for template development
+        .route("/:id/debug", get(get_workspace_debug))
+        .route("/:id/rerun-init", post(rerun_init_script))
+        .route("/:id/init-log", get(get_init_log))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -771,6 +775,74 @@ pub struct ExecCommandResponse {
     pub timed_out: bool,
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Debug Types (for template development)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+pub struct WorkspaceDebugInfo {
+    /// Workspace ID
+    pub id: Uuid,
+    /// Workspace name
+    pub name: String,
+    /// Current status
+    pub status: WorkspaceStatus,
+    /// Container/workspace path
+    pub path: String,
+    /// Whether the container directory exists
+    pub path_exists: bool,
+    /// Size of the container in bytes (if applicable)
+    pub size_bytes: Option<u64>,
+    /// Key directories that exist in the container
+    pub directories: Vec<DirectoryInfo>,
+    /// Whether bash is available
+    pub has_bash: bool,
+    /// Whether the init script file exists in the container
+    pub init_script_exists: bool,
+    /// Last modification time of init script
+    pub init_script_modified: Option<String>,
+    /// Distro information
+    pub distro: Option<String>,
+    /// Any error message from last build
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DirectoryInfo {
+    /// Directory path
+    pub path: String,
+    /// Whether it exists
+    pub exists: bool,
+    /// Approximate file count (if exists)
+    pub file_count: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct InitLogResponse {
+    /// Whether the log file exists
+    pub exists: bool,
+    /// Log content (last N lines)
+    pub content: String,
+    /// Total lines in log
+    pub total_lines: Option<u32>,
+    /// Log file path inside container
+    pub log_path: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RerunInitResponse {
+    /// Whether the rerun was successful
+    pub success: bool,
+    /// Exit code from the script
+    pub exit_code: i32,
+    /// Standard output from the script
+    pub stdout: String,
+    /// Standard error from the script
+    pub stderr: String,
+    /// Execution time in seconds
+    pub duration_secs: f64,
+}
+
 /// POST /api/workspaces/:id/exec - Execute a command in a workspace.
 async fn exec_workspace_command(
     State(state): State<Arc<super::routes::AppState>>,
@@ -951,6 +1023,285 @@ async fn exec_workspace_command(
             }))
         }
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Debug Endpoints (for template development)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// GET /api/workspaces/:id/debug - Get debug information about a workspace container.
+///
+/// Returns detailed information about the container state useful for debugging
+/// init script issues: directory structure, file existence, sizes, etc.
+async fn get_workspace_debug(
+    State(state): State<Arc<super::routes::AppState>>,
+    AxumPath(id): AxumPath<Uuid>,
+) -> Result<Json<WorkspaceDebugInfo>, (StatusCode, String)> {
+    let workspace = state
+        .workspaces
+        .get(id)
+        .await
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Workspace {} not found", id)))?;
+
+    let path = &workspace.path;
+    let path_exists = path.exists();
+
+    // Calculate container size (only for chroot workspaces)
+    let size_bytes = if workspace.workspace_type == WorkspaceType::Chroot && path_exists {
+        // Use du command for quick size calculation
+        let output = tokio::process::Command::new("du")
+            .args(["-sb", &path.to_string_lossy()])
+            .output()
+            .await
+            .ok();
+
+        output.and_then(|o| {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            stdout.split_whitespace().next()?.parse::<u64>().ok()
+        })
+    } else {
+        None
+    };
+
+    // Check key directories
+    let key_dirs = ["bin", "usr", "etc", "var", "var/log", "root", "tmp"];
+    let directories: Vec<DirectoryInfo> = key_dirs
+        .iter()
+        .map(|dir| {
+            let full_path = path.join(dir);
+            let exists = full_path.exists() && full_path.is_dir();
+            let file_count = if exists {
+                std::fs::read_dir(&full_path)
+                    .map(|entries| entries.count() as u32)
+                    .ok()
+            } else {
+                None
+            };
+            DirectoryInfo {
+                path: dir.to_string(),
+                exists,
+                file_count,
+            }
+        })
+        .collect();
+
+    // Check for bash
+    let has_bash = path.join("bin/bash").exists() || path.join("usr/bin/bash").exists();
+
+    // Check for init script
+    let init_script_path = path.join("openagent-init.sh");
+    let init_script_exists = init_script_path.exists();
+    let init_script_modified = if init_script_exists {
+        std::fs::metadata(&init_script_path)
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .map(|t| {
+                chrono::DateTime::<chrono::Utc>::from(t)
+                    .format("%Y-%m-%d %H:%M:%S UTC")
+                    .to_string()
+            })
+    } else {
+        None
+    };
+
+    Ok(Json(WorkspaceDebugInfo {
+        id: workspace.id,
+        name: workspace.name.clone(),
+        status: workspace.status.clone(),
+        path: path.to_string_lossy().to_string(),
+        path_exists,
+        size_bytes,
+        directories,
+        has_bash,
+        init_script_exists,
+        init_script_modified,
+        distro: workspace.distro.clone(),
+        last_error: workspace.error_message.clone(),
+    }))
+}
+
+/// GET /api/workspaces/:id/init-log - Get the init script log from inside the container.
+///
+/// Reads /var/log/openagent-init.log from inside the container to show what
+/// the init script has logged. Useful for debugging template issues.
+async fn get_init_log(
+    State(state): State<Arc<super::routes::AppState>>,
+    AxumPath(id): AxumPath<Uuid>,
+) -> Result<Json<InitLogResponse>, (StatusCode, String)> {
+    let workspace = state
+        .workspaces
+        .get(id)
+        .await
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Workspace {} not found", id)))?;
+
+    let log_path = "/var/log/openagent-init.log";
+    let host_log_path = workspace.path.join("var/log/openagent-init.log");
+
+    if !host_log_path.exists() {
+        return Ok(Json(InitLogResponse {
+            exists: false,
+            content: String::new(),
+            total_lines: None,
+            log_path: log_path.to_string(),
+        }));
+    }
+
+    // Read the log file
+    let content = tokio::fs::read_to_string(&host_log_path)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to read log file: {}", e),
+            )
+        })?;
+
+    let lines: Vec<&str> = content.lines().collect();
+    let total_lines = lines.len() as u32;
+
+    // Return last 500 lines max
+    let start = if lines.len() > 500 { lines.len() - 500 } else { 0 };
+    let truncated_content = lines[start..].join("\n");
+
+    Ok(Json(InitLogResponse {
+        exists: true,
+        content: truncated_content,
+        total_lines: Some(total_lines),
+        log_path: log_path.to_string(),
+    }))
+}
+
+/// POST /api/workspaces/:id/rerun-init - Re-run the init script without rebuilding the container.
+///
+/// This allows template developers to iterate on their init script without
+/// waiting for a full container rebuild. The container must already exist.
+async fn rerun_init_script(
+    State(state): State<Arc<super::routes::AppState>>,
+    AxumPath(id): AxumPath<Uuid>,
+) -> Result<Json<RerunInitResponse>, (StatusCode, String)> {
+    let mut workspace = state
+        .workspaces
+        .get(id)
+        .await
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Workspace {} not found", id)))?;
+
+    // Only works for container workspaces
+    if workspace.workspace_type != WorkspaceType::Chroot {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Rerun init only works for container workspaces".to_string(),
+        ));
+    }
+
+    // Container must exist (at least have basic structure)
+    if !workspace.path.join("bin").exists() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Container doesn't exist yet. Build it first.".to_string(),
+        ));
+    }
+
+    // Must have an init script configured
+    let init_script = workspace.init_script.clone().unwrap_or_default();
+    if init_script.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "No init script configured for this workspace".to_string(),
+        ));
+    }
+
+    // Write the init script to the container
+    let script_path = workspace.path.join("openagent-init.sh");
+    tokio::fs::write(&script_path, &init_script)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to write init script: {}", e),
+            )
+        })?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o755);
+        tokio::fs::set_permissions(&script_path, perms)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to set script permissions: {}", e),
+                )
+            })?;
+    }
+
+    // Update status to building
+    workspace.status = WorkspaceStatus::Building;
+    workspace.error_message = None;
+    state.workspaces.update(workspace.clone()).await;
+
+    // Run the init script
+    let start_time = std::time::Instant::now();
+
+    let shell = if workspace.path.join("bin/bash").exists() {
+        "/bin/bash"
+    } else {
+        "/bin/sh"
+    };
+
+    let mut config = crate::nspawn::NspawnConfig::default();
+    config.env = workspace.env_vars.clone();
+
+    let command = vec![shell.to_string(), "/openagent-init.sh".to_string()];
+    let output = crate::nspawn::execute_in_container(&workspace.path, &command, &config)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to execute init script: {}", e),
+            )
+        })?;
+
+    let duration_secs = start_time.elapsed().as_secs_f64();
+    let exit_code = output.status.code().unwrap_or(-1);
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let success = output.status.success();
+
+    // Update workspace status
+    if success {
+        workspace.status = WorkspaceStatus::Ready;
+        workspace.error_message = None;
+    } else {
+        workspace.status = WorkspaceStatus::Error;
+        let mut error_msg = String::new();
+        if !stderr.trim().is_empty() {
+            error_msg.push_str(stderr.trim());
+        }
+        if !stdout.trim().is_empty() {
+            if !error_msg.is_empty() {
+                error_msg.push_str(" | ");
+            }
+            error_msg.push_str(stdout.trim());
+        }
+        if error_msg.is_empty() {
+            error_msg = format!("Init script failed with exit code {}", exit_code);
+        }
+        workspace.error_message = Some(format!("Init script failed: {}", error_msg));
+    }
+
+    // Clean up the script file
+    let _ = tokio::fs::remove_file(&script_path).await;
+
+    state.workspaces.update(workspace).await;
+
+    Ok(Json(RerunInitResponse {
+        success,
+        exit_code,
+        stdout,
+        stderr,
+        duration_secs,
+    }))
 }
 
 #[cfg(test)]

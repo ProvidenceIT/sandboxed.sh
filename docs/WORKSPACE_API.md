@@ -197,6 +197,140 @@ Opens an interactive PTY shell session via WebSocket.
 
 ---
 
+## Debug Endpoints (Template Development)
+
+These endpoints help debug init script issues when developing workspace templates.
+
+### Get Debug Info
+
+```
+GET /api/workspaces/:id/debug
+```
+
+Returns detailed information about the container state, useful for understanding why an init script might be failing.
+
+**Response**:
+```json
+{
+  "id": "uuid",
+  "name": "minecraft",
+  "status": "error",
+  "path": "/root/.openagent/containers/minecraft",
+  "path_exists": true,
+  "size_bytes": 1234567890,
+  "directories": [
+    {"path": "bin", "exists": true, "file_count": 156},
+    {"path": "usr", "exists": true, "file_count": 12},
+    {"path": "etc", "exists": true, "file_count": 45},
+    {"path": "var", "exists": true, "file_count": 8},
+    {"path": "var/log", "exists": true, "file_count": 3},
+    {"path": "root", "exists": true, "file_count": 2},
+    {"path": "tmp", "exists": true, "file_count": 0}
+  ],
+  "has_bash": true,
+  "init_script_exists": false,
+  "init_script_modified": null,
+  "distro": "ubuntu-noble",
+  "last_error": "Init script failed: E: Unable to correct problems..."
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `path_exists` | boolean | Whether the container directory exists |
+| `size_bytes` | number | Total size of container in bytes |
+| `directories` | array | Key directories and their file counts |
+| `has_bash` | boolean | Whether `/bin/bash` is available |
+| `init_script_exists` | boolean | Whether the init script file exists |
+| `init_script_modified` | string | Last modification time of init script |
+| `last_error` | string | Error message from last build attempt |
+
+### Get Init Script Log
+
+```
+GET /api/workspaces/:id/init-log
+```
+
+Reads the init script log from `/var/log/openagent-init.log` inside the container.
+
+**Response**:
+```json
+{
+  "exists": true,
+  "content": "Starting init script\nRunning apt-get update...\n...",
+  "total_lines": 1234,
+  "log_path": "/var/log/openagent-init.log"
+}
+```
+
+**Note**: Returns the last 500 lines if the log is larger.
+
+### Re-run Init Script
+
+```
+POST /api/workspaces/:id/rerun-init
+```
+
+Re-runs the init script without rebuilding the container from scratch. This is much faster for iterating on init script development.
+
+**Requirements**:
+- Workspace must be `chroot` type
+- Container must already exist (debootstrap completed)
+- Workspace must have an init script configured
+
+**Response**:
+```json
+{
+  "success": false,
+  "exit_code": 1,
+  "stdout": "Starting init script\nRunning apt-get update...\n...",
+  "stderr": "",
+  "duration_secs": 45.3
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `success` | boolean | Whether the script completed successfully |
+| `exit_code` | number | Exit code from the script |
+| `stdout` | string | Standard output from the script |
+| `stderr` | string | Standard error from the script |
+| `duration_secs` | number | How long the script took to run |
+
+### Debug Workflow Example
+
+```bash
+# 1. Check current container state
+curl "http://localhost:3000/api/workspaces/{id}/debug" \
+  -H "Authorization: Bearer <token>"
+
+# 2. View the init script log
+curl "http://localhost:3000/api/workspaces/{id}/init-log" \
+  -H "Authorization: Bearer <token>"
+
+# 3. Update the template with a fix
+curl -X PUT "http://localhost:3000/api/library/workspace-template/my-template" \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"init_script": "#!/bin/bash\n# fixed script..."}'
+
+# 4. Update workspace to use new init script
+curl -X PUT "http://localhost:3000/api/workspaces/{id}" \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"init_script": "#!/bin/bash\n# fixed script..."}'
+
+# 5. Re-run the init script (fast iteration)
+curl -X POST "http://localhost:3000/api/workspaces/{id}/rerun-init" \
+  -H "Authorization: Bearer <token>"
+
+# 6. If it works, do a full rebuild to verify
+curl -X POST "http://localhost:3000/api/workspaces/{id}/build?rebuild=true" \
+  -H "Authorization: Bearer <token>"
+```
+
+---
+
 ## Workspace Templates
 
 Templates are stored in the library and define reusable workspace configurations.
