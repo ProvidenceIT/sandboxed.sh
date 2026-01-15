@@ -588,124 +588,119 @@ export default function WorkspacesPage() {
                         )}
                       </div>
                       <div className="p-4 space-y-4">
-                        <div>
-                          <label className="text-xs text-white/40 block mb-2">Linux Distribution</label>
-                          <select
-                            value={selectedDistro}
-                            onChange={(e) => setSelectedDistro(e.target.value as ChrootDistro)}
-                            disabled={building || selectedWorkspace.status === 'building'}
-                            className="w-full px-3 py-2.5 rounded-lg bg-black/20 border border-white/[0.06] text-sm text-white focus:outline-none focus:border-indigo-500/50 disabled:opacity-50 appearance-none cursor-pointer"
-                            style={{
-                              backgroundImage:
-                                "url(\"data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e\")",
-                              backgroundPosition: 'right 0.75rem center',
-                              backgroundRepeat: 'no-repeat',
-                              backgroundSize: '1.25em 1.25em',
-                            }}
-                          >
-                            {CHROOT_DISTROS.map((distro) => (
-                              <option key={distro.value} value={distro.value} className="bg-[#161618]">
-                                {distro.label}
-                              </option>
-                            ))}
-                          </select>
-                        </div>
-                        <div className="flex items-center gap-3">
-                          <button
-                            onClick={() => handleBuildWorkspace(selectedWorkspace.status === 'ready')}
-                            disabled={building || selectedWorkspace.status === 'building'}
-                            className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-indigo-500 hover:bg-indigo-600 rounded-lg disabled:opacity-50 transition-colors"
-                          >
-                            {building ? (
-                              <>
-                                <Loader className="h-4 w-4 animate-spin" />
-                                {selectedWorkspace.status === 'ready' ? 'Rebuilding...' : 'Building...'}
-                              </>
-                            ) : selectedWorkspace.status === 'ready' ? (
-                              <>
-                                <RefreshCw className="h-4 w-4" />
-                                Rebuild
-                              </>
-                            ) : (
-                              <>
-                                <Hammer className="h-4 w-4" />
-                                Build
-                              </>
-                            )}
-                          </button>
-                          <p className="text-xs text-white/40 flex-1">
-                            {selectedWorkspace.status === 'ready'
-                              ? 'Destroys container and reruns init script'
-                              : 'Creates isolated Linux filesystem'}
-                          </p>
-                        </div>
+                        {/* Show build controls when not building */}
+                        {selectedWorkspace.status !== 'building' && (
+                          <>
+                            <div>
+                              <label className="text-xs text-white/40 block mb-2">Linux Distribution</label>
+                              <select
+                                value={selectedDistro}
+                                onChange={(e) => setSelectedDistro(e.target.value as ChrootDistro)}
+                                disabled={building}
+                                className="w-full px-3 py-2.5 rounded-lg bg-black/20 border border-white/[0.06] text-sm text-white focus:outline-none focus:border-indigo-500/50 disabled:opacity-50 appearance-none cursor-pointer"
+                                style={{
+                                  backgroundImage:
+                                    "url(\"data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e\")",
+                                  backgroundPosition: 'right 0.75rem center',
+                                  backgroundRepeat: 'no-repeat',
+                                  backgroundSize: '1.25em 1.25em',
+                                }}
+                              >
+                                {CHROOT_DISTROS.map((distro) => (
+                                  <option key={distro.value} value={distro.value} className="bg-[#161618]">
+                                    {distro.label}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                            <div className="flex items-center gap-3">
+                              <button
+                                onClick={() => handleBuildWorkspace(selectedWorkspace.status === 'ready')}
+                                disabled={building}
+                                className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-indigo-500 hover:bg-indigo-600 rounded-lg disabled:opacity-50 transition-colors"
+                              >
+                                {building ? (
+                                  <>
+                                    <Loader className="h-4 w-4 animate-spin" />
+                                    {selectedWorkspace.status === 'ready' ? 'Rebuilding...' : 'Building...'}
+                                  </>
+                                ) : selectedWorkspace.status === 'ready' ? (
+                                  <>
+                                    <RefreshCw className="h-4 w-4" />
+                                    Rebuild
+                                  </>
+                                ) : (
+                                  <>
+                                    <Hammer className="h-4 w-4" />
+                                    Build
+                                  </>
+                                )}
+                              </button>
+                              <p className="text-xs text-white/40 flex-1">
+                                {selectedWorkspace.status === 'ready'
+                                  ? 'Destroys container and reruns init script'
+                                  : 'Creates isolated Linux filesystem'}
+                              </p>
+                            </div>
+                          </>
+                        )}
 
-                        {/* Build Progress Logs */}
-                        {selectedWorkspace.status === 'building' && (buildDebug || buildLog) && (
-                          <div className="mt-4 pt-4 border-t border-white/[0.06]">
-                            <button
-                              onClick={() => setShowBuildLogs(!showBuildLogs)}
-                              className="flex items-center justify-between w-full text-left"
-                            >
+                        {/* Build Progress Logs - shown when building */}
+                        {selectedWorkspace.status === 'building' && (
+                          <div className="space-y-3">
+                            {/* Header with size */}
+                            <div className="flex items-center justify-between">
                               <div className="flex items-center gap-2">
                                 <FileText className="h-3.5 w-3.5 text-amber-400" />
-                                <span className="text-xs text-white/70 font-medium">Build Logs</span>
+                                <span className="text-xs text-white/70 font-medium">Build Output</span>
                               </div>
-                              <div className="flex items-center gap-2">
-                                {buildDebug?.size_bytes && (
-                                  <span className="text-[10px] text-white/40 font-mono">
-                                    {(buildDebug.size_bytes / 1024 / 1024).toFixed(1)} MB
+                              {buildDebug?.size_bytes != null && buildDebug.size_bytes > 0 && (
+                                <span className="text-[10px] text-white/40 font-mono">
+                                  {buildDebug.size_bytes >= 1024 * 1024 * 1024
+                                    ? `${(buildDebug.size_bytes / 1024 / 1024 / 1024).toFixed(2)} GB`
+                                    : `${(buildDebug.size_bytes / 1024 / 1024).toFixed(1)} MB`}
+                                </span>
+                              )}
+                            </div>
+
+                            {/* Container Status Badges */}
+                            {buildDebug && (
+                              <div className="flex flex-wrap gap-2">
+                                {buildDebug.has_bash && (
+                                  <span className="px-2 py-0.5 text-[10px] font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 rounded">
+                                    bash ready
                                   </span>
                                 )}
-                                <span className="text-xs text-white/40">{showBuildLogs ? '−' : '+'}</span>
+                                {buildDebug.init_script_exists && (
+                                  <span className="px-2 py-0.5 text-[10px] font-medium bg-blue-500/10 text-blue-400 border border-blue-500/20 rounded">
+                                    init script running
+                                  </span>
+                                )}
+                                {buildDebug.distro && (
+                                  <span className="px-2 py-0.5 text-[10px] font-mono text-white/40 bg-white/[0.04] border border-white/[0.06] rounded">
+                                    {buildDebug.distro}
+                                  </span>
+                                )}
                               </div>
-                            </button>
+                            )}
 
-                            {showBuildLogs && (
-                              <div className="mt-3 space-y-3">
-                                {/* Container Status */}
-                                {buildDebug && (
-                                  <div className="flex flex-wrap gap-2">
-                                    {buildDebug.has_bash && (
-                                      <span className="px-2 py-0.5 text-[10px] font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 rounded">
-                                        bash ready
-                                      </span>
-                                    )}
-                                    {buildDebug.init_script_exists && (
-                                      <span className="px-2 py-0.5 text-[10px] font-medium bg-blue-500/10 text-blue-400 border border-blue-500/20 rounded">
-                                        init script running
-                                      </span>
-                                    )}
-                                    {buildDebug.distro && (
-                                      <span className="px-2 py-0.5 text-[10px] font-mono text-white/40 bg-white/[0.04] border border-white/[0.06] rounded">
-                                        {buildDebug.distro}
-                                      </span>
-                                    )}
-                                  </div>
-                                )}
-
-                                {/* Init Log Output */}
-                                {buildLog?.exists && buildLog.content && (
-                                  <div className="rounded-lg bg-black/30 border border-white/[0.06] overflow-hidden">
-                                    <div className="px-3 py-1.5 border-b border-white/[0.06] flex items-center justify-between">
-                                      <span className="text-[10px] text-white/40 font-mono">{buildLog.log_path}</span>
-                                      {buildLog.total_lines && (
-                                        <span className="text-[10px] text-white/30">{buildLog.total_lines} lines</span>
-                                      )}
-                                    </div>
-                                    <pre className="p-3 text-[11px] font-mono text-white/70 overflow-x-auto max-h-48 overflow-y-auto whitespace-pre-wrap break-all">
-                                      {buildLog.content.split('\n').slice(-50).join('\n')}
-                                    </pre>
-                                  </div>
-                                )}
-
-                                {/* No logs yet message */}
-                                {(!buildLog?.exists || !buildLog?.content) && (
-                                  <div className="flex items-center gap-2 py-3 text-xs text-white/40">
-                                    <Loader className="h-3 w-3 animate-spin" />
-                                    <span>Waiting for build output...</span>
-                                  </div>
-                                )}
+                            {/* Init Log Output */}
+                            {buildLog?.exists && buildLog.content ? (
+                              <div className="rounded-lg bg-black/30 border border-white/[0.06] overflow-hidden">
+                                <div className="px-3 py-1.5 border-b border-white/[0.06] flex items-center justify-between">
+                                  <span className="text-[10px] text-white/40 font-mono">{buildLog.log_path}</span>
+                                  {buildLog.total_lines && (
+                                    <span className="text-[10px] text-white/30">{buildLog.total_lines} lines</span>
+                                  )}
+                                </div>
+                                <pre className="p-3 text-[11px] font-mono text-white/70 overflow-x-auto max-h-64 overflow-y-auto whitespace-pre-wrap break-all">
+                                  {buildLog.content.split('\n').slice(-50).join('\n')}
+                                </pre>
+                              </div>
+                            ) : (
+                              <div className="flex items-center gap-2 py-6 justify-center text-xs text-white/40">
+                                <Loader className="h-3 w-3 animate-spin" />
+                                <span>Waiting for build output...</span>
                               </div>
                             )}
                           </div>
