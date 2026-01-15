@@ -16,6 +16,7 @@ struct SettingsView: View {
     @State private var showingSaveConfirmation = false
 
     private let api = APIService.shared
+    private let originalURL: String
 
     enum ConnectionStatus: Equatable {
         case unknown
@@ -62,7 +63,9 @@ struct SettingsView: View {
     }
 
     init() {
-        _serverURL = State(initialValue: APIService.shared.baseURL)
+        let currentURL = APIService.shared.baseURL
+        _serverURL = State(initialValue: currentURL)
+        originalURL = currentURL
     }
 
     var body: some View {
@@ -171,6 +174,8 @@ struct SettingsView: View {
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("Cancel") {
+                        // Restore original URL on cancel
+                        api.baseURL = originalURL
                         dismiss()
                     }
                     .foregroundStyle(Theme.textSecondary)

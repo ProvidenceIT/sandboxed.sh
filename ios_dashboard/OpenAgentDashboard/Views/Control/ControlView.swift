@@ -885,9 +885,6 @@ struct ControlView: View {
     }
 
     private func removeFromQueue(messageId: String) async {
-        let previousItems = queuedItems
-        let previousLength = queueLength
-
         // Optimistic update
         queuedItems.removeAll { $0.id == messageId }
         queueLength = max(0, queueLength - 1)
@@ -896,17 +893,14 @@ struct ControlView: View {
             try await api.removeFromQueue(messageId: messageId)
         } catch {
             print("Failed to remove from queue: \(error)")
-            // Restore on error
-            queuedItems = previousItems
-            queueLength = previousLength
+            // Refresh from server on error to get actual state
+            await loadQueueItems()
+            queueLength = queuedItems.count
             HapticService.error()
         }
     }
 
     private func clearQueue() async {
-        let previousItems = queuedItems
-        let previousLength = queueLength
-
         // Optimistic update
         queuedItems = []
         queueLength = 0
@@ -917,9 +911,9 @@ struct ControlView: View {
             HapticService.success()
         } catch {
             print("Failed to clear queue: \(error)")
-            // Restore on error
-            queuedItems = previousItems
-            queueLength = previousLength
+            // Refresh from server on error to get actual state
+            await loadQueueItems()
+            queueLength = queuedItems.count
             HapticService.error()
         }
     }
