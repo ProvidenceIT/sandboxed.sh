@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   listWorkspaces,
@@ -73,6 +73,7 @@ export default function WorkspacesPage() {
   const [buildDebug, setBuildDebug] = useState<WorkspaceDebugInfo | null>(null);
   const [buildLog, setBuildLog] = useState<InitLogResponse | null>(null);
   const [showBuildLogs, setShowBuildLogs] = useState(false);
+  const buildLogRef = useRef<HTMLPreElement>(null);
 
   // Workspace settings state
   const [envRows, setEnvRows] = useState<{ id: string; key: string; value: string; secret: boolean; visible: boolean }[]>([]);
@@ -222,6 +223,13 @@ export default function WorkspacesPage() {
     };
   }, [selectedWorkspace?.id, selectedWorkspace?.status]);
 
+  // Auto-scroll build log to bottom when new content arrives
+  useEffect(() => {
+    if (buildLogRef.current) {
+      buildLogRef.current.scrollTop = buildLogRef.current.scrollHeight;
+    }
+  }, [buildLog?.content]);
+
   const loadWorkspace = async (id: string) => {
     try {
       const workspace = await getWorkspace(id);
@@ -241,30 +249,26 @@ export default function WorkspacesPage() {
         workspace_type: workspaceType,
         template: newWorkspaceTemplate || undefined,
       });
+
+      // For chroot workspaces, trigger build BEFORE showing the modal
+      // This prevents the flicker where status briefly shows as non-building
+      let workspaceToShow = created;
+      if (workspaceType === 'chroot') {
+        try {
+          workspaceToShow = await buildWorkspace(created.id, created.distro as ChrootDistro || 'ubuntu-noble', false);
+        } catch (buildErr) {
+          showError(buildErr instanceof Error ? buildErr.message : 'Failed to start build');
+          // Refresh workspace to get error status
+          workspaceToShow = await getWorkspace(created.id);
+        }
+      }
+
+      // Now close dialog and show the workspace with correct status
       await loadData();
       setShowNewWorkspaceDialog(false);
       setNewWorkspaceName('');
       setNewWorkspaceTemplate('');
-
-      // Auto-select the new workspace
-      setSelectedWorkspace(created);
-
-      // Auto-trigger build for isolated (chroot) workspaces
-      if (workspaceType === 'chroot') {
-        setBuilding(true);
-        try {
-          const updated = await buildWorkspace(created.id, created.distro as ChrootDistro || 'ubuntu-noble', false);
-          setSelectedWorkspace(updated);
-          await loadData();
-        } catch (buildErr) {
-          showError(buildErr instanceof Error ? buildErr.message : 'Failed to start build');
-          // Refresh workspace to get error status
-          const refreshed = await getWorkspace(created.id);
-          setSelectedWorkspace(refreshed);
-        } finally {
-          setBuilding(false);
-        }
-      }
+      setSelectedWorkspace(workspaceToShow);
     } catch (err) {
       showError(err instanceof Error ? err.message : 'Failed to create workspace');
     } finally {
@@ -711,7 +715,10 @@ export default function WorkspacesPage() {
                                     <span className="text-[10px] text-white/30">{buildLog.total_lines} lines</span>
                                   )}
                                 </div>
-                                <pre className="p-3 text-[11px] font-mono text-white/70 overflow-x-auto max-h-64 overflow-y-auto whitespace-pre-wrap break-all">
+                                <pre
+                                  ref={buildLogRef}
+                                  className="p-3 text-[11px] font-mono text-white/70 overflow-x-auto max-h-64 overflow-y-auto whitespace-pre-wrap break-all"
+                                >
                                   {buildLog.content.split('\n').slice(-50).join('\n')}
                                 </pre>
                               </div>
