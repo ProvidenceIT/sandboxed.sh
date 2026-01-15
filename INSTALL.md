@@ -510,9 +510,179 @@ systemctl restart opencode.service
 curl -fsSL http://127.0.0.1:4096/global/health | jq .
 ```
 
-## Suggested improvements
+## 10) Production Security (TLS + Reverse Proxy)
 
-- Put Open Agent behind a reverse proxy (Caddy/Nginx) with TLS and restrict who can reach `:3000`.
-- Set `DEV_MODE=false` in production and use strong JWT secrets / multi-user auth.
-- Run OpenCode on localhost only (already recommended) and keep it firewalled.
-- Pin OpenCode/plugin versions for reproducible deployments.
+For production deployments, **always** put Open Agent behind a reverse proxy with TLS. The backend serves HTTP only and should never be exposed directly to the internet.
+
+### 10.1 Caddy (recommended - automatic HTTPS)
+
+Caddy automatically obtains and renews Let's Encrypt certificates.
+
+Install Caddy:
+
+```bash
+apt install -y debian-keyring debian-archive-keyring apt-transport-https
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list
+apt update && apt install caddy
+```
+
+Create `/etc/caddy/Caddyfile`:
+
+```
+agent.yourdomain.com {
+    reverse_proxy localhost:3000
+}
+```
+
+Enable and start:
+
+```bash
+systemctl enable --now caddy
+```
+
+Caddy will automatically obtain TLS certificates for your domain.
+
+### 10.2 Nginx (manual certificate setup)
+
+Install Nginx and Certbot:
+
+```bash
+apt install -y nginx certbot python3-certbot-nginx
+```
+
+Create `/etc/nginx/sites-available/openagent`:
+
+```nginx
+server {
+    listen 80;
+    server_name agent.yourdomain.com;
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # SSE support (for mission streaming)
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 86400s;
+    }
+}
+```
+
+Enable the site and obtain certificates:
+
+```bash
+ln -s /etc/nginx/sites-available/openagent /etc/nginx/sites-enabled/
+nginx -t && systemctl reload nginx
+certbot --nginx -d agent.yourdomain.com
+```
+
+### 10.3 Firewall
+
+Block direct access to port 3000 from the internet:
+
+```bash
+# Allow only localhost to reach Open Agent directly
+iptables -A INPUT -p tcp --dport 3000 -s 127.0.0.1 -j ACCEPT
+iptables -A INPUT -p tcp --dport 3000 -j DROP
+```
+
+---
+
+## 11) Authentication Modes
+
+Open Agent supports three authentication modes:
+
+| Mode | Environment Variables | Use Case |
+|------|----------------------|----------|
+| **Disabled** | `DEV_MODE=true` | Local development only |
+| **Single Tenant** | `DASHBOARD_PASSWORD`, `JWT_SECRET` | Personal server, one user |
+| **Multi-User** | `OPEN_AGENT_USERS`, `JWT_SECRET` | Shared server, multiple users |
+
+### 11.1 Single Tenant (default for production)
+
+Set a strong password and JWT secret:
+
+```bash
+# Generate a random JWT secret
+JWT_SECRET=$(openssl rand -base64 32)
+
+# In /etc/open_agent/open_agent.env:
+DEV_MODE=false
+DASHBOARD_PASSWORD=your-strong-password-here
+JWT_SECRET=$JWT_SECRET
+JWT_TTL_DAYS=30
+```
+
+### 11.2 Multi-User Mode
+
+For multiple users with separate credentials:
+
+```bash
+# In /etc/open_agent/open_agent.env:
+DEV_MODE=false
+OPEN_AGENT_USERS='[
+  {"username": "alice", "password": "alice-strong-password"},
+  {"username": "bob", "password": "bob-strong-password"}
+]'
+JWT_SECRET=$(openssl rand -base64 32)
+```
+
+Note: Multi-user mode provides separate login credentials but does **not** provide workspace or data isolation between users. All users see the same missions and workspaces.
+
+---
+
+## 12) Dashboard Configuration
+
+### 12.1 Web Dashboard
+
+The web dashboard auto-detects the backend URL. For production, set the environment variable:
+
+```bash
+# When building/running the Next.js dashboard
+NEXT_PUBLIC_API_URL=https://agent.yourdomain.com
+```
+
+Or configure it at runtime via the Settings page.
+
+### 12.2 iOS App
+
+On first launch, the iOS app prompts for the server URL. Enter your production URL (e.g., `https://agent.yourdomain.com`).
+
+To change later: **Menu (⋮) → Settings**
+
+---
+
+## 13) OAuth Provider Setup
+
+Open Agent uses OAuth for AI provider authentication. The following providers are pre-configured:
+
+| Provider | OAuth Client | Setup Required |
+|----------|-------------|----------------|
+| **Anthropic** | OpenCode's client | None (works out of the box) |
+| **OpenAI** | Codex CLI client | None (works out of the box) |
+| **Google/Gemini** | Gemini CLI client | Install `opencode-gemini-auth` plugin |
+
+OAuth flows use copy-paste for the authorization code. The user:
+1. Clicks "Authorize" in the dashboard
+2. Completes OAuth in their browser
+3. Copies the redirect URL back to the dashboard
+
+---
+
+## Checklist for Production Deployment
+
+- [ ] Set `DEV_MODE=false`
+- [ ] Set strong `DASHBOARD_PASSWORD` and `JWT_SECRET`
+- [ ] Configure reverse proxy (Caddy or Nginx) with TLS
+- [ ] Firewall port 3000 (only allow localhost)
+- [ ] Pin OpenCode version for stability
+- [ ] Set up your Library git repo
+- [ ] Test OAuth flows for AI providers
