@@ -38,6 +38,7 @@
 		DA4634D7424AF3FC985987E7 /* GlassButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5267DE67017A858357F68424 /* GlassButton.swift */; };
 		E1A2B3C4D5E6F78901234567 /* MarkdownView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D4E5F6789012345678 /* MarkdownView.swift */; };
 		EFABDC95B65F6ED3420186FC /* NewMissionSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1A8191F935AB50463216395 /* NewMissionSheet.swift */; };
+		QUEUESHEETBUILD123456789 /* QueueSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = QUEUESHEETREF1234567890 /* QueueSheet.swift */; };
 		FA7E68F22D16E1AC0B5F5E22 /* StatusBadge.swift in Sources */ = {isa = PBXBuildFile; fileRef = CD6FB2E54DC07BE7A1EB08F8 /* StatusBadge.swift */; };
 		FF9C447978711CBA9185B8B0 /* OpenAgentDashboardApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 139C740B7D55C13F3B167EF3 /* OpenAgentDashboardApp.swift */; };
 		SETTINGSVIEWBUILD1234567 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = SETTINGSVIEWREF123456789 /* SettingsView.swift */; };
@@ -85,6 +86,7 @@
 		CD6FB2E54DC07BE7A1EB08F8 /* StatusBadge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusBadge.swift; sourceTree = "<group>"; };
 		CD8D224B6758B664864F3987 /* ANSIParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ANSIParser.swift; sourceTree = "<group>"; };
 		D1A8191F935AB50463216395 /* NewMissionSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewMissionSheet.swift; sourceTree = "<group>"; };
+		QUEUESHEETREF1234567890 /* QueueSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QueueSheet.swift; sourceTree = "<group>"; };
 		D4AB47CF121ABA1946A4D879 /* Mission.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Mission.swift; sourceTree = "<group>"; };
 		E7C1198DDF17571DE85F5ABA /* Workspace.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Workspace.swift; sourceTree = "<group>"; };
 		E7FC053808661C9A0E21E83C /* RunningMissionsBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunningMissionsBar.swift; sourceTree = "<group>"; };
@@ -250,6 +252,7 @@
 			children = (
 				A84519FDE8FC75084938B292 /* ControlView.swift */,
 				D1A8191F935AB50463216395 /* NewMissionSheet.swift */,
+				QUEUESHEETREF1234567890 /* QueueSheet.swift */,
 			);
 			path = Control;
 			sourceTree = "<group>";
@@ -385,6 +388,7 @@
 				9BC40E40E1B5622B24328AEB /* Mission.swift in Sources */,
 				83BB0F0AAFE4F2735FF76B87 /* NavigationState.swift in Sources */,
 				EFABDC95B65F6ED3420186FC /* NewMissionSheet.swift in Sources */,
+				QUEUESHEETBUILD123456789 /* QueueSheet.swift in Sources */,
 				FF9C447978711CBA9185B8B0 /* OpenAgentDashboardApp.swift in Sources */,
 				51436A7671B1E3C8478F81A2 /* RunningMissionsBar.swift in Sources */,
 				SETTINGSVIEWBUILD1234567 /* SettingsView.swift in Sources */,

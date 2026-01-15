@@ -38,6 +38,7 @@ use super::mcp as mcp_api;
 use super::monitoring;
 use super::opencode as opencode_api;
 use super::secrets as secrets_api;
+use super::system as system_api;
 use super::types::*;
 use super::workspaces as workspaces_api;
 
@@ -265,6 +266,16 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         .route("/api/control/tool_result", post(control::post_tool_result))
         .route("/api/control/stream", get(control::stream))
         .route("/api/control/cancel", post(control::post_cancel))
+        // Queue management endpoints
+        .route("/api/control/queue", get(control::get_queue))
+        .route(
+            "/api/control/queue/:id",
+            axum::routing::delete(control::remove_from_queue),
+        )
+        .route(
+            "/api/control/queue",
+            axum::routing::delete(control::clear_queue),
+        )
         // State snapshots (for refresh resilience)
         .route("/api/control/tree", get(control::get_tree))
         .route("/api/control/progress", get(control::get_progress))
@@ -379,6 +390,8 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         .nest("/api/secrets", secrets_api::routes())
         // Desktop session management endpoints
         .nest("/api/desktop", desktop::routes())
+        // System component management endpoints
+        .nest("/api/system", system_api::routes())
         .layer(middleware::from_fn_with_state(
             Arc::clone(&state),
             auth::require_auth,

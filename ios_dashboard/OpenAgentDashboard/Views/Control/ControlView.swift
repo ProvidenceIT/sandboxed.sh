@@ -13,6 +13,8 @@ struct ControlView: View {
     @State private var inputText = ""
     @State private var runState: ControlRunState = .idle
     @State private var queueLength = 0
+    @State private var queuedItems: [QueuedMessage] = []
+    @State private var showQueueSheet = false
     @State private var currentMission: Mission?
     @State private var viewingMission: Mission?
     @State private var isLoading = true
@@ -101,9 +103,15 @@ struct ControlView: View {
                                 .foregroundStyle(Theme.textSecondary)
 
                             if queueLength > 0 {
-                                Text("• \(queueLength) queued")
-                                    .font(.caption2)
-                                    .foregroundStyle(Theme.textTertiary)
+                                Button {
+                                    Task { await loadQueueItems() }
+                                    showQueueSheet = true
+                                    HapticService.lightTap()
+                                } label: {
+                                    Text("• \(queueLength) queued")
+                                        .font(.caption2)
+                                        .foregroundStyle(Theme.warning)
+                                }
                             }
 
                             // Progress indicator
@@ -321,6 +329,22 @@ struct ControlView: View {
         }
         .sheet(isPresented: $showSettings) {
             SettingsView()
+        }
+        .sheet(isPresented: $showQueueSheet) {
+            QueueSheet(
+                items: queuedItems,
+                onRemove: { messageId in
+                    Task { await removeFromQueue(messageId: messageId) }
+                },
+                onClearAll: {
+                    Task { await clearQueue() }
+                },
+                onDismiss: {
+                    showQueueSheet = false
+                }
+            )
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
         }
     }
 
@@ -846,6 +870,52 @@ struct ControlView: View {
             HapticService.success()
         } catch {
             print("Failed to cancel: \(error)")
+            HapticService.error()
+        }
+    }
+
+    // MARK: - Queue Management
+
+    private func loadQueueItems() async {
+        do {
+            queuedItems = try await api.getQueue()
+        } catch {
+            print("Failed to load queue: \(error)")
+        }
+    }
+
+    private func removeFromQueue(messageId: String) async {
+        // Optimistic update
+        queuedItems.removeAll { $0.id == messageId }
+        queueLength = max(0, queueLength - 1)
+
+        do {
+            try await api.removeFromQueue(messageId: messageId)
+        } catch {
+            print("Failed to remove from queue: \(error)")
+            // Refresh on error
+            await loadQueueItems()
+            HapticService.error()
+        }
+    }
+
+    private func clearQueue() async {
+        let previousItems = queuedItems
+        let previousLength = queueLength
+
+        // Optimistic update
+        queuedItems = []
+        queueLength = 0
+        showQueueSheet = false
+
+        do {
+            _ = try await api.clearQueue()
+            HapticService.success()
+        } catch {
+            print("Failed to clear queue: \(error)")
+            // Restore on error
+            queuedItems = previousItems
+            queueLength = previousLength
             HapticService.error()
         }
     }

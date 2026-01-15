@@ -31,6 +31,7 @@ pub mod opencode;
 mod providers;
 mod routes;
 pub mod secrets;
+pub mod system;
 pub mod types;
 pub mod workspaces;
 

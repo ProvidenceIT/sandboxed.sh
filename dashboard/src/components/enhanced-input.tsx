@@ -344,7 +344,7 @@ export function EnhancedInput({
     <div className="relative flex-1">
       <div
         className={cn(
-          "flex items-start gap-2 w-full rounded-xl border border-white/[0.06] bg-white/[0.02] px-4 py-3 transition-[border-color] duration-150 ease-out focus-within:border-indigo-500/50",
+          "flex items-center gap-2 w-full rounded-xl border border-white/[0.06] bg-white/[0.02] px-4 py-3 transition-[border-color] duration-150 ease-out focus-within:border-indigo-500/50",
           className
         )}
         style={{ minHeight: "46px" }}

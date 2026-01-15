@@ -195,7 +195,25 @@ final class APIService {
     func cancelControl() async throws {
         let _: EmptyResponse = try await post("/api/control/cancel", body: EmptyBody())
     }
-    
+
+    // MARK: - Queue Management
+
+    func getQueue() async throws -> [QueuedMessage] {
+        try await get("/api/control/queue")
+    }
+
+    func removeFromQueue(messageId: String) async throws {
+        let _: EmptyResponse = try await delete("/api/control/queue/\(messageId)")
+    }
+
+    func clearQueue() async throws -> Int {
+        struct ClearResponse: Decodable {
+            let cleared: Int
+        }
+        let response: ClearResponse = try await delete("/api/control/queue")
+        return response.cleared
+    }
+
     // MARK: - Tasks
     
     func listTasks() async throws -> [TaskState] {

@@ -144,6 +144,22 @@ struct TaskState: Codable, Identifiable {
     }
 }
 
+// MARK: - Queue
+
+struct QueuedMessage: Codable, Identifiable {
+    let id: String
+    let content: String
+    let agent: String?
+
+    /// Truncated content for display (max 100 chars)
+    var displayContent: String {
+        if content.count > 100 {
+            return String(content.prefix(100)) + "..."
+        }
+        return content
+    }
+}
+
 // MARK: - Parallel Execution
 
 struct RunningMissionInfo: Codable, Identifiable {

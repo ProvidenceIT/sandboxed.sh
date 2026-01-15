@@ -49,6 +49,16 @@ struct SettingsView: View {
             case .failure(let message): return message
             }
         }
+
+        /// Header message for display above the URL field
+        var headerMessage: String {
+            switch self {
+            case .unknown: return "Not tested"
+            case .testing: return "Testing..."
+            case .success(let authMode): return "Connected (\(authMode))"
+            case .failure: return "Failed"
+            }
+        }
     }
 
     init() {
@@ -69,53 +79,55 @@ struct SettingsView: View {
                                 .foregroundStyle(Theme.textPrimary)
 
                             GlassCard(padding: 20, cornerRadius: 20) {
-                                VStack(alignment: .leading, spacing: 16) {
-                                    // Server URL field
-                                    VStack(alignment: .leading, spacing: 8) {
-                                        Text("Server URL")
+                                VStack(alignment: .leading, spacing: 10) {
+                                    // Header: "API URL" + status + refresh button
+                                    HStack(spacing: 8) {
+                                        Text("API URL")
                                             .font(.caption.weight(.medium))
                                             .foregroundStyle(Theme.textSecondary)
 
-                                        TextField("https://your-server.com", text: $serverURL)
-                                            .textFieldStyle(.plain)
-                                            .textInputAutocapitalization(.never)
-                                            .autocorrectionDisabled()
-                                            .keyboardType(.URL)
-                                            .padding(.horizontal, 16)
-                                            .padding(.vertical, 14)
-                                            .background(Color.white.opacity(0.05))
-                                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                                            .overlay(
-                                                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                                    .stroke(Theme.border, lineWidth: 1)
-                                            )
-                                            .onChange(of: serverURL) { _, _ in
-                                                connectionStatus = .unknown
-                                            }
-                                    }
-
-                                    // Connection status
-                                    HStack(spacing: 8) {
-                                        Image(systemName: connectionStatus.icon)
-                                            .foregroundStyle(connectionStatus.color)
-                                            .symbolEffect(.rotate, isActive: connectionStatus == .testing)
-
-                                        Text(connectionStatus.message)
-                                            .font(.caption)
-                                            .foregroundStyle(connectionStatus.color)
-
                                         Spacer()
 
-                                        // Test Connection button
+                                        // Status indicator
+                                        HStack(spacing: 5) {
+                                            Circle()
+                                                .fill(connectionStatus.color)
+                                                .frame(width: 6, height: 6)
+
+                                            Text(connectionStatus.headerMessage)
+                                                .font(.caption2)
+                                                .foregroundStyle(connectionStatus.color)
+                                        }
+
+                                        // Refresh button
                                         Button {
                                             Task { await testConnection() }
                                         } label: {
-                                            Text("Test")
-                                                .font(.caption.weight(.medium))
+                                            Image(systemName: "arrow.clockwise")
+                                                .font(.system(size: 11, weight: .medium))
+                                                .foregroundStyle(connectionStatus == .testing ? Theme.accent : Theme.textMuted)
                                         }
-                                        .buttonStyle(.glass)
                                         .disabled(serverURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || connectionStatus == .testing)
+                                        .symbolEffect(.rotate, isActive: connectionStatus == .testing)
                                     }
+
+                                    // URL input field
+                                    TextField("https://your-server.com", text: $serverURL)
+                                        .textFieldStyle(.plain)
+                                        .textInputAutocapitalization(.never)
+                                        .autocorrectionDisabled()
+                                        .keyboardType(.URL)
+                                        .padding(.horizontal, 16)
+                                        .padding(.vertical, 14)
+                                        .background(Color.white.opacity(0.05))
+                                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                                .stroke(Theme.border, lineWidth: 1)
+                                        )
+                                        .onChange(of: serverURL) { _, _ in
+                                            connectionStatus = .unknown
+                                        }
                                 }
                             }
                         }

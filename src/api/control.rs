@@ -133,6 +133,14 @@ pub struct ControlMessageResponse {
     pub queued: bool,
 }
 
+/// A message waiting in the queue
+#[derive(Debug, Clone, Serialize)]
+pub struct QueuedMessage {
+    pub id: Uuid,
+    pub content: String,
+    pub agent: Option<String>,
+}
+
 /// Tool result posted by the frontend for an interactive tool call.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ControlToolResultRequest {
@@ -507,6 +515,19 @@ pub enum ControlCommand {
     GracefulShutdown {
         respond: oneshot::Sender<Vec<Uuid>>,
     },
+    /// Get the current message queue
+    GetQueue {
+        respond: oneshot::Sender<Vec<QueuedMessage>>,
+    },
+    /// Remove a message from the queue
+    RemoveFromQueue {
+        message_id: Uuid,
+        respond: oneshot::Sender<bool>, // true if removed, false if not found
+    },
+    /// Clear all messages from the queue
+    ClearQueue {
+        respond: oneshot::Sender<usize>, // number of messages cleared
+    },
 }
 
 // ==================== Mission Types ====================
@@ -876,6 +897,94 @@ pub async fn post_cancel(
             )
         })?;
     Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+// ==================== Queue Management Endpoints ====================
+
+/// Get the current message queue.
+pub async fn get_queue(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+) -> Result<Json<Vec<QueuedMessage>>, (StatusCode, String)> {
+    let control = control_for_user(&state, &user).await;
+    let (tx, rx) = oneshot::channel();
+    control
+        .cmd_tx
+        .send(ControlCommand::GetQueue { respond: tx })
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "control session unavailable".to_string(),
+            )
+        })?;
+    let queue = rx.await.map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to get queue".to_string(),
+        )
+    })?;
+    Ok(Json(queue))
+}
+
+/// Remove a message from the queue.
+pub async fn remove_from_queue(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+    Path(message_id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let control = control_for_user(&state, &user).await;
+    let (tx, rx) = oneshot::channel();
+    control
+        .cmd_tx
+        .send(ControlCommand::RemoveFromQueue {
+            message_id,
+            respond: tx,
+        })
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "control session unavailable".to_string(),
+            )
+        })?;
+    let removed = rx.await.map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to remove from queue".to_string(),
+        )
+    })?;
+    if removed {
+        Ok(Json(serde_json::json!({ "ok": true })))
+    } else {
+        Err((StatusCode::NOT_FOUND, "message not in queue".to_string()))
+    }
+}
+
+/// Clear all messages from the queue.
+pub async fn clear_queue(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let control = control_for_user(&state, &user).await;
+    let (tx, rx) = oneshot::channel();
+    control
+        .cmd_tx
+        .send(ControlCommand::ClearQueue { respond: tx })
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "control session unavailable".to_string(),
+            )
+        })?;
+    let cleared = rx.await.map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "failed to clear queue".to_string(),
+        )
+    })?;
+    Ok(Json(serde_json::json!({ "ok": true, "cleared": cleared })))
 }
 
 // ==================== Mission Endpoints ====================
@@ -2852,6 +2961,50 @@ async fn control_actor_loop(
                         }
 
                         let _ = respond.send(interrupted_ids);
+                    }
+                    ControlCommand::GetQueue { respond } => {
+                        let queued: Vec<QueuedMessage> = queue
+                            .iter()
+                            .map(|(id, content, agent)| QueuedMessage {
+                                id: *id,
+                                content: content.clone(),
+                                agent: agent.clone(),
+                            })
+                            .collect();
+                        let _ = respond.send(queued);
+                    }
+                    ControlCommand::RemoveFromQueue { message_id, respond } => {
+                        let before_len = queue.len();
+                        queue.retain(|(id, _, _)| *id != message_id);
+                        let removed = queue.len() < before_len;
+                        if removed {
+                            // Emit event to notify frontend
+                            let _ = events_tx.send(AgentEvent::Status {
+                                state: if running.is_some() {
+                                    ControlRunState::Running
+                                } else {
+                                    ControlRunState::Idle
+                                },
+                                queue_len: queue.len(),
+                                mission_id: current_mission.read().await.clone(),
+                            });
+                        }
+                        let _ = respond.send(removed);
+                    }
+                    ControlCommand::ClearQueue { respond } => {
+                        let cleared = queue.len();
+                        queue.clear();
+                        // Emit event to notify frontend
+                        let _ = events_tx.send(AgentEvent::Status {
+                            state: if running.is_some() {
+                                ControlRunState::Running
+                            } else {
+                                ControlRunState::Idle
+                            },
+                            queue_len: 0,
+                            mission_id: current_mission.read().await.clone(),
+                        });
+                        let _ = respond.send(cleared);
                     }
                 }
             }

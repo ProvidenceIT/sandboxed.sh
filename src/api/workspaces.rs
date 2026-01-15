@@ -1047,17 +1047,18 @@ async fn get_workspace_debug(
     let path_exists = path.exists();
 
     // Calculate container size (only for chroot workspaces)
+    // Use du -sk (kilobytes) for portability, then convert to bytes
     let size_bytes = if workspace.workspace_type == WorkspaceType::Chroot && path_exists {
-        // Use du command for quick size calculation
         let output = tokio::process::Command::new("du")
-            .args(["-sb", &path.to_string_lossy()])
+            .args(["-sk", &path.to_string_lossy()])
             .output()
             .await
             .ok();
 
         output.and_then(|o| {
             let stdout = String::from_utf8_lossy(&o.stdout);
-            stdout.split_whitespace().next()?.parse::<u64>().ok()
+            let kb = stdout.split_whitespace().next()?.parse::<u64>().ok()?;
+            Some(kb * 1024) // Convert KB to bytes
         })
     } else {
         None

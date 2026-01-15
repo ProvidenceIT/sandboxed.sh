@@ -31,6 +31,7 @@ import {
 import { readSavedSettings, writeSavedSettings } from '@/lib/settings';
 import { cn } from '@/lib/utils';
 import { AddProviderModal } from '@/components/ui/add-provider-modal';
+import { ServerConnectionCard } from '@/components/server-connection-card';
 
 // Provider icons/colors mapping
 const providerConfig: Record<string, { color: string; icon: string }> = {
@@ -349,74 +350,17 @@ export default function SettingsPage() {
         </div>
 
         <div className="space-y-5">
-          {/* API Connection */}
-          <div className="rounded-xl bg-white/[0.02] border border-white/[0.04] p-5">
-            <div className="flex items-center gap-3 mb-4">
-              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-500/10">
-                <Server className="h-5 w-5 text-indigo-400" />
-              </div>
-              <div>
-                <h2 className="text-sm font-medium text-white">API Connection</h2>
-                <p className="text-xs text-white/40">Configure server endpoint</p>
-              </div>
-            </div>
-
-            <div className="space-y-4">
-              <div>
-                <label className="block text-xs font-medium text-white/60 mb-1.5">
-                  API URL
-                </label>
-                <input
-                  type="text"
-                  value={apiUrl}
-                  onChange={(e) => {
-                    setApiUrl(e.target.value);
-                    validateUrl(e.target.value);
-                  }}
-                  className={cn(
-                    'w-full rounded-lg border bg-white/[0.02] px-3 py-2.5 text-sm text-white placeholder-white/30 focus:outline-none transition-colors',
-                    urlError
-                      ? 'border-red-500/50 focus:border-red-500/50'
-                      : 'border-white/[0.06] focus:border-indigo-500/50'
-                  )}
-                />
-                {urlError && <p className="mt-1.5 text-xs text-red-400">{urlError}</p>}
-              </div>
-
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <span className="text-xs text-white/40">Status:</span>
-                  {healthLoading ? (
-                    <span className="flex items-center gap-1.5 text-xs text-white/40">
-                      <RefreshCw className="h-3 w-3 animate-spin" />
-                      Checking...
-                    </span>
-                  ) : health ? (
-                    <span className="flex items-center gap-1.5 text-xs text-emerald-400">
-                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                      Connected (v{health.version})
-                    </span>
-                  ) : (
-                    <span className="flex items-center gap-1.5 text-xs text-red-400">
-                      <span className="h-1.5 w-1.5 rounded-full bg-red-400" />
-                      Disconnected
-                    </span>
-                  )}
-                </div>
-
-                <button
-                  onClick={testApiConnection}
-                  disabled={testingConnection}
-                  className="flex items-center gap-2 rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-1.5 text-xs text-white/70 hover:bg-white/[0.04] transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  <RefreshCw
-                    className={cn('h-3 w-3', testingConnection && 'animate-spin')}
-                  />
-                  Test Connection
-                </button>
-              </div>
-            </div>
-          </div>
+          {/* Server Connection & System Components */}
+          <ServerConnectionCard
+            apiUrl={apiUrl}
+            setApiUrl={setApiUrl}
+            urlError={urlError}
+            validateUrl={validateUrl}
+            health={health}
+            healthLoading={healthLoading}
+            testingConnection={testingConnection}
+            testApiConnection={testApiConnection}
+          />
 
           {/* AI Providers */}
           <div className="rounded-xl bg-white/[0.02] border border-white/[0.04] p-5">
