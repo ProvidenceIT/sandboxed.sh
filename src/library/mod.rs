@@ -12,6 +12,7 @@
 //! - OpenAgent config (`openagent/config.json`)
 
 mod git;
+pub mod template_crypto;
 pub mod types;
 
 use anyhow::{Context, Result};
