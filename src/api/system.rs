@@ -450,13 +450,25 @@ fn stream_open_agent_update() -> impl Stream<Item = Result<Event, std::convert::
             .output()
             .await;
 
-        if let Err(e) = fetch_result {
-            yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
-                event_type: "error".to_string(),
-                message: format!("Failed to fetch: {}", e),
-                progress: None,
-            }).unwrap()));
-            return;
+        match fetch_result {
+            Ok(output) if output.status.success() => {}
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
+                    event_type: "error".to_string(),
+                    message: format!("Failed to fetch: {}", stderr),
+                    progress: None,
+                }).unwrap()));
+                return;
+            }
+            Err(e) => {
+                yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
+                    event_type: "error".to_string(),
+                    message: format!("Failed to run git fetch: {}", e),
+                    progress: None,
+                }).unwrap()));
+                return;
+            }
         }
 
         // Get the latest tag
@@ -627,45 +639,21 @@ fn stream_open_agent_update() -> impl Stream<Item = Result<Event, std::convert::
             }
         }
 
+        // Send restart event before restarting - the SSE connection will drop when the
+        // service restarts since this process will be terminated by systemctl. The client
+        // should detect the connection drop at progress 100% and treat it as success.
         yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
-            event_type: "log".to_string(),
-            message: "Binaries installed, restarting service...".to_string(),
-            progress: Some(85),
+            event_type: "restarting".to_string(),
+            message: format!("Binaries installed, restarting service to complete update to {}...", latest_tag),
+            progress: Some(100),
         }).unwrap()));
 
-        // Restart the open_agent service
-        let restart_result = Command::new("systemctl")
+        // Restart the service - this will terminate our process, so no code after this
+        // will execute. The client should poll /api/health to confirm the new version.
+        let _ = Command::new("systemctl")
             .args(["restart", "open_agent.service"])
             .output()
             .await;
-
-        match restart_result {
-            Ok(output) if output.status.success() => {
-                // Wait a moment for the service to start
-                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-
-                yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
-                    event_type: "complete".to_string(),
-                    message: format!("Open Agent updated to {} successfully!", latest_tag),
-                    progress: Some(100),
-                }).unwrap()));
-            }
-            Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
-                    event_type: "error".to_string(),
-                    message: format!("Failed to restart service: {}", stderr),
-                    progress: None,
-                }).unwrap()));
-            }
-            Err(e) => {
-                yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
-                    event_type: "error".to_string(),
-                    message: format!("Failed to restart service: {}", e),
-                    progress: None,
-                }).unwrap()));
-            }
-        }
     }
 }
 
