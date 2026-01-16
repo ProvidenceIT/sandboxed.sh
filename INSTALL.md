@@ -11,7 +11,25 @@ Open Agent is the orchestrator/UI backend. **It does not run model inference**; 
 > 4. **Library git repo URL** (or confirm using the template)
 > 5. **Dashboard password** to set for authentication (or offer to generate one)
 >
+> **SSH Key Setup**: Most servers require SSH key authentication. If the user doesn't have one:
+> 1. Generate a key (without passphrase for easier automation):
+>    ```bash
+>    ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519 -N ""
+>    ```
+> 2. Display the public key for them to copy:
+>    ```bash
+>    cat ~/.ssh/id_ed25519.pub
+>    ```
+> 3. They need to add this key to their server. Options:
+>    - **Hosting provider dashboard**: Most providers (Hetzner, DigitalOcean, Vultr, etc.) have an "SSH Keys" section in their web console
+>    - **Existing access**: If they can already log in: `ssh-copy-id root@<server-ip>`
+>
 > Verify you have SSH access before proceeding: `ssh root@<server-ip> "hostname"`
+>
+> If connection fails, common causes:
+> - The SSH key wasn't added to the server (check hosting provider's dashboard)
+> - The key has a passphrase (agent tools may not handle passphrase prompts)
+> - Firewall blocking port 22 (check hosting provider's firewall settings)
 
 ---
 

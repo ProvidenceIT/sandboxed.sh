@@ -23,6 +23,10 @@
   <img src="screenshots/hero.webp" alt="Open Agent Dashboard" width="100%" />
 </p>
 
+<p align="center">
+  <strong>Ready to deploy?</strong> Ask your local AI agent to check out <a href="./INSTALL.md">INSTALL.md</a> it'll guide you through everything.
+</p>
+
 ---
 
 ## Vision
