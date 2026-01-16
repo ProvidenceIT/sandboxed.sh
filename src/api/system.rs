@@ -22,6 +22,9 @@ use tokio::process::Command;
 
 use super::routes::AppState;
 
+/// Default repo path for Open Agent source
+const OPEN_AGENT_REPO_PATH: &str = "/opt/open_agent/vaduz-v1";
+
 /// Information about a system component.
 #[derive(Debug, Clone, Serialize)]
 pub struct ComponentInfo {
@@ -71,13 +74,20 @@ async fn get_components(State(state): State<Arc<AppState>>) -> Json<SystemCompon
     let mut components = Vec::new();
 
     // Open Agent (self)
+    let current_version = env!("CARGO_PKG_VERSION");
+    let update_available = check_open_agent_update(Some(current_version)).await;
+    let status = if update_available.is_some() {
+        ComponentStatus::UpdateAvailable
+    } else {
+        ComponentStatus::Ok
+    };
     components.push(ComponentInfo {
         name: "open_agent".to_string(),
-        version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        version: Some(current_version.to_string()),
         installed: true,
-        update_available: None, // Would need to check GitHub releases
+        update_available,
         path: Some("/usr/local/bin/open_agent".to_string()),
-        status: ComponentStatus::Ok,
+        status,
     });
 
     // OpenCode
@@ -187,6 +197,68 @@ async fn check_opencode_update(current_version: Option<&str>) -> Option<String> 
     let latest_version = latest.trim_start_matches('v');
 
     // Simple version comparison (assumes semver-like format)
+    if latest_version != current && version_is_newer(latest_version, current) {
+        Some(latest_version.to_string())
+    } else {
+        None
+    }
+}
+
+/// Check if there's a newer version of Open Agent available.
+/// First checks GitHub releases, then falls back to git tags if no releases exist.
+async fn check_open_agent_update(current_version: Option<&str>) -> Option<String> {
+    let current = current_version?;
+
+    // First, try GitHub releases API
+    let client = reqwest::Client::new();
+    let resp = client
+        .get("https://api.github.com/repos/Th0rgal/openagent/releases/latest")
+        .header("User-Agent", "open-agent")
+        .send()
+        .await
+        .ok();
+
+    if let Some(resp) = resp {
+        if resp.status().is_success() {
+            if let Ok(json) = resp.json::<serde_json::Value>().await {
+                if let Some(latest) = json.get("tag_name").and_then(|t| t.as_str()) {
+                    let latest_version = latest.trim_start_matches('v');
+                    if latest_version != current && version_is_newer(latest_version, current) {
+                        return Some(latest_version.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: check git tags from the repo if it exists
+    let repo_path = std::path::Path::new(OPEN_AGENT_REPO_PATH);
+    if !repo_path.exists() {
+        return None;
+    }
+
+    // Fetch tags first
+    let _ = Command::new("git")
+        .args(["fetch", "--tags", "origin"])
+        .current_dir(OPEN_AGENT_REPO_PATH)
+        .output()
+        .await;
+
+    // Get the latest tag
+    let tag_result = Command::new("git")
+        .args(["describe", "--tags", "--abbrev=0", "origin/master"])
+        .current_dir(OPEN_AGENT_REPO_PATH)
+        .output()
+        .await
+        .ok()?;
+
+    if !tag_result.status.success() {
+        return None;
+    }
+
+    let latest_tag = String::from_utf8_lossy(&tag_result.stdout).trim().to_string();
+    let latest_version = latest_tag.trim_start_matches('v');
+
     if latest_version != current && version_is_newer(latest_version, current) {
         Some(latest_version.to_string())
     } else {
@@ -334,12 +406,266 @@ async fn update_component(
     Path(name): Path<String>,
 ) -> Result<Sse<UpdateStream>, (StatusCode, String)> {
     match name.as_str() {
+        "open_agent" => Ok(Sse::new(Box::pin(stream_open_agent_update()))),
         "opencode" => Ok(Sse::new(Box::pin(stream_opencode_update()))),
         "oh_my_opencode" => Ok(Sse::new(Box::pin(stream_oh_my_opencode_update()))),
         _ => Err((
             StatusCode::BAD_REQUEST,
             format!("Unknown component: {}", name),
         )),
+    }
+}
+
+/// Stream the Open Agent update process.
+/// Builds from source using git tags (no pre-built binaries needed).
+fn stream_open_agent_update() -> impl Stream<Item = Result<Event, std::convert::Infallible>> {
+    async_stream::stream! {
+        yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
+            event_type: "log".to_string(),
+            message: "Starting Open Agent update...".to_string(),
+            progress: Some(0),
+        }).unwrap()));
+
+        // Check if source repo exists
+        let repo_path = std::path::Path::new(OPEN_AGENT_REPO_PATH);
+        if !repo_path.exists() {
+            yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
+                event_type: "error".to_string(),
+                message: format!("Source repo not found at {}. Clone the repo first (see INSTALL.md).", OPEN_AGENT_REPO_PATH),
+                progress: None,
+            }).unwrap()));
+            return;
+        }
+
+        // Fetch latest from git
+        yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
+            event_type: "log".to_string(),
+            message: "Fetching latest changes from git...".to_string(),
+            progress: Some(5),
+        }).unwrap()));
+
+        let fetch_result = Command::new("git")
+            .args(["fetch", "--tags", "origin"])
+            .current_dir(OPEN_AGENT_REPO_PATH)
+            .output()
+            .await;
+
+        if let Err(e) = fetch_result {
+            yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
+                event_type: "error".to_string(),
+                message: format!("Failed to fetch: {}", e),
+                progress: None,
+            }).unwrap()));
+            return;
+        }
+
+        // Get the latest tag
+        yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
+            event_type: "log".to_string(),
+            message: "Finding latest release tag...".to_string(),
+            progress: Some(10),
+        }).unwrap()));
+
+        let tag_result = Command::new("git")
+            .args(["describe", "--tags", "--abbrev=0", "origin/master"])
+            .current_dir(OPEN_AGENT_REPO_PATH)
+            .output()
+            .await;
+
+        let latest_tag = match tag_result {
+            Ok(output) if output.status.success() => {
+                String::from_utf8_lossy(&output.stdout).trim().to_string()
+            }
+            _ => {
+                // No tags found, use origin/master
+                yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
+                    event_type: "log".to_string(),
+                    message: "No release tags found, using origin/master...".to_string(),
+                    progress: Some(12),
+                }).unwrap()));
+                "origin/master".to_string()
+            }
+        };
+
+        yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
+            event_type: "log".to_string(),
+            message: format!("Checking out {}...", latest_tag),
+            progress: Some(15),
+        }).unwrap()));
+
+        // Checkout the tag/branch
+        let checkout_result = Command::new("git")
+            .args(["checkout", &latest_tag])
+            .current_dir(OPEN_AGENT_REPO_PATH)
+            .output()
+            .await;
+
+        match checkout_result {
+            Ok(output) if output.status.success() => {}
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
+                    event_type: "error".to_string(),
+                    message: format!("Failed to checkout: {}", stderr),
+                    progress: None,
+                }).unwrap()));
+                return;
+            }
+            Err(e) => {
+                yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
+                    event_type: "error".to_string(),
+                    message: format!("Failed to run git checkout: {}", e),
+                    progress: None,
+                }).unwrap()));
+                return;
+            }
+        }
+
+        // If using origin/master, pull latest
+        if latest_tag == "origin/master" {
+            let pull_result = Command::new("git")
+                .args(["pull", "origin", "master"])
+                .current_dir(OPEN_AGENT_REPO_PATH)
+                .output()
+                .await;
+
+            if let Ok(output) = pull_result {
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
+                        event_type: "log".to_string(),
+                        message: format!("Warning: git pull failed: {}", stderr),
+                        progress: Some(18),
+                    }).unwrap()));
+                }
+            }
+        }
+
+        // Build the project
+        yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
+            event_type: "log".to_string(),
+            message: "Building Open Agent (this may take a few minutes)...".to_string(),
+            progress: Some(20),
+        }).unwrap()));
+
+        // Source cargo env and build
+        let build_result = Command::new("bash")
+            .args(["-c", "source /root/.cargo/env && cargo build --bin open_agent --bin host-mcp --bin desktop-mcp"])
+            .current_dir(OPEN_AGENT_REPO_PATH)
+            .output()
+            .await;
+
+        match build_result {
+            Ok(output) if output.status.success() => {
+                yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
+                    event_type: "log".to_string(),
+                    message: "Build complete".to_string(),
+                    progress: Some(70),
+                }).unwrap()));
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                // Show last few lines of error
+                let last_lines: Vec<&str> = stderr.lines().rev().take(10).collect();
+                let error_summary = last_lines.into_iter().rev().collect::<Vec<_>>().join("\n");
+                yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
+                    event_type: "error".to_string(),
+                    message: format!("Build failed:\n{}", error_summary),
+                    progress: None,
+                }).unwrap()));
+                return;
+            }
+            Err(e) => {
+                yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
+                    event_type: "error".to_string(),
+                    message: format!("Failed to run cargo build: {}", e),
+                    progress: None,
+                }).unwrap()));
+                return;
+            }
+        }
+
+        // Install binaries
+        yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
+            event_type: "log".to_string(),
+            message: "Installing binaries...".to_string(),
+            progress: Some(75),
+        }).unwrap()));
+
+        let binaries = [
+            ("open_agent", "/usr/local/bin/open_agent"),
+            ("host-mcp", "/usr/local/bin/host-mcp"),
+            ("desktop-mcp", "/usr/local/bin/desktop-mcp"),
+        ];
+
+        for (name, dest) in binaries {
+            let src = format!("{}/target/debug/{}", OPEN_AGENT_REPO_PATH, name);
+            let install_result = Command::new("install")
+                .args(["-m", "0755", &src, dest])
+                .output()
+                .await;
+
+            match install_result {
+                Ok(output) if output.status.success() => {}
+                Ok(output) => {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
+                        event_type: "error".to_string(),
+                        message: format!("Failed to install {}: {}", name, stderr),
+                        progress: None,
+                    }).unwrap()));
+                    return;
+                }
+                Err(e) => {
+                    yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
+                        event_type: "error".to_string(),
+                        message: format!("Failed to install {}: {}", name, e),
+                        progress: None,
+                    }).unwrap()));
+                    return;
+                }
+            }
+        }
+
+        yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
+            event_type: "log".to_string(),
+            message: "Binaries installed, restarting service...".to_string(),
+            progress: Some(85),
+        }).unwrap()));
+
+        // Restart the open_agent service
+        let restart_result = Command::new("systemctl")
+            .args(["restart", "open_agent.service"])
+            .output()
+            .await;
+
+        match restart_result {
+            Ok(output) if output.status.success() => {
+                // Wait a moment for the service to start
+                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+                yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
+                    event_type: "complete".to_string(),
+                    message: format!("Open Agent updated to {} successfully!", latest_tag),
+                    progress: Some(100),
+                }).unwrap()));
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
+                    event_type: "error".to_string(),
+                    message: format!("Failed to restart service: {}", stderr),
+                    progress: None,
+                }).unwrap()));
+            }
+            Err(e) => {
+                yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
+                    event_type: "error".to_string(),
+                    message: format!("Failed to restart service: {}", e),
+                    progress: None,
+                }).unwrap()));
+            }
+        }
     }
 }
 

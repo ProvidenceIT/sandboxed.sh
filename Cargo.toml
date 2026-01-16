@@ -1,6 +1,6 @@
 [package]
 name = "open_agent"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Managed control plane for OpenCode-based agents"
 authors = ["Open Agent Contributors"]

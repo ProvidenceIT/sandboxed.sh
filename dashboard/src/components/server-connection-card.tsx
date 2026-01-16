@@ -287,7 +287,7 @@ export function ServerConnectionCard({
                     </div>
 
                     {/* Update button */}
-                    {component.status === 'update_available' && component.name !== 'open_agent' && (
+                    {component.status === 'update_available' && (
                       <button
                         onClick={() => handleUpdate(component)}
                         disabled={updatingComponent !== null}
