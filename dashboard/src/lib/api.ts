@@ -1669,6 +1669,11 @@ export function updatePlugin(
 
   eventSource.onerror = () => {
     eventSource.close();
+    onEvent({
+      event_type: "error",
+      message: "Connection error: failed to connect to server",
+      progress: null,
+    });
   };
 
   return () => eventSource.close();

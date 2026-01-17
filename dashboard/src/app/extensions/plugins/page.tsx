@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useMemo, useEffect } from 'react';
+import { useState, useMemo, useEffect, useRef } from 'react';
 import useSWR from 'swr';
 import { toast } from '@/components/toast';
 import { type Plugin, getInstalledPlugins, updatePlugin, type InstalledPluginInfo } from '@/lib/api';
@@ -585,6 +585,16 @@ function InstalledPluginsSection() {
 
   const [updating, setUpdating] = useState<string | null>(null);
   const [updateProgress, setUpdateProgress] = useState<string | null>(null);
+  const cleanupRef = useRef<(() => void) | null>(null);
+
+  // Cleanup EventSource on unmount
+  useEffect(() => {
+    return () => {
+      if (cleanupRef.current) {
+        cleanupRef.current();
+      }
+    };
+  }, []);
 
   const handleUpdate = (packageName: string) => {
     setUpdating(packageName);
@@ -597,16 +607,17 @@ function InstalledPluginsSection() {
         toast.success(event.message);
         setUpdating(null);
         setUpdateProgress(null);
+        cleanupRef.current = null;
         mutate(); // Refresh the list
       } else if (event.event_type === 'error') {
         toast.error(event.message);
         setUpdating(null);
         setUpdateProgress(null);
+        cleanupRef.current = null;
       }
     });
 
-    // Cleanup on unmount
-    return cleanup;
+    cleanupRef.current = cleanup;
   };
 
   if (isLoading) {

@@ -1069,7 +1069,8 @@ fn stream_plugin_update(package: String) -> impl Stream<Item = Result<Event, std
                             // Update the plugin spec to @latest
                             for p in plugins.iter_mut() {
                                 if let Some(s) = p.as_str() {
-                                    if s.starts_with(&package) {
+                                    // Match exact package name or package@version to avoid prefix collisions
+                                    if s == package || s.starts_with(&format!("{}@", package)) {
                                         *p = serde_json::json!(format!("{}@latest", package));
                                     }
                                 }
