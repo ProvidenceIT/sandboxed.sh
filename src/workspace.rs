@@ -615,21 +615,28 @@ fn opencode_entry_from_mcp(
                     "--chdir".to_string(),
                     rel_str,
                 ];
-                if let Ok(context_root) = std::env::var("OPEN_AGENT_CONTEXT_ROOT") {
-                    let context_root = context_root.trim();
-                    if !context_root.is_empty() && Path::new(context_root).exists() {
-                        cmd.push(format!("--bind={}:/root/context", context_root));
-                        nspawn_env.insert(
-                            "OPEN_AGENT_CONTEXT_ROOT".to_string(),
-                            "/root/context".to_string(),
-                        );
-                        if let Ok(dir_name) = std::env::var("OPEN_AGENT_CONTEXT_DIR_NAME") {
-                            if !dir_name.trim().is_empty() {
-                                nspawn_env
-                                    .insert("OPEN_AGENT_CONTEXT_DIR_NAME".to_string(), dir_name);
-                            }
-                        }
-                    }
+                // For chroot workspaces, compute context root from workspace_root
+                // instead of using the global env var (which is for the host workspace)
+                let context_dir_name = std::env::var("OPEN_AGENT_CONTEXT_DIR_NAME")
+                    .ok()
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or_else(|| "context".to_string());
+                let workspace_context_root = workspace_root.join(&context_dir_name);
+                // Create the context directory if it doesn't exist
+                let _ = std::fs::create_dir_all(&workspace_context_root);
+                if workspace_context_root.exists() {
+                    cmd.push(format!(
+                        "--bind={}:/root/context",
+                        workspace_context_root.display()
+                    ));
+                    nspawn_env.insert(
+                        "OPEN_AGENT_CONTEXT_ROOT".to_string(),
+                        "/root/context".to_string(),
+                    );
+                    nspawn_env.insert(
+                        "OPEN_AGENT_CONTEXT_DIR_NAME".to_string(),
+                        context_dir_name,
+                    );
                 }
                 cmd.extend(nspawn::tailscale_nspawn_extra_args(&merged_env));
                 for (key, value) in &nspawn_env {
