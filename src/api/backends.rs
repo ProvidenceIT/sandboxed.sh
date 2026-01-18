@@ -111,43 +111,38 @@ pub async fn get_backend_config(
     let backend = registry
         .get(&id)
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Backend {} not found", id)))?;
+    drop(registry);
 
-    // Return backend-specific configuration
-    let settings = match id.as_str() {
-        "opencode" => {
-            let base_url = std::env::var("OPENCODE_BASE_URL")
-                .unwrap_or_else(|_| "http://127.0.0.1:4096".to_string());
-            let default_agent = std::env::var("OPENCODE_DEFAULT_AGENT").ok();
-            let permissive = std::env::var("OPENCODE_PERMISSIVE")
-                .map(|v| v == "true" || v == "1")
-                .unwrap_or(false);
-            serde_json::json!({
-                "base_url": base_url,
-                "default_agent": default_agent,
-                "permissive": permissive,
-            })
-        }
-        "claudecode" => {
-            // Check if Claude Code API key is configured
-            let api_key_configured = state
-                .secrets
-                .as_ref()
-                .map(|_s| {
-                    // TODO: implement proper secret check
-                    false
-                })
-                .unwrap_or(false);
-            serde_json::json!({
-                "api_key_configured": api_key_configured,
-            })
-        }
-        _ => serde_json::json!({}),
-    };
+    let config_entry = state
+        .backend_configs
+        .get(&id)
+        .await
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Backend {} not configured", id)))?;
+
+    let mut settings = config_entry.settings.clone();
+
+    if id == "claudecode" {
+        let api_key_configured = if let Some(store) = state.secrets.as_ref() {
+            match store.list_secrets("claudecode").await {
+                Ok(secrets) => secrets.iter().any(|s| s.key == "api_key" && !s.is_expired),
+                Err(_) => false,
+            }
+        } else {
+            false
+        };
+
+        let mut obj = settings.as_object().cloned().unwrap_or_default();
+        obj.insert(
+            "api_key_configured".to_string(),
+            serde_json::Value::Bool(api_key_configured),
+        );
+        settings = serde_json::Value::Object(obj);
+    }
 
     Ok(Json(BackendConfig {
         id: backend.id().to_string(),
         name: backend.name().to_string(),
-        enabled: true,
+        enabled: config_entry.enabled,
         settings,
     }))
 }
@@ -156,6 +151,7 @@ pub async fn get_backend_config(
 #[derive(Debug, Clone, Deserialize)]
 pub struct UpdateBackendConfigRequest {
     pub settings: serde_json::Value,
+    pub enabled: Option<bool>,
 }
 
 /// Update backend configuration
@@ -163,18 +159,88 @@ pub async fn update_backend_config(
     State(state): State<Arc<AppState>>,
     Extension(_user): Extension<AuthUser>,
     Path(id): Path<String>,
-    Json(_req): Json<UpdateBackendConfigRequest>,
+    Json(req): Json<UpdateBackendConfigRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let registry = state.backend_registry.read().await;
     if registry.get(&id).is_none() {
         return Err((StatusCode::NOT_FOUND, format!("Backend {} not found", id)));
     }
+    drop(registry);
 
-    // Backend configuration is currently read from environment variables
-    // TODO: Implement persistent backend configuration storage
+    let updated_settings = match id.as_str() {
+        "opencode" => {
+            let settings = req
+                .settings
+                .as_object()
+                .ok_or_else(|| (StatusCode::BAD_REQUEST, "Invalid settings payload".to_string()))?;
+            let base_url = settings
+                .get("base_url")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| (StatusCode::BAD_REQUEST, "base_url is required".to_string()))?;
+            let default_agent = settings
+                .get("default_agent")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            let permissive = settings
+                .get("permissive")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            serde_json::json!({
+                "base_url": base_url,
+                "default_agent": default_agent,
+                "permissive": permissive,
+            })
+        }
+        "claudecode" => {
+            let mut settings = req.settings.clone();
+            if let Some(api_key) = settings.get("api_key").and_then(|v| v.as_str()) {
+                let store = state
+                    .secrets
+                    .as_ref()
+                    .ok_or_else(|| {
+                        (
+                            StatusCode::BAD_REQUEST,
+                            "Secrets store not available".to_string(),
+                        )
+                    })?;
+                store
+                    .set_secret("claudecode", "api_key", api_key, None)
+                    .await
+                    .map_err(|e| {
+                        (
+                            StatusCode::BAD_REQUEST,
+                            format!("Failed to store API key: {}", e),
+                        )
+                    })?;
+            }
+            if let Some(obj) = settings.as_object_mut() {
+                obj.remove("api_key");
+            }
+            settings
+        }
+        _ => req.settings.clone(),
+    };
+
+    let updated = state
+        .backend_configs
+        .update_settings(&id, updated_settings, req.enabled)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to persist backend config: {}", e),
+            )
+        })?;
+
+    if updated.is_none() {
+        return Err((StatusCode::NOT_FOUND, format!("Backend {} not found", id)));
+    }
 
     Ok(Json(serde_json::json!({
         "ok": true,
-        "message": "Backend configuration is currently read-only"
+        "message": "Backend configuration updated. Restart Open Agent to apply runtime changes."
     })))
 }

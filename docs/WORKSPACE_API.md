@@ -124,6 +124,10 @@ Manually syncs the workspace's skills and tools from the library to the `.openco
 
 **Response**: `Workspace` object.
 
+Note: Mission workspaces also generate backend-specific config on execution:
+- OpenCode: `.opencode/opencode.json` (and `opencode.json` in the workspace root)
+- Claude Code: `.claude/settings.local.json` + `CLAUDE.md`
+
 ## Execute Command
 
 ```

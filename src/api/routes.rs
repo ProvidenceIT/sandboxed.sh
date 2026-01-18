@@ -23,6 +23,7 @@ use uuid::Uuid;
 
 use crate::agents::{AgentContext, AgentRef, OpenCodeAgent};
 use crate::backend::registry::BackendRegistry;
+use crate::backend_config::BackendConfigEntry;
 use crate::config::{AuthMode, Config};
 use crate::mcp::McpRegistry;
 use crate::workspace;
@@ -76,15 +77,15 @@ pub struct AppState {
     pub settings: Arc<crate::settings::SettingsStore>,
     /// Backend registry for multi-backend support
     pub backend_registry: Arc<RwLock<BackendRegistry>>,
+    /// Backend configuration store
+    pub backend_configs: Arc<crate::backend_config::BackendConfigStore>,
 }
 
 /// Start the HTTP server.
 pub async fn serve(config: Config) -> anyhow::Result<()> {
+    let mut config = config;
     // Start monitoring background collector early so clients get history immediately
     monitoring::init_monitoring();
-
-    // Always use OpenCode backend
-    let root_agent: AgentRef = Arc::new(OpenCodeAgent::new(config.clone()));
 
     // Initialize MCP registry
     let mcp = Arc::new(McpRegistry::new(&config.working_dir).await);
@@ -139,6 +140,51 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
 
     // Initialize global settings store
     let settings = Arc::new(crate::settings::SettingsStore::new(&config.working_dir).await);
+
+    // Initialize backend config store (persisted settings)
+    let backend_defaults = vec![
+        BackendConfigEntry::new(
+            "opencode",
+            "OpenCode",
+            serde_json::json!({
+                "base_url": config.opencode_base_url,
+                "default_agent": config.opencode_agent,
+                "permissive": config.opencode_permissive,
+            }),
+        ),
+        BackendConfigEntry::new("claudecode", "Claude Code", serde_json::json!({})),
+    ];
+    let backend_configs = Arc::new(
+        crate::backend_config::BackendConfigStore::new(
+            config
+                .working_dir
+                .join(".openagent/backend_config.json"),
+            backend_defaults,
+        )
+        .await,
+    );
+
+    // Apply persisted OpenCode settings (if present)
+    if let Some(entry) = backend_configs.get("opencode").await {
+        if let Some(settings) = entry.settings.as_object() {
+            if let Some(base_url) = settings.get("base_url").and_then(|v| v.as_str()) {
+                if !base_url.trim().is_empty() {
+                    config.opencode_base_url = base_url.to_string();
+                }
+            }
+            if let Some(agent) = settings.get("default_agent").and_then(|v| v.as_str()) {
+                if !agent.trim().is_empty() {
+                    config.opencode_agent = Some(agent.to_string());
+                }
+            }
+            if let Some(permissive) = settings.get("permissive").and_then(|v| v.as_bool()) {
+                config.opencode_permissive = permissive;
+            }
+        }
+    }
+
+    // Always use OpenCode backend
+    let root_agent: AgentRef = Arc::new(OpenCodeAgent::new(config.clone()));
 
     // Initialize backend registry with OpenCode and Claude Code backends
     let opencode_base_url =
@@ -251,6 +297,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         console_pool,
         settings,
         backend_registry,
+        backend_configs,
     });
 
     // Start background desktop session cleanup task

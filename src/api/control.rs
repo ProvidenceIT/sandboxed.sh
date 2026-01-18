@@ -3676,7 +3676,7 @@ async fn run_single_control_turn(
     // Context for agent execution.
     let mut ctx = AgentContext::new(config.clone(), working_dir_path);
     ctx.mission_control = mission_control;
-    ctx.control_events = Some(events_tx);
+    ctx.control_events = Some(events_tx.clone());
     ctx.frontend_tool_hub = Some(tool_hub);
     ctx.control_status = Some(status);
     ctx.cancel_token = Some(cancel);
@@ -3684,6 +3684,24 @@ async fn run_single_control_turn(
     ctx.progress_snapshot = Some(progress_snapshot);
     ctx.mission_id = mission_id;
     ctx.mcp = Some(mcp);
+
+    if let Some(ref backend) = backend_id {
+        if backend != "opencode" {
+            let _ = events_tx.send(AgentEvent::Error {
+                message: format!(
+                    "Backend '{}' is not supported for in-app execution yet. Please use OpenCode or run Claude Code locally.",
+                    backend
+                ),
+                mission_id,
+                resumable: mission_id.is_some(),
+            });
+            return crate::agents::AgentResult::failure(
+                format!("Unsupported backend: {}", backend),
+                0,
+            )
+            .with_terminal_reason(TerminalReason::LlmError);
+        }
+    }
 
     let result = root_agent.execute(&mut task, &ctx).await;
     result

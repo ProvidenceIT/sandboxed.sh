@@ -37,6 +37,7 @@ pub mod agents;
 pub mod ai_providers;
 pub mod api;
 pub mod backend;
+pub mod backend_config;
 pub mod config;
 pub mod library;
 pub mod mcp;

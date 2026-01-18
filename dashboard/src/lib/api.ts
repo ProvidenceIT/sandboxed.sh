@@ -2874,12 +2874,13 @@ export async function getBackendConfig(backendId: string): Promise<BackendConfig
 // Update backend configuration
 export async function updateBackendConfig(
   backendId: string,
-  settings: Record<string, unknown>
+  settings: Record<string, unknown>,
+  options?: { enabled?: boolean }
 ): Promise<{ ok: boolean; message?: string }> {
   const res = await apiFetch(`/api/backends/${encodeURIComponent(backendId)}/config`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ settings }),
+    body: JSON.stringify({ settings, enabled: options?.enabled }),
   });
   if (!res.ok) throw new Error('Failed to update backend config');
   return res.json();

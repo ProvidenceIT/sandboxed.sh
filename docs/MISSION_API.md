@@ -14,9 +14,12 @@ POST /api/control/missions
   "title": "My Mission",
   "workspace_id": "uuid",
   "agent": "code-reviewer",
-  "model_override": "anthropic/claude-sonnet-4-20250514"
+  "model_override": "anthropic/claude-sonnet-4-20250514",
+  "backend": "opencode"
 }
 ```
+
+`backend` can be `"opencode"` or `"claudecode"`. Defaults to `"opencode"` if omitted.
 
 **Response**: `Mission` object (see below).
 
@@ -155,9 +158,9 @@ data: {"id":"uuid","content":"Done!","success":true,"cost_cents":5,"model":"clau
   "workspace_name": "my-workspace",
   "agent": "code-reviewer",
   "model_override": null,
+  "backend": "opencode",
   "history": [],
   "created_at": "2025-01-13T10:00:00Z",
   "updated_at": "2025-01-13T10:05:00Z"
 }
 ```
-

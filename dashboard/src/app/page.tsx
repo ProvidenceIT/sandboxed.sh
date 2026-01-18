@@ -46,12 +46,13 @@ export default function OverviewPage() {
   const isActive = (stats?.active_tasks ?? 0) > 0;
 
   const handleNewMission = useCallback(
-    async (options?: { workspaceId?: string; agent?: string }) => {
+    async (options?: { workspaceId?: string; agent?: string; backend?: string }) => {
       try {
         setCreatingMission(true);
         const mission = await createMission({
           workspaceId: options?.workspaceId,
           agent: options?.agent,
+          backend: options?.backend,
         });
         toast.success('New mission created');
         router.push(`/control?mission=${mission.id}`);

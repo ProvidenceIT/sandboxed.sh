@@ -16,6 +16,9 @@ import {
   AIProviderTypeInfo,
   getSettings,
   updateLibraryRemote,
+  listBackends,
+  getBackendConfig,
+  updateBackendConfig,
 } from '@/lib/api';
 import {
   Server,
@@ -101,6 +104,22 @@ export default function SettingsPage() {
   const [libraryRemoteValue, setLibraryRemoteValue] = useState('');
   const [savingLibraryRemote, setSavingLibraryRemote] = useState(false);
 
+  // Backend settings state
+  const [activeBackendTab, setActiveBackendTab] = useState<'opencode' | 'claudecode'>('opencode');
+  const [savingBackend, setSavingBackend] = useState(false);
+  const [opencodeForm, setOpencodeForm] = useState({
+    base_url: '',
+    default_agent: '',
+    permissive: false,
+    enabled: true,
+  });
+  const [claudeForm, setClaudeForm] = useState({
+    api_key: '',
+    default_model: '',
+    api_key_configured: false,
+    enabled: true,
+  });
+
   // SWR: fetch health status
   const { data: health, isLoading: healthLoading, mutate: mutateHealth } = useSWR(
     'health',
@@ -126,6 +145,26 @@ export default function SettingsPage() {
   const { data: serverSettings, mutate: mutateSettings } = useSWR(
     'settings',
     getSettings,
+    { revalidateOnFocus: false }
+  );
+
+  // SWR: fetch backends
+  const { data: backends = [] } = useSWR('backends', listBackends, {
+    revalidateOnFocus: false,
+    fallbackData: [
+      { id: 'opencode', name: 'OpenCode' },
+      { id: 'claudecode', name: 'Claude Code' },
+    ],
+  });
+
+  const { data: opencodeBackendConfig, mutate: mutateOpenCodeBackend } = useSWR(
+    'backend-opencode-config',
+    () => getBackendConfig('opencode'),
+    { revalidateOnFocus: false }
+  );
+  const { data: claudecodeBackendConfig, mutate: mutateClaudeBackend } = useSWR(
+    'backend-claudecode-config',
+    () => getBackendConfig('claudecode'),
     { revalidateOnFocus: false }
   );
 
@@ -174,6 +213,28 @@ export default function SettingsPage() {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [apiUrl]);
+
+  useEffect(() => {
+    if (!opencodeBackendConfig?.settings) return;
+    const settings = opencodeBackendConfig.settings as Record<string, unknown>;
+    setOpencodeForm({
+      base_url: typeof settings.base_url === 'string' ? settings.base_url : '',
+      default_agent: typeof settings.default_agent === 'string' ? settings.default_agent : '',
+      permissive: Boolean(settings.permissive),
+      enabled: opencodeBackendConfig.enabled,
+    });
+  }, [opencodeBackendConfig]);
+
+  useEffect(() => {
+    if (!claudecodeBackendConfig?.settings) return;
+    const settings = claudecodeBackendConfig.settings as Record<string, unknown>;
+    setClaudeForm((prev) => ({
+      ...prev,
+      default_model: typeof settings.default_model === 'string' ? settings.default_model : '',
+      api_key_configured: Boolean(settings.api_key_configured),
+      enabled: claudecodeBackendConfig.enabled,
+    }));
+  }, [claudecodeBackendConfig]);
 
   const handleSave = () => {
     if (!validateUrl(apiUrl)) {
@@ -256,6 +317,58 @@ export default function SettingsPage() {
       toast.error(
         `Failed to delete: ${err instanceof Error ? err.message : 'Unknown error'}`
       );
+    }
+  };
+
+  const handleSaveOpenCodeBackend = async () => {
+    setSavingBackend(true);
+    try {
+      const result = await updateBackendConfig(
+        'opencode',
+        {
+          base_url: opencodeForm.base_url,
+          default_agent: opencodeForm.default_agent || null,
+          permissive: opencodeForm.permissive,
+        },
+        { enabled: opencodeForm.enabled }
+      );
+      toast.success(result.message || 'OpenCode settings updated');
+      mutateOpenCodeBackend();
+    } catch (err) {
+      toast.error(
+        `Failed to update OpenCode settings: ${
+          err instanceof Error ? err.message : 'Unknown error'
+        }`
+      );
+    } finally {
+      setSavingBackend(false);
+    }
+  };
+
+  const handleSaveClaudeBackend = async () => {
+    setSavingBackend(true);
+    try {
+      const settings: Record<string, unknown> = {
+        default_model: claudeForm.default_model || null,
+      };
+      if (claudeForm.api_key) {
+        settings.api_key = claudeForm.api_key;
+      }
+
+      const result = await updateBackendConfig('claudecode', settings, {
+        enabled: claudeForm.enabled,
+      });
+      toast.success(result.message || 'Claude Code settings updated');
+      setClaudeForm((prev) => ({ ...prev, api_key: '' }));
+      mutateClaudeBackend();
+    } catch (err) {
+      toast.error(
+        `Failed to update Claude Code settings: ${
+          err instanceof Error ? err.message : 'Unknown error'
+        }`
+      );
+    } finally {
+      setSavingBackend(false);
     }
   };
 
@@ -563,6 +676,176 @@ export default function SettingsPage() {
                 })
               )}
             </div>
+          </div>
+
+          {/* Backends */}
+          <div className="rounded-xl bg-white/[0.02] border border-white/[0.04] p-5">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-500/10">
+                <Server className="h-5 w-5 text-emerald-400" />
+              </div>
+              <div>
+                <h2 className="text-sm font-medium text-white">Backends</h2>
+                <p className="text-xs text-white/40">
+                  Configure execution backends and authentication
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 mb-4">
+              {backends.map((backend) => (
+                <button
+                  key={backend.id}
+                  onClick={() =>
+                    setActiveBackendTab(
+                      backend.id === 'claudecode' ? 'claudecode' : 'opencode'
+                    )
+                  }
+                  className={cn(
+                    'px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors',
+                    activeBackendTab === backend.id
+                      ? 'bg-white/[0.08] border-white/[0.12] text-white'
+                      : 'bg-white/[0.02] border-white/[0.06] text-white/50 hover:text-white/70'
+                  )}
+                >
+                  {backend.name}
+                </button>
+              ))}
+            </div>
+
+            {activeBackendTab === 'opencode' ? (
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs text-white/60">Enabled</span>
+                  <label className="flex items-center gap-2 text-xs text-white/60 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={opencodeForm.enabled}
+                      onChange={(e) =>
+                        setOpencodeForm((prev) => ({ ...prev, enabled: e.target.checked }))
+                      }
+                      className="rounded border-white/20 cursor-pointer"
+                    />
+                    Enabled
+                  </label>
+                </div>
+                <div>
+                  <label className="block text-xs text-white/60 mb-1.5">Base URL</label>
+                  <input
+                    type="text"
+                    value={opencodeForm.base_url}
+                    onChange={(e) =>
+                      setOpencodeForm((prev) => ({ ...prev, base_url: e.target.value }))
+                    }
+                    placeholder="http://127.0.0.1:4096"
+                    className="w-full rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500/50"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs text-white/60 mb-1.5">Default Agent</label>
+                  <input
+                    type="text"
+                    value={opencodeForm.default_agent}
+                    onChange={(e) =>
+                      setOpencodeForm((prev) => ({ ...prev, default_agent: e.target.value }))
+                    }
+                    placeholder="Sisyphus"
+                    className="w-full rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500/50"
+                  />
+                </div>
+                <label className="flex items-center gap-2 text-xs text-white/60 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={opencodeForm.permissive}
+                    onChange={(e) =>
+                      setOpencodeForm((prev) => ({ ...prev, permissive: e.target.checked }))
+                    }
+                    className="rounded border-white/20 cursor-pointer"
+                  />
+                  Permissive mode (auto-allow tool permissions)
+                </label>
+                <div className="flex items-center gap-2 pt-1">
+                  <button
+                    onClick={handleSaveOpenCodeBackend}
+                    disabled={savingBackend}
+                    className="flex items-center gap-2 rounded-lg bg-indigo-500 px-3 py-1.5 text-xs text-white hover:bg-indigo-600 transition-colors disabled:opacity-50"
+                  >
+                    {savingBackend ? (
+                      <Loader className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Save className="h-3.5 w-3.5" />
+                    )}
+                    Save OpenCode
+                  </button>
+                  <span className="text-xs text-white/40">Restart required to apply runtime changes</span>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs text-white/60">Enabled</span>
+                  <label className="flex items-center gap-2 text-xs text-white/60 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={claudeForm.enabled}
+                      onChange={(e) =>
+                        setClaudeForm((prev) => ({ ...prev, enabled: e.target.checked }))
+                      }
+                      className="rounded border-white/20 cursor-pointer"
+                    />
+                    Enabled
+                  </label>
+                </div>
+                <div className="text-xs text-white/50">
+                  API key status:{' '}
+                  <span className={claudeForm.api_key_configured ? 'text-emerald-400' : 'text-amber-400'}>
+                    {claudeForm.api_key_configured ? 'Configured' : 'Not configured'}
+                  </span>
+                </div>
+                <div>
+                  <label className="block text-xs text-white/60 mb-1.5">API Key</label>
+                  <input
+                    type="password"
+                    value={claudeForm.api_key}
+                    onChange={(e) =>
+                      setClaudeForm((prev) => ({ ...prev, api_key: e.target.value }))
+                    }
+                    placeholder="sk-..."
+                    className="w-full rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500/50"
+                  />
+                  <p className="mt-1.5 text-xs text-white/30">
+                    Stored securely in the secrets vault; leave blank to keep existing key.
+                  </p>
+                </div>
+                <div>
+                  <label className="block text-xs text-white/60 mb-1.5">Default Model</label>
+                  <input
+                    type="text"
+                    value={claudeForm.default_model}
+                    onChange={(e) =>
+                      setClaudeForm((prev) => ({ ...prev, default_model: e.target.value }))
+                    }
+                    placeholder="claude-sonnet-4-20250514"
+                    className="w-full rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500/50"
+                  />
+                </div>
+                <div className="flex items-center gap-2 pt-1">
+                  <button
+                    onClick={handleSaveClaudeBackend}
+                    disabled={savingBackend}
+                    className="flex items-center gap-2 rounded-lg bg-indigo-500 px-3 py-1.5 text-xs text-white hover:bg-indigo-600 transition-colors disabled:opacity-50"
+                  >
+                    {savingBackend ? (
+                      <Loader className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Save className="h-3.5 w-3.5" />
+                    )}
+                    Save Claude Code
+                  </button>
+                  <span className="text-xs text-white/40">Restart required to apply runtime changes</span>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Library Settings */}

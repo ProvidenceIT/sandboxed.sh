@@ -3109,6 +3109,7 @@ export default function ControlClient() {
     workspaceId?: string;
     agent?: string;
     modelOverride?: string;
+    backend?: string;
   }) => {
     try {
       setMissionLoading(true);
@@ -3116,6 +3117,7 @@ export default function ControlClient() {
         workspaceId: options?.workspaceId,
         agent: options?.agent,
         modelOverride: options?.modelOverride,
+        backend: options?.backend,
       });
       pendingMissionNavRef.current = mission.id;
       router.replace(`/control?mission=${mission.id}`, { scroll: false });

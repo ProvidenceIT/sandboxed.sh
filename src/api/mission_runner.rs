@@ -18,7 +18,7 @@ use tokio::sync::{broadcast, mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::agents::{AgentContext, AgentRef, AgentResult};
+use crate::agents::{AgentContext, AgentRef, AgentResult, TerminalReason};
 use crate::config::Config;
 use crate::mcp::McpRegistry;
 use crate::task::{extract_deliverables, DeliverableSet};
@@ -502,7 +502,7 @@ async fn run_mission_turn(
 
     let mut ctx = AgentContext::new(config.clone(), mission_work_dir);
     ctx.mission_control = mission_control;
-    ctx.control_events = Some(events_tx);
+    ctx.control_events = Some(events_tx.clone());
     ctx.frontend_tool_hub = Some(tool_hub);
     ctx.control_status = Some(status);
     ctx.cancel_token = Some(cancel);
@@ -510,6 +510,19 @@ async fn run_mission_turn(
     ctx.progress_snapshot = Some(progress_snapshot);
     ctx.mission_id = Some(mission_id);
     ctx.mcp = Some(mcp);
+
+    if backend_id != "opencode" {
+        let _ = events_tx.send(AgentEvent::Error {
+            message: format!(
+                "Backend '{}' is not supported for in-app execution yet. Please use OpenCode or run Claude Code locally.",
+                backend_id
+            ),
+            mission_id: Some(mission_id),
+            resumable: true,
+        });
+        return AgentResult::failure(format!("Unsupported backend: {}", backend_id), 0)
+            .with_terminal_reason(TerminalReason::LlmError);
+    }
 
     let result = root_agent.execute(&mut task, &ctx).await;
     tracing::info!(
