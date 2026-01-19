@@ -471,17 +471,133 @@ pub fn parse_frontmatter(content: &str) -> (Option<serde_yaml::Value>, &str) {
         return (None, content);
     }
 
-    let rest = &content[3..];
-    if let Some(end_pos) = rest.find("\n---") {
-        let yaml_str = &rest[..end_pos];
-        let body = &rest[end_pos + 4..].trim_start();
+    // Normalize line endings to handle Windows-style \r\n
+    let normalized = content.replace("\r\n", "\n");
+    let normalized_ref = normalized.as_str();
 
+    let rest = &normalized_ref[3..];
+
+    // Find closing --- (could be \n--- or end of yaml section)
+    if let Some(end_pos) = rest.find("\n---") {
+        let yaml_str = rest[..end_pos].trim();
+
+        // Try serde_yaml first
         match serde_yaml::from_str(yaml_str) {
-            Ok(value) => (Some(value), body),
-            Err(_) => (None, content),
+            Ok(value) => {
+                // Return body slice from original content if possible, otherwise use normalized
+                let original_body = find_body_in_original(content);
+                return (Some(value), original_body);
+            }
+            Err(e) => {
+                // Log the error for debugging but try fallback parser
+                tracing::debug!("serde_yaml parse failed, trying fallback: {}", e);
+            }
         }
+
+        // Fallback: simple line-by-line parser for basic key: value pairs
+        if let Some(fallback) = parse_simple_frontmatter(yaml_str) {
+            let original_body = find_body_in_original(content);
+            return (Some(fallback), original_body);
+        }
+
+        // Both parsers failed
+        (None, content)
     } else {
         (None, content)
+    }
+}
+
+/// Find the body content in the original (non-normalized) content.
+fn find_body_in_original(content: &str) -> &str {
+    // Look for closing --- after the opening ---
+    if let Some(start) = content.find("---") {
+        let after_open = &content[start + 3..];
+        // Find closing delimiter (handles both \n--- and \r\n---)
+        if let Some(close_pos) = after_open.find("\n---") {
+            let body_start = start + 3 + close_pos + 4;
+            if body_start < content.len() {
+                return content[body_start..].trim_start();
+            }
+        } else if let Some(close_pos) = after_open.find("\r\n---") {
+            let body_start = start + 3 + close_pos + 5;
+            if body_start < content.len() {
+                return content[body_start..].trim_start();
+            }
+        }
+    }
+    content
+}
+
+/// Simple fallback parser for basic YAML frontmatter.
+/// Handles simple key: value pairs when serde_yaml fails.
+fn parse_simple_frontmatter(yaml_str: &str) -> Option<serde_yaml::Value> {
+    use serde_yaml::{Mapping, Value};
+
+    let mut map = Mapping::new();
+    let mut current_key: Option<String> = None;
+    let mut current_value = String::new();
+    let mut in_multiline = false;
+
+    for line in yaml_str.lines() {
+        let trimmed = line.trim();
+
+        // Skip empty lines at the start
+        if trimmed.is_empty() && current_key.is_none() {
+            continue;
+        }
+
+        // Check for new key: value pair
+        if let Some(colon_pos) = line.find(':') {
+            let potential_key = line[..colon_pos].trim();
+            // Only treat as new key if it starts at beginning (not indented) and is alphanumeric
+            if !line.starts_with(' ') && !line.starts_with('\t') && !potential_key.is_empty() {
+                // Save previous key-value if exists
+                if let Some(key) = current_key.take() {
+                    let val = current_value.trim().to_string();
+                    map.insert(Value::String(key), Value::String(val));
+                    current_value.clear();
+                }
+
+                current_key = Some(potential_key.to_string());
+                let value_part = line[colon_pos + 1..].trim();
+
+                // Check for multiline indicators
+                if value_part == ">" || value_part == "|" || value_part == ">-" || value_part == "|-" {
+                    in_multiline = true;
+                    current_value.clear();
+                } else {
+                    in_multiline = false;
+                    // Remove surrounding quotes if present
+                    let cleaned = value_part
+                        .trim_start_matches('"')
+                        .trim_end_matches('"')
+                        .trim_start_matches('\'')
+                        .trim_end_matches('\'');
+                    current_value = cleaned.to_string();
+                }
+                continue;
+            }
+        }
+
+        // Continuation of multiline value
+        if in_multiline && current_key.is_some() {
+            if !current_value.is_empty() {
+                current_value.push(' ');
+            }
+            current_value.push_str(trimmed);
+        }
+    }
+
+    // Save last key-value
+    if let Some(key) = current_key {
+        let val = current_value.trim().to_string();
+        map.insert(Value::String(key), Value::String(val));
+    }
+
+    if map.is_empty() {
+        None
+    } else {
+        Some(Value::Mapping(map))
     }
 }
 
