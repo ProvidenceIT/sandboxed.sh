@@ -899,24 +899,26 @@ async fn write_claudecode_config(
     }
 
     // Write settings.local.json
-    // Add permissive settings to avoid permission prompts for both workspace types.
-    // For container workspaces, the environment is isolated.
-    // For host workspaces, the user has explicitly chosen to run missions on host.
+    // Add permissive settings to avoid permission prompts.
     //
     // IMPORTANT: Claude Code permission syntax:
     // - "Bash" (no parentheses) allows ALL bash commands
     // - "Bash(*)" does NOT work as a wildcard - it's a literal pattern
     // - "mcp__*" works for MCP tools as a wildcard
+    //
+    // For container workspaces: Do NOT include Bash permission - agents must use
+    // mcp__workspace__bash which runs inside the container. The CLAUDE.md file
+    // also instructs agents to use mcp__workspace__bash.
+    //
+    // For host workspaces: Include Bash permission since commands run on host anyway.
+    let permissions: Vec<&str> = match workspace_type {
+        WorkspaceType::Chroot => vec!["Edit", "Write", "Read", "mcp__*"],
+        WorkspaceType::Host => vec!["Bash", "Edit", "Write", "Read", "mcp__*"],
+    };
     let settings = json!({
         "mcpServers": mcp_servers,
         "permissions": {
-            "allow": [
-                "Bash",
-                "Edit",
-                "Write",
-                "Read",
-                "mcp__*"
-            ]
+            "allow": permissions
         }
     });
     let settings_path = claude_dir.join("settings.local.json");
