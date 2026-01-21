@@ -166,7 +166,14 @@ async fn get_opencode_info(config: &crate::config::Config) -> ComponentInfo {
     // Fallback: try to run opencode --version
     match Command::new("opencode").arg("--version").output().await {
         Ok(output) if output.status.success() => {
-            let version_str = String::from_utf8_lossy(&output.stdout);
+            let mut version_str = String::from_utf8_lossy(&output.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if !stderr.trim().is_empty() {
+                if !version_str.is_empty() {
+                    version_str.push(' ');
+                }
+                version_str.push_str(stderr.trim());
+            }
             let version = version_str.lines().next().map(|l| {
                 l.trim()
                     .replace("opencode version ", "")
@@ -205,18 +212,18 @@ async fn get_claude_code_info() -> ComponentInfo {
     // Try to run claude --version to check if it's installed
     match Command::new("claude").arg("--version").output().await {
         Ok(output) if output.status.success() => {
-            let version_str = String::from_utf8_lossy(&output.stdout);
-            // Parse version from output like "claude 2.1.12 (Code)"
-            // We need to extract just the version number, stripping any suffix like "(Code)"
-            let version = version_str.lines().next().map(|l| {
-                let trimmed = l.trim().replace("claude ", "").replace("Claude ", "");
-                // Take only the first whitespace-separated token (the version number)
-                trimmed
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or(&trimmed)
-                    .to_string()
-            });
+            let mut version_str = String::from_utf8_lossy(&output.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if !stderr.trim().is_empty() {
+                if !version_str.is_empty() {
+                    version_str.push(' ');
+                }
+                version_str.push_str(stderr.trim());
+            }
+            // Parse version from output like:
+            // - "claude 2.1.12 (Code)"
+            // - "Claude Code v2.1.12"
+            let version = extract_version_token(&version_str);
 
             let update_available = check_claude_code_update(version.as_deref()).await;
             let status = if update_available.is_some() {
@@ -257,7 +264,8 @@ async fn which_claude_code() -> Option<String> {
 
 /// Check if there's a newer version of Claude Code available.
 async fn check_claude_code_update(current_version: Option<&str>) -> Option<String> {
-    let current = current_version?;
+    let current_raw = current_version?;
+    let current = extract_version_token(current_raw)?;
 
     // Check npm registry for @anthropic-ai/claude-code
     let client = reqwest::Client::new();
@@ -273,9 +281,12 @@ async fn check_claude_code_update(current_version: Option<&str>) -> Option<Strin
     }
 
     let json: serde_json::Value = resp.json().await.ok()?;
-    let latest = json.get("version")?.as_str()?;
+    let latest_raw = json.get("version")?.as_str()?;
+    let latest = extract_version_token(latest_raw).unwrap_or_else(|| {
+        latest_raw.trim_start_matches('v').to_string()
+    });
 
-    if latest != current && version_is_newer(latest, current) {
+    if latest != current && version_is_newer(&latest, &current) {
         Some(latest.to_string())
     } else {
         None
@@ -396,6 +407,29 @@ fn version_is_newer(a: &str, b: &str) -> bool {
         }
     }
     false
+}
+
+/// Extract the first semver-like token from a version string.
+fn extract_version_token(input: &str) -> Option<String> {
+    let mut best: Option<String> = None;
+    let mut current = String::new();
+
+    for ch in input.chars() {
+        if ch.is_ascii_digit() || ch == '.' {
+            current.push(ch);
+            continue;
+        }
+        if current.contains('.') {
+            best = Some(current.clone());
+        }
+        current.clear();
+    }
+
+    if current.contains('.') {
+        best = Some(current);
+    }
+
+    best.map(|v| v.trim_start_matches('v').to_string())
 }
 
 /// Get oh-my-opencode version and status.

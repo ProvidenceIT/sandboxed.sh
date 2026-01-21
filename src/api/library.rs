@@ -31,6 +31,7 @@ use crate::library::{
     OpenAgentConfig, Plugin, Rule, RuleSummary, Skill, SkillSummary, WorkspaceTemplate,
     WorkspaceTemplateSummary,
 };
+use crate::opencode_agents;
 use crate::nspawn::NspawnDistro;
 use crate::workspace::{self, WorkspaceType, DEFAULT_WORKSPACE_ID};
 
@@ -1078,12 +1079,18 @@ async fn get_openagent_config(
     State(state): State<Arc<super::routes::AppState>>,
     headers: HeaderMap,
 ) -> Result<Json<OpenAgentConfig>, (StatusCode, String)> {
-    let library = ensure_library(&state, &headers).await?;
-    library
-        .get_openagent_config()
-        .await
-        .map(Json)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+    match ensure_library(&state, &headers).await {
+        Ok(library) => library
+            .get_openagent_config()
+            .await
+            .map(Json)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+        Err((StatusCode::SERVICE_UNAVAILABLE, _)) => {
+            let config = workspace::read_openagent_config(&state.config.working_dir).await;
+            Ok(Json(config))
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// PUT /api/library/openagent/config - Save OpenAgent config to Library.
@@ -1092,22 +1099,41 @@ async fn save_openagent_config(
     headers: HeaderMap,
     Json(config): Json<OpenAgentConfig>,
 ) -> Result<(StatusCode, String), (StatusCode, String)> {
-    let library = ensure_library(&state, &headers).await?;
+    match ensure_library(&state, &headers).await {
+        Ok(library) => {
+            library
+                .save_openagent_config(&config)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    library
-        .save_openagent_config(&config)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            // Sync to working directory
+            if let Err(e) = workspace::sync_openagent_config(&library, &state.config.working_dir)
+                .await
+            {
+                tracing::warn!(error = %e, "Failed to sync openagent config to working dir");
+            }
 
-    // Sync to working directory
-    if let Err(e) = workspace::sync_openagent_config(&library, &state.config.working_dir).await {
-        tracing::warn!(error = %e, "Failed to sync openagent config to working dir");
+            Ok((
+                StatusCode::OK,
+                "OpenAgent config saved successfully".to_string(),
+            ))
+        }
+        Err((StatusCode::SERVICE_UNAVAILABLE, _)) => {
+            if let Err(e) = workspace::write_openagent_config(&state.config.working_dir, &config)
+                .await
+            {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to write openagent config locally: {}", e),
+                ));
+            }
+            Ok((
+                StatusCode::OK,
+                "OpenAgent config saved locally (Library not configured)".to_string(),
+            ))
+        }
+        Err(e) => Err(e),
     }
-
-    Ok((
-        StatusCode::OK,
-        "OpenAgent config saved successfully".to_string(),
-    ))
 }
 
 /// GET /api/library/openagent/agents - Get filtered list of visible agents.
@@ -1123,10 +1149,23 @@ async fn get_visible_agents(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    // Filter out hidden agents
-    let visible_agents = filter_agents_by_config(all_agents, &config);
+    let visible_agents = filter_visible_agents_with_fallback(all_agents.clone(), &config);
 
     Ok(Json(visible_agents))
+}
+
+fn filter_visible_agents_with_fallback(
+    agents: serde_json::Value,
+    config: &OpenAgentConfig,
+) -> serde_json::Value {
+    let visible = filter_agents_by_config(agents, config);
+    if extract_agent_names(&visible).is_empty() {
+        let fallback = filter_agents_by_config(opencode_agents::default_agent_payload(), config);
+        if !extract_agent_names(&fallback).is_empty() {
+            return fallback;
+        }
+    }
+    visible
 }
 
 /// Filter agents based on OpenAgent config hidden_agents list.
@@ -1213,10 +1252,14 @@ pub async fn validate_agent_exists(
 
     // Read config to get hidden agents list
     let config = crate::workspace::read_openagent_config(&state.config.working_dir).await;
-    let visible_agents = filter_agents_by_config(all_agents, &config);
+    let visible_agents = filter_visible_agents_with_fallback(all_agents.clone(), &config);
 
-    // Extract agent names from the visible agents list
-    let agent_names = extract_agent_names(&visible_agents);
+    // Extract agent names from the visible agents list.
+    // If all agents are hidden, fall back to the raw OpenCode list so OpenCode remains usable.
+    let mut agent_names = extract_agent_names(&visible_agents);
+    if agent_names.is_empty() {
+        agent_names = extract_agent_names(&all_agents);
+    }
 
     // Case-insensitive match for better UX
     let exists = agent_names
@@ -1224,14 +1267,27 @@ pub async fn validate_agent_exists(
         .any(|name| name.eq_ignore_ascii_case(agent_name));
 
     if exists {
-        Ok(())
-    } else {
-        let suggestions = agent_names.join(", ");
-        Err(format!(
-            "Agent '{}' not found. Available agents: {}",
-            agent_name, suggestions
-        ))
+        return Ok(());
     }
+
+    // If the requested agent exists in the raw OpenCode list, allow it even if hidden.
+    let raw_agent_names = extract_agent_names(&all_agents);
+    if raw_agent_names
+        .iter()
+        .any(|name| name.eq_ignore_ascii_case(agent_name))
+    {
+        return Ok(());
+    }
+
+    let suggestions = if agent_names.is_empty() {
+        raw_agent_names.join(", ")
+    } else {
+        agent_names.join(", ")
+    };
+    Err(format!(
+        "Agent '{}' not found. Available agents: {}",
+        agent_name, suggestions
+    ))
 }
 
 /// Extract agent names from the visible agents payload.

@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::path::PathBuf;
 use thiserror::Error;
 use tokio::process::Command;
 
@@ -33,6 +34,52 @@ pub enum NspawnError {
 }
 
 pub type NspawnResult<T> = Result<T, NspawnError>;
+
+fn env_var_bool(name: &str, default: bool) -> bool {
+    match std::env::var(name) {
+        Ok(value) => matches!(
+            value.trim().to_lowercase().as_str(),
+            "1" | "true" | "yes" | "y" | "on"
+        ),
+        Err(_) => default,
+    }
+}
+
+fn command_on_path(cmd: &str) -> bool {
+    if cmd.contains('/') {
+        return Path::new(cmd).is_file();
+    }
+    if let Ok(path_var) = std::env::var("PATH") {
+        for dir in path_var.split(':') {
+            if dir.trim().is_empty() {
+                continue;
+            }
+            let candidate = PathBuf::from(dir).join(cmd);
+            if candidate.is_file() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Returns true if systemd-nspawn is available on this host.
+pub fn nspawn_available() -> bool {
+    if !cfg!(target_os = "linux") {
+        return false;
+    }
+    if Path::new("/usr/bin/systemd-nspawn").is_file() {
+        return true;
+    }
+    command_on_path("systemd-nspawn")
+}
+
+/// Whether we should allow chroot workspaces to fall back to host execution.
+/// Default: enabled on non-Linux hosts, disabled on Linux unless explicitly set.
+pub fn allow_chroot_fallback() -> bool {
+    let default = !cfg!(target_os = "linux");
+    env_var_bool("OPEN_AGENT_ALLOW_CHROOT_FALLBACK", default)
+}
 
 /// Supported Linux distributions for container environments.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

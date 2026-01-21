@@ -615,29 +615,48 @@ pub async fn run_claudecode_turn(
     app_working_dir: &std::path::Path,
 ) -> AgentResult {
     use super::ai_providers::{
-        get_anthropic_api_key_for_claudecode,
+        ClaudeCodeAuth, ensure_anthropic_oauth_token_valid, get_anthropic_auth_for_claudecode,
     };
     use std::collections::HashMap;
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};    // Try to get API key from Anthropic provider configured for Claude Code backend
-    let api_key = if let Some(key) = get_anthropic_api_key_for_claudecode(app_working_dir) {
-        tracing::info!("Using Anthropic API key from provider for Claude Code");
-        Some(key)
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    fn classify_claudecode_secret(value: String) -> ClaudeCodeAuth {
+        if value.starts_with("sk-ant-oat") {
+            ClaudeCodeAuth::OAuthToken(value)
+        } else {
+            ClaudeCodeAuth::ApiKey(value)
+        }
+    }
+
+    // Ensure OAuth tokens are fresh before resolving credentials.
+    if let Err(e) = ensure_anthropic_oauth_token_valid().await {
+        tracing::warn!("Failed to refresh Anthropic OAuth token: {}", e);
+    }
+
+    // Try to get API key/OAuth token from Anthropic provider configured for Claude Code backend
+    let api_auth = if let Some(auth) = get_anthropic_auth_for_claudecode(app_working_dir) {
+        tracing::info!("Using Anthropic credentials from provider for Claude Code");
+        Some(auth)
     } else {
         // Fall back to secrets vault (legacy support)
         if let Some(ref store) = secrets {
             match store.get_secret("claudecode", "api_key").await {
                 Ok(key) => {
-                    tracing::info!("Using Claude Code API key from secrets vault (legacy)");
-                    Some(key)
+                    tracing::info!("Using Claude Code credentials from secrets vault (legacy)");
+                    Some(classify_claudecode_secret(key))
                 }
                 Err(e) => {
                     tracing::warn!("Failed to get Claude API key from secrets: {}", e);
                     // Fall back to environment variable
-                    std::env::var("ANTHROPIC_API_KEY").ok()
+                    std::env::var("ANTHROPIC_API_KEY")
+                        .ok()
+                        .map(classify_claudecode_secret)
                 }
             }
         } else {
-            std::env::var("ANTHROPIC_API_KEY").ok()
+            std::env::var("ANTHROPIC_API_KEY")
+                .ok()
+                .map(classify_claudecode_secret)
         }
     };
 
@@ -675,6 +694,13 @@ pub async fn run_claudecode_turn(
         "--include-partial-messages".to_string(),
     ];
 
+    // Ensure per-workspace MCP config is loaded (Claude CLI may not auto-load .claude in --print mode).
+    let mcp_config_path = work_dir.join(".claude").join("settings.local.json");
+    if mcp_config_path.exists() {
+        args.push("--mcp-config".to_string());
+        args.push(mcp_config_path.to_string_lossy().to_string());
+    }
+
     if let Some(m) = model {
         args.push("--model".to_string());
         args.push(m.to_string());
@@ -690,13 +716,16 @@ pub async fn run_claudecode_turn(
 
     // Build environment variables
     let mut env: HashMap<String, String> = HashMap::new();
-    if let Some(ref key) = api_key {
-        if key.starts_with("sk-ant-oat") {
-            env.insert("CLAUDE_CODE_OAUTH_TOKEN".to_string(), key.clone());
-            tracing::debug!("Using OAuth token for Claude CLI authentication");
-        } else {
-            env.insert("ANTHROPIC_API_KEY".to_string(), key.clone());
-            tracing::debug!("Using API key for Claude CLI authentication");
+    if let Some(ref auth) = api_auth {
+        match auth {
+            ClaudeCodeAuth::OAuthToken(token) => {
+                env.insert("CLAUDE_CODE_OAUTH_TOKEN".to_string(), token.clone());
+                tracing::debug!("Using OAuth token for Claude CLI authentication");
+            }
+            ClaudeCodeAuth::ApiKey(key) => {
+                env.insert("ANTHROPIC_API_KEY".to_string(), key.clone());
+                tracing::debug!("Using API key for Claude CLI authentication");
+            }
         }
     }
 
@@ -1008,7 +1037,9 @@ fn workspace_path_for_env(
     workspace: &Workspace,
     host_path: &std::path::Path,
 ) -> std::path::PathBuf {
-    if workspace.workspace_type == workspace::WorkspaceType::Chroot {
+    if workspace.workspace_type == workspace::WorkspaceType::Chroot
+        && workspace::use_nspawn_for_workspace(workspace)
+    {
         if let Ok(rel) = host_path.strip_prefix(&workspace.path) {
             return std::path::PathBuf::from("/").join(rel);
         }
@@ -1053,6 +1084,32 @@ fn parse_opencode_session_token(value: &str) -> Option<String> {
         None
     } else {
         Some(token)
+    }
+}
+
+fn prepend_opencode_bin_to_path(env: &mut HashMap<String, String>, workspace: &Workspace) {
+    let home = if workspace.workspace_type == WorkspaceType::Chroot
+        && workspace::use_nspawn_for_workspace(workspace)
+    {
+        "/root".to_string()
+    } else {
+        std::env::var("HOME").unwrap_or_else(|_| "/root".to_string())
+    };
+    let bin_dir = format!("{}/.opencode/bin", home);
+
+    let current = env
+        .get("PATH")
+        .cloned()
+        .or_else(|| std::env::var("PATH").ok())
+        .unwrap_or_default();
+    let already = current.split(':').any(|p| p == bin_dir);
+    if !already {
+        let next = if current.is_empty() {
+            bin_dir.clone()
+        } else {
+            format!("{}:{}", bin_dir, current)
+        };
+        env.insert("PATH".to_string(), next);
     }
 }
 
@@ -1105,36 +1162,876 @@ fn opencode_output_needs_fallback(output: &str) -> bool {
     true
 }
 
-fn resolve_opencode_storage_root(workspace: &Workspace) -> std::path::PathBuf {
-    match workspace.workspace_type {
-        WorkspaceType::Chroot => workspace
-            .path
-            .join("root")
+fn allocate_opencode_server_port() -> Option<u16> {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .ok()
+        .and_then(|listener| listener.local_addr().ok().map(|addr| addr.port()))
+}
+
+fn host_oh_my_opencode_config_candidates() -> Vec<std::path::PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(home) = std::env::var("HOME") {
+        let base = std::path::PathBuf::from(home)
+            .join(".config")
+            .join("opencode");
+        candidates.push(base.join("oh-my-opencode.json"));
+        candidates.push(base.join("oh-my-opencode.jsonc"));
+    }
+    candidates
+}
+
+fn strip_jsonc_comments(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    let mut in_string = false;
+    let mut escape = false;
+
+    while let Some(c) = chars.next() {
+        if in_string {
+            out.push(c);
+            if escape {
+                escape = false;
+            } else if c == '\\' {
+                escape = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        if c == '"' {
+            in_string = true;
+            out.push(c);
+            continue;
+        }
+
+        if c == '/' {
+            match chars.peek() {
+                Some('/') => {
+                    chars.next();
+                    while let Some(n) = chars.next() {
+                        if n == '\n' {
+                            out.push('\n');
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                Some('*') => {
+                    chars.next();
+                    let mut prev = '\0';
+                    while let Some(n) = chars.next() {
+                        if prev == '*' && n == '/' {
+                            break;
+                        }
+                        prev = n;
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+        }
+
+        out.push(c);
+    }
+
+    out
+}
+
+fn omo_config_all_fallback(value: &serde_json::Value) -> bool {
+    let agents = match value.get("agents").and_then(|v| v.as_object()) {
+        Some(agents) => agents,
+        None => return false,
+    };
+    let mut saw_model = false;
+    for agent in agents.values() {
+        if let Some(model) = agent.get("model").and_then(|v| v.as_str()) {
+            saw_model = true;
+            if !model.contains("glm-4.7-free") {
+                return false;
+            }
+        }
+    }
+    saw_model
+}
+
+fn host_oh_my_opencode_config_is_fallback() -> Option<bool> {
+    for candidate in host_oh_my_opencode_config_candidates() {
+        if !candidate.exists() {
+            continue;
+        }
+        let contents = std::fs::read_to_string(&candidate).ok()?;
+        let parsed = serde_json::from_str::<serde_json::Value>(&contents)
+            .or_else(|_| {
+                let stripped = strip_jsonc_comments(&contents);
+                serde_json::from_str::<serde_json::Value>(&stripped)
+            })
+            .ok();
+        if let Some(value) = parsed {
+            return Some(omo_config_all_fallback(&value));
+        }
+        return Some(contents.contains("glm-4.7-free"));
+    }
+    None
+}
+
+fn detect_opencode_provider_auth() -> (bool, bool, bool) {
+    let mut has_openai = false;
+    let mut has_anthropic = false;
+    let mut has_google = false;
+
+    if let Some(path) = host_opencode_auth_path() {
+        if let Ok(contents) = std::fs::read_to_string(path) {
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&contents) {
+                has_openai |= parsed.get("openai").is_some();
+                has_anthropic |= parsed.get("anthropic").is_some();
+                has_google |= parsed.get("google").is_some();
+            }
+        }
+    }
+
+    if let Some(dir) = host_opencode_provider_auth_dir() {
+        has_openai |= dir.join("openai.json").exists();
+        has_anthropic |= dir.join("anthropic.json").exists();
+        has_google |= dir.join("google.json").exists();
+    }
+
+    if let Ok(value) = std::env::var("OPENAI_API_KEY") {
+        if !value.trim().is_empty() {
+            has_openai = true;
+        }
+    }
+    if let Ok(value) = std::env::var("ANTHROPIC_API_KEY") {
+        if !value.trim().is_empty() {
+            has_anthropic = true;
+        }
+    }
+    if let Ok(value) = std::env::var("GOOGLE_GENERATIVE_AI_API_KEY") {
+        if !value.trim().is_empty() {
+            has_google = true;
+        }
+    }
+    if let Ok(value) = std::env::var("GOOGLE_API_KEY") {
+        if !value.trim().is_empty() {
+            has_google = true;
+        }
+    }
+
+    (has_openai, has_anthropic, has_google)
+}
+
+fn workspace_oh_my_opencode_config_paths(
+    opencode_config_dir: &std::path::Path,
+) -> (std::path::PathBuf, std::path::PathBuf) {
+    (
+        opencode_config_dir.join("oh-my-opencode.json"),
+        opencode_config_dir.join("oh-my-opencode.jsonc"),
+    )
+}
+
+fn try_copy_host_oh_my_opencode_config(opencode_config_dir: &std::path::Path) -> bool {
+    let (omo_path, omo_path_jsonc) = workspace_oh_my_opencode_config_paths(opencode_config_dir);
+    for candidate in host_oh_my_opencode_config_candidates() {
+        if !candidate.exists() {
+            continue;
+        }
+        if let Some(parent) = opencode_config_dir.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                tracing::warn!(
+                    "Failed to create OpenCode config dir {}: {}",
+                    parent.display(),
+                    e
+                );
+                return false;
+            }
+        }
+        if let Err(e) = std::fs::create_dir_all(opencode_config_dir) {
+            tracing::warn!(
+                "Failed to create OpenCode config dir {}: {}",
+                opencode_config_dir.display(),
+                e
+            );
+            return false;
+        }
+        let dest = if candidate.extension().and_then(|s| s.to_str()) == Some("jsonc") {
+            &omo_path_jsonc
+        } else {
+            &omo_path
+        };
+        if let Err(e) = std::fs::copy(&candidate, dest) {
+            tracing::warn!(
+                "Failed to copy oh-my-opencode config to workspace {}: {}",
+                dest.display(),
+                e
+            );
+            return false;
+        }
+        tracing::info!("Copied oh-my-opencode config to workspace {}", dest.display());
+        return true;
+    }
+    false
+}
+
+async fn ensure_oh_my_opencode_config(
+    workspace_exec: &WorkspaceExec,
+    work_dir: &std::path::Path,
+    opencode_config_dir_host: &std::path::Path,
+    opencode_config_dir_env: &std::path::Path,
+    cli_runner: &str,
+    runner_is_direct: bool,
+) {
+    let (omo_path, omo_path_jsonc) = workspace_oh_my_opencode_config_paths(opencode_config_dir_host);
+    if omo_path.exists() || omo_path_jsonc.exists() {
+        return;
+    }
+
+    let (has_openai, has_anthropic, has_google) = detect_opencode_provider_auth();
+    let has_any_provider = has_openai || has_anthropic || has_google;
+    let host_fallback = host_oh_my_opencode_config_is_fallback();
+    let should_regen = matches!(host_fallback, Some(true)) && has_any_provider;
+
+    if !should_regen {
+        if try_copy_host_oh_my_opencode_config(opencode_config_dir_host) {
+            return;
+        }
+    }
+
+    // No config found; run oh-my-opencode install in non-interactive mode to generate defaults.
+    let mut args: Vec<String> = Vec::new();
+    let claude_flag = if has_anthropic { "yes" } else { "no" };
+    let chatgpt_flag = if has_openai { "yes" } else { "no" };
+    let gemini_flag = if has_google { "yes" } else { "no" };
+    if runner_is_direct {
+        args.extend([
+            "install".to_string(),
+            "--no-tui".to_string(),
+            format!("--claude={}", claude_flag),
+            format!("--chatgpt={}", chatgpt_flag),
+            format!("--gemini={}", gemini_flag),
+            "--skip-auth".to_string(),
+        ]);
+    } else {
+        args.extend([
+            "oh-my-opencode".to_string(),
+            "install".to_string(),
+            "--no-tui".to_string(),
+            format!("--claude={}", claude_flag),
+            format!("--chatgpt={}", chatgpt_flag),
+            format!("--gemini={}", gemini_flag),
+            "--skip-auth".to_string(),
+        ]);
+    }
+
+    let mut env = std::collections::HashMap::new();
+    env.insert(
+        "OPENCODE_CONFIG_DIR".to_string(),
+        opencode_config_dir_env.to_string_lossy().to_string(),
+    );
+    env.insert("NO_COLOR".to_string(), "1".to_string());
+    env.insert("FORCE_COLOR".to_string(), "0".to_string());
+
+    match workspace_exec.output(work_dir, cli_runner, &args, env).await {
+        Ok(output) => {
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                tracing::warn!(
+                    "oh-my-opencode install failed: {} {}",
+                    stderr.trim(),
+                    stdout.trim()
+                );
+            } else {
+                tracing::info!("Generated oh-my-opencode config in workspace");
+                // Some oh-my-opencode versions ignore OPENCODE_CONFIG_DIR during install,
+                // so copy the generated host config into the workspace if still missing.
+                if !omo_path.exists() && !omo_path_jsonc.exists() {
+                    let _ = try_copy_host_oh_my_opencode_config(opencode_config_dir_host);
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!("Failed to run oh-my-opencode install: {}", e);
+        }
+    }
+}
+
+fn sync_opencode_agent_config(
+    opencode_config_dir: &std::path::Path,
+    default_model: Option<&str>,
+) {
+    let (omo_path, omo_path_jsonc) = workspace_oh_my_opencode_config_paths(opencode_config_dir);
+    let omo_path = if omo_path.exists() {
+        omo_path
+    } else if omo_path_jsonc.exists() {
+        omo_path_jsonc
+    } else {
+        return;
+    };
+
+    let omo_contents = match std::fs::read_to_string(&omo_path) {
+        Ok(contents) => contents,
+        Err(err) => {
+            tracing::warn!(
+                "Failed to read oh-my-opencode config at {}: {}",
+                omo_path.display(),
+                err
+            );
+            return;
+        }
+    };
+
+    let omo_json = if omo_path.extension().and_then(|s| s.to_str()) == Some("jsonc") {
+        serde_json::from_str::<serde_json::Value>(&strip_jsonc_comments(&omo_contents))
+    } else {
+        serde_json::from_str::<serde_json::Value>(&omo_contents)
+    };
+
+    let omo_json = match omo_json {
+        Ok(value) => value,
+        Err(err) => {
+            tracing::warn!(
+                "Failed to parse oh-my-opencode config at {}: {}",
+                omo_path.display(),
+                err
+            );
+            return;
+        }
+    };
+
+    let Some(omo_agents) = omo_json.get("agents").and_then(|v| v.as_object()) else {
+        return;
+    };
+
+    let opencode_path = opencode_config_dir.join("opencode.json");
+    let mut opencode_json = if opencode_path.exists() {
+        match std::fs::read_to_string(&opencode_path)
+            .ok()
+            .and_then(|contents| serde_json::from_str::<serde_json::Value>(&contents).ok())
+        {
+            Some(value) => value,
+            None => serde_json::json!({}),
+        }
+    } else {
+        serde_json::json!({})
+    };
+
+    let mut updated = false;
+    if let Some(model) = default_model {
+        if let Some(obj) = opencode_json.as_object_mut() {
+            match obj.get("model").and_then(|v| v.as_str()) {
+                Some(existing) if existing == model => {}
+                _ => {
+                    obj.insert("model".to_string(), serde_json::Value::String(model.to_string()));
+                    updated = true;
+                }
+            }
+        }
+    }
+
+    let agent_entry = opencode_json
+        .as_object_mut()
+        .and_then(|obj| obj.get_mut("agent"))
+        .and_then(|v| v.as_object_mut());
+
+    let agent_entry = match agent_entry {
+        Some(entry) => entry,
+        None => {
+            if let Some(obj) = opencode_json.as_object_mut() {
+                obj.insert("agent".to_string(), serde_json::Value::Object(serde_json::Map::new()));
+            }
+            let Some(entry) = opencode_json
+                .as_object_mut()
+                .and_then(|obj| obj.get_mut("agent"))
+                .and_then(|v| v.as_object_mut())
+            else {
+                return;
+            };
+            entry
+        }
+    };
+    for (name, entry) in omo_agents {
+        let desired_model = default_model
+            .or_else(|| entry.get("model").and_then(|v| v.as_str()))
+            .map(|s| s.to_string());
+
+        if let Some(existing) = agent_entry.get_mut(name) {
+            if let (Some(model), Some(existing_obj)) = (desired_model.as_ref(), existing.as_object_mut()) {
+                match existing_obj.get("model").and_then(|v| v.as_str()) {
+                    Some(current) if current == model => {}
+                    _ => {
+                        existing_obj.insert("model".to_string(), serde_json::Value::String(model.clone()));
+                        updated = true;
+                    }
+                }
+            }
+            continue;
+        }
+
+        let mut agent_config = serde_json::Map::new();
+        if let Some(model) = desired_model {
+            agent_config.insert("model".to_string(), serde_json::Value::String(model));
+        }
+        agent_entry.insert(name.clone(), serde_json::Value::Object(agent_config));
+        updated = true;
+    }
+
+    if updated {
+        if let Err(err) = std::fs::write(
+            &opencode_path,
+            serde_json::to_string_pretty(&opencode_json).unwrap_or_else(|_| "{}".to_string()),
+        ) {
+            tracing::warn!(
+                "Failed to update opencode.json agent config at {}: {}",
+                opencode_path.display(),
+                err
+            );
+        }
+    }
+}
+
+fn workspace_abs_path(workspace: &Workspace, path: &std::path::Path) -> std::path::PathBuf {
+    if workspace.workspace_type == WorkspaceType::Chroot
+        && workspace::use_nspawn_for_workspace(workspace)
+    {
+        if let Ok(relative) = path.strip_prefix(std::path::Path::new("/")) {
+            return workspace.path.join(relative);
+        }
+        return workspace.path.join(path);
+    }
+    path.to_path_buf()
+}
+
+fn find_oh_my_opencode_cli_js(workspace: &Workspace) -> Option<std::path::PathBuf> {
+    let candidates = [
+        "/usr/local/lib/node_modules/oh-my-opencode/dist/cli/index.js",
+        "/usr/lib/node_modules/oh-my-opencode/dist/cli/index.js",
+        "/opt/homebrew/lib/node_modules/oh-my-opencode/dist/cli/index.js",
+        "/usr/local/share/node_modules/oh-my-opencode/dist/cli/index.js",
+    ];
+
+    for candidate in candidates {
+        let path = workspace_abs_path(workspace, std::path::Path::new(candidate));
+        if path.exists() {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn patch_oh_my_opencode_port_override(workspace: &Workspace) -> bool {
+    let Some(cli_js_path) = find_oh_my_opencode_cli_js(workspace) else {
+        return false;
+    };
+
+    let contents = match std::fs::read_to_string(&cli_js_path) {
+        Ok(contents) => contents,
+        Err(err) => {
+            tracing::warn!(
+                "Failed to read oh-my-opencode CLI at {}: {}",
+                cli_js_path.display(),
+                err
+            );
+            return false;
+        }
+    };
+
+    if contents.contains("OPEN_AGENT_OPENCODE_PORT_PATCH") {
+        return true;
+    }
+
+    let newline = if contents.contains("\r\n") { "\r\n" } else { "\n" };
+    let needle = format!(
+        "const {{ client: client3, server: server2 }} = await createOpencode({{{nl}      signal: abortController.signal{nl}    }});",
+        nl = newline
+    );
+    if !contents.contains(&needle) {
+        tracing::warn!(
+            "Unable to patch oh-my-opencode CLI (pattern mismatch) at {}",
+            cli_js_path.display()
+        );
+        return false;
+    }
+
+    let replacement = format!(
+        "const __oaPortRaw = process.env.OPENCODE_SERVER_PORT;{nl}    const __oaPort = __oaPortRaw ? Number(__oaPortRaw) : void 0;{nl}    const __oaHost = process.env.OPENCODE_SERVER_HOSTNAME;{nl}    const {{ client: client3, server: server2 }} = await createOpencode({{{nl}      signal: abortController.signal,{nl}      ...(Number.isFinite(__oaPort) ? {{ port: __oaPort }} : {{}}),{nl}      ...(__oaHost ? {{ hostname: __oaHost }} : {{}}),{nl}      // OPEN_AGENT_OPENCODE_PORT_PATCH{nl}    }});",
+        nl = newline
+    );
+
+    let patched = contents.replace(&needle, &replacement);
+    if let Err(err) = std::fs::write(&cli_js_path, patched) {
+        tracing::warn!(
+            "Failed to patch oh-my-opencode CLI at {}: {}",
+            cli_js_path.display(),
+            err
+        );
+        return false;
+    }
+
+    tracing::info!(
+        "Patched oh-my-opencode CLI to honor OPENCODE_SERVER_PORT at {}",
+        cli_js_path.display()
+    );
+    true
+}
+
+fn opencode_storage_roots(workspace: &Workspace) -> Vec<std::path::PathBuf> {
+    if workspace.workspace_type == WorkspaceType::Chroot
+        && workspace::use_nspawn_for_workspace(workspace)
+    {
+        let mut roots = Vec::new();
+
+        // Prefer container-local /root storage (matches overridden XDG defaults).
+        roots.push(
+            workspace
+                .path
+                .join("root")
+                .join(".local")
+                .join("share")
+                .join("opencode")
+                .join("storage"),
+        );
+
+        if let Ok(data_home) = std::env::var("XDG_DATA_HOME") {
+            if let Ok(rel) = std::path::Path::new(&data_home).strip_prefix(std::path::Path::new("/")) {
+                roots.push(workspace.path.join(rel).join("opencode").join("storage"));
+            }
+        }
+
+        if let Ok(home) = std::env::var("HOME") {
+            if let Ok(rel) = std::path::Path::new(&home).strip_prefix(std::path::Path::new("/")) {
+                roots.push(
+                    workspace
+                        .path
+                        .join(rel)
+                        .join(".local")
+                        .join("share")
+                        .join("opencode")
+                        .join("storage"),
+                );
+            }
+        }
+
+        roots.sort();
+        roots.dedup();
+        return roots;
+    }
+
+    let data_home = std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+        format!("{}/.local/share", home)
+    });
+    vec![std::path::PathBuf::from(data_home)
+        .join("opencode")
+        .join("storage")]
+}
+
+fn host_opencode_auth_path() -> Option<std::path::PathBuf> {
+    let mut candidates = Vec::new();
+
+    if let Ok(data_home) = std::env::var("XDG_DATA_HOME") {
+        candidates.push(
+            std::path::PathBuf::from(data_home)
+                .join("opencode")
+                .join("auth.json"),
+        );
+    }
+
+    if let Ok(home) = std::env::var("HOME") {
+        candidates.push(
+            std::path::PathBuf::from(home)
+                .join(".local")
+                .join("share")
+                .join("opencode")
+                .join("auth.json"),
+        );
+    }
+
+    candidates.push(
+        std::path::PathBuf::from("/var/lib/opencode")
             .join(".local")
             .join("share")
             .join("opencode")
-            .join("storage"),
-        _ => {
-            let data_home = std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| {
-                let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
-                format!("{}/.local/share", home)
-            });
-            std::path::PathBuf::from(data_home)
-                .join("opencode")
-                .join("storage")
+            .join("auth.json"),
+    );
+
+    for candidate in &candidates {
+        if candidate.exists() {
+            return Some(candidate.clone());
         }
     }
+
+    candidates.into_iter().next()
+}
+
+fn host_opencode_provider_auth_dir() -> Option<std::path::PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(home) = std::env::var("HOME") {
+        candidates.push(std::path::PathBuf::from(home).join(".opencode").join("auth"));
+    }
+
+    candidates.push(
+        std::path::PathBuf::from("/var/lib/opencode")
+            .join(".opencode")
+            .join("auth"),
+    );
+
+    for candidate in &candidates {
+        if candidate.exists() {
+            return Some(candidate.clone());
+        }
+    }
+
+    candidates.into_iter().next()
+}
+
+fn workspace_opencode_auth_path(workspace: &Workspace) -> Option<std::path::PathBuf> {
+    if workspace.workspace_type == WorkspaceType::Chroot
+        && workspace::use_nspawn_for_workspace(workspace)
+    {
+        return Some(
+            workspace
+                .path
+                .join("root")
+                .join(".local")
+                .join("share")
+                .join("opencode")
+                .join("auth.json"),
+        );
+    }
+    host_opencode_auth_path()
+}
+
+fn workspace_opencode_provider_auth_dir(workspace: &Workspace) -> Option<std::path::PathBuf> {
+    if workspace.workspace_type == WorkspaceType::Chroot
+        && workspace::use_nspawn_for_workspace(workspace)
+    {
+        return Some(workspace.path.join("root").join(".opencode").join("auth"));
+    }
+    host_opencode_provider_auth_dir()
+}
+
+fn build_opencode_auth_from_ai_providers(
+    app_working_dir: &std::path::Path,
+) -> Option<serde_json::Value> {
+    let path = app_working_dir.join(".openagent").join("ai_providers.json");
+    let contents = std::fs::read_to_string(&path).ok()?;
+    let providers: Vec<crate::ai_providers::AIProvider> = serde_json::from_str(&contents).ok()?;
+
+    let mut map = serde_json::Map::new();
+    for provider in providers {
+        if !provider.enabled {
+            continue;
+        }
+        match provider.provider_type {
+            crate::ai_providers::ProviderType::OpenAI
+            | crate::ai_providers::ProviderType::Anthropic
+            | crate::ai_providers::ProviderType::Google => {
+                let key = provider.provider_type.id();
+                if let Some(api_key) = provider.api_key {
+                    map.insert(
+                        key.to_string(),
+                        serde_json::json!({
+                            "type": "api_key",
+                            "key": api_key,
+                        }),
+                    );
+                } else if let Some(oauth) = provider.oauth {
+                    map.insert(
+                        key.to_string(),
+                        serde_json::json!({
+                            "type": "oauth",
+                            "refresh": oauth.refresh_token,
+                            "access": oauth.access_token,
+                            "expires": oauth.expires_at,
+                        }),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if map.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(map))
+    }
+}
+
+fn write_json_file(path: &std::path::Path, value: &serde_json::Value) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let contents = serde_json::to_string_pretty(value)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    std::fs::write(path, contents)
+}
+
+fn sync_opencode_auth_to_workspace(
+    workspace: &Workspace,
+    app_working_dir: &std::path::Path,
+) -> Option<serde_json::Value> {
+    let mut auth_json: Option<serde_json::Value> = None;
+
+    if let Some(source_path) = host_opencode_auth_path() {
+        if let Ok(contents) = std::fs::read_to_string(&source_path) {
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&contents) {
+                auth_json = Some(parsed);
+            }
+        }
+
+        if let Some(dest_path) = workspace_opencode_auth_path(workspace) {
+            if dest_path != source_path && source_path.exists() {
+                if let Some(parent) = dest_path.parent() {
+                    if let Err(e) = std::fs::create_dir_all(parent) {
+                        tracing::warn!(
+                            "Failed to create OpenCode auth directory {}: {}",
+                            parent.display(),
+                            e
+                        );
+                    }
+                }
+                if let Err(e) = std::fs::copy(&source_path, &dest_path) {
+                    tracing::warn!(
+                        "Failed to copy OpenCode auth.json to workspace {}: {}",
+                        dest_path.display(),
+                        e
+                    );
+                }
+            }
+        }
+    }
+
+    if auth_json.is_none() {
+        auth_json = build_opencode_auth_from_ai_providers(app_working_dir);
+        if let Some(ref value) = auth_json {
+            if let Some(dest_path) = workspace_opencode_auth_path(workspace) {
+                if let Err(e) = write_json_file(&dest_path, value) {
+                    tracing::warn!(
+                        "Failed to write OpenCode auth.json to workspace {}: {}",
+                        dest_path.display(),
+                        e
+                    );
+                }
+            }
+        }
+    }
+
+    let providers = ["openai", "anthropic", "google"];
+    if let (Some(src_dir), Some(dest_dir)) = (
+        host_opencode_provider_auth_dir(),
+        workspace_opencode_provider_auth_dir(workspace),
+    ) {
+        for provider in providers {
+            let src = src_dir.join(format!("{}.json", provider));
+            if !src.exists() {
+                continue;
+            }
+            let dest = dest_dir.join(format!("{}.json", provider));
+            if dest == src {
+                continue;
+            }
+            if let Err(e) = std::fs::create_dir_all(&dest_dir) {
+                tracing::warn!(
+                    "Failed to create OpenCode provider auth dir {}: {}",
+                    dest_dir.display(),
+                    e
+                );
+                continue;
+            }
+            if let Err(e) = std::fs::copy(&src, &dest) {
+                tracing::warn!(
+                    "Failed to copy OpenCode provider auth file to workspace {}: {}",
+                    dest.display(),
+                    e
+                );
+            }
+        }
+    }
+
+    if let (Some(value), Some(dest_dir)) =
+        (auth_json.as_ref(), workspace_opencode_provider_auth_dir(workspace))
+    {
+        let provider_entries = [("openai", "OpenAI"), ("anthropic", "Anthropic"), ("google", "Google")];
+        for (key, label) in provider_entries {
+            if let Some(entry) = value.get(key) {
+                let dest = dest_dir.join(format!("{}.json", key));
+                if let Err(e) = write_json_file(&dest, entry) {
+                    tracing::warn!(
+                        "Failed to write OpenCode {} auth file to workspace {}: {}",
+                        label,
+                        dest.display(),
+                        e
+                    );
+                }
+            }
+        }
+    }
+
+    auth_json
+}
+
+fn extract_opencode_api_key(entry: &serde_json::Value) -> Option<String> {
+    let auth_type = entry.get("type").and_then(|v| v.as_str());
+    let key = entry
+        .get("key")
+        .or_else(|| entry.get("api_key"))
+        .and_then(|v| v.as_str());
+
+    match auth_type {
+        Some("oauth") => None,
+        _ => key.map(|s| s.to_string()),
+    }
+}
+
+fn apply_opencode_auth_env(
+    auth: &serde_json::Value,
+    env: &mut std::collections::HashMap<String, String>,
+) -> Vec<&'static str> {
+    let mut providers = Vec::new();
+
+    if let Some(entry) = auth.get("openai") {
+        if let Some(key) = extract_opencode_api_key(entry) {
+            env.entry("OPENAI_API_KEY".to_string()).or_insert(key);
+            providers.push("openai");
+        }
+    }
+
+    if let Some(entry) = auth.get("anthropic") {
+        if let Some(key) = extract_opencode_api_key(entry) {
+            env.entry("ANTHROPIC_API_KEY".to_string())
+                .or_insert(key);
+            providers.push("anthropic");
+        }
+    }
+
+    if let Some(entry) = auth.get("google") {
+        if let Some(key) = extract_opencode_api_key(entry) {
+            env.entry("GOOGLE_GENERATIVE_AI_API_KEY".to_string())
+                .or_insert(key.clone());
+            env.entry("GOOGLE_API_KEY".to_string()).or_insert(key);
+            providers.push("google");
+        }
+    }
+
+    providers
 }
 
 fn load_latest_opencode_assistant_text(
     workspace: &Workspace,
     session_id: &str,
 ) -> Option<String> {
-    let storage_root = resolve_opencode_storage_root(workspace);
-    let message_dir = storage_root.join("message").join(session_id);
-    if !message_dir.exists() {
-        return None;
+    let mut storage_root: Option<std::path::PathBuf> = None;
+    for root in opencode_storage_roots(workspace) {
+        let message_dir = root.join("message").join(session_id);
+        if message_dir.exists() {
+            storage_root = Some(root);
+            break;
+        }
     }
+
+    let storage_root = storage_root?;
+    let message_dir = storage_root.join("message").join(session_id);
 
     let mut latest_time = 0i64;
     let mut latest_message_id: Option<String> = None;
@@ -1406,8 +2303,17 @@ async fn opencode_binary_available(
     if command_available(workspace_exec, cwd, "/usr/local/bin/opencode").await {
         return true;
     }
-    if command_available(workspace_exec, cwd, "$HOME/.opencode/bin/opencode").await {
-        return true;
+    if workspace_exec.workspace.workspace_type == WorkspaceType::Chroot
+        && workspace::use_nspawn_for_workspace(&workspace_exec.workspace)
+    {
+        if command_available(workspace_exec, cwd, "/root/.opencode/bin/opencode").await {
+            return true;
+        }
+    } else if let Ok(home) = std::env::var("HOME") {
+        let path = format!("{}/.opencode/bin/opencode", home);
+        if command_available(workspace_exec, cwd, &path).await {
+            return true;
+        }
     }
     false
 }
@@ -1415,15 +2321,21 @@ async fn opencode_binary_available(
 async fn cleanup_opencode_listeners(
     workspace_exec: &WorkspaceExec,
     cwd: &std::path::Path,
+    port: Option<&str>,
 ) {
+    let port = port
+        .and_then(|p| p.trim().parse::<u16>().ok())
+        .unwrap_or(4096);
     let mut args = Vec::new();
     args.push("-lc".to_string());
     args.push(
-        "if command -v lsof >/dev/null 2>&1; then \
-           pids=$(lsof -t -iTCP:4096 -sTCP:LISTEN 2>/dev/null || true); \
-           if [ -n \"$pids\" ]; then kill -9 $pids || true; fi; \
-         fi"
-        .to_string(),
+        format!(
+            "if command -v lsof >/dev/null 2>&1; then \
+               pids=$(lsof -t -iTCP:{port} -sTCP:LISTEN 2>/dev/null || true); \
+               if [ -n \"$pids\" ]; then kill -9 $pids || true; fi; \
+             fi",
+            port = port
+        ),
     );
     let _ = workspace_exec.output(cwd, "/bin/sh", &args, HashMap::new()).await;
 }
@@ -1505,7 +2417,7 @@ pub async fn run_opencode_turn(
     mission_id: Uuid,
     events_tx: broadcast::Sender<AgentEvent>,
     cancel: CancellationToken,
-    _app_working_dir: &std::path::Path,
+    app_working_dir: &std::path::Path,
 ) -> AgentResult {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
@@ -1519,7 +2431,20 @@ pub async fn run_opencode_turn(
         return AgentResult::failure(err, 0).with_terminal_reason(TerminalReason::LlmError);
     }
 
-    let configured_runner = get_opencode_cli_path_from_config(_app_working_dir)
+    let resolved_model = model
+        .map(|m| m.to_string())
+        .or_else(|| {
+            std::env::var("OPEN_AGENT_OPENCODE_DEFAULT_MODEL")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+        })
+        .or_else(|| {
+            std::env::var("OPENCODE_DEFAULT_MODEL")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+        });
+
+    let configured_runner = get_opencode_cli_path_from_config(app_working_dir)
         .or_else(|| std::env::var("OPENCODE_CLI_PATH").ok());
 
     let mut runner_is_direct = false;
@@ -1575,7 +2500,7 @@ pub async fn run_opencode_turn(
         mission_id = %mission_id,
         work_dir = %work_dir.display(),
         workspace_type = ?workspace.workspace_type,
-        model = ?model,
+        model = ?resolved_model,
         agent = ?agent,
         cli_runner = %cli_runner,
         "Starting OpenCode execution via WorkspaceExec (per-workspace CLI mode)"
@@ -1583,6 +2508,19 @@ pub async fn run_opencode_turn(
 
     let work_dir_env = workspace_path_for_env(workspace, work_dir);
     let work_dir_arg = work_dir_env.to_string_lossy().to_string();
+    let opencode_config_dir_host = work_dir.join(".opencode");
+    let opencode_config_dir_env = workspace_path_for_env(workspace, &opencode_config_dir_host);
+    ensure_oh_my_opencode_config(
+        &workspace_exec,
+        work_dir,
+        &opencode_config_dir_host,
+        &opencode_config_dir_env,
+        &cli_runner,
+        runner_is_direct,
+    )
+    .await;
+    sync_opencode_agent_config(&opencode_config_dir_host, resolved_model.as_deref());
+    let port_override_supported = patch_oh_my_opencode_port_override(workspace);
 
     // Build CLI arguments for oh-my-opencode run
     // The 'run' command takes a prompt and executes it with completion detection
@@ -1617,9 +2555,44 @@ pub async fn run_opencode_turn(
 
     // Build environment variables
     let mut env: HashMap<String, String> = HashMap::new();
+    let opencode_auth = sync_opencode_auth_to_workspace(workspace, app_working_dir);
+
+    // Allow per-mission OpenCode server port; default to an allocated free port.
+    let requested_port = std::env::var("OPEN_AGENT_OPENCODE_SERVER_PORT")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+    let mut opencode_port = requested_port
+        .clone()
+        .or_else(|| allocate_opencode_server_port().map(|p| p.to_string()))
+        .unwrap_or_else(|| "0".to_string());
+
+    if opencode_port == "0" {
+        opencode_port = "4096".to_string();
+    }
+
+    if !port_override_supported {
+        if requested_port.is_some() {
+            tracing::warn!(
+                mission_id = %mission_id,
+                "Requested OPENCODE_SERVER_PORT override but oh-my-opencode could not be patched; falling back to port 4096"
+            );
+        }
+        opencode_port = "4096".to_string();
+    }
+    env.insert("OPENCODE_SERVER_PORT".to_string(), opencode_port.clone());
+    if let Ok(host) = std::env::var("OPEN_AGENT_OPENCODE_SERVER_HOSTNAME") {
+        if !host.trim().is_empty() {
+            env.insert("OPENCODE_SERVER_HOSTNAME".to_string(), host);
+        }
+    }
+    tracing::info!(
+        mission_id = %mission_id,
+        opencode_port = %opencode_port,
+        "OpenCode server port selected"
+    );
 
     // Pass the model if specified
-    if let Some(m) = model {
+    if let Some(m) = resolved_model.as_deref() {
         // Parse provider/model format
         if let Some((provider, model_id)) = m.split_once('/') {
             env.insert("OPENCODE_PROVIDER".to_string(), provider.to_string());
@@ -1630,18 +2603,18 @@ pub async fn run_opencode_turn(
     }
 
     // Ensure OpenCode uses workspace-local config
-    let opencode_config_dir = workspace_path_for_env(workspace, &work_dir.join(".opencode"));
-    let opencode_config_path = workspace_path_for_env(workspace, &work_dir.join("opencode.json"));
+    let opencode_config_path =
+        workspace_path_for_env(workspace, &opencode_config_dir_host.join("opencode.json"));
     env.insert(
         "OPENCODE_CONFIG_DIR".to_string(),
-        opencode_config_dir.to_string_lossy().to_string(),
+        opencode_config_dir_env.to_string_lossy().to_string(),
     );
     env.insert(
         "OPENCODE_CONFIG".to_string(),
         opencode_config_path.to_string_lossy().to_string(),
     );
 
-    if let Some(permissive) = get_opencode_permissive_from_config(_app_working_dir) {
+    if let Some(permissive) = get_opencode_permissive_from_config(app_working_dir) {
         env.insert("OPENCODE_PERMISSIVE".to_string(), permissive.to_string());
     } else if let Ok(value) = std::env::var("OPENCODE_PERMISSIVE") {
         if !value.trim().is_empty() {
@@ -1659,7 +2632,20 @@ pub async fn run_opencode_turn(
     env.entry("OPEN_AGENT_WORKSPACE_TYPE".to_string())
         .or_insert_with(|| workspace.workspace_type.as_str().to_string());
 
-    cleanup_opencode_listeners(&workspace_exec, work_dir).await;
+    if let Some(auth) = opencode_auth.as_ref() {
+        let providers = apply_opencode_auth_env(auth, &mut env);
+        if !providers.is_empty() {
+            tracing::info!(
+                mission_id = %mission_id,
+                providers = ?providers,
+                "Loaded OpenCode auth credentials for workspace"
+            );
+        }
+    }
+
+    prepend_opencode_bin_to_path(&mut env, workspace);
+
+    cleanup_opencode_listeners(&workspace_exec, work_dir, Some(&opencode_port)).await;
 
     // Use WorkspaceExec to spawn the CLI in the correct workspace context
     let mut child = match workspace_exec
@@ -1874,6 +2860,12 @@ pub async fn run_opencode_turn(
                 "OpenCode output was empty/banner-only and no session id was detected"
             );
         }
+    }
+
+    if final_result.trim().is_empty() && !had_error {
+        had_error = true;
+        final_result =
+            "OpenCode produced no output. Check CLI installation or authentication.".to_string();
     }
 
     tracing::info!(

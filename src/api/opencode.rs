@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use crate::opencode_config::OpenCodeConnection;
+use crate::opencode_agents;
 
 /// Create OpenCode connection routes.
 pub fn routes() -> Router<Arc<super::routes::AppState>> {
@@ -229,7 +230,8 @@ pub async fn fetch_opencode_agents(state: &super::routes::AppState) -> Result<Va
     };
     let base_url = base_url.trim_end_matches('/').to_string();
     if base_url.is_empty() {
-        return Err("OpenCode base URL is not configured".to_string());
+        tracing::warn!("OpenCode base URL not configured. Returning default agents.");
+        return Ok(opencode_agents::default_agent_payload());
     }
 
     let url = format!("{}/agent", base_url);
@@ -238,21 +240,38 @@ pub async fn fetch_opencode_agents(state: &super::routes::AppState) -> Result<Va
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
 
-    let resp = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| format!("OpenCode request failed: {}", e))?;
+    let resp = match client.get(&url).send().await {
+        Ok(resp) => resp,
+        Err(e) => {
+            tracing::warn!(
+                "OpenCode /agent request failed ({}). Returning default agents.",
+                e
+            );
+            return Ok(opencode_agents::default_agent_payload());
+        }
+    };
 
     let status = resp.status();
     if !status.is_success() {
         let text = resp.text().await.unwrap_or_default();
-        return Err(format!("OpenCode /agent failed: {} - {}", status, text));
+        tracing::warn!(
+            "OpenCode /agent returned {} ({}). Returning default agents.",
+            status,
+            text
+        );
+        return Ok(opencode_agents::default_agent_payload());
     }
 
-    resp.json()
-        .await
-        .map_err(|e| format!("Invalid agent payload: {}", e))
+    match resp.json().await {
+        Ok(payload) => Ok(payload),
+        Err(e) => {
+            tracing::warn!(
+                "Invalid OpenCode agent payload ({}). Returning default agents.",
+                e
+            );
+            Ok(opencode_agents::default_agent_payload())
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -286,10 +305,8 @@ pub async fn list_agents(
     };
     let base_url = base_url.trim_end_matches('/').to_string();
     if base_url.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "OpenCode base URL is not configured".to_string(),
-        ));
+        tracing::warn!("OpenCode base URL not configured. Returning default agents.");
+        return Ok(Json(opencode_agents::default_agent_payload()));
     }
 
     let url = format!("{}/agent", base_url);
@@ -298,28 +315,38 @@ pub async fn list_agents(
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
 
-    let resp = client.get(&url).send().await.map_err(|e| {
-        (
-            StatusCode::BAD_GATEWAY,
-            format!("OpenCode request failed: {}", e),
-        )
-    })?;
+    let resp = match client.get(&url).send().await {
+        Ok(resp) => resp,
+        Err(e) => {
+            tracing::warn!(
+                "OpenCode /agent request failed ({}). Returning default agents.",
+                e
+            );
+            return Ok(Json(opencode_agents::default_agent_payload()));
+        }
+    };
 
     let status = resp.status();
     if !status.is_success() {
         let text = resp.text().await.unwrap_or_default();
-        return Err((
-            StatusCode::BAD_GATEWAY,
-            format!("OpenCode /agent failed: {} - {}", status, text),
-        ));
+        tracing::warn!(
+            "OpenCode /agent returned {} ({}). Returning default agents.",
+            status,
+            text
+        );
+        return Ok(Json(opencode_agents::default_agent_payload()));
     }
 
-    let payload: Value = resp.json().await.map_err(|e| {
-        (
-            StatusCode::BAD_GATEWAY,
-            format!("Invalid agent payload: {}", e),
-        )
-    })?;
+    let payload: Value = match resp.json().await {
+        Ok(payload) => payload,
+        Err(e) => {
+            tracing::warn!(
+                "Invalid OpenCode agent payload ({}). Returning default agents.",
+                e
+            );
+            return Ok(Json(opencode_agents::default_agent_payload()));
+        }
+    };
 
     {
         let mut cache = state.opencode_agents_cache.write().await;

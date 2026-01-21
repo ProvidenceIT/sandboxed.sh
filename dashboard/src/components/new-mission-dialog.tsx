@@ -26,6 +26,19 @@ interface CombinedAgent {
   value: string; // "backend:agent" format
 }
 
+const DEFAULT_OPENCODE_AGENTS = [
+  'Sisyphus',
+  'oracle',
+  'librarian',
+  'explore',
+  'frontend-ui-ux-engineer',
+  'document-writer',
+  'multimodal-looker',
+  'Prometheus',
+  'Metis',
+  'Momus',
+];
+
 // Parse agent names from API response
 const parseAgentNames = (payload: unknown): string[] => {
   const normalizeEntry = (entry: unknown): string | null => {
@@ -131,8 +144,24 @@ export function NewMissionDialog({
 
       if (backend.id === 'opencode') {
         // Filter out hidden OpenCode agents
-        const allOpenCodeAgents = opencodeAgents?.map(a => a.name) || parseAgentNames(agentsPayload);
-        agentNames = allOpenCodeAgents.filter(name => !openCodeHiddenAgents.includes(name));
+        const backendAgents = opencodeAgents?.map(a => a.name) || [];
+        const visibleBackendAgents = backendAgents.filter(name => !openCodeHiddenAgents.includes(name));
+        if (visibleBackendAgents.length > 0) {
+          agentNames = visibleBackendAgents;
+        } else if (backendAgents.length > 0) {
+          // If all OpenCode agents are hidden, fall back to the raw list so the backend remains usable.
+          agentNames = backendAgents;
+        } else {
+          const fallbackAgents = parseAgentNames(agentsPayload);
+          agentNames = fallbackAgents.filter(name => !openCodeHiddenAgents.includes(name));
+        }
+
+        if (agentNames.length === 0) {
+          const visibleDefaults = DEFAULT_OPENCODE_AGENTS.filter(
+            name => !openCodeHiddenAgents.includes(name),
+          );
+          agentNames = visibleDefaults.length > 0 ? visibleDefaults : [...DEFAULT_OPENCODE_AGENTS];
+        }
       } else if (backend.id === 'claudecode') {
         // Filter out hidden Claude Code agents
         const allClaudeAgents = claudecodeAgents?.map(a => a.name) || [];

@@ -229,6 +229,11 @@ fn container_root_from_env() -> Option<PathBuf> {
     if workspace_type != "chroot" && workspace_type != "nspawn" && workspace_type != "container" {
         return None;
     }
+    if let Ok(flag) = env::var("OPEN_AGENT_CHROOT_FALLBACK") {
+        if matches!(flag.trim().to_lowercase().as_str(), "1" | "true" | "yes" | "y" | "on") {
+            return None;
+        }
+    }
     let root = env::var("OPEN_AGENT_WORKSPACE_ROOT").ok()?;
     Some(PathBuf::from(root))
 }
@@ -289,6 +294,40 @@ fn parse_env(args: &Value) -> HashMap<String, String> {
 
 fn workspace_env_vars() -> HashMap<String, String> {
     let mut envs = HashMap::new();
+    if let Ok(raw_path) = env::var("OPEN_AGENT_WORKSPACE_ENV_VARS_FILE") {
+        let path = raw_path.trim();
+        if !path.is_empty() {
+            let mut candidates = Vec::new();
+            let path_buf = PathBuf::from(path);
+            if path_buf.is_absolute() {
+                candidates.push(path_buf);
+            } else {
+                if let Ok(cwd) = env::current_dir() {
+                    candidates.push(cwd.join(&path_buf));
+                }
+                if let Ok(workspace) = env::var("OPEN_AGENT_WORKSPACE") {
+                    if !workspace.trim().is_empty() {
+                        candidates.push(PathBuf::from(workspace).join(&path_buf));
+                    }
+                }
+                if let Ok(working_dir) = env::var("WORKING_DIR") {
+                    if !working_dir.trim().is_empty() {
+                        candidates.push(PathBuf::from(working_dir).join(&path_buf));
+                    }
+                }
+                candidates.push(path_buf);
+            }
+
+            for candidate in candidates {
+                if let Ok(raw) = std::fs::read_to_string(&candidate) {
+                    if let Ok(map) = serde_json::from_str::<HashMap<String, String>>(&raw) {
+                        envs.extend(map);
+                        return envs;
+                    }
+                }
+            }
+        }
+    }
     let Ok(raw) = env::var("OPEN_AGENT_WORKSPACE_ENV_VARS") else {
         return envs;
     };

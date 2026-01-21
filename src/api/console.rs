@@ -29,7 +29,7 @@ use uuid::Uuid;
 use super::auth;
 use super::routes::AppState;
 use crate::nspawn;
-use crate::workspace::WorkspaceType;
+use crate::workspace::{use_nspawn_for_workspace, WorkspaceType};
 
 /// How long to keep a session alive after disconnect before cleanup.
 const SESSION_POOL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -754,7 +754,7 @@ async fn handle_new_workspace_shell(
 
     // Build command based on workspace type
     let mut cmd = match workspace.workspace_type {
-        WorkspaceType::Chroot => {
+        WorkspaceType::Chroot if use_nspawn_for_workspace(&workspace) => {
             // For container workspaces, use systemd-nspawn to enter the isolated environment
             // First, terminate any stale container that might be holding the directory lock
             terminate_stale_container(&workspace.name).await;
@@ -799,7 +799,7 @@ async fn handle_new_workspace_shell(
             }
             cmd
         }
-        WorkspaceType::Host => {
+        _ => {
             // For host workspaces, just spawn a shell in the workspace directory
             let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
             let mut cmd = CommandBuilder::new(&shell);

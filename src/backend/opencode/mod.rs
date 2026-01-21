@@ -9,6 +9,7 @@ use tokio::task::JoinHandle;
 
 use crate::backend::events::ExecutionEvent;
 use crate::backend::{AgentInfo, Backend, Session, SessionConfig};
+use crate::opencode_agents;
 use client::OpenCodeClient;
 
 pub struct OpenCodeBackend {
@@ -96,8 +97,16 @@ impl Backend for OpenCodeBackend {
     }
 
     async fn list_agents(&self) -> Result<Vec<AgentInfo>, Error> {
-        let payload = self.fetch_agents().await?;
-        Ok(Self::parse_agents(payload))
+        match self.fetch_agents().await {
+            Ok(payload) => Ok(Self::parse_agents(payload)),
+            Err(err) => {
+                tracing::warn!(
+                    "OpenCode /agent unavailable ({}). Falling back to default agents.",
+                    err
+                );
+                Ok(opencode_agents::default_agent_infos())
+            }
+        }
     }
 
     async fn create_session(&self, config: SessionConfig) -> Result<Session, Error> {

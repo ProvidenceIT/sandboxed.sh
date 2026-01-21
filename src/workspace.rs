@@ -58,6 +58,24 @@ impl WorkspaceType {
     }
 }
 
+pub fn is_chroot_fallback(workspace: &Workspace) -> bool {
+    workspace
+        .config
+        .get("chroot_fallback")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+pub fn use_nspawn_for_workspace(workspace: &Workspace) -> bool {
+    if workspace.workspace_type != WorkspaceType::Chroot {
+        return false;
+    }
+    if is_chroot_fallback(workspace) {
+        return false;
+    }
+    nspawn::nspawn_available()
+}
+
 /// Status of a workspace.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -596,8 +614,24 @@ fn opencode_entry_from_mcp(
                 }
             }
 
-            let use_nspawn =
-                config.scope == McpScope::Workspace && workspace_type == WorkspaceType::Chroot;
+            let chroot_fallback = workspace_env
+                .get("OPEN_AGENT_CHROOT_FALLBACK")
+                .map(|v| matches!(v.trim().to_lowercase().as_str(), "1" | "true" | "yes" | "y" | "on"))
+                .unwrap_or(false)
+                || (workspace_type == WorkspaceType::Chroot && !nspawn::nspawn_available());
+            let per_workspace_runner =
+                env_var_bool("OPEN_AGENT_PER_WORKSPACE_RUNNER", true);
+            if chroot_fallback {
+                merged_env
+                    .entry("OPEN_AGENT_CHROOT_FALLBACK".to_string())
+                    .or_insert_with(|| "1".to_string());
+            }
+
+            let use_nspawn = config.scope == McpScope::Workspace
+                && workspace_type == WorkspaceType::Chroot
+                && !chroot_fallback
+                && !per_workspace_runner
+                && nspawn::nspawn_available();
 
             if use_nspawn {
                 let rel = workspace_dir
@@ -698,6 +732,7 @@ fn claude_entry_from_mcp(
     workspace_root: &Path,
     workspace_type: WorkspaceType,
     workspace_env: &HashMap<String, String>,
+    workspace_env_file: Option<&str>,
     shared_network: Option<bool>,
 ) -> serde_json::Value {
     match &config.transport {
@@ -743,7 +778,15 @@ fn claude_entry_from_mcp(
                 .get("environment")
                 .and_then(|v| v.as_object())
             {
-                entry.insert("env".to_string(), serde_json::Value::Object(env.clone()));
+                let mut env_map = env.clone();
+                if let Some(env_file) = workspace_env_file {
+                    env_map.remove("OPEN_AGENT_WORKSPACE_ENV_VARS");
+                    env_map.insert(
+                        "OPEN_AGENT_WORKSPACE_ENV_VARS_FILE".to_string(),
+                        json!(env_file),
+                    );
+                }
+                entry.insert("env".to_string(), serde_json::Value::Object(env_map));
             }
 
             serde_json::Value::Object(entry)
@@ -760,6 +803,64 @@ async fn write_opencode_config(
     skill_allowlist: Option<&[String]>,
     shared_network: Option<bool>,
 ) -> anyhow::Result<()> {
+    fn strip_jsonc_comments(input: &str) -> String {
+        let mut out = String::with_capacity(input.len());
+        let mut chars = input.chars().peekable();
+        let mut in_string = false;
+        let mut escape = false;
+
+        while let Some(c) = chars.next() {
+            if in_string {
+                out.push(c);
+                if escape {
+                    escape = false;
+                } else if c == '\\' {
+                    escape = true;
+                } else if c == '"' {
+                    in_string = false;
+                }
+                continue;
+            }
+
+            if c == '"' {
+                in_string = true;
+                out.push(c);
+                continue;
+            }
+
+            if c == '/' {
+                match chars.peek() {
+                    Some('/') => {
+                        chars.next();
+                        while let Some(n) = chars.next() {
+                            if n == '\n' {
+                                out.push('\n');
+                                break;
+                            }
+                        }
+                        continue;
+                    }
+                    Some('*') => {
+                        chars.next();
+                        let mut prev = '\0';
+                        while let Some(n) = chars.next() {
+                            if prev == '*' && n == '/' {
+                                break;
+                            }
+                            prev = n;
+                        }
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+
+            out.push(c);
+        }
+
+        out
+    }
+
     let mut mcp_map = serde_json::Map::new();
     let mut used = std::collections::HashSet::new();
 
@@ -785,13 +886,6 @@ async fn write_opencode_config(
             ),
         );
     }
-
-    let mut config_json = serde_json::Map::new();
-    config_json.insert(
-        "$schema".to_string(),
-        json!("https://opencode.ai/config.json"),
-    );
-    config_json.insert("mcp".to_string(), serde_json::Value::Object(mcp_map));
 
     let mut permission = serde_json::Map::new();
     permission.insert("read".to_string(), json!("allow"));
@@ -824,16 +918,18 @@ async fn write_opencode_config(
             );
         }
     }
-    config_json.insert(
-        "permission".to_string(),
-        serde_json::Value::Object(permission),
-    );
-
     // Tool policy:
     // - We want shell/file effects scoped to the workspace by running the agent process
     //   inside the workspace execution context (host/chroot/ssh).
     // - Therefore, OpenCode built-in bash MUST be enabled for all workspace types.
     // - The legacy workspace-mcp/desktop-mcp proxy tools are no longer required for core flows.
+    let enable_desktop_tools =
+        env_var_bool("OPEN_AGENT_ENABLE_DESKTOP_TOOLS", false) || env_var_bool("DESKTOP_ENABLED", false);
+    let chroot_fallback = workspace_env
+        .get("OPEN_AGENT_CHROOT_FALLBACK")
+        .map(|v| matches!(v.trim().to_lowercase().as_str(), "1" | "true" | "yes" | "y" | "on"))
+        .unwrap_or(false);
+    let per_workspace_runner = env_var_bool("OPEN_AGENT_PER_WORKSPACE_RUNNER", true);
     let mut tools = serde_json::Map::new();
     match workspace_type {
         WorkspaceType::Chroot => {
@@ -842,7 +938,10 @@ async fn write_opencode_config(
             tools.insert("bash".to_string(), json!(true));
             // Disable legacy MCP tool namespaces by default.
             tools.insert("workspace_*".to_string(), json!(false));
-            tools.insert("desktop_*".to_string(), json!(false));
+            tools.insert(
+                "desktop_*".to_string(),
+                json!(enable_desktop_tools && (chroot_fallback || per_workspace_runner)),
+            );
             tools.insert("playwright_*".to_string(), json!(true));
             tools.insert("browser_*".to_string(), json!(true));
         }
@@ -850,14 +949,59 @@ async fn write_opencode_config(
             tools.insert("Bash".to_string(), json!(true));
             tools.insert("bash".to_string(), json!(true));
             tools.insert("workspace_*".to_string(), json!(false));
-            tools.insert("desktop_*".to_string(), json!(false));
+            tools.insert("desktop_*".to_string(), json!(enable_desktop_tools));
             tools.insert("playwright_*".to_string(), json!(false));
             tools.insert("browser_*".to_string(), json!(false));
         }
     }
-    config_json.insert("tools".to_string(), serde_json::Value::Object(tools));
+    let mut base_config = serde_json::json!({});
+    let base_dir = resolve_opencode_config_dir();
+    let base_path = base_dir.join("opencode.json");
+    let base_jsonc = base_dir.join("opencode.jsonc");
+    let base_contents = if base_path.exists() {
+        tokio::fs::read_to_string(&base_path).await.ok()
+    } else if base_jsonc.exists() {
+        tokio::fs::read_to_string(&base_jsonc).await.ok()
+    } else {
+        None
+    };
 
-    let config_value = serde_json::Value::Object(config_json);
+    if let Some(contents) = base_contents {
+        match serde_json::from_str::<serde_json::Value>(&contents) {
+            Ok(value) => base_config = value,
+            Err(_) => {
+                let stripped = strip_jsonc_comments(&contents);
+                match serde_json::from_str::<serde_json::Value>(&stripped) {
+                    Ok(value) => base_config = value,
+                    Err(e) => {
+                        tracing::warn!("Failed to parse OpenCode base config: {}", e);
+                    }
+                }
+            }
+        }
+    }
+
+    if !base_config.is_object() {
+        base_config = serde_json::json!({});
+    }
+
+    {
+        let base_obj = base_config
+            .as_object_mut()
+            .expect("opencode base config");
+        base_obj.insert(
+            "$schema".to_string(),
+            json!("https://opencode.ai/config.json"),
+        );
+        base_obj.insert("mcp".to_string(), serde_json::Value::Object(mcp_map));
+        base_obj.insert(
+            "permission".to_string(),
+            serde_json::Value::Object(permission),
+        );
+        base_obj.insert("tools".to_string(), serde_json::Value::Object(tools));
+    }
+
+    let config_value = base_config;
     let config_payload = serde_json::to_string_pretty(&config_value)?;
 
     // Write to workspace root
@@ -887,6 +1031,17 @@ async fn write_claudecode_config(
     let claude_dir = workspace_dir.join(".claude");
     tokio::fs::create_dir_all(&claude_dir).await?;
 
+    let workspace_env_file = if !workspace_env.is_empty() {
+        let openagent_dir = workspace_dir.join(".openagent");
+        tokio::fs::create_dir_all(&openagent_dir).await?;
+        let env_path = openagent_dir.join("workspace_env.json");
+        let payload = serde_json::to_string_pretty(workspace_env)?;
+        tokio::fs::write(&env_path, payload).await?;
+        Some(".openagent/workspace_env.json".to_string())
+    } else {
+        None
+    };
+
     // Build MCP servers config in Claude Code format
     let mut mcp_servers = serde_json::Map::new();
     let mut used = std::collections::HashSet::new();
@@ -904,6 +1059,7 @@ async fn write_claudecode_config(
                 workspace_root,
                 workspace_type,
                 workspace_env,
+                workspace_env_file.as_deref(),
                 shared_network,
             ),
         );
@@ -2072,12 +2228,48 @@ async fn copy_binary_into_container(
 }
 
 async fn sync_workspace_mcp_binaries(
-    _working_dir: &Path,
-    _container_root: &Path,
+    working_dir: &Path,
+    container_root: &Path,
 ) -> anyhow::Result<()> {
-    // Legacy behavior: copy host workspace-mcp/desktop-mcp binaries into container.
-    // New behavior: no-op. With per-workspace agent execution, shell/tools execute
-    // inside the workspace and we no longer depend on these proxy MCP binaries.
+    // Copy MCP binaries into the container so workspace-local MCP configs can run them directly.
+    for binary in ["workspace-mcp", "desktop-mcp"] {
+        if find_host_binary(binary, working_dir).is_none() {
+            tracing::warn!(binary, "MCP binary not found on host; skipping copy");
+            continue;
+        }
+        copy_binary_into_container(working_dir, container_root, binary).await?;
+    }
+    Ok(())
+}
+
+fn mark_chroot_fallback(workspace: &mut Workspace, reason: &str) {
+    let mut obj = workspace.config.as_object().cloned().unwrap_or_default();
+    obj.insert("chroot_fallback".to_string(), json!(true));
+    if !reason.trim().is_empty() {
+        obj.insert("chroot_fallback_reason".to_string(), json!(reason));
+    }
+    workspace.config = serde_json::Value::Object(obj);
+    workspace
+        .env_vars
+        .entry("OPEN_AGENT_CHROOT_FALLBACK".to_string())
+        .or_insert_with(|| "1".to_string());
+}
+
+async fn build_chroot_fallback(workspace: &mut Workspace, reason: &str) -> anyhow::Result<()> {
+    tracing::warn!(
+        workspace = %workspace.name,
+        reason = %reason,
+        "Chroot fallback enabled; workspace will run on host without systemd-nspawn"
+    );
+
+    tokio::fs::create_dir_all(&workspace.path).await?;
+    for dir in ["bin", "usr", "etc", "var", "root", "tmp"] {
+        let _ = tokio::fs::create_dir_all(workspace.path.join(dir)).await;
+    }
+
+    mark_chroot_fallback(workspace, reason);
+    workspace.status = WorkspaceStatus::Ready;
+    workspace.error_message = None;
     Ok(())
 }
 
@@ -2090,6 +2282,15 @@ pub async fn build_chroot_workspace(
 ) -> anyhow::Result<()> {
     if workspace.workspace_type != WorkspaceType::Chroot {
         return Err(anyhow::anyhow!("Workspace is not a container type"));
+    }
+
+    if !nspawn::nspawn_available() {
+        if nspawn::allow_chroot_fallback() {
+            return build_chroot_fallback(workspace, "systemd-nspawn not available").await;
+        }
+        return Err(anyhow::anyhow!(
+            "systemd-nspawn not available; install systemd-container or set OPEN_AGENT_ALLOW_CHROOT_FALLBACK=1"
+        ));
     }
 
     // Update status to building
@@ -2194,7 +2395,12 @@ pub async fn build_chroot_workspace(
             workspace.status = WorkspaceStatus::Error;
             workspace.error_message = Some(format!("Container build failed: {}", e));
             tracing::error!("Failed to build container: {}", e);
-            Err(anyhow::anyhow!("Container build failed: {}", e))
+            if nspawn::allow_chroot_fallback() {
+                let reason = format!("container build failed: {}", e);
+                build_chroot_fallback(workspace, &reason).await
+            } else {
+                Err(anyhow::anyhow!("Container build failed: {}", e))
+            }
         }
     }
 }
@@ -2268,7 +2474,7 @@ fn env_var_bool(name: &str, default: bool) -> bool {
 }
 
 async fn bootstrap_workspace_harnesses(workspace: &Workspace) -> anyhow::Result<()> {
-    if workspace.workspace_type != WorkspaceType::Chroot {
+    if workspace.workspace_type != WorkspaceType::Chroot || !use_nspawn_for_workspace(workspace) {
         return Ok(());
     }
 
@@ -2450,6 +2656,12 @@ pub async fn destroy_chroot_workspace(workspace: &Workspace) -> anyhow::Result<(
         workspace.path.display()
     );
 
+    if !use_nspawn_for_workspace(workspace) {
+        // Fallback workspaces are plain directories on the host.
+        let _ = tokio::fs::remove_dir_all(&workspace.path).await;
+        return Ok(());
+    }
+
     nspawn::destroy_container(&workspace.path).await?;
 
     Ok(())
@@ -2519,6 +2731,28 @@ pub async fn sync_openagent_config(
     tracing::info!(
         path = %dest_path.display(),
         "Synced openagent config from Library"
+    );
+
+    Ok(())
+}
+
+/// Write openagent/config.json to the working directory.
+/// Useful when the Library is not configured but the UI still needs local defaults.
+pub async fn write_openagent_config(
+    working_dir: &std::path::Path,
+    config: &crate::library::OpenAgentConfig,
+) -> anyhow::Result<()> {
+    let dest_dir = working_dir.join(".openagent");
+    let dest_path = dest_dir.join("config.json");
+
+    tokio::fs::create_dir_all(&dest_dir).await?;
+
+    let content = serde_json::to_string_pretty(&config)?;
+    tokio::fs::write(&dest_path, content).await?;
+
+    tracing::info!(
+        path = %dest_path.display(),
+        "Wrote openagent config to working directory"
     );
 
     Ok(())

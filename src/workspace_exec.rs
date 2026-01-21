@@ -14,7 +14,7 @@ use anyhow::Context;
 use tokio::process::{Child, Command};
 
 use crate::nspawn;
-use crate::workspace::{Workspace, WorkspaceType};
+use crate::workspace::{use_nspawn_for_workspace, Workspace, WorkspaceType};
 
 #[derive(Debug, Clone)]
 pub struct WorkspaceExec {
@@ -42,10 +42,145 @@ impl WorkspaceExec {
         merged
             .entry("OPEN_AGENT_WORKSPACE_TYPE".to_string())
             .or_insert_with(|| self.workspace.workspace_type.as_str().to_string());
+        if self.workspace.workspace_type == WorkspaceType::Chroot {
+            if let Some(name) = self
+                .workspace
+                .path
+                .file_name()
+                .and_then(|n| n.to_str())
+            {
+                if !name.trim().is_empty() {
+                    merged
+                        .entry("OPEN_AGENT_WORKSPACE_NAME".to_string())
+                        .or_insert_with(|| name.to_string());
+                }
+            }
+            // Ensure container processes use container-local XDG paths instead of host defaults.
+            merged
+                .entry("HOME".to_string())
+                .or_insert_with(|| "/root".to_string());
+            merged
+                .entry("XDG_CONFIG_HOME".to_string())
+                .or_insert_with(|| "/root/.config".to_string());
+            merged
+                .entry("XDG_DATA_HOME".to_string())
+                .or_insert_with(|| "/root/.local/share".to_string());
+            merged
+                .entry("XDG_STATE_HOME".to_string())
+                .or_insert_with(|| "/root/.local/state".to_string());
+            merged
+                .entry("XDG_CACHE_HOME".to_string())
+                .or_insert_with(|| "/root/.cache".to_string());
+        }
+        if self.workspace.workspace_type == WorkspaceType::Chroot && !use_nspawn_for_workspace(&self.workspace) {
+            merged
+                .entry("OPEN_AGENT_CHROOT_FALLBACK".to_string())
+                .or_insert_with(|| "1".to_string());
+        }
         merged
     }
 
-    fn build_command(
+    fn shell_escape(value: &str) -> String {
+        if value.is_empty() {
+            return "''".to_string();
+        }
+        let mut escaped = String::new();
+        escaped.push('\'');
+        for ch in value.chars() {
+            if ch == '\'' {
+                escaped.push_str("'\"'\"'");
+            } else {
+                escaped.push(ch);
+            }
+        }
+        escaped.push('\'');
+        escaped
+    }
+
+    fn build_shell_command(rel_cwd: &str, program: &str, args: &[String]) -> String {
+        let mut cmd = String::new();
+        cmd.push_str("cd ");
+        cmd.push_str(&Self::shell_escape(rel_cwd));
+        cmd.push_str(" && exec ");
+        cmd.push_str(&Self::shell_escape(program));
+        for arg in args {
+            cmd.push(' ');
+            cmd.push_str(&Self::shell_escape(arg));
+        }
+        cmd
+    }
+
+    fn machine_name(&self) -> Option<String> {
+        self.workspace
+            .path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|s| s.to_string())
+            .filter(|s| !s.trim().is_empty())
+    }
+
+    async fn running_container_leader(&self) -> Option<String> {
+        let name = self.machine_name()?;
+        let machinectl = if Path::new("/usr/bin/machinectl").exists() {
+            "/usr/bin/machinectl"
+        } else {
+            "machinectl"
+        };
+        let output = Command::new(machinectl)
+            .args(["show", &name, "-p", "Leader", "--value"])
+            .output()
+            .await
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let leader = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if leader.is_empty() {
+            None
+        } else {
+            Some(leader)
+        }
+    }
+
+    fn build_nsenter_command(
+        &self,
+        leader: &str,
+        cwd: &Path,
+        program: &str,
+        args: &[String],
+        env: HashMap<String, String>,
+        stdin: Stdio,
+        stdout: Stdio,
+        stderr: Stdio,
+    ) -> anyhow::Result<Command> {
+        let nsenter = if Path::new("/usr/bin/nsenter").exists() {
+            "/usr/bin/nsenter"
+        } else {
+            "nsenter"
+        };
+        let rel_cwd = self.rel_path_in_container(cwd);
+        let shell_cmd = Self::build_shell_command(&rel_cwd, program, args);
+        let mut cmd = Command::new(nsenter);
+        cmd.args([
+            "--target",
+            leader,
+            "--mount",
+            "--uts",
+            "--ipc",
+            "--net",
+            "--pid",
+            "/bin/sh",
+            "-lc",
+        ]);
+        cmd.arg(shell_cmd);
+        if !env.is_empty() {
+            cmd.envs(env);
+        }
+        cmd.stdin(stdin).stdout(stdout).stderr(stderr);
+        Ok(cmd)
+    }
+
+    async fn build_command(
         &self,
         cwd: &Path,
         program: &str,
@@ -69,12 +204,32 @@ impl WorkspaceExec {
                 Ok(cmd)
             }
             WorkspaceType::Chroot => {
-                // For chroot workspaces we execute via systemd-nspawn.
-                // Note: this requires systemd-nspawn on the host at runtime.
+                if !use_nspawn_for_workspace(&self.workspace) {
+                    // Fallback: execute on host when systemd-nspawn isn't available.
+                    let mut cmd = Command::new(program);
+                    cmd.current_dir(cwd);
+                    if !args.is_empty() {
+                        cmd.args(args);
+                    }
+                    if !env.is_empty() {
+                        cmd.envs(env);
+                    }
+                    cmd.stdin(stdin).stdout(stdout).stderr(stderr);
+                    return Ok(cmd);
+                }
+
                 let mut env = env;
                 if !env.contains_key("HOME") {
                     env.insert("HOME".to_string(), "/root".to_string());
                 }
+                if let Some(leader) = self.running_container_leader().await {
+                    return self.build_nsenter_command(
+                        &leader, cwd, program, args, env, stdin, stdout, stderr,
+                    );
+                }
+
+                // For chroot workspaces we execute via systemd-nspawn.
+                // Note: this requires systemd-nspawn on the host at runtime.
                 let root = self.workspace.path.clone();
                 let rel_cwd = self.rel_path_in_container(cwd);
 
@@ -158,6 +313,7 @@ impl WorkspaceExec {
                 Stdio::piped(),
                 Stdio::piped(),
             )
+            .await
             .context("Failed to build workspace command")?;
         let output = cmd
             .output()
@@ -184,6 +340,7 @@ impl WorkspaceExec {
                 Stdio::piped(),
                 Stdio::piped(),
             )
+            .await
             .context("Failed to build workspace command")?;
 
         let child = cmd.spawn().context("Failed to spawn workspace command")?;

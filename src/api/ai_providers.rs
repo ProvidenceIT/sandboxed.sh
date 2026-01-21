@@ -137,6 +137,13 @@ pub fn routes() -> Router<Arc<super::routes::AppState>> {
 // Public API for Backend Access
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Claude Code authentication material.
+#[derive(Debug, Clone)]
+pub enum ClaudeCodeAuth {
+    ApiKey(String),
+    OAuthToken(String),
+}
+
 /// Get the Anthropic API key or OAuth access token for the Claude Code backend.
 ///
 /// This checks if the Anthropic provider has "claudecode" in its use_for_backends
@@ -150,7 +157,7 @@ pub fn routes() -> Router<Arc<super::routes::AppState>> {
 /// - Anthropic provider is not configured for claudecode
 /// - No credentials are available (neither API key nor OAuth)
 /// - Any error occurs reading the config
-pub fn get_anthropic_api_key_for_claudecode(working_dir: &Path) -> Option<String> {
+pub fn get_anthropic_auth_for_claudecode(working_dir: &Path) -> Option<ClaudeCodeAuth> {
     // Read the provider backends state to check use_for_backends
     let backends_state = read_provider_backends_state(working_dir);
 
@@ -165,16 +172,16 @@ pub fn get_anthropic_api_key_for_claudecode(working_dir: &Path) -> Option<String
     }
 
     // Try to get credentials from OpenCode auth.json first
-    if let Some(key) = get_anthropic_key_from_opencode_auth() {
-        return Some(key);
+    if let Some(auth) = get_anthropic_auth_from_opencode_auth() {
+        return Some(auth);
     }
 
     // Fall back to ai_providers.json
-    get_anthropic_key_from_ai_providers(working_dir)
+    get_anthropic_auth_from_ai_providers(working_dir)
 }
 
 /// Get Anthropic API key or OAuth access token from OpenCode auth.json.
-fn get_anthropic_key_from_opencode_auth() -> Option<String> {
+fn get_anthropic_auth_from_opencode_auth() -> Option<ClaudeCodeAuth> {
     let auth = read_opencode_auth().ok()?;
     let anthropic_auth = auth.get("anthropic")?;
 
@@ -185,30 +192,30 @@ fn get_anthropic_key_from_opencode_auth() -> Option<String> {
             .get("key")
             .or_else(|| anthropic_auth.get("api_key"))
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
+            .map(|s| ClaudeCodeAuth::ApiKey(s.to_string())),
         Some("oauth") => {
             // Return OAuth access token - Claude CLI can use this
             anthropic_auth
                 .get("access")
                 .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
+                .map(|s| ClaudeCodeAuth::OAuthToken(s.to_string()))
         }
         _ => {
             // Check without type field - try key first, then OAuth access token
             if let Some(key) = anthropic_auth.get("key").and_then(|v| v.as_str()) {
-                return Some(key.to_string());
+                return Some(ClaudeCodeAuth::ApiKey(key.to_string()));
             }
             // Fall back to OAuth access token
             anthropic_auth
                 .get("access")
                 .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
+                .map(|s| ClaudeCodeAuth::OAuthToken(s.to_string()))
         }
     }
 }
 
 /// Get Anthropic API key or OAuth access token from Open Agent's ai_providers.json.
-fn get_anthropic_key_from_ai_providers(working_dir: &Path) -> Option<String> {
+fn get_anthropic_auth_from_ai_providers(working_dir: &Path) -> Option<ClaudeCodeAuth> {
     let ai_providers_path = working_dir.join(".openagent/ai_providers.json");
     if !ai_providers_path.exists() {
         return None;
@@ -227,7 +234,7 @@ fn get_anthropic_key_from_ai_providers(working_dir: &Path) -> Option<String> {
         // Check for API key first
         if let Some(api_key) = provider.get("api_key").and_then(|v| v.as_str()) {
             if !api_key.is_empty() {
-                return Some(api_key.to_string());
+                return Some(ClaudeCodeAuth::ApiKey(api_key.to_string()));
             }
         }
 
@@ -235,7 +242,7 @@ fn get_anthropic_key_from_ai_providers(working_dir: &Path) -> Option<String> {
         if let Some(oauth) = provider.get("oauth") {
             if let Some(access_token) = oauth.get("access_token").and_then(|v| v.as_str()) {
                 if !access_token.is_empty() {
-                    return Some(access_token.to_string());
+                    return Some(ClaudeCodeAuth::OAuthToken(access_token.to_string()));
                 }
             }
         }
@@ -536,7 +543,10 @@ fn sync_to_opencode_auth(
     std::fs::write(&auth_path, contents)
         .map_err(|e| format!("Failed to write OpenCode auth: {}", e))?;
 
-    if provider_type == ProviderType::OpenAI {
+    if matches!(
+        provider_type,
+        ProviderType::OpenAI | ProviderType::Anthropic | ProviderType::Google
+    ) {
         if let Err(e) = write_opencode_provider_auth_file(provider_type, &entry) {
             tracing::error!("Failed to write OpenCode provider auth file: {}", e);
         }
@@ -699,7 +709,10 @@ fn sync_api_key_to_opencode_auth(provider_type: ProviderType, api_key: &str) -> 
     std::fs::write(&auth_path, contents)
         .map_err(|e| format!("Failed to write OpenCode auth: {}", e))?;
 
-    if provider_type == ProviderType::OpenAI {
+    if matches!(
+        provider_type,
+        ProviderType::OpenAI | ProviderType::Anthropic | ProviderType::Google
+    ) {
         let provider_entry = serde_json::json!({
             "type": "api_key",
             "key": api_key
@@ -719,7 +732,10 @@ fn remove_opencode_auth_entry(provider_type: ProviderType) -> Result<(), String>
     let auth_path = get_opencode_auth_path();
     if !auth_path.exists() {
         // Still attempt to remove provider-specific auth file if present.
-        if provider_type == ProviderType::OpenAI {
+        if matches!(
+            provider_type,
+            ProviderType::OpenAI | ProviderType::Anthropic | ProviderType::Google
+        ) {
             let provider_path = get_opencode_provider_auth_path(provider_type);
             if provider_path.exists() {
                 std::fs::remove_file(&provider_path)
@@ -747,7 +763,10 @@ fn remove_opencode_auth_entry(provider_type: ProviderType) -> Result<(), String>
             .map_err(|e| format!("Failed to write OpenCode auth: {}", e))?;
     }
 
-    if provider_type == ProviderType::OpenAI {
+    if matches!(
+        provider_type,
+        ProviderType::OpenAI | ProviderType::Anthropic | ProviderType::Google
+    ) {
         let provider_path = get_opencode_provider_auth_path(provider_type);
         if provider_path.exists() {
             std::fs::remove_file(&provider_path)
@@ -760,23 +779,65 @@ fn remove_opencode_auth_entry(provider_type: ProviderType) -> Result<(), String>
 
 /// Get the path to OpenCode's auth.json file.
 fn get_opencode_auth_path() -> PathBuf {
-    let data_home = std::env::var("XDG_DATA_HOME").ok();
-    let base = if let Some(data_home) = data_home {
-        PathBuf::from(data_home).join("opencode")
-    } else {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
-        PathBuf::from(&home).join(".local/share/opencode")
-    };
+    let mut candidates = Vec::new();
+    if let Ok(data_home) = std::env::var("XDG_DATA_HOME") {
+        candidates.push(PathBuf::from(data_home).join("opencode").join("auth.json"));
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+    candidates.push(
+        PathBuf::from(&home)
+            .join(".local")
+            .join("share")
+            .join("opencode")
+            .join("auth.json"),
+    );
+    candidates.push(
+        PathBuf::from("/var/lib/opencode")
+            .join(".local")
+            .join("share")
+            .join("opencode")
+            .join("auth.json"),
+    );
 
-    base.join("auth.json")
+    for candidate in &candidates {
+        if candidate.exists() {
+            return candidate.clone();
+        }
+    }
+    candidates
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| PathBuf::from("/var/lib/opencode/.local/share/opencode/auth.json"))
 }
 
 fn get_opencode_provider_auth_path(provider_type: ProviderType) -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
-    PathBuf::from(home)
-        .join(".opencode")
-        .join("auth")
-        .join(format!("{}.json", provider_type.id()))
+    let mut candidates = vec![
+        PathBuf::from(&home)
+            .join(".opencode")
+            .join("auth")
+            .join(format!("{}.json", provider_type.id())),
+        PathBuf::from("/var/lib/opencode")
+            .join(".opencode")
+            .join("auth")
+            .join(format!("{}.json", provider_type.id())),
+    ];
+
+    for candidate in &candidates {
+        if candidate.exists() {
+            return candidate.clone();
+        }
+    }
+
+    candidates
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| {
+            PathBuf::from(home)
+                .join(".opencode")
+                .join("auth")
+                .join(format!("{}.json", provider_type.id()))
+        })
 }
 
 fn read_opencode_provider_auth(provider_type: ProviderType) -> Result<Option<AuthKind>, String> {
@@ -1262,7 +1323,10 @@ async fn set_opencode_auth(
     // Write back to file
     write_opencode_auth(&auth).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    if provider_type == ProviderType::OpenAI {
+    if matches!(
+        provider_type,
+        ProviderType::OpenAI | ProviderType::Anthropic | ProviderType::Google
+    ) {
         if let Err(e) = write_opencode_provider_auth_file(provider_type, &entry_clone) {
             tracing::error!("Failed to write OpenCode provider auth file: {}", e);
         }

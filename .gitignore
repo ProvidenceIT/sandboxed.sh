@@ -44,3 +44,10 @@ Thumbs.db
 dashboard/package-lock.json
 .openagent/
 library-template/
+
+# Local workspace artifacts
+workspaces/
+.openagent_context.json
+
+# Local experiments
+vllm-gb10-dgx-spark/

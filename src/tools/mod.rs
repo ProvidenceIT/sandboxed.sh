@@ -226,10 +226,7 @@ impl ToolRegistry {
         tools.insert("debug_error".to_string(), Arc::new(composite::DebugError));
 
         // Desktop automation (conditional on DESKTOP_ENABLED)
-        if std::env::var("DESKTOP_ENABLED")
-            .map(|v| v.to_lowercase() == "true" || v == "1")
-            .unwrap_or(false)
-        {
+        if desktop::desktop_enabled() {
             tools.insert(
                 "desktop_start_session".to_string(),
                 Arc::new(desktop::StartSession),
