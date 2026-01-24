@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState, useCallback, memo } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { toast } from "@/components/toast";
 import { MarkdownContent } from "@/components/markdown-content";
+import { StreamingMarkdown } from "@/components/streaming-markdown";
 import { EnhancedInput, type SubmitPayload, type EnhancedInputHandle } from "@/components/enhanced-input";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
@@ -788,8 +789,10 @@ function ThinkingGroupItem({
                 {idx > 0 && (
                   <div className="border-t border-white/[0.06] my-2" />
                 )}
-                <MarkdownContent
+                {/* Use StreamingMarkdown for efficient incremental rendering */}
+                <StreamingMarkdown
                   content={item.content}
+                  isStreaming={!item.done}
                   className="text-xs text-white/60 [&_p]:my-1 [&_ul]:my-1 [&_ol]:my-1"
                   basePath={basePath}
                 />
@@ -864,8 +867,9 @@ function ThinkingPanelItem({
         "max-h-[50vh] overflow-y-auto"
       )}>
         {item.content ? (
-          <MarkdownContent
+          <StreamingMarkdown
             content={item.content}
+            isStreaming={isActive}
             className="text-xs [&_p]:my-1 [&_ul]:my-1 [&_ol]:my-1"
             basePath={basePath}
           />
@@ -1864,10 +1868,13 @@ export default function ControlClient() {
 
   // Library context for agents
 
+  // Only tick when stream is active to avoid unnecessary re-renders
+  const streamIsActive = streamDiagnostics.phase === "open" || streamDiagnostics.phase === "streaming" || streamDiagnostics.phase === "connecting";
   useEffect(() => {
+    if (!streamIsActive) return;
     const interval = setInterval(() => setDiagTick((prev) => prev + 1), 1000);
     return () => clearInterval(interval);
-  }, []);
+  }, [streamIsActive]);
 
   // Parallel missions state
   const [runningMissions, setRunningMissions] = useState<RunningMissionInfo[]>(
@@ -1880,9 +1887,25 @@ export default function ControlClient() {
   const [viewingMissionId, setViewingMissionId] = useState<string | null>(null);
 
   // Store items per mission to preserve context when switching
+  // Limited to MAX_CACHED_MISSIONS to prevent memory bloat
+  const MAX_CACHED_MISSIONS = 5;
   const [missionItems, setMissionItems] = useState<Record<string, ChatItem[]>>(
     {}
   );
+
+  // Helper to update missionItems with LRU-style cleanup
+  const updateMissionItems = useCallback((missionId: string, items: ChatItem[]) => {
+    setMissionItems((prev) => {
+      const updated = { ...prev, [missionId]: items };
+      const keys = Object.keys(updated);
+      // If over limit, remove oldest entries (first in object)
+      if (keys.length > MAX_CACHED_MISSIONS) {
+        const toRemove = keys.slice(0, keys.length - MAX_CACHED_MISSIONS);
+        toRemove.forEach(k => delete updated[k]);
+      }
+      return updated;
+    });
+  }, []);
 
   // Attachment state
   const [attachments, setAttachments] = useState<
@@ -3195,8 +3218,8 @@ export default function ControlClient() {
         if (events) {
           applyDesktopSessionFromEvents(events);
         }
-        // Update cache with fresh data
-        setMissionItems((prev) => ({ ...prev, [missionId]: historyItems }));
+        // Update cache with fresh data (with LRU cleanup)
+        updateMissionItems(missionId, historyItems);
         setViewingMission(mission);
         if (currentMissionRef.current?.id === mission.id) {
           setCurrentMission(mission);
@@ -3319,7 +3342,7 @@ export default function ControlClient() {
       // Show basic history immediately
       const basicItems = missionHistoryToItems(resumed);
       setItems(basicItems);
-      setMissionItems((prev) => ({ ...prev, [resumed.id]: basicItems }));
+      updateMissionItems(resumed.id, basicItems);
       refreshRecentMissions();
       toast.success(
         cleanWorkspace
@@ -3331,7 +3354,7 @@ export default function ControlClient() {
         .then((events) => {
           const fullItems = eventsToItems(events);
           setItems(fullItems);
-          setMissionItems((prev) => ({ ...prev, [resumed.id]: fullItems }));
+          updateMissionItems(resumed.id, fullItems);
           // Also check events for desktop sessions
           applyDesktopSessionFromEvents(events);
         })
@@ -3343,6 +3366,16 @@ export default function ControlClient() {
       setMissionLoading(false);
     }
   };
+
+  // Debouncing for thinking updates to reduce re-renders during streaming
+  const pendingThinkingRef = useRef<{
+    content: string;
+    done: boolean;
+    id: string;
+    startTime: number;
+  } | null>(null);
+  const thinkingFlushTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const thinkingIdCounterRef = useRef(0);
 
   // Auto-reconnecting stream with exponential backoff
   useEffect(() => {
@@ -3439,7 +3472,7 @@ export default function ControlClient() {
               if (!mounted) return;
               const historyItems = eventsToItems(events);
               setItems(historyItems);
-              setMissionItems((prev) => ({ ...prev, [viewingId]: historyItems }));
+              updateMissionItems(viewingId, historyItems);
               // Also check events for desktop sessions
               applyDesktopSessionFromEvents(events);
             })
@@ -3450,7 +3483,7 @@ export default function ControlClient() {
                   if (!mounted) return;
                   const historyItems = missionHistoryToItems(mission);
                   setItems(historyItems);
-                  setMissionItems((prev) => ({ ...prev, [viewingId]: historyItems }));
+                  updateMissionItems(viewingId, historyItems);
                 })
                 .catch(() => {}); // Ignore errors - we'll get updates via stream
             });
@@ -3635,64 +3668,102 @@ export default function ControlClient() {
         const done = Boolean(data["done"]);
         const now = Date.now();
 
-        setItems((prev) => {
-          // Remove phase items when thinking starts
-          const filtered = prev.filter((it) => it.kind !== "phase");
-          const existingIdx = filtered.findIndex(
-            (it) => it.kind === "thinking" && !it.done
-          );
-          if (existingIdx >= 0) {
-            const updated = [...filtered];
-            const existing = updated[existingIdx] as Extract<
-              ChatItem,
-              { kind: "thinking" }
-            >;
+        // Debounced thinking updates to reduce re-renders during streaming
+        const flushThinking = () => {
+          const pending = pendingThinkingRef.current;
+          if (!pending) return;
 
-            // If this is a done marker or content update for the same thought, update in place
-            if (done || !content || existing.content.startsWith(content) || content.startsWith(existing.content)) {
+          setItems((prev) => {
+            // Remove phase items when thinking starts
+            const filtered = prev.filter((it) => it.kind !== "phase");
+            const existingIdx = filtered.findIndex(
+              (it) => it.kind === "thinking" && !it.done
+            );
+            if (existingIdx >= 0) {
+              const updated = [...filtered];
+              const existing = updated[existingIdx] as Extract<
+                ChatItem,
+                { kind: "thinking" }
+              >;
+
+              // Update existing item in place with buffered content
+              if (pending.done || !pending.content || existing.id === pending.id) {
+                updated[existingIdx] = {
+                  ...existing,
+                  content: pending.content || existing.content,
+                  done: pending.done,
+                  endTime: pending.done ? now : existing.endTime,
+                };
+                if (pending.done) {
+                  pendingThinkingRef.current = null;
+                }
+                return updated;
+              }
+
+              // New thought - mark existing as done and create new
               updated[existingIdx] = {
                 ...existing,
-                // When done marker arrives with empty content, preserve existing content
-                // Backend sends cumulative content normally, but final done marker may be empty
-                content: content || existing.content,
-                done,
-                // Set endTime when marking as done
-                ...(done && { endTime: now }),
+                done: true,
+                endTime: now,
               };
-              return updated;
+              if (pending.done) {
+                pendingThinkingRef.current = null;
+              }
+              return [
+                ...updated,
+                {
+                  kind: "thinking" as const,
+                  id: pending.id,
+                  content: pending.content,
+                  done: pending.done,
+                  startTime: pending.startTime,
+                  endTime: pending.done ? now : undefined,
+                },
+              ];
+            } else {
+              if (pending.done) {
+                pendingThinkingRef.current = null;
+              }
+              return [
+                ...filtered,
+                {
+                  kind: "thinking" as const,
+                  id: pending.id,
+                  content: pending.content,
+                  done: pending.done,
+                  startTime: pending.startTime,
+                  endTime: pending.done ? now : undefined,
+                },
+              ];
             }
+          });
+        };
 
-            // New thought content that doesn't match existing - mark existing as done and create new
-            updated[existingIdx] = {
-              ...existing,
-              done: true,
-              endTime: now,
-            };
-            return [
-              ...updated,
-              {
-                kind: "thinking" as const,
-                id: `thinking-${now}`,
-                content,
-                done: false,
-                startTime: now,
-              },
-            ];
-          } else {
-            return [
-              ...filtered,
-              {
-                kind: "thinking" as const,
-                id: `thinking-${now}`,
-                content,
-                done,
-                startTime: now,
-                // Set endTime if creating a pre-done item (unlikely but handle it)
-                ...(done && { endTime: now }),
-              },
-            ];
-          }
-        });
+        // Get or create stable ID for current thinking session
+        const existingPending = pendingThinkingRef.current;
+        const thinkingId = existingPending?.id ?? `thinking-${thinkingIdCounterRef.current++}`;
+        const startTime = existingPending?.startTime ?? now;
+
+        // Buffer the content update
+        pendingThinkingRef.current = {
+          content: content || existingPending?.content || "",
+          done,
+          id: thinkingId,
+          startTime,
+        };
+
+        // Clear any pending flush timeout
+        if (thinkingFlushTimeoutRef.current) {
+          clearTimeout(thinkingFlushTimeoutRef.current);
+          thinkingFlushTimeoutRef.current = null;
+        }
+
+        // Flush immediately if done, otherwise debounce (100ms)
+        if (done) {
+          flushThinking();
+        } else {
+          thinkingFlushTimeoutRef.current = setTimeout(flushThinking, 100);
+        }
         return;
       }
 
@@ -3935,6 +4006,11 @@ export default function ControlClient() {
       if (reconnectTimeout) clearTimeout(reconnectTimeout);
       cleanup?.();
       streamCleanupRef.current = null;
+      // Clean up thinking debounce timeout
+      if (thinkingFlushTimeoutRef.current) {
+        clearTimeout(thinkingFlushTimeoutRef.current);
+        thinkingFlushTimeoutRef.current = null;
+      }
     };
   }, []);
 
