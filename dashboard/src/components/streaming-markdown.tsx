@@ -139,6 +139,7 @@ const MemoizedBlock = memo(function MemoizedBlock({
 
 /**
  * Plain text streaming block - minimal DOM updates
+ * Uses text-sm to match MarkdownContent's prose-glass styling
  */
 const StreamingBlock = memo(function StreamingBlock({
   content,
@@ -146,7 +147,7 @@ const StreamingBlock = memo(function StreamingBlock({
   content: string;
 }) {
   return (
-    <p className="my-2 whitespace-pre-wrap">{content}</p>
+    <p className="my-2 whitespace-pre-wrap text-sm">{content}</p>
   );
 });
 
