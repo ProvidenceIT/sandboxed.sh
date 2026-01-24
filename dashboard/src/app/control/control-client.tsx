@@ -887,11 +887,13 @@ function ThinkingPanel({
   onClose,
   className,
   basePath,
+  missionId,
 }: {
   items: Extract<ChatItem, { kind: "thinking" }>[];
   onClose: () => void;
   className?: string;
   basePath?: string;
+  missionId?: string | null;
 }) {
   const activeItem = items.find(t => !t.done);
 
@@ -914,11 +916,10 @@ function ThinkingPanel({
   const LOAD_MORE_THOUGHTS = 10;
   const [visibleThoughtsLimit, setVisibleThoughtsLimit] = useState(INITIAL_VISIBLE_THOUGHTS);
 
-  // Reset limit when items array reference changes (new mission loads new items)
+  // Reset limit when mission changes (not during streaming updates)
   useEffect(() => {
     setVisibleThoughtsLimit(INITIAL_VISIBLE_THOUGHTS);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [items]);
+  }, [missionId]);
 
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -5618,6 +5619,7 @@ export default function ControlClient() {
                 onClose={() => setShowThinkingPanel(false)}
                 className={showDesktopStream ? "flex-shrink-0 max-h-[40%]" : "flex-1"}
                 basePath={missionWorkingDirectory}
+                missionId={viewingMissionId}
               />
             )}
 
