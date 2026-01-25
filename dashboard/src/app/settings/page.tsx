@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import useSWR from 'swr';
 import { toast } from '@/components/toast';
 import {
@@ -21,6 +21,8 @@ import {
   updateBackendConfig,
   getProviderForBackend,
   BackendProviderResponse,
+  downloadBackup,
+  restoreBackup,
 } from '@/lib/api';
 import {
   Server,
@@ -37,6 +39,9 @@ import {
   Key,
   Check,
   X,
+  Download,
+  Upload,
+  Archive,
 } from 'lucide-react';
 import { readSavedSettings, writeSavedSettings } from '@/lib/settings';
 import { cn } from '@/lib/utils';
@@ -129,6 +134,15 @@ export default function SettingsPage() {
     enabled: true,
     api_key: '',
   });
+
+  // Backup/restore state
+  const [downloadingBackup, setDownloadingBackup] = useState(false);
+  const [restoringBackup, setRestoringBackup] = useState(false);
+  const fileInputRef = useCallback((node: HTMLInputElement | null) => {
+    if (node) {
+      node.value = '';
+    }
+  }, []);
 
   // SWR: fetch health status
   const { data: health, isLoading: healthLoading, mutate: mutateHealth } = useSWR(
@@ -511,6 +525,49 @@ export default function SettingsPage() {
     }
   };
 
+  // Backup/restore handlers
+  const handleDownloadBackup = async () => {
+    setDownloadingBackup(true);
+    try {
+      await downloadBackup();
+      toast.success('Backup downloaded successfully');
+    } catch (err) {
+      toast.error(
+        `Failed to download backup: ${err instanceof Error ? err.message : 'Unknown error'}`
+      );
+    } finally {
+      setDownloadingBackup(false);
+    }
+  };
+
+  const handleRestoreBackup = async (file: File) => {
+    setRestoringBackup(true);
+    try {
+      const result = await restoreBackup(file);
+      if (result.success) {
+        toast.success(result.message);
+        // Refresh all data after restore
+        mutateHealth();
+        mutateSettings();
+        mutateProviders();
+        mutateOpenCodeBackend();
+        mutateClaudeBackend();
+        mutateAmpBackend();
+      } else {
+        toast.error(result.message);
+        if (result.errors.length > 0) {
+          result.errors.forEach((error) => toast.error(error));
+        }
+      }
+    } catch (err) {
+      toast.error(
+        `Failed to restore backup: ${err instanceof Error ? err.message : 'Unknown error'}`
+      );
+    } finally {
+      setRestoringBackup(false);
+    }
+  };
+
   return (
     <div className="min-h-screen flex flex-col items-center p-6">
       {/* Add Provider Modal */}
@@ -860,7 +917,7 @@ export default function SettingsPage() {
                     )}
                     Save OpenCode
                   </button>
-                  <span className="text-xs text-white/40">Restart required to apply runtime changes</span>
+                  
                 </div>
               </div>
             ) : activeBackendTab === 'claudecode' ? (
@@ -935,7 +992,7 @@ export default function SettingsPage() {
                     )}
                     Save Claude Code
                   </button>
-                  <span className="text-xs text-white/40">Restart required to apply runtime changes</span>
+                  
                 </div>
               </div>
             ) : activeBackendTab === 'amp' ? (
@@ -1032,7 +1089,7 @@ export default function SettingsPage() {
                     )}
                     Save Amp
                   </button>
-                  <span className="text-xs text-white/40">Restart required to apply runtime changes</span>
+                  
                 </div>
               </div>
             ) : null}
@@ -1114,6 +1171,70 @@ export default function SettingsPage() {
               )}
               <p className="mt-1.5 text-xs text-white/30">
                 Git remote URL for skills, tools, agents, and rules. Click to edit.
+              </p>
+            </div>
+          </div>
+
+          {/* Backup & Restore */}
+          <div className="rounded-xl bg-white/[0.02] border border-white/[0.04] p-5">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-amber-500/10">
+                <Archive className="h-5 w-5 text-amber-400" />
+              </div>
+              <div>
+                <h2 className="text-sm font-medium text-white">Backup & Restore</h2>
+                <p className="text-xs text-white/40">
+                  Export or import your settings, credentials, and provider configurations
+                </p>
+              </div>
+            </div>
+
+            <div className="space-y-3">
+              <p className="text-xs text-white/50">
+                Backup includes: AI provider credentials, backend settings (Amp API key, etc.),
+                workspace definitions, MCP configurations, and encrypted secrets.
+              </p>
+
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={handleDownloadBackup}
+                  disabled={downloadingBackup}
+                  className="flex items-center gap-2 rounded-lg bg-indigo-500 px-4 py-2 text-sm text-white hover:bg-indigo-600 transition-colors disabled:opacity-50"
+                >
+                  {downloadingBackup ? (
+                    <Loader className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Download className="h-4 w-4" />
+                  )}
+                  Download Backup
+                </button>
+
+                <label className="flex items-center gap-2 rounded-lg border border-white/[0.08] bg-white/[0.02] px-4 py-2 text-sm text-white/70 hover:bg-white/[0.04] transition-colors cursor-pointer">
+                  {restoringBackup ? (
+                    <Loader className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Upload className="h-4 w-4" />
+                  )}
+                  Restore Backup
+                  <input
+                    type="file"
+                    accept=".zip"
+                    className="hidden"
+                    ref={fileInputRef}
+                    disabled={restoringBackup}
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file) {
+                        handleRestoreBackup(file);
+                        e.target.value = '';
+                      }
+                    }}
+                  />
+                </label>
+              </div>
+
+              <p className="text-xs text-white/30">
+                After restoring, a server restart may be required to apply credential changes.
               </p>
             </div>
           </div>

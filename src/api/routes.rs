@@ -600,34 +600,51 @@ async fn get_stats(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthUser>,
 ) -> Json<StatsResponse> {
+    // Legacy tasks
     let tasks = state.tasks.read().await;
     let user_tasks = tasks.get(&user.id);
 
-    let total_tasks = user_tasks.map(|t| t.len()).unwrap_or(0);
-    let active_tasks = user_tasks
+    let legacy_total = user_tasks.map(|t| t.len()).unwrap_or(0);
+    let legacy_active = user_tasks
         .map(|t| {
             t.values()
                 .filter(|s| s.status == TaskStatus::Running)
                 .count()
         })
         .unwrap_or(0);
-    let completed_tasks = user_tasks
+    let legacy_completed = user_tasks
         .map(|t| {
             t.values()
                 .filter(|s| s.status == TaskStatus::Completed)
                 .count()
         })
         .unwrap_or(0);
-    let failed_tasks = user_tasks
+    let legacy_failed = user_tasks
         .map(|t| {
             t.values()
                 .filter(|s| s.status == TaskStatus::Failed)
                 .count()
         })
         .unwrap_or(0);
+    drop(tasks);
+
+    // Get mission stats from mission store
+    let control_state = state.control.get_or_spawn(&user).await;
+    
+    // Count missions by status
+    let missions = control_state.mission_store.list_missions(1000, 0).await.unwrap_or_default();
+    let mission_total = missions.len();
+    let mission_active = missions.iter().filter(|m| m.status == super::control::MissionStatus::Active).count();
+    let mission_completed = missions.iter().filter(|m| m.status == super::control::MissionStatus::Completed).count();
+    let mission_failed = missions.iter().filter(|m| m.status == super::control::MissionStatus::Failed).count();
+    
+    // Combine legacy tasks and missions
+    let total_tasks = legacy_total + mission_total;
+    let active_tasks = legacy_active + mission_active;
+    let completed_tasks = legacy_completed + mission_completed;
+    let failed_tasks = legacy_failed + mission_failed;
 
     // Get total cost from mission store (aggregates from all assistant_message events)
-    let control_state = state.control.get_or_spawn(&user).await;
     let total_cost_cents = control_state
         .mission_store
         .get_total_cost_cents()
