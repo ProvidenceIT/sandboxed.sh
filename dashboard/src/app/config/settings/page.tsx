@@ -989,17 +989,6 @@ export default function SettingsPage() {
               <h2 className="text-lg font-medium text-white">Amp Settings</h2>
               <p className="text-sm text-white/50">Configure default mode and agent for Amp missions</p>
             </div>
-            <div className="flex items-center gap-2">
-              <button
-                onClick={loadSettings}
-                disabled={loading}
-                title="Reloads the source from disk"
-                className="flex items-center gap-2 px-3 py-1.5 text-sm text-white/70 hover:text-white bg-white/[0.04] hover:bg-white/[0.08] rounded-lg transition-colors disabled:opacity-50"
-              >
-                <RefreshCw className={cn('h-4 w-4', loading && 'animate-spin')} />
-                Reload
-              </button>
-            </div>
           </div>
 
           {/* Amp Info */}
