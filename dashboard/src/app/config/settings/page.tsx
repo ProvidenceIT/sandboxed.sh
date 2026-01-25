@@ -19,7 +19,7 @@ import {
   listBackendAgents,
   listProviders,
 } from '@/lib/api';
-import { Save, Loader, AlertCircle, Check, RefreshCw, RotateCcw, Eye, EyeOff, AlertTriangle, X, GitBranch, Upload, Info } from 'lucide-react';
+import { Save, Loader, AlertCircle, Check, RefreshCw, RotateCcw, Eye, EyeOff, AlertTriangle, X, GitBranch, Upload, Info, Download } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { ConfigCodeEditor } from '@/components/config-code-editor';
 import { useLibrary } from '@/contexts/library-context';
@@ -463,8 +463,19 @@ export default function SettingsPage() {
             <p className="text-sm text-amber-400/80 mt-1">
               The Library settings differ from what OpenCode is currently using.
               This can happen if settings were changed outside the Library.
-              Save your current settings to sync them to OpenCode.
             </p>
+            <div className="flex items-center gap-3 mt-3">
+              <button
+                onClick={() => {
+                  setSettings(systemSettings);
+                }}
+                className="flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-amber-400 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 rounded-lg transition-colors"
+              >
+                <Download className="h-3.5 w-3.5" />
+                Import from OpenCode
+              </button>
+              <span className="text-xs text-amber-400/60">or edit and save to overwrite</span>
+            </div>
           </div>
         </div>
       )}
