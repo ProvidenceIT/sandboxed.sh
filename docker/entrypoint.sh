@@ -65,6 +65,19 @@ echo "[entrypoint] starting open_agent backend on ${HOST:-127.0.0.1}:${PORT:-300
 open_agent &
 BACKEND_PID=$!
 
+# Wait for backend to become healthy before starting dashboard/Caddy
+echo "[entrypoint] waiting for backend health..."
+for i in $(seq 1 30); do
+    if curl -sf http://127.0.0.1:${PORT:-3000}/api/health >/dev/null 2>&1; then
+        echo "[entrypoint] backend ready"
+        break
+    fi
+    if [ "$i" -eq 30 ]; then
+        echo "[entrypoint] WARNING: backend not healthy after 15s, continuing anyway"
+    fi
+    sleep 0.5
+done
+
 # -- Start Next.js dashboard --------------------------------------------------
 echo "[entrypoint] starting Next.js dashboard on port 3001"
 cd /opt/dashboard

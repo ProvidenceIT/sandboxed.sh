@@ -93,11 +93,17 @@ COPY --from=dashboard-builder /build/dashboard/.next/standalone /opt/dashboard
 COPY --from=dashboard-builder /build/dashboard/.next/static /opt/dashboard/.next/static
 COPY --from=dashboard-builder /build/dashboard/public /opt/dashboard/public
 
-# -- Pre-install AI harness CLIs ---------------------------------------------
-RUN npm install -g @anthropic-ai/claude-code@latest 2>/dev/null || true
+# -- Pre-install AI harness CLIs (optional — agents still work if these fail) -
+RUN npm install -g @anthropic-ai/claude-code@latest \
+    && echo "[docker] Claude Code CLI installed: $(claude --version 2>/dev/null || echo 'unknown')" \
+    || echo "[docker] WARNING: Claude Code CLI install failed (will be installed on first mission)"
 RUN curl -fsSL https://opencode.ai/install | bash -s -- --no-modify-path \
-    && install -m 0755 /root/.opencode/bin/opencode /usr/local/bin/opencode || true
-RUN npm install -g @anthropic-ai/amp@latest 2>/dev/null || true
+    && install -m 0755 /root/.opencode/bin/opencode /usr/local/bin/opencode \
+    && echo "[docker] OpenCode CLI installed: $(opencode --version 2>/dev/null || echo 'unknown')" \
+    || echo "[docker] WARNING: OpenCode CLI install failed (will be installed on first mission)"
+RUN npm install -g @anthropic-ai/amp@latest \
+    && echo "[docker] Amp CLI installed: $(amp --version 2>/dev/null || echo 'unknown')" \
+    || echo "[docker] WARNING: Amp CLI install failed (will be installed on first mission)"
 
 # -- i3 config (from install_desktop.sh) -------------------------------------
 RUN mkdir -p /root/.config/i3

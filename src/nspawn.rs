@@ -221,7 +221,122 @@ pub fn tailscale_nspawn_extra_args(env: &HashMap<String, String>) -> Vec<String>
     args
 }
 
+/// Return the cache directory for rootfs tarballs.
+/// Defaults to `{WORKING_DIR}/.openagent/cache` (sibling of `containers/`).
+fn rootfs_cache_dir() -> PathBuf {
+    let working_dir = std::env::var("WORKING_DIR")
+        .unwrap_or_else(|_| "/root".to_string());
+    PathBuf::from(working_dir)
+        .join(".openagent")
+        .join("cache")
+}
+
+/// Return the path for a cached rootfs tarball for the given distro.
+fn rootfs_cache_path(distro: NspawnDistro) -> PathBuf {
+    rootfs_cache_dir().join(format!("rootfs-{}.tar", distro.as_str()))
+}
+
+/// Try to restore a container from a cached rootfs tarball.
+/// Returns Ok(true) if cache hit, Ok(false) if no cache.
+async fn restore_from_cache(path: &Path, distro: NspawnDistro) -> NspawnResult<bool> {
+    let cache_path = rootfs_cache_path(distro);
+    if !cache_path.exists() {
+        return Ok(false);
+    }
+
+    tracing::info!(
+        "Restoring container from cache: {} -> {}",
+        cache_path.display(),
+        path.display()
+    );
+
+    // Append to the build log so the dashboard can show progress.
+    let build_log_path = build_log_path_for(path);
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&build_log_path)
+    {
+        use std::io::Write;
+        let _ = writeln!(f, "[openagent] Restoring from cached rootfs...");
+    }
+
+    let output = Command::new("tar")
+        .arg("xf")
+        .arg(&cache_path)
+        .arg("-C")
+        .arg(path)
+        .output()
+        .await
+        .map_err(|e| NspawnError::Debootstrap(format!("tar extract failed: {}", e)))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        tracing::warn!(
+            "Cache restore failed (will fall back to debootstrap): {}",
+            stderr
+        );
+        // Clean up partial extraction
+        let _ = tokio::fs::remove_dir_all(path).await;
+        let _ = tokio::fs::create_dir_all(path).await;
+        return Ok(false);
+    }
+
+    tracing::info!("Container restored from cache successfully");
+    Ok(true)
+}
+
+/// Save a freshly-created container rootfs to the cache for reuse.
+async fn save_to_cache(path: &Path, distro: NspawnDistro) {
+    let cache_path = rootfs_cache_path(distro);
+    let cache_dir = rootfs_cache_dir();
+
+    if let Err(e) = tokio::fs::create_dir_all(&cache_dir).await {
+        tracing::warn!("Failed to create cache dir {}: {}", cache_dir.display(), e);
+        return;
+    }
+
+    // Write to a temp file first, then rename for atomicity.
+    let tmp_path = cache_path.with_extension("tar.tmp");
+
+    tracing::info!(
+        "Caching rootfs: {} -> {}",
+        path.display(),
+        cache_path.display()
+    );
+
+    let result = Command::new("tar")
+        .arg("cf")
+        .arg(&tmp_path)
+        .arg("-C")
+        .arg(path)
+        .arg(".")
+        .output()
+        .await;
+
+    match result {
+        Ok(output) if output.status.success() => {
+            if let Err(e) = tokio::fs::rename(&tmp_path, &cache_path).await {
+                tracing::warn!("Failed to finalize cache file: {}", e);
+                let _ = tokio::fs::remove_file(&tmp_path).await;
+            } else {
+                tracing::info!("Rootfs cached at {}", cache_path.display());
+            }
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            tracing::warn!("Cache tar creation failed: {}", stderr);
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+        }
+        Err(e) => {
+            tracing::warn!("Failed to run tar for caching: {}", e);
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+        }
+    }
+}
+
 /// Create a minimal container environment using debootstrap or pacstrap.
+/// Uses a cached rootfs tarball when available to avoid repeating slow bootstraps.
 pub async fn create_container(path: &Path, distro: NspawnDistro) -> NspawnResult<()> {
     // Create the container directory
     tokio::fs::create_dir_all(path).await?;
@@ -232,12 +347,22 @@ pub async fn create_container(path: &Path, distro: NspawnDistro) -> NspawnResult
         distro.as_str()
     );
 
+    // Try cache first
+    if restore_from_cache(path, distro).await? {
+        tracing::info!("Container created from cache at {}", path.display());
+        return Ok(());
+    }
+
+    // No cache — bootstrap from scratch
     match distro {
         NspawnDistro::ArchLinux => create_arch_container(path).await?,
         _ => create_debootstrap_container(path, distro).await?,
     }
 
     tracing::info!("Container created successfully at {}", path.display());
+
+    // Cache the fresh rootfs in the background for next time
+    save_to_cache(path, distro).await;
 
     Ok(())
 }
