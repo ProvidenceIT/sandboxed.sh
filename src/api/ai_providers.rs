@@ -1048,11 +1048,17 @@ fn read_openagent_credential(provider_type: ProviderType) -> Option<OAuthTokenEn
     let auth: serde_json::Value = serde_json::from_str(&contents).ok()?;
 
     for key in opencode_auth_keys(provider_type) {
-        let entry = auth.get(key)?;
+        let entry = match auth.get(key) {
+            Some(entry) => entry,
+            None => continue,
+        };
         if entry.get("type").and_then(|v| v.as_str()) != Some("oauth") {
             continue;
         }
-        let refresh_token = entry.get("refresh").and_then(|v| v.as_str())?;
+        let refresh_token = match entry.get("refresh").and_then(|v| v.as_str()) {
+            Some(t) => t,
+            None => continue,
+        };
         let access_token = entry
             .get("access")
             .and_then(|v| v.as_str())

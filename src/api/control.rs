@@ -814,7 +814,7 @@ impl FrontendToolHub {
         const MAX_EARLY_RESULTS: usize = 256;
         if early.len() >= MAX_EARLY_RESULTS {
             tracing::warn!(
-                "FrontendToolHub: early_results cache full ({} entries), dropping oldest",
+                "FrontendToolHub: early_results cache full ({} entries), dropping an entry",
                 early.len()
             );
             if let Some(key) = early.keys().next().cloned() {

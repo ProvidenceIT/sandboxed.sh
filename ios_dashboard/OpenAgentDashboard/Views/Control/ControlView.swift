@@ -2064,6 +2064,8 @@ private struct ThoughtsSheet: View {
 private struct ThoughtRow: View {
     let message: ChatMessage
     @State private var isExpanded = true
+    @State private var elapsedSeconds: Int = 0
+    @State private var timerTask: Task<Void, Never>?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -2079,12 +2081,9 @@ private struct ThoughtRow: View {
                         .foregroundStyle(message.thinkingDone ? Theme.textMuted : Theme.accent)
                         .symbolEffect(.pulse, options: message.thinkingDone ? .nonRepeating : .repeating)
 
-                    if let startTime = message.thinkingStartTime {
-                        let elapsed = Int(Date().timeIntervalSince(startTime))
-                        Text(message.thinkingDone ? "Thought for \(formatDuration(elapsed))" : "Thinking for \(formatDuration(elapsed))")
-                            .font(.caption)
-                            .foregroundStyle(Theme.textSecondary)
-                    }
+                    Text(message.thinkingDone ? "Thought for \(formatDuration(elapsedSeconds))" : "Thinking for \(formatDuration(elapsedSeconds))")
+                        .font(.caption)
+                        .foregroundStyle(Theme.textSecondary)
 
                     Spacer()
 
@@ -2108,6 +2107,43 @@ private struct ThoughtRow: View {
         .padding(10)
         .background(Theme.backgroundSecondary)
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .onAppear {
+            startTimer()
+        }
+        .onDisappear {
+            timerTask?.cancel()
+            timerTask = nil
+        }
+        .onChange(of: message.thinkingDone) { _, done in
+            if done {
+                timerTask?.cancel()
+                timerTask = nil
+                if let startTime = message.thinkingStartTime {
+                    elapsedSeconds = Int(Date().timeIntervalSince(startTime))
+                }
+            }
+        }
+    }
+
+    private func startTimer() {
+        timerTask?.cancel()
+        timerTask = nil
+
+        guard !message.thinkingDone else {
+            if let startTime = message.thinkingStartTime {
+                elapsedSeconds = Int(Date().timeIntervalSince(startTime))
+            }
+            return
+        }
+
+        timerTask = Task { @MainActor in
+            while !Task.isCancelled {
+                if let startTime = message.thinkingStartTime {
+                    elapsedSeconds = Int(Date().timeIntervalSince(startTime))
+                }
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+            }
+        }
     }
 
     private func formatDuration(_ seconds: Int) -> String {
