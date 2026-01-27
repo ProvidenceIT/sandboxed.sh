@@ -376,12 +376,10 @@ impl LibraryStore {
         // Ensure directory exists
         fs::create_dir_all(&skill_dir).await?;
 
-        // Encrypt any unversioned encrypted tags
-        let encrypted_content = if let Some(key) = env_crypto::load_private_key_from_env()? {
-            env_crypto::encrypt_content_tags(&key, content)?
-        } else {
-            content.to_string()
-        };
+        // Encrypt any unversioned encrypted tags (lazily generates key if needed)
+        let key = env_crypto::ensure_private_key().await
+            .context("Failed to ensure encryption key for saving skill")?;
+        let encrypted_content = env_crypto::encrypt_content_tags(&key, content)?;
 
         fs::write(&skill_md, encrypted_content)
             .await
@@ -511,13 +509,11 @@ impl LibraryStore {
             fs::create_dir_all(parent).await?;
         }
 
-        // Encrypt tags in .md files
+        // Encrypt tags in .md files (lazily generates key if needed)
         let content_to_write = if ref_path.ends_with(".md") {
-            if let Some(key) = env_crypto::load_private_key_from_env()? {
-                env_crypto::encrypt_content_tags(&key, content)?
-            } else {
-                content.to_string()
-            }
+            let key = env_crypto::ensure_private_key().await
+                .context("Failed to ensure encryption key for saving reference")?;
+            env_crypto::encrypt_content_tags(&key, content)?
         } else {
             content.to_string()
         };
@@ -1304,34 +1300,27 @@ impl LibraryStore {
 
         fs::create_dir_all(&templates_dir).await?;
 
-        // Selectively encrypt only keys in encrypted_keys
+        // Selectively encrypt only keys in encrypted_keys (lazily generates key if needed)
         let encrypted_set: std::collections::HashSet<_> =
             template.encrypted_keys.iter().cloned().collect();
-        let env_vars = match env_crypto::load_private_key_from_env()? {
-            Some(key) => {
-                let mut result = HashMap::with_capacity(template.env_vars.len());
-                for (k, v) in &template.env_vars {
-                    if encrypted_set.contains(k) {
-                        result.insert(
-                            k.clone(),
-                            env_crypto::encrypt_value(&key, v)
-                                .context("Failed to encrypt env var")?,
-                        );
-                    } else {
-                        result.insert(k.clone(), v.clone());
-                    }
-                }
-                result
-            }
-            None => {
-                if !encrypted_set.is_empty() {
-                    tracing::warn!(
-                        "Saving template '{}' with plaintext env vars (PRIVATE_KEY not configured)",
-                        name
+        let env_vars = if encrypted_set.is_empty() {
+            template.env_vars.clone()
+        } else {
+            let key = env_crypto::ensure_private_key().await
+                .context("Failed to ensure encryption key for saving template")?;
+            let mut result = HashMap::with_capacity(template.env_vars.len());
+            for (k, v) in &template.env_vars {
+                if encrypted_set.contains(k) {
+                    result.insert(
+                        k.clone(),
+                        env_crypto::encrypt_value(&key, v)
+                            .context("Failed to encrypt env var")?,
                     );
+                } else {
+                    result.insert(k.clone(), v.clone());
                 }
-                template.env_vars.clone()
             }
+            result
         };
 
         let config = WorkspaceTemplateConfig {

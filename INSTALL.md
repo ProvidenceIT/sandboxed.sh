@@ -535,6 +535,55 @@ Set in `/etc/open_agent/open_agent.env`:
   initial default if not configured in Settings)
 - optional: `LIBRARY_PATH=/root/.openagent/library`
 
+### 5.3 Library encryption key
+
+Workspace templates can mark env vars as **encrypted**. When saved, those values
+are encrypted with AES-256-GCM and stored in the git repo as
+`<encrypted v="1">...</encrypted>`. The plaintext is only visible in the
+dashboard and when deployed to workspaces.
+
+**How the key works:**
+
+- A single encryption key protects all encrypted values in the library.
+- The key is stored at `{WORKING_DIR}/.openagent/private_key` (typically
+  `/root/.openagent/private_key`).
+- On first save of any encrypted value, Open Agent **auto-generates** the key if
+  none exists.
+- The key can also be set manually via the `PRIVATE_KEY` environment variable
+  (hex-encoded, 32 bytes / 64 hex chars).
+
+**Sharing the key across servers:**
+
+All servers that use the same Library repo **must share the same encryption
+key**, otherwise they cannot decrypt each other's encrypted values.
+
+The recommended way to share the key is via **Backup & Restore** in the
+dashboard (Settings page). The backup archive includes the encryption key along
+with all other settings and credentials.
+
+To set up a new server with an existing library:
+
+1. On the **source** server: go to **Settings → Backup & Restore** and click
+   **Download Backup**.
+2. On the **new** server: go to **Settings → Backup & Restore** and upload the
+   backup file via **Restore Backup**.
+3. The encryption key, AI provider credentials, workspace definitions, and all
+   other settings are restored automatically.
+
+Alternatively, copy the key file manually:
+
+```bash
+# Copy from source to new server
+scp root@source-server:/root/.openagent/private_key root@new-server:/root/.openagent/private_key
+```
+
+Or set it via the environment:
+
+```bash
+# In /etc/open_agent/open_agent.env on the new server
+PRIVATE_KEY=<64-hex-char-key-from-source-server>
+```
+
 ---
 
 ## 6) Configure Open Agent (env file)
@@ -1033,4 +1082,5 @@ OAuth flows use copy-paste for the authorization code. The user:
 - [ ] Firewall port 3000 (only allow localhost)
 - [ ] Pin OpenCode version for stability
 - [ ] Set up your Library git repo
+- [ ] Share encryption key across servers (backup/restore or manual copy)
 - [ ] Test OAuth flows for AI providers
