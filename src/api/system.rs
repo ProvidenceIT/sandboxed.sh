@@ -59,6 +59,25 @@ pub struct UpdateProgressEvent {
     pub progress: Option<u8>, // 0-100
 }
 
+/// Build a single SSE event carrying an [`UpdateProgressEvent`] payload.
+///
+/// Used by all `stream_*_update()` functions to avoid repeating the
+/// `Event::default().data(serde_json::to_string(...).unwrap())` boilerplate.
+fn sse(
+    event_type: &str,
+    message: impl Into<String>,
+    progress: Option<u8>,
+) -> Result<Event, std::convert::Infallible> {
+    Ok(Event::default().data(
+        serde_json::to_string(&UpdateProgressEvent {
+            event_type: event_type.to_string(),
+            message: message.into(),
+            progress,
+        })
+        .unwrap(),
+    ))
+}
+
 /// Information about an installed OpenCode plugin.
 #[derive(Debug, Clone, Serialize)]
 pub struct InstalledPluginInfo {
@@ -642,29 +661,17 @@ async fn update_component(
 /// Builds from source using git tags (no pre-built binaries needed).
 fn stream_open_agent_update() -> impl Stream<Item = Result<Event, std::convert::Infallible>> {
     async_stream::stream! {
-        yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
-            event_type: "log".to_string(),
-            message: "Starting Open Agent update...".to_string(),
-            progress: Some(0),
-        }).unwrap()));
+        yield sse("log", "Starting Open Agent update...", Some(0));
 
         // Check if source repo exists
         let repo_path = std::path::Path::new(OPEN_AGENT_REPO_PATH);
         if !repo_path.exists() {
-            yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
-                event_type: "error".to_string(),
-                message: format!("Source repo not found at {}. Clone the repo first (see INSTALL.md).", OPEN_AGENT_REPO_PATH),
-                progress: None,
-            }).unwrap()));
+            yield sse("error", format!("Source repo not found at {}. Clone the repo first (see INSTALL.md).", OPEN_AGENT_REPO_PATH), None);
             return;
         }
 
         // Fetch latest from git
-        yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
-            event_type: "log".to_string(),
-            message: "Fetching latest changes from git...".to_string(),
-            progress: Some(5),
-        }).unwrap()));
+        yield sse("log", "Fetching latest changes from git...", Some(5));
 
         let fetch_result = Command::new("git")
             .args(["fetch", "--tags", "origin"])
@@ -676,29 +683,17 @@ fn stream_open_agent_update() -> impl Stream<Item = Result<Event, std::convert::
             Ok(output) if output.status.success() => {}
             Ok(output) => {
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
-                    event_type: "error".to_string(),
-                    message: format!("Failed to fetch: {}", stderr),
-                    progress: None,
-                }).unwrap()));
+                yield sse("error", format!("Failed to fetch: {}", stderr), None);
                 return;
             }
             Err(e) => {
-                yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
-                    event_type: "error".to_string(),
-                    message: format!("Failed to run git fetch: {}", e),
-                    progress: None,
-                }).unwrap()));
+                yield sse("error", format!("Failed to run git fetch: {}", e), None);
                 return;
             }
         }
 
         // Get the latest tag
-        yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
-            event_type: "log".to_string(),
-            message: "Finding latest release tag...".to_string(),
-            progress: Some(10),
-        }).unwrap()));
+        yield sse("log", "Finding latest release tag...", Some(10));
 
         let tag_result = Command::new("git")
             .args(["describe", "--tags", "--abbrev=0", "origin/master"])
@@ -711,21 +706,12 @@ fn stream_open_agent_update() -> impl Stream<Item = Result<Event, std::convert::
                 String::from_utf8_lossy(&output.stdout).trim().to_string()
             }
             _ => {
-                // No tags found, use origin/master
-                yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
-                    event_type: "log".to_string(),
-                    message: "No release tags found, using origin/master...".to_string(),
-                    progress: Some(12),
-                }).unwrap()));
+                yield sse("log", "No release tags found, using origin/master...", Some(12));
                 "origin/master".to_string()
             }
         };
 
-        yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
-            event_type: "log".to_string(),
-            message: format!("Checking out {}...", latest_tag),
-            progress: Some(15),
-        }).unwrap()));
+        yield sse("log", format!("Checking out {}...", latest_tag), Some(15));
 
         // Reset any local changes before checkout to prevent conflicts
         let _ = Command::new("git")
@@ -742,130 +728,84 @@ fn stream_open_agent_update() -> impl Stream<Item = Result<Event, std::convert::
             .await;
 
         // Checkout the tag/branch
-        let checkout_result = Command::new("git")
+        match Command::new("git")
             .args(["checkout", &latest_tag])
             .current_dir(OPEN_AGENT_REPO_PATH)
             .output()
-            .await;
-
-        match checkout_result {
+            .await
+        {
             Ok(output) if output.status.success() => {}
             Ok(output) => {
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
-                    event_type: "error".to_string(),
-                    message: format!("Failed to checkout: {}", stderr),
-                    progress: None,
-                }).unwrap()));
+                yield sse("error", format!("Failed to checkout: {}", stderr), None);
                 return;
             }
             Err(e) => {
-                yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
-                    event_type: "error".to_string(),
-                    message: format!("Failed to run git checkout: {}", e),
-                    progress: None,
-                }).unwrap()));
+                yield sse("error", format!("Failed to run git checkout: {}", e), None);
                 return;
             }
         }
 
         // If using origin/master, pull latest
         if latest_tag == "origin/master" {
-            let pull_result = Command::new("git")
+            if let Ok(output) = Command::new("git")
                 .args(["pull", "origin", "master"])
                 .current_dir(OPEN_AGENT_REPO_PATH)
                 .output()
-                .await;
-
-            if let Ok(output) = pull_result {
+                .await
+            {
                 if !output.status.success() {
                     let stderr = String::from_utf8_lossy(&output.stderr);
-                    yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
-                        event_type: "log".to_string(),
-                        message: format!("Warning: git pull failed: {}", stderr),
-                        progress: Some(18),
-                    }).unwrap()));
+                    yield sse("log", format!("Warning: git pull failed: {}", stderr), Some(18));
                 }
             }
         }
 
         // Build the project
-        yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
-            event_type: "log".to_string(),
-            message: "Building Open Agent (this may take a few minutes)...".to_string(),
-            progress: Some(20),
-        }).unwrap()));
+        yield sse("log", "Building Open Agent (this may take a few minutes)...", Some(20));
 
-        // Source cargo env and build
-        let build_result = Command::new("bash")
+        match Command::new("bash")
             .args(["-c", "source /root/.cargo/env && cargo build --bin open_agent"])
             .current_dir(OPEN_AGENT_REPO_PATH)
             .output()
-            .await;
-
-        match build_result {
+            .await
+        {
             Ok(output) if output.status.success() => {
-                yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
-                    event_type: "log".to_string(),
-                    message: "Build complete".to_string(),
-                    progress: Some(70),
-                }).unwrap()));
+                yield sse("log", "Build complete", Some(70));
             }
             Ok(output) => {
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                // Show last few lines of error
                 let last_lines: Vec<&str> = stderr.lines().rev().take(10).collect();
                 let error_summary = last_lines.into_iter().rev().collect::<Vec<_>>().join("\n");
-                yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
-                    event_type: "error".to_string(),
-                    message: format!("Build failed:\n{}", error_summary),
-                    progress: None,
-                }).unwrap()));
+                yield sse("error", format!("Build failed:\n{}", error_summary), None);
                 return;
             }
             Err(e) => {
-                yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
-                    event_type: "error".to_string(),
-                    message: format!("Failed to run cargo build: {}", e),
-                    progress: None,
-                }).unwrap()));
+                yield sse("error", format!("Failed to run cargo build: {}", e), None);
                 return;
             }
         }
 
         // Install binaries
-        yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
-            event_type: "log".to_string(),
-            message: "Installing binaries...".to_string(),
-            progress: Some(75),
-        }).unwrap()));
+        yield sse("log", "Installing binaries...", Some(75));
 
         let binaries = [("open_agent", "/usr/local/bin/open_agent")];
 
         for (name, dest) in binaries {
             let src = format!("{}/target/debug/{}", OPEN_AGENT_REPO_PATH, name);
-            let install_result = Command::new("install")
+            match Command::new("install")
                 .args(["-m", "0755", &src, dest])
                 .output()
-                .await;
-
-            match install_result {
+                .await
+            {
                 Ok(output) if output.status.success() => {}
                 Ok(output) => {
                     let stderr = String::from_utf8_lossy(&output.stderr);
-                    yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
-                        event_type: "error".to_string(),
-                        message: format!("Failed to install {}: {}", name, stderr),
-                        progress: None,
-                    }).unwrap()));
+                    yield sse("error", format!("Failed to install {}: {}", name, stderr), None);
                     return;
                 }
                 Err(e) => {
-                    yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
-                        event_type: "error".to_string(),
-                        message: format!("Failed to install {}: {}", name, e),
-                        progress: None,
-                    }).unwrap()));
+                    yield sse("error", format!("Failed to install {}: {}", name, e), None);
                     return;
                 }
             }
@@ -874,11 +814,7 @@ fn stream_open_agent_update() -> impl Stream<Item = Result<Event, std::convert::
         // Send restart event before restarting - the SSE connection will drop when the
         // service restarts since this process will be terminated by systemctl. The client
         // should detect the connection drop at progress 100% and treat it as success.
-        yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
-            event_type: "restarting".to_string(),
-            message: format!("Binaries installed, restarting service to complete update to {}...", latest_tag),
-            progress: Some(100),
-        }).unwrap()));
+        yield sse("restarting", format!("Binaries installed, restarting service to complete update to {}...", latest_tag), Some(100));
 
         // Small delay to ensure the SSE event is flushed before we restart
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -898,15 +834,6 @@ fn stream_open_agent_update() -> impl Stream<Item = Result<Event, std::convert::
 /// systemd service; non-root keeps the binary at `~/.opencode/bin` and
 /// skips the service restart (non-root users typically lack systemd access).
 fn stream_opencode_update() -> impl Stream<Item = Result<Event, std::convert::Infallible>> {
-    // Helper to build an SSE event from an UpdateProgressEvent.
-    fn sse(event_type: &str, message: impl Into<String>, progress: Option<u8>) -> Result<Event, std::convert::Infallible> {
-        Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
-            event_type: event_type.to_string(),
-            message: message.into(),
-            progress,
-        }).unwrap()))
-    }
-
     async_stream::stream! {
         yield sse("log", "Starting OpenCode update...", Some(0));
         yield sse("log", "Downloading latest OpenCode release...", Some(10));
@@ -999,86 +926,48 @@ fn stream_opencode_update() -> impl Stream<Item = Result<Event, std::convert::In
 /// Stream the Claude Code install/update process.
 fn stream_claude_code_update() -> impl Stream<Item = Result<Event, std::convert::Infallible>> {
     async_stream::stream! {
-        yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
-            event_type: "log".to_string(),
-            message: "Starting Claude Code installation/update...".to_string(),
-            progress: Some(0),
-        }).unwrap()));
+        yield sse("log", "Starting Claude Code installation/update...", Some(0));
 
         // Check if npm is available
         let npm_check = Command::new("npm").arg("--version").output().await;
         if npm_check.is_err() || !npm_check.unwrap().status.success() {
-            yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
-                event_type: "error".to_string(),
-                message: "npm is required to install Claude Code. Please install Node.js first.".to_string(),
-                progress: None,
-            }).unwrap()));
+            yield sse("error", "npm is required to install Claude Code. Please install Node.js first.", None);
             return;
         }
 
-        yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
-            event_type: "log".to_string(),
-            message: "Installing @anthropic-ai/claude-code globally...".to_string(),
-            progress: Some(20),
-        }).unwrap()));
+        yield sse("log", "Installing @anthropic-ai/claude-code globally...", Some(20));
 
-        // Install Claude Code via npm
-        let install_result = Command::new("npm")
+        match Command::new("npm")
             .args(["install", "-g", "@anthropic-ai/claude-code@latest"])
             .output()
-            .await;
-
-        match install_result {
+            .await
+        {
             Ok(output) if output.status.success() => {
-                yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
-                    event_type: "log".to_string(),
-                    message: "Installation complete, verifying...".to_string(),
-                    progress: Some(80),
-                }).unwrap()));
+                yield sse("log", "Installation complete, verifying...", Some(80));
 
-                // Verify installation
-                let verify_result = Command::new("claude")
-                    .arg("--version")
-                    .output()
-                    .await;
-
-                match verify_result {
-                    Ok(output) if output.status.success() => {
-                        let version = String::from_utf8_lossy(&output.stdout)
+                let version = Command::new("claude").arg("--version").output().await
+                    .ok()
+                    .filter(|o| o.status.success())
+                    .and_then(|o| {
+                        String::from_utf8_lossy(&o.stdout)
                             .lines()
                             .next()
                             .map(|l| l.trim().to_string())
-                            .unwrap_or_else(|| "unknown".to_string());
+                    })
+                    .unwrap_or_else(|| "unknown".to_string());
 
-                        yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
-                            event_type: "complete".to_string(),
-                            message: format!("Claude Code installed successfully! Version: {}", version),
-                            progress: Some(100),
-                        }).unwrap()));
-                    }
-                    _ => {
-                        yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
-                            event_type: "complete".to_string(),
-                            message: "Claude Code installed, but version check failed. You may need to restart your shell.".to_string(),
-                            progress: Some(100),
-                        }).unwrap()));
-                    }
+                if version != "unknown" {
+                    yield sse("complete", format!("Claude Code installed successfully! Version: {version}"), Some(100));
+                } else {
+                    yield sse("complete", "Claude Code installed, but version check failed. You may need to restart your shell.", Some(100));
                 }
             }
             Ok(output) => {
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
-                    event_type: "error".to_string(),
-                    message: format!("Failed to install Claude Code: {}", stderr),
-                    progress: None,
-                }).unwrap()));
+                yield sse("error", format!("Failed to install Claude Code: {}", stderr), None);
             }
             Err(e) => {
-                yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
-                    event_type: "error".to_string(),
-                    message: format!("Failed to run npm install: {}", e),
-                    progress: None,
-                }).unwrap()));
+                yield sse("error", format!("Failed to run npm install: {}", e), None);
             }
         }
     }
@@ -1087,54 +976,27 @@ fn stream_claude_code_update() -> impl Stream<Item = Result<Event, std::convert:
 /// Stream the Amp update process.
 fn stream_amp_update() -> impl Stream<Item = Result<Event, std::convert::Infallible>> {
     async_stream::stream! {
-        yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
-            event_type: "log".to_string(),
-            message: "Starting Amp update...".to_string(),
-            progress: Some(0),
-        }).unwrap()));
+        yield sse("log", "Starting Amp update...", Some(0));
+        yield sse("log", "Running npm install -g @anthropic-ai/amp@latest...", Some(20));
 
-        yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
-            event_type: "log".to_string(),
-            message: "Running npm install -g @anthropic-ai/amp@latest...".to_string(),
-            progress: Some(20),
-        }).unwrap()));
-
-        // Run npm install for Amp
-        let install_result = Command::new("npm")
+        match Command::new("npm")
             .args(["install", "-g", "@anthropic-ai/amp@latest"])
             .output()
-            .await;
-
-        match install_result {
+            .await
+        {
             Ok(output) if output.status.success() => {
                 let stdout = String::from_utf8_lossy(&output.stdout);
-                yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
-                    event_type: "log".to_string(),
-                    message: format!("Installation output: {}", stdout.lines().take(5).collect::<Vec<_>>().join("\n")),
-                    progress: Some(80),
-                }).unwrap()));
-
-                yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
-                    event_type: "complete".to_string(),
-                    message: "Amp updated successfully!".to_string(),
-                    progress: Some(100),
-                }).unwrap()));
+                let summary: String = stdout.lines().take(5).collect::<Vec<_>>().join("\n");
+                yield sse("log", format!("Installation output: {summary}"), Some(80));
+                yield sse("complete", "Amp updated successfully!", Some(100));
             }
             Ok(output) => {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 let stdout = String::from_utf8_lossy(&output.stdout);
-                yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
-                    event_type: "error".to_string(),
-                    message: format!("Failed to update Amp: {} {}", stderr, stdout),
-                    progress: None,
-                }).unwrap()));
+                yield sse("error", format!("Failed to update Amp: {} {}", stderr, stdout), None);
             }
             Err(e) => {
-                yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
-                    event_type: "error".to_string(),
-                    message: format!("Failed to run update: {}", e),
-                    progress: None,
-                }).unwrap()));
+                yield sse("error", format!("Failed to run update: {}", e), None);
             }
         }
     }
@@ -1143,18 +1005,8 @@ fn stream_amp_update() -> impl Stream<Item = Result<Event, std::convert::Infalli
 /// Stream the oh-my-opencode update process.
 fn stream_oh_my_opencode_update() -> impl Stream<Item = Result<Event, std::convert::Infallible>> {
     async_stream::stream! {
-        yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
-            event_type: "log".to_string(),
-            message: "Starting oh-my-opencode update...".to_string(),
-            progress: Some(0),
-        }).unwrap()));
-
-        // First, remove only the oh-my-opencode cache entries to force fetching the latest version
-        yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
-            event_type: "log".to_string(),
-            message: "Clearing oh-my-opencode cache...".to_string(),
-            progress: Some(10),
-        }).unwrap()));
+        yield sse("log", "Starting oh-my-opencode update...", Some(0));
+        yield sse("log", "Clearing oh-my-opencode cache...", Some(10));
 
         // Remove only oh-my-opencode from bun cache (not the entire cache)
         let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
@@ -1166,15 +1018,11 @@ fn stream_oh_my_opencode_update() -> impl Stream<Item = Result<Event, std::conve
             .output()
             .await;
 
-        yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
-            event_type: "log".to_string(),
-            message: "Running bunx oh-my-opencode@latest install...".to_string(),
-            progress: Some(20),
-        }).unwrap()));
+        yield sse("log", "Running bunx oh-my-opencode@latest install...", Some(20));
 
         // Run the install command with @latest to force the newest version
         // Enable all providers by default for updates
-        let install_result = Command::new("bunx")
+        match Command::new("bunx")
             .args([
                 "oh-my-opencode@latest",
                 "install",
@@ -1185,38 +1033,21 @@ fn stream_oh_my_opencode_update() -> impl Stream<Item = Result<Event, std::conve
                 "--copilot=no",
             ])
             .output()
-            .await;
-
-        match install_result {
+            .await
+        {
             Ok(output) if output.status.success() => {
                 let stdout = String::from_utf8_lossy(&output.stdout);
-                yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
-                    event_type: "log".to_string(),
-                    message: format!("Installation output: {}", stdout.lines().take(5).collect::<Vec<_>>().join("\n")),
-                    progress: Some(80),
-                }).unwrap()));
-
-                yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
-                    event_type: "complete".to_string(),
-                    message: "oh-my-opencode updated successfully!".to_string(),
-                    progress: Some(100),
-                }).unwrap()));
+                let summary: String = stdout.lines().take(5).collect::<Vec<_>>().join("\n");
+                yield sse("log", format!("Installation output: {summary}"), Some(80));
+                yield sse("complete", "oh-my-opencode updated successfully!", Some(100));
             }
             Ok(output) => {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 let stdout = String::from_utf8_lossy(&output.stdout);
-                yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
-                    event_type: "error".to_string(),
-                    message: format!("Failed to update oh-my-opencode: {} {}", stderr, stdout),
-                    progress: None,
-                }).unwrap()));
+                yield sse("error", format!("Failed to update oh-my-opencode: {} {}", stderr, stdout), None);
             }
             Err(e) => {
-                yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
-                    event_type: "error".to_string(),
-                    message: format!("Failed to run update: {}", e),
-                    progress: None,
-                }).unwrap()));
+                yield sse("error", format!("Failed to run update: {}", e), None);
             }
         }
     }
@@ -1354,44 +1185,24 @@ fn stream_plugin_update(
     package: String,
 ) -> impl Stream<Item = Result<Event, std::convert::Infallible>> {
     async_stream::stream! {
-        yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
-            event_type: "log".to_string(),
-            message: format!("Starting {} update...", package),
-            progress: Some(0),
-        }).unwrap()));
-
-        // Clear bun cache for this package
-        yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
-            event_type: "log".to_string(),
-            message: "Clearing package cache...".to_string(),
-            progress: Some(10),
-        }).unwrap()));
+        yield sse("log", format!("Starting {} update...", package), Some(0));
+        yield sse("log", "Clearing package cache...", Some(10));
 
         let _ = Command::new("bun")
             .args(["pm", "cache", "rm"])
             .output()
             .await;
 
-        // Update the plugin by reinstalling with @latest
-        yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
-            event_type: "log".to_string(),
-            message: format!("Installing {}@latest...", package),
-            progress: Some(30),
-        }).unwrap()));
+        yield sse("log", format!("Installing {}@latest...", package), Some(30));
 
         // Use bunx to trigger the plugin install (which will cache the latest version)
-        let install_result = Command::new("bunx")
+        match Command::new("bunx")
             .args([&format!("{}@latest", package), "--help"])
             .output()
-            .await;
-
-        match install_result {
+            .await
+        {
             Ok(_) => {
-                yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
-                    event_type: "log".to_string(),
-                    message: "Package downloaded, updating config...".to_string(),
-                    progress: Some(70),
-                }).unwrap()));
+                yield sse("log", "Package downloaded, updating config...", Some(70));
 
                 // Update the opencode config to use @latest
                 let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
@@ -1400,10 +1211,8 @@ fn stream_plugin_update(
                 if let Ok(contents) = tokio::fs::read_to_string(&config_path).await {
                     if let Ok(mut root) = serde_json::from_str::<serde_json::Value>(&contents) {
                         if let Some(plugins) = root.get_mut("plugin").and_then(|v| v.as_array_mut()) {
-                            // Update the plugin spec to @latest
                             for p in plugins.iter_mut() {
                                 if let Some(s) = p.as_str() {
-                                    // Match exact package name or package@version to avoid prefix collisions
                                     if s == package || s.starts_with(&format!("{}@", package)) {
                                         *p = serde_json::json!(format!("{}@latest", package));
                                     }
@@ -1417,18 +1226,10 @@ fn stream_plugin_update(
                     }
                 }
 
-                yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
-                    event_type: "complete".to_string(),
-                    message: format!("{} updated successfully!", package),
-                    progress: Some(100),
-                }).unwrap()));
+                yield sse("complete", format!("{} updated successfully!", package), Some(100));
             }
             Err(e) => {
-                yield Ok(Event::default().data(serde_json::to_string(&UpdateProgressEvent {
-                    event_type: "error".to_string(),
-                    message: format!("Failed to update {}: {}", package, e),
-                    progress: None,
-                }).unwrap()));
+                yield sse("error", format!("Failed to update {}: {}", package, e), None);
             }
         }
     }
