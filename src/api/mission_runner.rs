@@ -5243,19 +5243,77 @@ pub async fn run_amp_turn(
         }
     }
 
+    // Check if node is available (amp CLI is a Node.js script)
+    let has_node = command_available(&workspace_exec, work_dir, "node").await;
+    let has_bun = command_available(&workspace_exec, work_dir, "bun").await
+        || command_available(&workspace_exec, work_dir, "/root/.bun/bin/bun").await;
+
     // Find the amp binary - check standard PATH first, then bun's global bin paths
-    let amp_binary = if command_available(&workspace_exec, work_dir, "amp").await {
-        "amp".to_string()
-    } else if command_available(&workspace_exec, work_dir, "/root/.bun/bin/amp").await {
-        "/root/.bun/bin/amp".to_string()
-    } else if command_available(&workspace_exec, work_dir, "/root/.cache/.bun/bin/amp").await {
-        "/root/.cache/.bun/bin/amp".to_string()
-    } else {
-        let err_msg = "Amp CLI not found. Install it with: bun install -g @sourcegraph/amp (or npm install -g @sourcegraph/amp)";
-        tracing::error!(mission_id = %mission_id, "{}", err_msg);
-        return AgentResult::failure(err_msg.to_string(), 0)
-            .with_terminal_reason(TerminalReason::LlmError);
-    };
+    // The amp CLI is a Node.js script, so if node is not available but bun is,
+    // we need to run it via "bun run amp" or "bun /path/to/main.js"
+    let (amp_binary, amp_args_prefix): (String, Vec<String>) =
+        if has_node && command_available(&workspace_exec, work_dir, "amp").await {
+            // Node available and amp in PATH - run directly
+            ("amp".to_string(), vec![])
+        } else if has_bun {
+            // No node, but bun is available - use "bun run amp" or run the JS directly
+            // First check for bun's global install paths
+            let bun_path = if command_available(&workspace_exec, work_dir, "bun").await {
+                "bun".to_string()
+            } else {
+                "/root/.bun/bin/bun".to_string()
+            };
+
+            // Check for amp's main.js in bun's global install location
+            let amp_main_js_paths = [
+                "/root/.bun/install/global/node_modules/@sourcegraph/amp/dist/main.js",
+                "/root/.cache/.bun/install/global/node_modules/@sourcegraph/amp/dist/main.js",
+            ];
+
+            let mut found_js = None;
+            for path in &amp_main_js_paths {
+                let check_result = workspace_exec
+                    .output(
+                        work_dir,
+                        "/bin/sh",
+                        &["-c".to_string(), format!("test -f {} && echo exists", path)],
+                        HashMap::new(),
+                    )
+                    .await;
+                if let Ok(output) = check_result {
+                    if String::from_utf8_lossy(&output.stdout).contains("exists") {
+                        found_js = Some(path.to_string());
+                        break;
+                    }
+                }
+            }
+
+            if let Some(js_path) = found_js {
+                tracing::info!(
+                    mission_id = %mission_id,
+                    js_path = %js_path,
+                    "Running Amp CLI via bun (node not available)"
+                );
+                (bun_path, vec![js_path])
+            } else {
+                // Try "bun run amp" as fallback
+                tracing::info!(
+                    mission_id = %mission_id,
+                    "Trying 'bun run amp' (amp main.js not found in expected locations)"
+                );
+                (bun_path, vec!["run".to_string(), "amp".to_string()])
+            }
+        } else if command_available(&workspace_exec, work_dir, "/root/.bun/bin/amp").await {
+            // Amp exists but may fail without node - try anyway
+            ("/root/.bun/bin/amp".to_string(), vec![])
+        } else if command_available(&workspace_exec, work_dir, "/root/.cache/.bun/bin/amp").await {
+            ("/root/.cache/.bun/bin/amp".to_string(), vec![])
+        } else {
+            let err_msg = "Amp CLI not found. Install it with: bun install -g @sourcegraph/amp (or npm install -g @sourcegraph/amp)";
+            tracing::error!(mission_id = %mission_id, "{}", err_msg);
+            return AgentResult::failure(err_msg.to_string(), 0)
+                .with_terminal_reason(TerminalReason::LlmError);
+        };
 
     tracing::info!(
         mission_id = %mission_id,
@@ -5270,7 +5328,8 @@ pub async fn run_amp_turn(
     // Build CLI arguments
     // Amp CLI format: amp [subcommand] --execute "message" [flags]
     // For continuation: amp threads continue <session_id> --execute "message" [flags]
-    let mut args = vec![];
+    // When running via bun, amp_args_prefix contains ["/path/to/main.js"] or ["run", "amp"]
+    let mut args = amp_args_prefix;
 
     // For continuation, use threads continue subcommand
     if is_continuation {
