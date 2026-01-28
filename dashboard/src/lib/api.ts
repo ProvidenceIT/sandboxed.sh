@@ -1,13 +1,38 @@
-import { authHeader, clearJwt, signalAuthRequired } from "./auth";
-import { getRuntimeApiBase } from "./settings";
+/**
+ * Main API module - re-exports from split modules for backward compatibility.
+ * 
+ * New code should import from specific modules when possible:
+ * - Core utilities: @/lib/api/core
+ * - Missions: @/lib/api/missions
+ * - Workspaces: @/lib/api/workspaces
+ * - Providers: @/lib/api/providers
+ */
 
-function apiUrl(pathOrUrl: string): string {
-  if (/^https?:\/\//i.test(pathOrUrl)) return pathOrUrl;
-  const base = getRuntimeApiBase();
-  const path = pathOrUrl.startsWith("/") ? pathOrUrl : `/${pathOrUrl}`;
-  return `${base}${path}`;
-}
+import { authHeader } from "./auth";
 
+// Re-export from split modules
+export * from "./api/core";
+export * from "./api/missions";
+export * from "./api/workspaces";
+export * from "./api/providers";
+
+// Import core utilities for use in this file (remaining APIs not yet split)
+import {
+  apiUrl,
+  apiFetch,
+  apiGet,
+  apiPost,
+  apiPut,
+  apiPatch,
+  apiDel,
+  libGet,
+  libPost,
+  libPut,
+  libDel,
+  ensureLibraryResponse,
+} from "./api/core";
+
+// Types that remain in this file (not yet migrated to modules)
 export interface TaskState {
   id: string;
   status: "pending" | "running" | "completed" | "failed" | "cancelled";
@@ -47,158 +72,6 @@ export interface HealthResponse {
 export interface LoginResponse {
   token: string;
   exp: number;
-}
-
-export function isNetworkError(error: unknown): boolean {
-  if (!error) return false;
-  if (error instanceof Error) {
-    const message = error.message.toLowerCase();
-    return (
-      message.includes("failed to fetch") ||
-      message.includes("networkerror") ||
-      message.includes("load failed") ||
-      message.includes("network request failed") ||
-      message.includes("offline")
-    );
-  }
-  return false;
-}
-
-async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
-  const headers: Record<string, string> = {
-    ...(init?.headers ? (init.headers as Record<string, string>) : {}),
-    ...authHeader(),
-  };
-
-  const res = await fetch(apiUrl(path), { ...init, headers });
-  if (res.status === 401) {
-    clearJwt();
-    signalAuthRequired();
-  }
-  return res;
-}
-
-// ---------------------------------------------------------------------------
-// Internal request helpers – reduce repeated Content-Type / throw / .json()
-// ---------------------------------------------------------------------------
-
-async function apiGet<T>(path: string, errorMsg: string): Promise<T> {
-  const res = await apiFetch(path);
-  if (!res.ok) throw new Error(errorMsg);
-  return res.json();
-}
-
-async function apiPost<T = void>(
-  path: string,
-  body?: unknown,
-  errorMsg = "Request failed",
-): Promise<T> {
-  const init: RequestInit = { method: "POST" };
-  if (body !== undefined) {
-    init.headers = { "Content-Type": "application/json" };
-    init.body = JSON.stringify(body);
-  }
-  const res = await apiFetch(path, init);
-  if (!res.ok) throw new Error(errorMsg);
-  // For void returns the caller simply ignores the result
-  return res.json().catch(() => undefined as unknown as T);
-}
-
-async function apiPut<T = void>(
-  path: string,
-  body: unknown,
-  errorMsg = "Request failed",
-): Promise<T> {
-  const res = await apiFetch(path, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) throw new Error(errorMsg);
-  return res.json().catch(() => undefined as unknown as T);
-}
-
-async function apiPatch<T = void>(
-  path: string,
-  body: unknown,
-  errorMsg = "Request failed",
-): Promise<T> {
-  const res = await apiFetch(path, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) throw new Error(errorMsg);
-  return res.json().catch(() => undefined as unknown as T);
-}
-
-async function apiDel<T = void>(path: string, errorMsg = "Request failed"): Promise<T> {
-  const res = await apiFetch(path, { method: "DELETE" });
-  if (!res.ok) throw new Error(errorMsg);
-  return res.json().catch(() => undefined as unknown as T);
-}
-
-// Library-specific variants that use ensureLibraryResponse (handles 503 → LibraryUnavailableError)
-async function libGet<T>(path: string, errorMsg: string): Promise<T> {
-  const res = await apiFetch(path);
-  await ensureLibraryResponse(res, errorMsg);
-  return res.json();
-}
-
-async function libPost<T = void>(
-  path: string,
-  body?: unknown,
-  errorMsg = "Request failed",
-): Promise<T> {
-  const init: RequestInit = { method: "POST" };
-  if (body !== undefined) {
-    init.headers = { "Content-Type": "application/json" };
-    init.body = JSON.stringify(body);
-  }
-  const res = await apiFetch(path, init);
-  await ensureLibraryResponse(res, errorMsg);
-  return res.json().catch(() => undefined as unknown as T);
-}
-
-async function libPut<T = void>(
-  path: string,
-  body: unknown,
-  errorMsg = "Request failed",
-): Promise<T> {
-  const res = await apiFetch(path, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  await ensureLibraryResponse(res, errorMsg);
-  return res.json().catch(() => undefined as unknown as T);
-}
-
-async function libDel(path: string, errorMsg = "Request failed"): Promise<void> {
-  const res = await apiFetch(path, { method: "DELETE" });
-  await ensureLibraryResponse(res, errorMsg);
-}
-
-export class LibraryUnavailableError extends Error {
-  status: number;
-
-  constructor(message: string) {
-    super(message);
-    this.name = "LibraryUnavailableError";
-    this.status = 503;
-  }
-}
-
-async function ensureLibraryResponse(
-  res: Response,
-  fallbackMessage: string
-): Promise<Response> {
-  if (res.ok) return res;
-  const text = await res.text().catch(() => "");
-  if (res.status === 503) {
-    throw new LibraryUnavailableError(text || "Library not initialized");
-  }
-  throw new Error(text || fallbackMessage);
 }
 
 export interface CreateTaskRequest {
@@ -393,209 +266,6 @@ export async function getRunTasks(
   id: string
 ): Promise<{ run_id: string; tasks: unknown[] }> {
   return apiGet(`/api/runs/${id}/tasks`, "Failed to fetch run tasks");
-}
-
-// ==================== Missions ====================
-
-export type MissionStatus = "active" | "completed" | "failed" | "interrupted" | "blocked" | "not_feasible";
-
-export interface MissionHistoryEntry {
-  role: string;
-  content: string;
-}
-
-export interface DesktopSessionInfo {
-  display: string;
-  resolution?: string;
-  started_at: string;
-  stopped_at?: string;
-  screenshots_dir?: string;
-  browser?: string;
-  url?: string;
-}
-
-export interface Mission {
-  id: string;
-  status: MissionStatus;
-  title: string | null;
-  workspace_id?: string;
-  workspace_name?: string;
-  agent?: string;
-  /** Backend used for this mission ("opencode" or "claudecode") */
-  backend?: string;
-  history: MissionHistoryEntry[];
-  desktop_sessions?: DesktopSessionInfo[];
-  created_at: string;
-  updated_at: string;
-  interrupted_at?: string;
-  resumable?: boolean;
-}
-
-// List all missions
-export async function listMissions(): Promise<Mission[]> {
-  return apiGet("/api/control/missions", "Failed to fetch missions");
-}
-
-// Get a specific mission
-export async function getMission(id: string): Promise<Mission> {
-  return apiGet(`/api/control/missions/${id}`, "Failed to fetch mission");
-}
-
-// Stored event from SQLite (for event replay)
-export interface StoredEvent {
-  id: number;
-  mission_id: string;
-  sequence: number;
-  event_type: string;
-  timestamp: string;
-  event_id?: string;
-  tool_call_id?: string;
-  tool_name?: string;
-  content: string;
-  metadata: Record<string, unknown>;
-}
-
-// Get mission events (for history replay including tool calls)
-export async function getMissionEvents(
-  id: string,
-  options?: { types?: string[]; limit?: number; offset?: number }
-): Promise<StoredEvent[]> {
-  const params = new URLSearchParams();
-  if (options?.types?.length) params.set("types", options.types.join(","));
-  if (options?.limit) params.set("limit", String(options.limit));
-  if (options?.offset) params.set("offset", String(options.offset));
-  const query = params.toString();
-  return apiGet(`/api/control/missions/${id}/events${query ? `?${query}` : ""}`, "Failed to fetch mission events");
-}
-
-// Get current mission
-export async function getCurrentMission(): Promise<Mission | null> {
-  return apiGet("/api/control/missions/current", "Failed to fetch current mission");
-}
-
-// Create a new mission
-export interface CreateMissionOptions {
-  title?: string;
-  workspaceId?: string;
-  /** Agent name from library (e.g., "code-reviewer") */
-  agent?: string;
-  /** Override model for this mission (provider/model) */
-  modelOverride?: string;
-  /** Backend to use for this mission ("opencode" or "claudecode") */
-  backend?: string;
-}
-
-export async function createMission(
-  options?: CreateMissionOptions
-): Promise<Mission> {
-  const body: {
-    title?: string;
-    workspace_id?: string;
-    agent?: string;
-    model_override?: string;
-    backend?: string;
-  } = {};
-
-  if (options?.title) body.title = options.title;
-  if (options?.workspaceId) body.workspace_id = options.workspaceId;
-  if (options?.agent) body.agent = options.agent;
-  if (options?.modelOverride) body.model_override = options.modelOverride;
-  if (options?.backend) body.backend = options.backend;
-
-  const res = await apiFetch("/api/control/missions", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: Object.keys(body).length > 0 ? JSON.stringify(body) : undefined,
-  });
-  if (!res.ok) throw new Error("Failed to create mission");
-  return res.json();
-}
-
-// Load/switch to a mission
-export async function loadMission(id: string): Promise<Mission> {
-  return apiPost(`/api/control/missions/${id}/load`, undefined, "Failed to load mission");
-}
-
-// ==================== Parallel Missions ====================
-
-export interface RunningMissionInfo {
-  mission_id: string;
-  state: "queued" | "running" | "waiting_for_tool" | "finished";
-  queue_len: number;
-  history_len: number;
-  seconds_since_activity: number;
-  expected_deliverables: number;
-}
-
-// Get all running parallel missions
-export async function getRunningMissions(): Promise<RunningMissionInfo[]> {
-  return apiGet("/api/control/running", "Failed to fetch running missions");
-}
-
-// Start a mission in parallel
-export async function startMissionParallel(
-  missionId: string,
-  content: string
-): Promise<{ ok: boolean; mission_id: string }> {
-  const res = await apiFetch(`/api/control/missions/${missionId}/parallel`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ content }),
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Failed to start parallel mission: ${text}`);
-  }
-  return res.json();
-}
-
-// Cancel a specific mission
-export async function cancelMission(missionId: string): Promise<void> {
-  return apiPost(`/api/control/missions/${missionId}/cancel`, undefined, "Failed to cancel mission");
-}
-
-// Set mission status
-export async function setMissionStatus(
-  id: string,
-  status: MissionStatus
-): Promise<void> {
-  return apiPost(`/api/control/missions/${id}/status`, { status }, "Failed to set mission status");
-}
-
-// Delete a mission
-export async function deleteMission(id: string): Promise<{ ok: boolean; deleted: string }> {
-  const res = await apiFetch(`/api/control/missions/${id}`, {
-    method: "DELETE",
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Failed to delete mission: ${text}`);
-  }
-  return res.json();
-}
-
-// Cleanup empty untitled missions
-export async function cleanupEmptyMissions(): Promise<{ ok: boolean; deleted_count: number }> {
-  const res = await apiFetch("/api/control/missions/cleanup", {
-    method: "POST",
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Failed to cleanup missions: ${text}`);
-  }
-  return res.json();
-}
-
-// Resume an interrupted mission
-export async function resumeMission(id: string): Promise<Mission> {
-  const res = await apiFetch(`/api/control/missions/${id}/resume`, {
-    method: "POST",
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Failed to resume mission: ${text}`);
-  }
-  return res.json();
 }
 
 // ==================== Global Control Session ====================
@@ -1861,156 +1531,6 @@ export async function migrateLibrary(): Promise<MigrationReport> {
   return libPost("/api/library/migrate", undefined, "Failed to migrate library");
 }
 
-// ==================== Workspaces ====================
-
-export type WorkspaceType = "host" | "container";
-export type WorkspaceStatus = "pending" | "building" | "ready" | "error";
-
-export interface Workspace {
-  id: string;
-  name: string;
-  workspace_type: WorkspaceType;
-  path: string;
-  status: WorkspaceStatus;
-  error_message: string | null;
-  created_at: string;
-  skills: string[];
-  plugins: string[];
-  template?: string | null;
-  distro?: string | null;
-  env_vars: Record<string, string>;
-  init_script?: string | null;
-  shared_network?: boolean | null;
-}
-
-// List workspaces
-export async function listWorkspaces(): Promise<Workspace[]> {
-  return apiGet("/api/workspaces", "Failed to fetch workspaces");
-}
-
-// Get workspace
-export async function getWorkspace(id: string): Promise<Workspace> {
-  return apiGet(`/api/workspaces/${id}`, "Failed to fetch workspace");
-}
-
-// Create workspace
-export async function createWorkspace(data: {
-  name: string;
-  workspace_type: WorkspaceType;
-  path?: string;
-  skills?: string[];
-  plugins?: string[];
-  template?: string;
-  distro?: string;
-  env_vars?: Record<string, string>;
-  init_script?: string;
-  shared_network?: boolean | null;
-}): Promise<Workspace> {
-  return apiPost("/api/workspaces", data, "Failed to create workspace");
-}
-
-// Update workspace
-export async function updateWorkspace(
-  id: string,
-  data: {
-    name?: string;
-    skills?: string[];
-    plugins?: string[];
-    template?: string | null;
-    distro?: string | null;
-    env_vars?: Record<string, string>;
-    init_script?: string | null;
-    shared_network?: boolean | null;
-  }
-): Promise<Workspace> {
-  return apiPut(`/api/workspaces/${id}`, data, "Failed to update workspace");
-}
-
-// Sync workspace skills
-export async function syncWorkspace(id: string): Promise<Workspace> {
-  return apiPost(`/api/workspaces/${id}/sync`, undefined, "Failed to sync workspace");
-}
-
-// Delete workspace
-export async function deleteWorkspace(id: string): Promise<void> {
-  return apiDel(`/api/workspaces/${id}`, "Failed to delete workspace");
-}
-
-// Supported Linux distributions for container workspaces
-export type ContainerDistro =
-  | "ubuntu-noble"
-  | "ubuntu-jammy"
-  | "debian-bookworm"
-  | "arch-linux";
-
-export const CONTAINER_DISTROS: { value: ContainerDistro; label: string }[] = [
-  { value: "ubuntu-noble", label: "Ubuntu 24.04 LTS (Noble)" },
-  { value: "ubuntu-jammy", label: "Ubuntu 22.04 LTS (Jammy)" },
-  { value: "debian-bookworm", label: "Debian 12 (Bookworm)" },
-  { value: "arch-linux", label: "Arch Linux (Base)" },
-];
-
-// Build a container workspace
-export async function buildWorkspace(
-  id: string,
-  distro?: ContainerDistro,
-  rebuild?: boolean
-): Promise<Workspace> {
-  const res = await apiFetch(`/api/workspaces/${id}/build`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: distro || rebuild ? JSON.stringify({ distro, rebuild }) : undefined,
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(text || "Failed to build workspace");
-  }
-  return res.json();
-}
-
-// Debug info for a workspace container
-export interface WorkspaceDebugInfo {
-  id: string;
-  name: string;
-  status: string;
-  path: string;
-  path_exists: boolean;
-  size_bytes: number | null;
-  directories: { path: string; exists: boolean; file_count: number | null }[];
-  has_bash: boolean;
-  init_script_exists: boolean;
-  init_script_modified: string | null;
-  distro: string | null;
-  last_error: string | null;
-}
-
-export interface InitLogResponse {
-  exists: boolean;
-  content: string | null;
-  total_lines: number | null;
-  log_path: string;
-}
-
-// Get workspace debug info (container state)
-export async function getWorkspaceDebug(id: string): Promise<WorkspaceDebugInfo> {
-  const res = await apiFetch(`/api/workspaces/${id}/debug`);
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(text || "Failed to get workspace debug info");
-  }
-  return res.json();
-}
-
-// Get init script log from container
-export async function getWorkspaceInitLog(id: string): Promise<InitLogResponse> {
-  const res = await apiFetch(`/api/workspaces/${id}/init-log`);
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(text || "Failed to get init log");
-  }
-  return res.json();
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // OpenCode Connection API
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2159,132 +1679,18 @@ export async function saveClaudeCodeConfig(
   return apiPut("/api/library/claudecode/config", config, "Failed to save Claude Code config");
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// AI Provider API
-// ─────────────────────────────────────────────────────────────────────────────
+// AI Provider types and functions are now exported from ./api/providers
+// Legacy interface removed - types come from providers module
 
-export type AIProviderType =
-  | "anthropic"
-  | "openai"
-  | "google"
-  | "amazon-bedrock"
-  | "azure"
-  | "open-router"
-  | "mistral"
-  | "groq"
-  | "xai"
-  | "deep-infra"
-  | "cerebras"
-  | "cohere"
-  | "together-ai"
-  | "perplexity"
-  | "github-copilot"
-  | "zai"
-  | "custom";
-
-export interface AIProviderTypeInfo {
-  id: string;
-  name: string;
-  uses_oauth: boolean;
-  env_var: string | null;
-}
-
-export interface AIProviderStatus {
-  type: "unknown" | "connected" | "needs_auth" | "error";
-  auth_url?: string;
-  message?: string;
-}
-
-export interface AIProviderAuthMethod {
-  label: string;
-  type: "oauth" | "api";
-  description?: string;
-}
-
-export interface AIProvider {
-  id: string;
-  provider_type: AIProviderType;
-  provider_type_name: string;
-  name: string;
-  google_project_id?: string | null;
+interface _RemovedLegacyAIProvider {
+  _removed: true;
   has_api_key: boolean;
-  has_oauth: boolean;
-  base_url: string | null;
-  enabled: boolean;
-  is_default: boolean;
-  uses_oauth: boolean;
-  auth_methods: AIProviderAuthMethod[];
-  status: AIProviderStatus;
-  /** Which backends this provider is used for (e.g., ["opencode", "claudecode"]) */
-  use_for_backends: string[];
-  created_at: string;
-  updated_at: string;
 }
 
-export interface AIProviderAuthResponse {
-  success: boolean;
-  message: string;
-  auth_url: string | null;
-}
+// Provider types and BackendProviderResponse are now in ./api/providers
 
-export interface OAuthAuthorizeResponse {
-  url: string;
-  instructions: string;
-  method: "code" | "auto";
-}
-
-// List all AI providers
-export async function listAIProviders(): Promise<AIProvider[]> {
-  return apiGet("/api/ai/providers", "Failed to list AI providers");
-}
-
-// List available provider types
-export async function listAIProviderTypes(): Promise<AIProviderTypeInfo[]> {
-  return apiGet("/api/ai/providers/types", "Failed to list AI provider types");
-}
-
-// Get provider by ID
-export async function getAIProvider(id: string): Promise<AIProvider> {
-  return apiGet(`/api/ai/providers/${id}`, "Failed to get AI provider");
-}
-
-// Create new provider
-export async function createAIProvider(data: {
-  provider_type: AIProviderType;
-  name: string;
-  google_project_id?: string;
-  api_key?: string;
-  base_url?: string;
-  enabled?: boolean;
-  /** Which backends this provider is used for (e.g., ["opencode", "claudecode"]) */
-  use_for_backends?: string[];
-}): Promise<AIProvider> {
-  return apiPost("/api/ai/providers", data, "Failed to create AI provider");
-}
-
-// Update provider
-export async function updateAIProvider(
-  id: string,
-  data: {
-    name?: string;
-    google_project_id?: string | null;
-    api_key?: string | null;
-    base_url?: string | null;
-    enabled?: boolean;
-    /** Which backends this provider is used for (e.g., ["opencode", "claudecode"]) */
-    use_for_backends?: string[];
-  }
-): Promise<AIProvider> {
-  return apiPut(`/api/ai/providers/${id}`, data, "Failed to update AI provider");
-}
-
-// Delete provider
-export async function deleteAIProvider(id: string): Promise<void> {
-  return apiDel(`/api/ai/providers/${id}`, "Failed to delete AI provider");
-}
-
-// Provider credentials for a backend
-export interface BackendProviderResponse {
+// This legacy interface is kept due to redacted content but is not exported
+interface _LegacyBackendProviderResponse {
   configured: boolean;
   provider_type: string | null;
   provider_name: string | null;
@@ -2295,63 +1701,6 @@ export interface BackendProviderResponse {
     expires_at: number;
   } | null;
   has_credentials: boolean;
-}
-
-// Get provider credentials for a specific backend (e.g., "claudecode")
-export async function getProviderForBackend(backendId: string): Promise<BackendProviderResponse> {
-  return apiGet(`/api/ai/providers/for-backend/${backendId}`, "Failed to get provider for backend");
-}
-
-// Authenticate provider (initiate OAuth or check API key)
-export async function authenticateAIProvider(id: string): Promise<AIProviderAuthResponse> {
-  return apiPost(`/api/ai/providers/${id}/auth`, undefined, "Failed to authenticate AI provider");
-}
-
-// Set default provider
-export async function setDefaultAIProvider(id: string): Promise<AIProvider> {
-  return apiPost(`/api/ai/providers/${id}/default`, undefined, "Failed to set default AI provider");
-}
-
-// Get auth methods for a provider
-export async function getAuthMethods(id: string): Promise<AIProviderAuthMethod[]> {
-  return apiGet(`/api/ai/providers/${id}/auth/methods`, "Failed to get auth methods");
-}
-
-// Start OAuth authorization flow
-export async function oauthAuthorize(id: string, methodIndex: number): Promise<OAuthAuthorizeResponse> {
-  const res = await apiFetch(`/api/ai/providers/${id}/oauth/authorize`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ method_index: methodIndex }),
-  });
-  if (!res.ok) {
-    const error = await res.text();
-    throw new Error(error || "Failed to start OAuth authorization");
-  }
-  return res.json();
-}
-
-// Complete OAuth flow with authorization code
-export async function oauthCallback(
-  id: string,
-  methodIndex: number,
-  code: string,
-  useForBackends?: string[]
-): Promise<AIProvider> {
-  const res = await apiFetch(`/api/ai/providers/${id}/oauth/callback`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      method_index: methodIndex,
-      code,
-      use_for_backends: useForBackends,
-    }),
-  });
-  if (!res.ok) {
-    const error = await res.text();
-    throw new Error(error || "Failed to complete OAuth");
-  }
-  return res.json();
 }
 
 // ============================================================================
