@@ -5,7 +5,6 @@
 //! - Skills (`skill/*/SKILL.md` with additional .md files and references)
 //! - Commands/prompts (`command/*.md`)
 //! - Plugins registry (`plugins.json`)
-//! - Rules (`rule/*.md`)
 //! - Library agents (`agent/*.md`)
 //! - Library tools (`tool/*.ts`)
 //! - OpenCode settings (`opencode/oh-my-opencode.json`)
@@ -55,7 +54,6 @@ const SKILL_DIR: &str = "skill";
 const COMMAND_DIR: &str = "command";
 const AGENT_DIR: &str = "agent";
 const TOOL_DIR: &str = "tool";
-const RULE_DIR: &str = "rule";
 const PLUGINS_FILE: &str = "plugins.json";
 const WORKSPACE_TEMPLATE_DIR: &str = "workspace-template";
 const OPENCODE_DIR: &str = "opencode";
@@ -816,108 +814,6 @@ impl LibraryStore {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Rules (rule/*.md)
-    // ─────────────────────────────────────────────────────────────────────────
-
-    /// List all rules with their summaries.
-    pub async fn list_rules(&self) -> Result<Vec<RuleSummary>> {
-        let rules_dir = self.path.join(RULE_DIR);
-
-        if !rules_dir.exists() {
-            return Ok(Vec::new());
-        }
-
-        let mut rules = Vec::new();
-        let mut entries = fs::read_dir(&rules_dir).await?;
-
-        while let Some(entry) = entries.next_entry().await? {
-            let entry_path = entry.path();
-
-            // Only process .md files
-            let Some(ext) = entry_path.extension() else {
-                continue;
-            };
-            if ext != "md" {
-                continue;
-            }
-
-            let file_name = entry.file_name().to_string_lossy().to_string();
-            let name = file_name.trim_end_matches(".md").to_string();
-
-            // Read and parse frontmatter for description
-            let content = fs::read_to_string(&entry_path).await.ok();
-            let (frontmatter, _) = content
-                .as_ref()
-                .map(|c| parse_frontmatter(c))
-                .unwrap_or((None, ""));
-
-            let description = extract_description(&frontmatter);
-
-            rules.push(RuleSummary {
-                name,
-                description,
-                path: format!("{}/{}", RULE_DIR, file_name),
-            });
-        }
-
-        rules.sort_by(|a, b| a.name.cmp(&b.name));
-        Ok(rules)
-    }
-
-    /// Get a rule by name with full content.
-    pub async fn get_rule(&self, name: &str) -> Result<Rule> {
-        Self::validate_name(name)?;
-        let rule_path = self.path.join(RULE_DIR).join(format!("{}.md", name));
-
-        if !rule_path.exists() {
-            anyhow::bail!("Rule not found: {}", name);
-        }
-
-        let content = fs::read_to_string(&rule_path)
-            .await
-            .context("Failed to read rule file")?;
-
-        let (frontmatter, _body) = parse_frontmatter(&content);
-        let description = extract_description(&frontmatter);
-
-        Ok(Rule {
-            name: name.to_string(),
-            description,
-            path: format!("{}/{}.md", RULE_DIR, name),
-            content,
-        })
-    }
-
-    /// Save a rule's content.
-    pub async fn save_rule(&self, name: &str, content: &str) -> Result<()> {
-        Self::validate_name(name)?;
-        let rules_dir = self.path.join(RULE_DIR);
-        let rule_path = rules_dir.join(format!("{}.md", name));
-
-        fs::create_dir_all(&rules_dir).await?;
-
-        fs::write(&rule_path, content)
-            .await
-            .context("Failed to write rule file")?;
-
-        Ok(())
-    }
-
-    /// Delete a rule.
-    pub async fn delete_rule(&self, name: &str) -> Result<()> {
-        Self::validate_name(name)?;
-        let rule_path = self.path.join(RULE_DIR).join(format!("{}.md", name));
-
-        if rule_path.exists() {
-            fs::remove_file(&rule_path)
-                .await
-                .context("Failed to delete rule file")?;
-        }
-
-        Ok(())
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
     // Library Agents (agent/*.md)
     // ─────────────────────────────────────────────────────────────────────────
 
@@ -984,7 +880,6 @@ impl LibraryStore {
         let model = extract_model(&frontmatter);
         let tools = extract_tools(&frontmatter);
         let permissions = extract_permissions(&frontmatter);
-        let rules = extract_string_array(&frontmatter, "rules");
 
         Ok(LibraryAgent {
             name: name.to_string(),
@@ -994,7 +889,6 @@ impl LibraryStore {
             model,
             tools,
             permissions,
-            rules,
         })
     }
 
@@ -1521,7 +1415,6 @@ impl LibraryStore {
         let _ = fs::create_dir_all(self.path.join(COMMAND_DIR)).await;
         let _ = fs::create_dir_all(self.path.join(AGENT_DIR)).await;
         let _ = fs::create_dir_all(self.path.join(TOOL_DIR)).await;
-        let _ = fs::create_dir_all(self.path.join(RULE_DIR)).await;
 
         report.success = true;
         Ok(report)

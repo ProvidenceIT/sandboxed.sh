@@ -19,7 +19,6 @@ import {
   FileCode,
   Server,
   Puzzle,
-  ScrollText,
   Wrench,
   LayoutGrid,
   Library,
@@ -47,7 +46,6 @@ const navigation: NavItem[] = [
     children: [
       { name: 'Commands', href: '/config/commands', icon: Terminal },
       { name: 'Skills', href: '/config/skills', icon: FileCode },
-      { name: 'Rules', href: '/config/rules', icon: ScrollText },
       { name: 'Workspaces', href: '/config/workspace-templates', icon: LayoutGrid },
       { name: 'Configs', href: '/config/settings', icon: Cog },
     ],

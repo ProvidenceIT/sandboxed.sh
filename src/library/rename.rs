@@ -1,6 +1,6 @@
 //! Library item rename functionality with cascade reference updates.
 //!
-//! This module handles renaming library items (skills, commands, rules, agents, tools,
+//! This module handles renaming library items (skills, commands, agents, tools,
 //! workspace templates) while automatically updating all cross-references.
 
 use anyhow::{Context, Result};
@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use tokio::fs;
 
-use super::types::{parse_frontmatter, OpenAgentConfig};
+use super::types::OpenAgentConfig;
 use super::LibraryStore;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -21,7 +21,6 @@ use super::LibraryStore;
 pub enum ItemType {
     Skill,
     Command,
-    Rule,
     Agent,
     Tool,
     WorkspaceTemplate,
@@ -32,7 +31,6 @@ impl ItemType {
         match self {
             Self::Skill => "skill",
             Self::Command => "command",
-            Self::Rule => "rule",
             Self::Agent => "agent",
             Self::Tool => "tool",
             Self::WorkspaceTemplate => "workspace-template",
@@ -94,11 +92,6 @@ impl LibraryStore {
                 // 1. workspace-template/*.json -> skills array
                 refs.extend(self.find_skill_refs_in_templates(name).await?);
             }
-            ItemType::Rule => {
-                // Rules are referenced by:
-                // 1. agent/*.md -> rules array in frontmatter
-                refs.extend(self.find_rule_refs_in_agents(name).await?);
-            }
             ItemType::Agent => {
                 // Agents are referenced by:
                 // 1. openagent/config.json -> hidden_agents, default_agent
@@ -140,45 +133,6 @@ impl LibraryStore {
                                     field: "skills".to_string(),
                                     old_value: skill_name.to_string(),
                                     new_value: String::new(), // Will be filled in during rename
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(refs)
-    }
-
-    /// Find references to a rule in agent definitions.
-    async fn find_rule_refs_in_agents(&self, rule_name: &str) -> Result<Vec<RenameChange>> {
-        let mut refs = Vec::new();
-        let agents_dir = self.path.join("agent");
-
-        if !agents_dir.exists() {
-            return Ok(refs);
-        }
-
-        let mut entries = fs::read_dir(&agents_dir).await?;
-        while let Some(entry) = entries.next_entry().await? {
-            let path = entry.path();
-            if path.extension().map(|e| e == "md").unwrap_or(false) {
-                if let Ok(content) = fs::read_to_string(&path).await {
-                    let (frontmatter, _) = parse_frontmatter(&content);
-                    if let Some(fm) = frontmatter {
-                        if let Some(rules) = fm.get("rules").and_then(|r| r.as_sequence()) {
-                            if rules.iter().any(|r| r.as_str() == Some(rule_name)) {
-                                let rel_path = path
-                                    .strip_prefix(&self.path)
-                                    .unwrap_or(&path)
-                                    .to_string_lossy()
-                                    .to_string();
-                                refs.push(RenameChange::UpdateReference {
-                                    file: rel_path,
-                                    field: "rules".to_string(),
-                                    old_value: rule_name.to_string(),
-                                    new_value: String::new(),
                                 });
                             }
                         }
@@ -363,10 +317,6 @@ impl LibraryStore {
             ItemType::Command => (
                 self.path.join("command").join(format!("{}.md", old_name)),
                 self.path.join("command").join(format!("{}.md", new_name)),
-            ),
-            ItemType::Rule => (
-                self.path.join("rule").join(format!("{}.md", old_name)),
-                self.path.join("rule").join(format!("{}.md", new_name)),
             ),
             ItemType::Agent => (
                 self.path.join("agent").join(format!("{}.md", old_name)),

@@ -6,7 +6,6 @@
 //! - Skills CRUD
 //! - Commands CRUD
 //! - Plugins CRUD
-//! - Rules CRUD
 //! - Library Agents CRUD
 //! - Library Tools CRUD
 //! - OpenCode settings (oh-my-opencode.json)
@@ -28,7 +27,7 @@ use crate::library::{
     rename::{ItemType, RenameResult},
     ClaudeCodeConfig, Command, CommandSummary, GitAuthor, LibraryAgent, LibraryAgentSummary,
     LibraryStatus, LibraryStore, LibraryTool, LibraryToolSummary, McpServer, MigrationReport,
-    OpenAgentConfig, Plugin, Rule, RuleSummary, Skill, SkillSummary, WorkspaceTemplate,
+    OpenAgentConfig, Plugin, Skill, SkillSummary, WorkspaceTemplate,
     WorkspaceTemplateSummary,
 };
 use crate::nspawn::NspawnDistro;
@@ -233,11 +232,6 @@ pub fn routes() -> Router<Arc<super::routes::AppState>> {
         // Plugins
         .route("/plugins", get(get_plugins))
         .route("/plugins", put(save_plugins))
-        // Rules
-        .route("/rule", get(list_rules))
-        .route("/rule/:name", get(get_rule))
-        .route("/rule/:name", put(save_rule))
-        .route("/rule/:name", delete(delete_rule))
         // Library Agents
         .route("/agent", get(list_library_agents))
         .route("/agent/:name", get(get_library_agent))
@@ -854,68 +848,6 @@ async fn save_plugins(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Rules
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// GET /api/library/rule - List all rules.
-async fn list_rules(
-    State(state): State<Arc<super::routes::AppState>>,
-    headers: HeaderMap,
-) -> Result<Json<Vec<RuleSummary>>, (StatusCode, String)> {
-    let library = ensure_library(&state, &headers).await?;
-    library
-        .list_rules()
-        .await
-        .map(Json)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
-}
-
-/// GET /api/library/rule/:name - Get a rule by name.
-async fn get_rule(
-    State(state): State<Arc<super::routes::AppState>>,
-    Path(name): Path<String>,
-    headers: HeaderMap,
-) -> Result<Json<Rule>, (StatusCode, String)> {
-    let library = ensure_library(&state, &headers).await?;
-    library.get_rule(&name).await.map(Json).map_err(|e| {
-        if e.to_string().contains("not found") {
-            (StatusCode::NOT_FOUND, e.to_string())
-        } else {
-            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
-        }
-    })
-}
-
-/// PUT /api/library/rule/:name - Save a rule.
-async fn save_rule(
-    State(state): State<Arc<super::routes::AppState>>,
-    Path(name): Path<String>,
-    headers: HeaderMap,
-    Json(req): Json<SaveContentRequest>,
-) -> Result<(StatusCode, String), (StatusCode, String)> {
-    let library = ensure_library(&state, &headers).await?;
-    library
-        .save_rule(&name, &req.content)
-        .await
-        .map(|_| (StatusCode::OK, "Rule saved successfully".to_string()))
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
-}
-
-/// DELETE /api/library/rule/:name - Delete a rule.
-async fn delete_rule(
-    State(state): State<Arc<super::routes::AppState>>,
-    Path(name): Path<String>,
-    headers: HeaderMap,
-) -> Result<(StatusCode, String), (StatusCode, String)> {
-    let library = ensure_library(&state, &headers).await?;
-    library
-        .delete_rule(&name)
-        .await
-        .map(|_| (StatusCode::OK, "Rule deleted successfully".to_string()))
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // Library Agents
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1476,7 +1408,6 @@ async fn rename_item(
     let item_type = match item_type_str.as_str() {
         "skill" => ItemType::Skill,
         "command" => ItemType::Command,
-        "rule" => ItemType::Rule,
         "agent" => ItemType::Agent,
         "tool" => ItemType::Tool,
         "workspace-template" => ItemType::WorkspaceTemplate,
@@ -1484,7 +1415,7 @@ async fn rename_item(
             return Err((
                 StatusCode::BAD_REQUEST,
                 format!(
-                    "Invalid item type '{}'. Valid types: skill, command, rule, agent, tool, workspace-template",
+                    "Invalid item type '{}'. Valid types: skill, command, agent, tool, workspace-template",
                     item_type_str
                 ),
             ))

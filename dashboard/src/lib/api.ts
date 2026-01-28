@@ -587,11 +587,9 @@ export async function cleanupEmptyMissions(): Promise<{ ok: boolean; deleted_cou
 }
 
 // Resume an interrupted mission
-export async function resumeMission(id: string, cleanWorkspace: boolean = false): Promise<Mission> {
+export async function resumeMission(id: string): Promise<Mission> {
   const res = await apiFetch(`/api/control/missions/${id}/resume`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ clean_workspace: cleanWorkspace }),
   });
   if (!res.ok) {
     const text = await res.text();
@@ -1359,20 +1357,6 @@ export interface Plugin {
   ui: PluginUI;
 }
 
-// Rule types
-export interface RuleSummary {
-  name: string;
-  description: string | null;
-  path: string;
-}
-
-export interface Rule {
-  name: string;
-  description: string | null;
-  path: string;
-  content: string;
-}
-
 // Library Agent types
 export interface LibraryAgentSummary {
   name: string;
@@ -1388,7 +1372,6 @@ export interface LibraryAgent {
   model: string | null;
   tools: Record<string, boolean>;
   permissions: Record<string, string>;
-  rules: string[];
 }
 
 // Library Tool types
@@ -1663,33 +1646,6 @@ export function updatePlugin(
   };
 
   return () => eventSource.close();
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Rules
-// ─────────────────────────────────────────────────────────────────────────────
-
-// List rules
-export async function listLibraryRules(): Promise<RuleSummary[]> {
-  return libGet("/api/library/rule", "Failed to fetch rules");
-}
-
-// Get rule
-export async function getLibraryRule(name: string): Promise<Rule> {
-  return libGet(`/api/library/rule/${encodeURIComponent(name)}`, "Failed to fetch rule");
-}
-
-// Save rule
-export async function saveLibraryRule(
-  name: string,
-  content: string
-): Promise<void> {
-  return libPut(`/api/library/rule/${encodeURIComponent(name)}`, { content }, "Failed to save rule");
-}
-
-// Delete rule
-export async function deleteLibraryRule(name: string): Promise<void> {
-  return libDel(`/api/library/rule/${encodeURIComponent(name)}`, "Failed to delete rule");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

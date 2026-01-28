@@ -25,10 +25,6 @@ import {
   deleteLibraryCommand,
   getLibraryPlugins,
   saveLibraryPlugins,
-  listLibraryRules,
-  getLibraryRule,
-  saveLibraryRule,
-  deleteLibraryRule,
   listLibraryAgents,
   getLibraryAgent as apiGetLibraryAgent,
   saveLibraryAgent as apiSaveLibraryAgent,
@@ -43,8 +39,6 @@ import {
   type SkillSummary,
   type CommandSummary,
   type Plugin,
-  type RuleSummary,
-  type Rule,
   type LibraryAgentSummary,
   type LibraryAgent,
   type LibraryToolSummary,
@@ -61,7 +55,6 @@ interface LibraryContextValue {
   skills: SkillSummary[];
   commands: CommandSummary[];
   plugins: Record<string, Plugin>;
-  rules: RuleSummary[];
   libraryAgents: LibraryAgentSummary[];
   libraryTools: LibraryToolSummary[];
   loading: boolean;
@@ -89,12 +82,6 @@ interface LibraryContextValue {
   // Plugin operations
   savePlugins: (plugins: Record<string, Plugin>) => Promise<void>;
   refreshPlugins: () => Promise<void>;
-
-  // Rule operations
-  getRule: (name: string) => Promise<Rule>;
-  saveRule: (name: string, content: string) => Promise<void>;
-  removeRule: (name: string) => Promise<void>;
-  refreshRules: () => Promise<void>;
 
   // Library Agent operations
   getLibraryAgent: (name: string) => Promise<LibraryAgent>;
@@ -135,7 +122,6 @@ export function LibraryProvider({ children }: LibraryProviderProps) {
   const [skills, setSkills] = useState<SkillSummary[]>([]);
   const [commands, setCommands] = useState<CommandSummary[]>([]);
   const [plugins, setPlugins] = useState<Record<string, Plugin>>({});
-  const [rules, setRules] = useState<RuleSummary[]>([]);
   const [libraryAgents, setLibraryAgents] = useState<LibraryAgentSummary[]>([]);
   const [libraryTools, setLibraryTools] = useState<LibraryToolSummary[]>([]);
   const [loading, setLoading] = useState(true);
@@ -152,13 +138,12 @@ export function LibraryProvider({ children }: LibraryProviderProps) {
       setLibraryUnavailable(false);
       setLibraryUnavailableMessage(null);
 
-      const [statusData, mcpsData, skillsData, commandsData, pluginsData, rulesData, agentsData, toolsData] = await Promise.all([
+      const [statusData, mcpsData, skillsData, commandsData, pluginsData, agentsData, toolsData] = await Promise.all([
         getLibraryStatus(),
         getLibraryMcps(),
         listLibrarySkills(),
         listLibraryCommands(),
         getLibraryPlugins().catch(() => ({})), // May not exist yet
-        listLibraryRules().catch(() => []),
         listLibraryAgents().catch(() => []),
         listLibraryTools().catch(() => []),
       ]);
@@ -168,7 +153,6 @@ export function LibraryProvider({ children }: LibraryProviderProps) {
       setSkills(skillsData);
       setCommands(commandsData);
       setPlugins(pluginsData);
-      setRules(rulesData);
       setLibraryAgents(agentsData);
       setLibraryTools(toolsData);
     } catch (err) {
@@ -180,7 +164,6 @@ export function LibraryProvider({ children }: LibraryProviderProps) {
         setSkills([]);
         setCommands([]);
         setPlugins({});
-        setRules([]);
         setLibraryAgents([]);
         setLibraryTools([]);
         return;
@@ -295,34 +278,6 @@ export function LibraryProvider({ children }: LibraryProviderProps) {
     }
   }, []);
 
-  // Rule operations
-  const saveRule = useCallback(async (name: string, content: string) => {
-    await saveLibraryRule(name, content);
-    const rulesData = await listLibraryRules();
-    setRules(rulesData);
-    await refreshStatus();
-  }, [refreshStatus]);
-
-  const removeRule = useCallback(async (name: string) => {
-    await deleteLibraryRule(name);
-    setRules((prev) => prev.filter((r) => r.name !== name));
-    await refreshStatus();
-  }, [refreshStatus]);
-
-  const refreshRules = useCallback(async () => {
-    try {
-      const rulesData = await listLibraryRules();
-      setRules(rulesData);
-    } catch {
-      // Silently fail
-    }
-  }, []);
-
-  // Rule getter
-  const getRule = useCallback(async (name: string): Promise<Rule> => {
-    return getLibraryRule(name);
-  }, []);
-
   // Library Agent operations
   const getLibraryAgent = useCallback(async (name: string): Promise<LibraryAgent> => {
     return apiGetLibraryAgent(name);
@@ -338,7 +293,6 @@ export function LibraryProvider({ children }: LibraryProviderProps) {
       model: null,
       tools: {},
       permissions: {},
-      rules: [],
     };
     await apiSaveLibraryAgent(name, agent);
     const agentsData = await listLibraryAgents();
@@ -395,7 +349,6 @@ export function LibraryProvider({ children }: LibraryProviderProps) {
       skills,
       commands,
       plugins,
-      rules,
       libraryAgents,
       libraryTools,
       loading,
@@ -413,10 +366,6 @@ export function LibraryProvider({ children }: LibraryProviderProps) {
       removeCommand,
       savePlugins: _savePlugins,
       refreshPlugins,
-      getRule,
-      saveRule,
-      removeRule,
-      refreshRules,
       getLibraryAgent,
       saveLibraryAgent: saveLibraryAgentFn,
       removeLibraryAgent,
@@ -435,7 +384,6 @@ export function LibraryProvider({ children }: LibraryProviderProps) {
       skills,
       commands,
       plugins,
-      rules,
       libraryAgents,
       libraryTools,
       loading,
@@ -453,10 +401,6 @@ export function LibraryProvider({ children }: LibraryProviderProps) {
       removeCommand,
       _savePlugins,
       refreshPlugins,
-      getRule,
-      saveRule,
-      removeRule,
-      refreshRules,
       getLibraryAgent,
       saveLibraryAgentFn,
       removeLibraryAgent,

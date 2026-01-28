@@ -71,36 +71,6 @@ pub struct Plugin {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Rule Types (AGENTS.md style instructions)
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Rule summary for listing.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RuleSummary {
-    /// Rule name (filename without .md)
-    pub name: String,
-    /// Description from frontmatter
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    /// Path relative to library root (e.g., "rule/code-style.md")
-    pub path: String,
-}
-
-/// Full rule with content.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Rule {
-    /// Rule name
-    pub name: String,
-    /// Description from frontmatter
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    /// Path relative to library root
-    pub path: String,
-    /// Full markdown content
-    pub content: String,
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // Library Agent Types (OpenCode agent definitions)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -138,9 +108,6 @@ pub struct LibraryAgent {
     /// Permission levels: {"bash": "ask", "write": "allow"}
     #[serde(default)]
     pub permissions: HashMap<String, String>,
-    /// Rules to include by name
-    #[serde(default)]
-    pub rules: Vec<String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
