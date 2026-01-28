@@ -2104,6 +2104,7 @@ pub fn run_claudecode_turn<'a>(
                 .with_terminal_reason(TerminalReason::LlmError)
         } else {
             AgentResult::success(final_result, cost_cents)
+                .with_terminal_reason(TerminalReason::Completed)
         }
     }) // end Box::pin(async move { ... })
 }
@@ -5154,7 +5155,7 @@ pub async fn run_opencode_turn(
     let mut result = if had_error {
         AgentResult::failure(final_result, 0).with_terminal_reason(TerminalReason::LlmError)
     } else {
-        AgentResult::success(final_result, 0)
+        AgentResult::success(final_result, 0).with_terminal_reason(TerminalReason::Completed)
     };
     if let Some(model) = model_used {
         result = result.with_model(model);
@@ -5769,6 +5770,7 @@ pub async fn run_amp_turn(
 
     let mut result = if success {
         AgentResult::success(final_result, cost_cents)
+            .with_terminal_reason(TerminalReason::Completed)
     } else {
         AgentResult::failure(final_result, cost_cents)
             .with_terminal_reason(TerminalReason::LlmError)
