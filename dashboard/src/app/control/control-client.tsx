@@ -449,6 +449,35 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+/**
+ * Generate a unique fingerprint for comparing message content.
+ * Uses a delimiter that's unlikely to appear in message content to avoid
+ * false matches when content contains newlines or role prefixes.
+ */
+function getMessageFingerprint(kind: string, content: string): string {
+  return `${kind}\x00${content.length}\x00${content}`;
+}
+
+/**
+ * Compare current items with mission history by content fingerprints.
+ * Returns true if the history has changed (contents differ).
+ */
+function hasHistoryChanged(
+  items: ReadonlyArray<{ kind: string; content?: string }>,
+  history: ReadonlyArray<{ role: string; content?: string | null }>
+): boolean {
+  const currentFingerprints = items
+    .filter(i => i.kind === "user" || i.kind === "assistant")
+    .map(i => getMessageFingerprint(i.kind, i.content || ""));
+  
+  const newFingerprints = history.map(e =>
+    getMessageFingerprint(e.role === "user" ? "user" : "assistant", e.content || "")
+  );
+  
+  if (currentFingerprints.length !== newFingerprints.length) return true;
+  return currentFingerprints.some((fp, i) => fp !== newFingerprints[i]);
+}
+
 function formatTime(timestamp: number): string {
   const date = new Date(timestamp);
   return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -3742,18 +3771,23 @@ export default function ControlClient() {
             return updated;
           }
 
-          // Check if there's an existing user message with the same content but a different ID
-          // (e.g., history-* ID from missionHistoryToItems that replaced the UUID-based item)
-          const contentIndex = prev.findIndex(
+          // Check if there's an existing user message with the same content but a non-server ID
+          // (e.g., history-* ID from missionHistoryToItems that replaced the UUID-based item).
+          // Search from the end to match the most recent message with this content,
+          // and only match if the ID is not already a server-assigned UUID.
+          const contentIndex = [...prev].reverse().findIndex(
             (item) =>
               item.kind === "user" &&
-              item.content === msgContent
+              item.content === msgContent &&
+              (item.id.startsWith("history-") || item.id.startsWith("temp-"))
           );
           if (contentIndex !== -1) {
-            const existing = prev[contentIndex];
+            // Convert reversed index back to forward index
+            const actualIndex = prev.length - 1 - contentIndex;
+            const existing = prev[actualIndex];
             if (existing.kind === "user") {
               const updated = [...prev];
-              updated[contentIndex] = {
+              updated[actualIndex] = {
                 ...existing,
                 id: msgId,
                 queued: hasQueuedFlag ? queued : existing.queued,
@@ -4297,16 +4331,8 @@ export default function ControlClient() {
         setCurrentMission(mission);
         setViewingMission(mission);
         setViewingMissionId(mission.id);
-        // Compare history by content (not IDs) to avoid replacing UUID-based items
-        // with history-* format IDs, which would break SSE deduplication.
-        const currentContent = items
-          .filter(i => i.kind === "user" || i.kind === "assistant")
-          .map(i => `${i.kind}:${i.content}`)
-          .join("\n");
-        const newContent = mission.history
-          .map(e => `${e.role === "user" ? "user" : "assistant"}:${e.content}`)
-          .join("\n");
-        if (currentContent !== newContent) {
+        // Only update items if history content has actually changed
+        if (hasHistoryChanged(items, mission.history)) {
           setItems(missionHistoryToItems(mission));
         }
         applyDesktopSessionState(mission);
@@ -4392,16 +4418,8 @@ export default function ControlClient() {
         setCurrentMission(mission);
         setViewingMission(mission);
         setViewingMissionId(mission.id);
-        // Compare history by content (not IDs) to avoid replacing UUID-based items
-        // with history-* format IDs, which would break SSE deduplication.
-        const currentContent = items
-          .filter(i => i.kind === "user" || i.kind === "assistant")
-          .map(i => `${i.kind}:${i.content}`)
-          .join("\n");
-        const newContent = mission.history
-          .map(e => `${e.role === "user" ? "user" : "assistant"}:${e.content}`)
-          .join("\n");
-        if (currentContent !== newContent) {
+        // Only update items if history content has actually changed
+        if (hasHistoryChanged(items, mission.history)) {
           setItems(missionHistoryToItems(mission));
         }
         applyDesktopSessionState(mission);
