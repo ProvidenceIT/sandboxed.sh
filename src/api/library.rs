@@ -269,6 +269,10 @@ pub fn routes() -> Router<Arc<super::routes::AppState>> {
         // Claude Code Config
         .route("/claudecode/config", get(get_claudecode_config))
         .route("/claudecode/config", put(save_claudecode_config))
+        // Skills Registry (skills.sh)
+        .route("/skill/registry/search", get(search_registry))
+        .route("/skill/registry/list/:identifier", get(list_repo_skills))
+        .route("/skill/registry/install", post(install_from_registry))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -292,6 +296,23 @@ pub struct ImportSkillRequest {
     /// Optional path within the repository (for monorepos)
     path: Option<String>,
     /// Target skill name (defaults to last path component)
+    name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RegistrySearchQuery {
+    /// Search query
+    q: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct InstallFromRegistryRequest {
+    /// Repository identifier (e.g., "vercel-labs/agent-skills")
+    identifier: String,
+    /// Specific skill names to install (optional, installs all if empty)
+    #[serde(default)]
+    skills: Vec<String>,
+    /// Target name for the skill in the library (defaults to skill name)
     name: Option<String>,
 }
 
@@ -1670,4 +1691,178 @@ async fn save_claudecode_config(
         StatusCode::OK,
         "Claude Code config saved successfully".to_string(),
     ))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Skills Registry (skills.sh) Handlers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// GET /api/library/skill/registry/search?q=<query> - Search skills.sh registry.
+async fn search_registry(
+    axum::extract::Query(query): axum::extract::Query<RegistrySearchQuery>,
+) -> Result<Json<Vec<crate::skills_registry::RegistrySkillListing>>, (StatusCode, String)> {
+    let results = crate::skills_registry::search_skills(&query.q)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(results))
+}
+
+/// GET /api/library/skill/registry/list/:identifier - List skills in a repository.
+async fn list_repo_skills(
+    Path(identifier): Path<String>,
+) -> Result<Json<Vec<String>>, (StatusCode, String)> {
+    let skills = crate::skills_registry::list_repo_skills(&identifier)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(skills))
+}
+
+/// POST /api/library/skill/registry/install - Install a skill from skills.sh.
+async fn install_from_registry(
+    State(state): State<Arc<super::routes::AppState>>,
+    headers: HeaderMap,
+    Json(request): Json<InstallFromRegistryRequest>,
+) -> Result<Json<Skill>, (StatusCode, String)> {
+    use crate::library::SkillSource;
+
+    let library = ensure_library(&state, &headers).await?;
+
+    // Create a temporary directory for the skills CLI to work in
+    let temp_dir = library.path().join(".tmp-registry-install");
+    if temp_dir.exists() {
+        tokio::fs::remove_dir_all(&temp_dir)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
+    tokio::fs::create_dir_all(&temp_dir)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Initialize a minimal structure for the skills CLI
+    // The skills CLI expects certain directories to exist
+    let claude_skills_dir = temp_dir.join(".claude").join("skills");
+    tokio::fs::create_dir_all(&claude_skills_dir)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Run the install command
+    let skill_refs: Vec<&str> = request.skills.iter().map(|s| s.as_str()).collect();
+    let skill_names = if skill_refs.is_empty() {
+        None
+    } else {
+        Some(skill_refs.as_slice())
+    };
+
+    let result = crate::skills_registry::install_skill(&request.identifier, skill_names, &temp_dir)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    if !result.errors.is_empty() {
+        // Clean up temp dir
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("Installation errors: {}", result.errors.join(", ")),
+        ));
+    }
+
+    // Find the installed skill in .claude/skills/
+    let mut installed_skill_dir = None;
+    let mut entries = tokio::fs::read_dir(&claude_skills_dir)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    {
+        let path = entry.path();
+        if path.is_dir() && path.join("SKILL.md").exists() {
+            installed_skill_dir = Some(path);
+            break;
+        }
+    }
+
+    let source_dir = installed_skill_dir.ok_or_else(|| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "No skill found after installation".to_string(),
+        )
+    })?;
+
+    // Determine target name
+    let skill_name = request.name.unwrap_or_else(|| {
+        source_dir
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "imported-skill".to_string())
+    });
+
+    // Copy to library
+    let target_dir = library.path().join("skill").join(&skill_name);
+    if target_dir.exists() {
+        let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+        return Err((
+            StatusCode::CONFLICT,
+            format!("Skill '{}' already exists", skill_name),
+        ));
+    }
+
+    copy_dir_recursive(&source_dir, &target_dir)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Write the source metadata file
+    let source = SkillSource::SkillsRegistry {
+        identifier: request.identifier.clone(),
+        skill_name: request.skills.first().cloned(),
+        version: None,
+        installed_at: Some(chrono::Utc::now().to_rfc3339()),
+        updated_at: None,
+    };
+    let source_json = serde_json::to_string_pretty(&source)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    tokio::fs::write(target_dir.join(".skill-source.json"), source_json)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Clean up temp directory
+    let _ = tokio::fs::remove_dir_all(&temp_dir).await;
+
+    // Get and return the skill
+    let skill = library
+        .get_skill(&skill_name)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Sync to workspaces
+    sync_skill_to_workspaces(&state, &library, &skill_name).await;
+
+    Ok(Json(skill))
+}
+
+/// Recursively copy a directory.
+#[async_recursion::async_recursion]
+async fn copy_dir_recursive(
+    src: &std::path::Path,
+    dst: &std::path::Path,
+) -> Result<(), std::io::Error> {
+    tokio::fs::create_dir_all(dst).await?;
+
+    let mut entries = tokio::fs::read_dir(src).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+
+        if src_path.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path).await?;
+        } else {
+            tokio::fs::copy(&src_path, &dst_path).await?;
+        }
+    }
+
+    Ok(())
 }

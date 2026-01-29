@@ -8,7 +8,11 @@ import {
   deleteSkillReference,
   importSkill,
   validateSkillName,
+  searchSkillsRegistry,
+  installFromRegistry,
   type Skill,
+  type SkillSummary,
+  type RegistrySkillListing,
 } from '@/lib/api';
 import {
   GitBranch,
@@ -30,6 +34,10 @@ import {
   FileText,
   ExternalLink,
   Pencil,
+  Search,
+  Globe,
+  Link2,
+  Package,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { LibraryUnavailable } from '@/components/library-unavailable';
@@ -684,6 +692,16 @@ export default function SkillsPage() {
   const [saving, setSaving] = useState(false);
   const [loadingFile, setLoadingFile] = useState(false);
 
+  // Tab state - simplified to just two tabs
+  type SkillTab = 'installed' | 'browse';
+  const [activeTab, setActiveTab] = useState<SkillTab>('installed');
+
+  // Registry state
+  const [registrySearch, setRegistrySearch] = useState('');
+  const [registryResults, setRegistryResults] = useState<RegistrySkillListing[]>([]);
+  const [searchingRegistry, setSearchingRegistry] = useState(false);
+  const [installingSkill, setInstallingSkill] = useState<string | null>(null);
+
   // Dialog state
   const [showNewSkillDialog, setShowNewSkillDialog] = useState(false);
   const [showImportDialog, setShowImportDialog] = useState(false);
@@ -971,6 +989,55 @@ Describe what this skill does.
     await loadSkill(skill.name);
   };
 
+  // Registry search with debounce
+  const searchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const handleRegistrySearch = useCallback((query: string) => {
+    setRegistrySearch(query);
+    if (searchTimeoutRef.current) {
+      clearTimeout(searchTimeoutRef.current);
+    }
+    if (!query.trim()) {
+      setRegistryResults([]);
+      return;
+    }
+    searchTimeoutRef.current = setTimeout(async () => {
+      setSearchingRegistry(true);
+      try {
+        const results = await searchSkillsRegistry(query);
+        setRegistryResults(results);
+      } catch (err) {
+        console.error('Failed to search registry:', err);
+        setRegistryResults([]);
+      } finally {
+        setSearchingRegistry(false);
+      }
+    }, 300);
+  }, []);
+
+  const handleInstallFromRegistry = async (identifier: string, skillName: string) => {
+    const skillKey = `${identifier}@${skillName}`;
+    setInstallingSkill(skillKey);
+    try {
+      const skill = await installFromRegistry({ identifier, skill_names: [skillName] });
+      await refresh();
+      await loadSkill(skill.name);
+      setActiveTab('installed');
+    } catch (err) {
+      console.error('Failed to install skill:', err);
+    } finally {
+      setInstallingSkill(null);
+    }
+  };
+
+  // Check if a skill is already installed (from registry)
+  const isSkillInstalled = useCallback((identifier: string, skillName: string) => {
+    return skills.some(s =>
+      s.source?.type === 'SkillsRegistry' &&
+      s.source.identifier === identifier &&
+      s.source.skill_name === skillName
+    );
+  }, [skills]);
+
   const handleRenameSuccess = async () => {
     await refresh();
     // The skill was renamed, so we need to clear selection
@@ -1062,66 +1129,210 @@ Describe what this skill does.
 
       {/* Main Content */}
       <div className="flex-1 min-h-0 rounded-xl bg-white/[0.02] border border-white/[0.06] overflow-hidden flex">
-        {/* Skills List */}
-        <div className="w-56 border-r border-white/[0.06] flex flex-col min-h-0">
-          <div className="p-3 border-b border-white/[0.06] flex items-center justify-between">
-            <span className="text-xs font-medium text-white/60">
-              Skills{skills.length ? ` (${skills.length})` : ''}
-            </span>
-            <div className="flex items-center gap-1">
-              <button
-                onClick={() => setShowImportDialog(true)}
-                className="p-1.5 rounded-lg hover:bg-white/[0.06] transition-colors"
-                title="Import from Git"
-              >
-                <Download className="h-3.5 w-3.5 text-white/60" />
-              </button>
-              <button
-                onClick={() => setShowNewSkillDialog(true)}
-                className="p-1.5 rounded-lg hover:bg-white/[0.06] transition-colors"
-                title="New Skill"
-              >
-                <Plus className="h-3.5 w-3.5 text-white/60" />
-              </button>
-            </div>
-          </div>
-          <div className="flex-1 min-h-0 overflow-y-auto p-2">
-            {skills.length === 0 ? (
-              <div className="text-center py-8">
-                <FileText className="h-8 w-8 text-white/20 mx-auto mb-2" />
-                <p className="text-xs text-white/40 mb-3">No skills yet</p>
-                <button
-                  onClick={() => setShowNewSkillDialog(true)}
-                  className="text-xs text-indigo-400 hover:text-indigo-300"
-                >
-                  Create your first skill
-                </button>
+        {/* Skills List with Tabs */}
+        <div className="w-64 border-r border-white/[0.06] flex flex-col min-h-0">
+          {/* Tab Headers - Two tabs: Installed and Browse */}
+          <div className="flex border-b border-white/[0.06]">
+            <button
+              onClick={() => setActiveTab('installed')}
+              className={cn(
+                'flex-1 px-3 py-2.5 text-xs font-medium transition-colors relative',
+                activeTab === 'installed'
+                  ? 'text-white'
+                  : 'text-white/50 hover:text-white/70'
+              )}
+            >
+              <div className="flex items-center justify-center gap-1.5">
+                <Package className="h-3 w-3" />
+                <span>Installed</span>
+                {skills.length > 0 && (
+                  <span className="text-[10px] text-white/40">({skills.length})</span>
+                )}
               </div>
-            ) : (
-              skills.map((skill) => {
-                // Use frontmatter description for selected skill as fallback
-                // (backend YAML parser may fail on special chars, but frontend parser succeeds)
-                const description = selectedSkill?.name === skill.name
-                  ? (skill.description || frontmatter.description)
-                  : skill.description;
-                return (
+              {activeTab === 'installed' && (
+                <div className="absolute bottom-0 left-2 right-2 h-0.5 bg-indigo-500 rounded-full" />
+              )}
+            </button>
+            <button
+              onClick={() => setActiveTab('browse')}
+              className={cn(
+                'flex-1 px-3 py-2.5 text-xs font-medium transition-colors relative',
+                activeTab === 'browse'
+                  ? 'text-white'
+                  : 'text-white/50 hover:text-white/70'
+              )}
+            >
+              <div className="flex items-center justify-center gap-1.5">
+                <Globe className="h-3 w-3" />
+                <span>Browse</span>
+              </div>
+              {activeTab === 'browse' && (
+                <div className="absolute bottom-0 left-2 right-2 h-0.5 bg-indigo-500 rounded-full" />
+              )}
+            </button>
+          </div>
+
+          {/* Tab Content */}
+          <div className="flex-1 min-h-0 overflow-y-auto">
+            {/* Installed Tab - All skills (local + from registry) */}
+            {activeTab === 'installed' && (
+              <div className="p-2">
+                {/* Action buttons */}
+                <div className="flex items-center gap-1 mb-2 px-1">
                   <button
-                    key={skill.name}
-                    onClick={() => loadSkill(skill.name)}
-                    className={cn(
-                      'w-full text-left p-2.5 rounded-lg transition-colors mb-1',
-                      selectedSkill?.name === skill.name
-                        ? 'bg-white/[0.08] text-white'
-                        : 'text-white/60 hover:bg-white/[0.04] hover:text-white'
-                    )}
+                    onClick={() => setShowImportDialog(true)}
+                    className="flex-1 flex items-center justify-center gap-1.5 p-1.5 rounded-lg text-xs text-white/60 hover:text-white hover:bg-white/[0.06] transition-colors"
+                    title="Import from Git"
                   >
-                    <p className="text-sm font-medium truncate">{skill.name}</p>
-                    {description && (
-                      <p className="text-xs text-white/40 truncate">{description}</p>
-                    )}
+                    <Download className="h-3 w-3" />
+                    Import
                   </button>
-                );
-              })
+                  <button
+                    onClick={() => setShowNewSkillDialog(true)}
+                    className="flex-1 flex items-center justify-center gap-1.5 p-1.5 rounded-lg text-xs text-white/60 hover:text-white hover:bg-white/[0.06] transition-colors"
+                    title="New Skill"
+                  >
+                    <Plus className="h-3 w-3" />
+                    New
+                  </button>
+                </div>
+                {skills.length === 0 ? (
+                  <div className="text-center py-8">
+                    <Package className="h-8 w-8 text-white/20 mx-auto mb-2" />
+                    <p className="text-xs text-white/40 mb-3">No skills yet</p>
+                    <div className="flex flex-col gap-2">
+                      <button
+                        onClick={() => setShowNewSkillDialog(true)}
+                        className="text-xs text-indigo-400 hover:text-indigo-300"
+                      >
+                        Create your first skill
+                      </button>
+                      <button
+                        onClick={() => setActiveTab('browse')}
+                        className="text-xs text-white/40 hover:text-white/60"
+                      >
+                        or browse skills.sh
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  skills.map((skill) => {
+                    const isFromRegistry = skill.source?.type === 'SkillsRegistry';
+                    const description = selectedSkill?.name === skill.name
+                      ? (skill.description || frontmatter.description)
+                      : skill.description;
+                    return (
+                      <button
+                        key={skill.name}
+                        onClick={() => loadSkill(skill.name)}
+                        className={cn(
+                          'w-full text-left p-2.5 rounded-lg transition-colors mb-1',
+                          selectedSkill?.name === skill.name
+                            ? 'bg-white/[0.08] text-white'
+                            : 'text-white/60 hover:bg-white/[0.04] hover:text-white'
+                        )}
+                      >
+                        <div className="flex items-center gap-1.5">
+                          {isFromRegistry && (
+                            <Globe className="h-3 w-3 text-indigo-400 flex-shrink-0" />
+                          )}
+                          <p className="text-sm font-medium truncate">{skill.name}</p>
+                        </div>
+                        {description && (
+                          <p className={cn(
+                            "text-xs text-white/40 truncate mt-0.5",
+                            isFromRegistry && "ml-[18px]"
+                          )}>{description}</p>
+                        )}
+                      </button>
+                    );
+                  })
+                )}
+              </div>
+            )}
+
+            {/* Browse Tab */}
+            {activeTab === 'browse' && (
+              <div className="p-2">
+                <div className="relative mb-3">
+                  <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-white/40" />
+                  <input
+                    type="text"
+                    placeholder="Search skills.sh..."
+                    value={registrySearch}
+                    onChange={(e) => handleRegistrySearch(e.target.value)}
+                    className="w-full pl-8 pr-3 py-2 text-xs bg-white/[0.04] border border-white/[0.08] rounded-lg text-white placeholder:text-white/30 focus:outline-none focus:border-indigo-500/50"
+                  />
+                  {searchingRegistry && (
+                    <Loader className="absolute right-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-white/40 animate-spin" />
+                  )}
+                </div>
+                {!registrySearch ? (
+                  <div className="text-center py-6">
+                    <Globe className="h-8 w-8 text-white/20 mx-auto mb-2" />
+                    <p className="text-xs text-white/40 mb-1">Search the skills.sh registry</p>
+                    <p className="text-[10px] text-white/30">
+                      Try &quot;react&quot;, &quot;typescript&quot;, or &quot;vercel-labs&quot;
+                    </p>
+                  </div>
+                ) : registryResults.length === 0 && !searchingRegistry ? (
+                  <div className="text-center py-6">
+                    <Search className="h-6 w-6 text-white/20 mx-auto mb-2" />
+                    <p className="text-xs text-white/40">No results found</p>
+                  </div>
+                ) : (
+                  registryResults.map((result) => {
+                    const skillKey = `${result.identifier}@${result.name}`;
+                    const installed = isSkillInstalled(result.identifier, result.name);
+                    const installing = installingSkill === skillKey;
+                    return (
+                      <div
+                        key={skillKey}
+                        className="p-2.5 rounded-lg bg-white/[0.02] hover:bg-white/[0.04] transition-colors mb-1.5 border border-white/[0.04]"
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0 flex-1">
+                            <p className="text-sm font-medium text-white truncate">{result.name}</p>
+                            <p className="text-[10px] text-white/40 truncate">{result.identifier}</p>
+                            {result.description && (
+                              <p className="text-xs text-white/50 mt-1 line-clamp-2">{result.description}</p>
+                            )}
+                          </div>
+                          {installed ? (
+                            <span className="text-[10px] text-emerald-400 bg-emerald-500/10 px-2 py-1 rounded flex-shrink-0">
+                              Installed
+                            </span>
+                          ) : (
+                            <button
+                              onClick={() => handleInstallFromRegistry(result.identifier, result.name)}
+                              disabled={installing}
+                              className="text-xs text-indigo-400 hover:text-indigo-300 bg-indigo-500/10 hover:bg-indigo-500/20 px-2.5 py-1 rounded transition-colors disabled:opacity-50 flex-shrink-0 flex items-center gap-1"
+                            >
+                              {installing ? (
+                                <Loader className="h-3 w-3 animate-spin" />
+                              ) : (
+                                <Plus className="h-3 w-3" />
+                              )}
+                              Add
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+                <div className="mt-3 pt-3 border-t border-white/[0.06]">
+                  <a
+                    href="https://skills.sh"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center justify-center gap-1.5 text-xs text-white/40 hover:text-white/60 transition-colors"
+                  >
+                    <ExternalLink className="h-3 w-3" />
+                    Open skills.sh
+                  </a>
+                </div>
+              </div>
             )}
           </div>
         </div>
@@ -1166,7 +1377,16 @@ Describe what this skill does.
             <>
               <div className="p-3 border-b border-white/[0.06] flex items-center justify-between">
                 <div className="min-w-0">
-                  <p className="text-sm font-medium text-white truncate">{selectedFile}</p>
+                  <div className="flex items-center gap-2">
+                    <p className="text-sm font-medium text-white truncate">{selectedFile}</p>
+                    {selectedSkill.source?.type === 'SkillsRegistry' && (
+                      <span className="flex items-center gap-1 text-[10px] text-indigo-400 bg-indigo-500/10 px-1.5 py-0.5 rounded">
+                        <Globe className="h-2.5 w-2.5" />
+                        {selectedSkill.source.identifier}
+                        {selectedSkill.source.version && ` @ ${selectedSkill.source.version}`}
+                      </span>
+                    )}
+                  </div>
                   <p className="text-xs text-white/40">skills/{selectedSkill.name}/{selectedFile}</p>
                 </div>
                 <div className="flex items-center gap-2">

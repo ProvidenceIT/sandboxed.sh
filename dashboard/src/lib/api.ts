@@ -998,19 +998,40 @@ export interface SkillFile {
   content: string;
 }
 
+// Skill source/provenance - local or from skills.sh registry
+export type SkillSource =
+  | { type: "Local" }
+  | {
+      type: "SkillsRegistry";
+      identifier: string;
+      skill_name?: string;
+      version?: string;
+      installed_at?: string;
+      updated_at?: string;
+    };
+
 export interface SkillSummary {
   name: string;
   description: string | null;
   path: string;
+  source?: SkillSource;
 }
 
 export interface Skill {
   name: string;
   description: string | null;
   path: string;
+  source?: SkillSource;
   content: string;
   files: SkillFile[];
   references: string[];
+}
+
+// Skills registry (skills.sh) types
+export interface RegistrySkillListing {
+  identifier: string;
+  name: string;
+  description: string | null;
 }
 
 // Plugin types
@@ -1188,6 +1209,32 @@ export interface ImportSkillRequest {
 
 export async function importSkill(request: ImportSkillRequest): Promise<Skill> {
   return libPost("/api/library/skills/import", request, "Failed to import skill");
+}
+
+// Skills Registry (skills.sh) API
+
+export async function searchSkillsRegistry(query: string): Promise<RegistrySkillListing[]> {
+  return libGet(
+    `/api/library/skill/registry/search?q=${encodeURIComponent(query)}`,
+    "Failed to search skills registry"
+  );
+}
+
+export async function listRepoSkills(identifier: string): Promise<string[]> {
+  return libGet(
+    `/api/library/skill/registry/list/${encodeURIComponent(identifier)}`,
+    "Failed to list repo skills"
+  );
+}
+
+export interface InstallFromRegistryRequest {
+  identifier: string;
+  skills?: string[];
+  name?: string;
+}
+
+export async function installFromRegistry(request: InstallFromRegistryRequest): Promise<Skill> {
+  return libPost("/api/library/skill/registry/install", request, "Failed to install from registry");
 }
 
 // Validate skill name (matches backend pattern)

@@ -249,6 +249,37 @@ pub struct SkillFile {
     pub content: String,
 }
 
+/// Source/provenance of a skill - local or from skills.sh registry.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type")]
+pub enum SkillSource {
+    /// Locally created skill
+    Local,
+    /// Skill installed from skills.sh registry
+    SkillsRegistry {
+        /// Repository identifier (e.g., "vercel-labs/agent-skills")
+        identifier: String,
+        /// Specific skill name within the repo (for multi-skill repos)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        skill_name: Option<String>,
+        /// Pinned version/commit hash
+        #[serde(skip_serializing_if = "Option::is_none")]
+        version: Option<String>,
+        /// When the skill was first installed
+        #[serde(skip_serializing_if = "Option::is_none")]
+        installed_at: Option<String>,
+        /// When the skill was last updated
+        #[serde(skip_serializing_if = "Option::is_none")]
+        updated_at: Option<String>,
+    },
+}
+
+impl Default for SkillSource {
+    fn default() -> Self {
+        SkillSource::Local
+    }
+}
+
 /// Skill summary for listing (without full content).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillSummary {
@@ -259,6 +290,9 @@ pub struct SkillSummary {
     pub description: Option<String>,
     /// Path relative to library root (e.g., "skill/frontend-development")
     pub path: String,
+    /// Source/provenance of the skill
+    #[serde(default)]
+    pub source: SkillSource,
 }
 
 /// Full skill with content.
@@ -271,6 +305,9 @@ pub struct Skill {
     pub description: Option<String>,
     /// Path relative to library root
     pub path: String,
+    /// Source/provenance of the skill
+    #[serde(default)]
+    pub source: SkillSource,
     /// Primary SKILL.md content (for backwards compatibility)
     pub content: String,
     /// All markdown files in the skill folder

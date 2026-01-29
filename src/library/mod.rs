@@ -210,10 +210,23 @@ impl LibraryStore {
 
             let description = extract_description(&frontmatter);
 
+            // Read skill source metadata if present
+            let source_file = entry_path.join(".skill-source.json");
+            let source = if source_file.exists() {
+                fs::read_to_string(&source_file)
+                    .await
+                    .ok()
+                    .and_then(|s| serde_json::from_str(&s).ok())
+                    .unwrap_or_default()
+            } else {
+                SkillSource::default()
+            };
+
             skills.push(SkillSummary {
                 name,
                 description,
                 path: format!("{}/{}", SKILL_DIR, entry.file_name().to_string_lossy()),
+                source,
             });
         }
 
@@ -252,10 +265,23 @@ impl LibraryStore {
         // Collect all .md files and non-.md reference files
         let (files, references) = self.collect_skill_files(&skill_dir).await?;
 
+        // Read skill source metadata if present
+        let source_file = skill_dir.join(".skill-source.json");
+        let source = if source_file.exists() {
+            fs::read_to_string(&source_file)
+                .await
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default()
+        } else {
+            SkillSource::default()
+        };
+
         Ok(Skill {
             name: name.to_string(),
             description,
             path: format!("{}/{}", SKILL_DIR, name),
+            source,
             content,
             files,
             references,
@@ -1507,16 +1533,92 @@ impl LibraryStore {
     /// Returns an empty object if neither file exists.
     pub async fn get_opencode_settings(&self) -> Result<serde_json::Value> {
         let path = self.path.join(OPENCODE_DIR).join("oh-my-opencode.json");
+        let system_path = Self::resolve_system_opencode_path();
 
-        if path.exists() {
+        let mut library_settings = if path.exists() {
             let content = fs::read_to_string(&path)
                 .await
                 .context("Failed to read opencode/oh-my-opencode.json")?;
-            return serde_json::from_str(&content).context("Failed to parse oh-my-opencode.json");
+            serde_json::from_str(&content).context("Failed to parse oh-my-opencode.json")?
+        } else {
+            serde_json::json!({})
+        };
+
+        let system_settings = if system_path.exists() {
+            let content = fs::read_to_string(&system_path)
+                .await
+                .context("Failed to read system oh-my-opencode.json")?;
+            Some(
+                serde_json::from_str::<serde_json::Value>(&content)
+                    .context("Failed to parse system oh-my-opencode.json")?,
+            )
+        } else {
+            None
+        };
+
+        if path.exists() {
+            let mut changed = false;
+
+            if !library_settings.is_object() {
+                library_settings = serde_json::json!({});
+                changed = true;
+            }
+
+            // If the library file is empty but the system config exists, prefer the system version.
+            if library_settings.as_object().map(|o| o.is_empty()).unwrap_or(true) {
+                if let Some(system_settings) = system_settings.clone() {
+                    library_settings = system_settings;
+                    changed = true;
+                }
+            } else if let Some(system_settings) = system_settings.as_ref() {
+                // Merge missing agents from the system config (preserve library overrides).
+                if let Some(system_agents) = system_settings.get("agents").and_then(|v| v.as_object())
+                {
+                    let lib_agents = library_settings
+                        .get_mut("agents")
+                        .and_then(|v| v.as_object_mut());
+
+                    match lib_agents {
+                        Some(lib_agents) => {
+                            for (name, entry) in system_agents {
+                                if !lib_agents.contains_key(name) {
+                                    lib_agents.insert(name.clone(), entry.clone());
+                                    changed = true;
+                                }
+                            }
+                        }
+                        None => {
+                            if !system_agents.is_empty() {
+                                library_settings
+                                    .as_object_mut()
+                                    .unwrap()
+                                    .insert("agents".to_string(), serde_json::Value::Object(system_agents.clone()));
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if changed {
+                let opencode_dir = self.path.join(OPENCODE_DIR);
+                if let Err(e) = fs::create_dir_all(&opencode_dir).await {
+                    tracing::warn!("Failed to create opencode directory in Library: {}", e);
+                } else if let Ok(content) = serde_json::to_string_pretty(&library_settings) {
+                    if let Err(e) = fs::write(&path, content).await {
+                        tracing::warn!("Failed to update oh-my-opencode.json in Library: {}", e);
+                    } else {
+                        tracing::info!(
+                            "Merged missing agents from system oh-my-opencode.json into Library"
+                        );
+                    }
+                }
+            }
+
+            return Ok(library_settings);
         }
 
         // Library file doesn't exist - try to copy from system location
-        let system_path = Self::resolve_system_opencode_path();
         if system_path.exists() {
             let content = fs::read_to_string(&system_path)
                 .await
@@ -1741,6 +1843,80 @@ impl LibraryStore {
         }
 
         Ok(())
+    }
+
+    #[cfg(test)]
+    async fn with_test_store(path: PathBuf) -> LibraryStore {
+        LibraryStore {
+            path,
+            remote: "test-remote".to_string(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod opencode_settings_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn merges_missing_agents_from_system_config() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let library_path = temp.path().join("library");
+        let system_path = temp.path().join("system");
+
+        tokio::fs::create_dir_all(library_path.join("opencode"))
+            .await
+            .expect("create library dir");
+        tokio::fs::create_dir_all(&system_path)
+            .await
+            .expect("create system dir");
+
+        let library_settings = serde_json::json!({
+            "agents": {
+                "sisyphus": { "model": "openai/gpt-4o-mini" }
+            }
+        });
+        tokio::fs::write(
+            library_path.join("opencode").join("oh-my-opencode.json"),
+            serde_json::to_string_pretty(&library_settings).unwrap(),
+        )
+        .await
+        .expect("write library settings");
+
+        let system_settings = serde_json::json!({
+            "agents": {
+                "sisyphus": { "model": "openai/gpt-4o-mini" },
+                "prometheus": { "model": "openai/gpt-4o" }
+            }
+        });
+        tokio::fs::write(
+            system_path.join("oh-my-opencode.json"),
+            serde_json::to_string_pretty(&system_settings).unwrap(),
+        )
+        .await
+        .expect("write system settings");
+
+        std::env::set_var("OPENCODE_CONFIG_DIR", &system_path);
+
+        let store = LibraryStore::with_test_store(library_path).await;
+        let merged = store
+            .get_opencode_settings()
+            .await
+            .expect("get settings");
+
+        let agents = merged.get("agents").and_then(|v| v.as_object()).unwrap();
+        assert!(agents.contains_key("sisyphus"));
+        assert!(agents.contains_key("prometheus"));
+
+        // Library file should be updated with prometheus.
+        let updated = tokio::fs::read_to_string(
+            temp.path().join("library/opencode/oh-my-opencode.json"),
+        )
+        .await
+        .expect("read updated library");
+        let updated_value: serde_json::Value = serde_json::from_str(&updated).unwrap();
+        let updated_agents = updated_value.get("agents").and_then(|v| v.as_object()).unwrap();
+        assert!(updated_agents.contains_key("prometheus"));
     }
 }
 
