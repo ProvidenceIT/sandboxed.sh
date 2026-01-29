@@ -46,9 +46,9 @@ ENV NEXT_PUBLIC_API_URL=""
 RUN bun run build
 
 # ---------------------------------------------------------------------------
-# Stage 3: Runtime
+# Stage 3: Runtime (Ubuntu 24.04 for native debootstrap support)
 # ---------------------------------------------------------------------------
-FROM debian:bookworm-slim AS runtime
+FROM ubuntu:24.04 AS runtime
 
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -60,13 +60,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # Desktop automation
     xvfb i3 x11-utils x11-xserver-utils xdotool scrot imagemagick \
     tesseract-ocr at-spi2-core \
-    fonts-liberation fonts-dejavu-core fonts-noto \
+    fonts-liberation fonts-dejavu fonts-noto \
     # Chromium
-    chromium \
+    chromium-browser \
     && rm -rf /var/lib/apt/lists/* \
-    # Add missing Ubuntu noble (24.04) script for debootstrap
-    # Debian 12's debootstrap doesn't include noble yet
-    && ln -sf gutsy /usr/share/debootstrap/scripts/noble \
+    # Add plucky (25.04) script for future Ubuntu releases
     && ln -sf gutsy /usr/share/debootstrap/scripts/plucky
 
 # -- Node.js 20 (for Next.js standalone + Claude Code via npm) ---------------
@@ -82,7 +80,7 @@ RUN curl -fsSL https://bun.sh/install | bash \
 # -- Caddy (reverse proxy) ---------------------------------------------------
 RUN curl -fsSL 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
       | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg \
-    && echo "deb [signed-by=/usr/share/keyrings/caddy-stable-archive-keyring.gpg] https://dl.cloudsmith.io/public/caddy/stable/deb/debian any-version main" \
+    && echo "deb [signed-by=/usr/share/keyrings/caddy-stable-archive-keyring.gpg] https://dl.cloudsmith.io/public/caddy/stable/deb/ubuntu noble main" \
       > /etc/apt/sources.list.d/caddy-stable.list \
     && apt-get update && apt-get install -y --no-install-recommends caddy \
     && rm -rf /var/lib/apt/lists/*
@@ -105,7 +103,7 @@ RUN curl -fsSL https://opencode.ai/install | bash -s -- --no-modify-path \
     && install -m 0755 /root/.opencode/bin/opencode /usr/local/bin/opencode \
     && echo "[docker] OpenCode CLI installed: $(opencode --version 2>/dev/null || echo 'unknown')" \
     || echo "[docker] WARNING: OpenCode CLI install failed (will be installed on first mission)"
-RUN npm install -g @anthropic-ai/amp@latest \
+RUN npm install -g @sourcegraph/amp@latest \
     && echo "[docker] Amp CLI installed: $(amp --version 2>/dev/null || echo 'unknown')" \
     || echo "[docker] WARNING: Amp CLI install failed (will be installed on first mission)"
 
