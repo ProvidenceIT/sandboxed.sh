@@ -92,6 +92,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/sessions/:display/close", post(close_session))
         .route("/sessions/:display/keep-alive", post(keep_alive_session))
         .route("/sessions/cleanup", post(cleanup_orphaned_sessions))
+        .route("/sessions/cleanup-stopped", post(cleanup_stopped_sessions))
 }
 
 /// List all desktop sessions across all missions.
@@ -116,6 +117,12 @@ async fn close_session(
     match close_desktop_session(&display_id, &state.config.working_dir).await {
         Ok(()) => {
             tracing::info!(display_id = %display_id, "Desktop session closed via API");
+
+            // Also remove the session record from storage
+            if let Err(e) = remove_session_from_storage(&state, &display_id).await {
+                tracing::warn!(display_id = %display_id, error = %e, "Failed to remove session from storage");
+            }
+
             Ok(Json(OperationResponse {
                 success: true,
                 message: Some(format!("Desktop session {} closed", display_id)),
@@ -224,6 +231,8 @@ async fn cleanup_orphaned_sessions(State(state): State<Arc<AppState>>) -> Json<O
                 .await
                 .is_ok()
             {
+                // Also remove from storage
+                let _ = remove_session_from_storage(&state, &session.display).await;
                 closed_count += 1;
             } else {
                 failed_count += 1;
@@ -249,6 +258,93 @@ async fn cleanup_orphaned_sessions(State(state): State<Arc<AppState>>) -> Json<O
             }
         )),
     })
+}
+
+/// Remove all stopped desktop session records from storage.
+async fn cleanup_stopped_sessions(State(state): State<Arc<AppState>>) -> Json<OperationResponse> {
+    let mission_store = state.control.get_mission_store().await;
+    let missions = match mission_store.list_missions(1000, 0).await {
+        Ok(m) => m,
+        Err(e) => {
+            return Json(OperationResponse {
+                success: false,
+                message: Some(format!("Failed to list missions: {}", e)),
+            });
+        }
+    };
+
+    let mut removed_count = 0;
+
+    for mission in missions {
+        let original_count = mission.desktop_sessions.len();
+
+        // Check each session - keep only those that are still running
+        let mut truly_active = Vec::new();
+        for session in &mission.desktop_sessions {
+            // Skip if stopped_at is set
+            if session.stopped_at.is_some() {
+                removed_count += 1;
+                continue;
+            }
+
+            // Check if process is actually running
+            if is_xvfb_running(&session.display).await {
+                truly_active.push(session.clone());
+            } else {
+                removed_count += 1;
+            }
+        }
+
+        // Update if we removed any sessions
+        if truly_active.len() != original_count {
+            if let Err(e) = mission_store
+                .update_mission_desktop_sessions(mission.id, &truly_active)
+                .await
+            {
+                tracing::warn!(
+                    mission_id = %mission.id,
+                    error = %e,
+                    "Failed to update mission desktop sessions"
+                );
+            }
+        }
+    }
+
+    tracing::info!(removed = removed_count, "Stopped desktop sessions cleanup complete");
+
+    Json(OperationResponse {
+        success: true,
+        message: Some(format!("Removed {} stopped session records", removed_count)),
+    })
+}
+
+/// Remove a session from storage (from the mission's desktop_sessions vector).
+async fn remove_session_from_storage(state: &Arc<AppState>, display_id: &str) -> Result<(), String> {
+    let mission_store = state.control.get_mission_store().await;
+    let missions = mission_store.list_missions(1000, 0).await?;
+
+    for mission in missions {
+        let original_count = mission.desktop_sessions.len();
+        let filtered: Vec<_> = mission
+            .desktop_sessions
+            .iter()
+            .filter(|s| s.display != display_id)
+            .cloned()
+            .collect();
+
+        if filtered.len() != original_count {
+            mission_store
+                .update_mission_desktop_sessions(mission.id, &filtered)
+                .await?;
+            tracing::debug!(
+                mission_id = %mission.id,
+                display_id = %display_id,
+                "Removed desktop session from storage"
+            );
+        }
+    }
+
+    Ok(())
 }
 
 /// Collect all desktop sessions from all missions with status information.

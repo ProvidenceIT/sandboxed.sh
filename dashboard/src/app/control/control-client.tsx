@@ -39,6 +39,7 @@ import {
   closeDesktopSession,
   keepAliveDesktopSession,
   cleanupOrphanedDesktopSessions,
+  cleanupStoppedDesktopSessions,
   removeFromQueue,
   clearQueue,
   getQueue,
@@ -4826,6 +4827,28 @@ export default function ControlClient() {
                             >
                               <Trash2 className="h-3.5 w-3.5" />
                               Close all orphaned
+                            </button>
+                          </>
+                        )}
+
+                        {/* Separator and cleanup action if there are stopped sessions */}
+                        {desktopSessions.some(s => !s.process_running || s.status === 'stopped') && (
+                          <>
+                            <div className="my-1 h-px bg-white/[0.06]" />
+                            <button
+                              onClick={async () => {
+                                try {
+                                  await cleanupStoppedDesktopSessions();
+                                  toast.success('Stopped sessions cleared');
+                                  await refreshDesktopSessions();
+                                } catch (err) {
+                                  toast.error('Failed to clear stopped sessions');
+                                }
+                              }}
+                              className="flex w-full items-center gap-2 px-3 py-2 text-xs text-white/40 hover:bg-white/[0.04] transition-colors"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                              Clear stopped sessions
                             </button>
                           </>
                         )}

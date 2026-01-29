@@ -1346,7 +1346,7 @@ export function updatePlugin(
   packageName: string,
   onEvent: (event: { event_type: string; message: string; progress?: number }) => void
 ): () => void {
-  const url = `${window.location.origin}/api/system/plugins/${encodeURIComponent(packageName)}/update`;
+  const url = apiUrl(`/api/system/plugins/${encodeURIComponent(packageName)}/update`);
 
   const eventSource = new EventSource(url, { withCredentials: true });
 
@@ -1955,6 +1955,11 @@ export async function keepAliveDesktopSession(
 // Close all orphaned desktop sessions
 export async function cleanupOrphanedDesktopSessions(): Promise<OperationResponse> {
   return apiPost('/api/desktop/sessions/cleanup', undefined, 'Failed to cleanup orphaned sessions');
+}
+
+// Remove all stopped desktop session records from storage
+export async function cleanupStoppedDesktopSessions(): Promise<OperationResponse> {
+  return apiPost('/api/desktop/sessions/cleanup-stopped', undefined, 'Failed to cleanup stopped sessions');
 }
 
 // ============================================
