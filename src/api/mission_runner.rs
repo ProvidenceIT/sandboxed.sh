@@ -3122,6 +3122,26 @@ fn sync_opencode_agent_config(
         }
     };
 
+    // When oh-my-opencode is enabled, it injects fully-specified agents
+    // (including prompts/permissions) into OpenCode. If we also write
+    // per-agent overrides into opencode.json, OpenCode treats those as
+    // authoritative and overwrites the plugin-defined agents, which
+    // strips the Prometheus/Metis/Momus/etc prompts. Therefore, we avoid
+    // writing any per-agent overrides for oh-my-opencode agents and
+    // remove any stale overrides that might already exist.
+    let oh_my_opencode_enabled = opencode_json
+        .get("plugin")
+        .and_then(|v| v.as_array())
+        .map(|plugins| {
+            plugins.iter().any(|entry| {
+                entry
+                    .as_str()
+                    .map(|s| s.contains("oh-my-opencode"))
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false);
+
     let mut updated = false;
     if let Some(model) = effective_default {
         if let Some(obj) = opencode_json.as_object_mut() {
@@ -3147,74 +3167,68 @@ fn sync_opencode_agent_config(
         }
     }
 
-    let agent_entry = opencode_json
-        .as_object_mut()
-        .and_then(|obj| obj.get_mut("agent"))
-        .and_then(|v| v.as_object_mut());
+    if let Some(obj) = opencode_json.as_object_mut() {
+        let agent_entry = obj
+            .entry("agent".to_string())
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        let agent_entry = match agent_entry.as_object_mut() {
+            Some(entry) => entry,
+            None => return,
+        };
 
-    let agent_entry = match agent_entry {
-        Some(entry) => entry,
-        None => {
-            if let Some(obj) = opencode_json.as_object_mut() {
-                obj.insert(
-                    "agent".to_string(),
-                    serde_json::Value::Object(serde_json::Map::new()),
-                );
+        if oh_my_opencode_enabled {
+            for name in omo_agents.keys() {
+                if agent_entry.remove(name).is_some() {
+                    updated = true;
+                }
             }
-            let Some(entry) = opencode_json
-                .as_object_mut()
-                .and_then(|obj| obj.get_mut("agent"))
-                .and_then(|v| v.as_object_mut())
-            else {
-                return;
-            };
-            entry
-        }
-    };
-    for (name, entry) in omo_agents {
-        // Agent-specific model from oh-my-opencode.json takes priority over fallback default
-        let desired_model = entry
-            .get("model")
-            .and_then(|v| v.as_str())
-            .filter(|model| model_allowed(model))
-            .map(|s| s.to_string())
-            .or_else(|| {
-                effective_default
+        } else {
+            for (name, entry) in omo_agents {
+                // Agent-specific model from oh-my-opencode.json takes priority over fallback default
+                let desired_model = entry
+                    .get("model")
+                    .and_then(|v| v.as_str())
                     .filter(|model| model_allowed(model))
                     .map(|s| s.to_string())
-            });
+                    .or_else(|| {
+                        effective_default
+                            .filter(|model| model_allowed(model))
+                            .map(|s| s.to_string())
+                    });
 
-        if let Some(existing) = agent_entry.get_mut(name) {
-            if let (Some(model), Some(existing_obj)) =
-                (desired_model.as_ref(), existing.as_object_mut())
-            {
-                match existing_obj.get("model").and_then(|v| v.as_str()) {
-                    Some(current) if current == model => {}
-                    _ => {
-                        existing_obj.insert(
-                            "model".to_string(),
-                            serde_json::Value::String(model.clone()),
-                        );
-                        updated = true;
+                if let Some(existing) = agent_entry.get_mut(name) {
+                    if let (Some(model), Some(existing_obj)) =
+                        (desired_model.as_ref(), existing.as_object_mut())
+                    {
+                        match existing_obj.get("model").and_then(|v| v.as_str()) {
+                            Some(current) if current == model => {}
+                            _ => {
+                                existing_obj.insert(
+                                    "model".to_string(),
+                                    serde_json::Value::String(model.clone()),
+                                );
+                                updated = true;
+                            }
+                        }
+                    } else if let Some(existing_obj) = existing.as_object_mut() {
+                        if let Some(current) = existing_obj.get("model").and_then(|v| v.as_str()) {
+                            if !model_allowed(current) {
+                                existing_obj.remove("model");
+                                updated = true;
+                            }
+                        }
                     }
+                    continue;
                 }
-            } else if let Some(existing_obj) = existing.as_object_mut() {
-                if let Some(current) = existing_obj.get("model").and_then(|v| v.as_str()) {
-                    if !model_allowed(current) {
-                        existing_obj.remove("model");
-                        updated = true;
-                    }
+
+                let mut agent_config = serde_json::Map::new();
+                if let Some(model) = desired_model {
+                    agent_config.insert("model".to_string(), serde_json::Value::String(model));
                 }
+                agent_entry.insert(name.clone(), serde_json::Value::Object(agent_config));
+                updated = true;
             }
-            continue;
         }
-
-        let mut agent_config = serde_json::Map::new();
-        if let Some(model) = desired_model {
-            agent_config.insert("model".to_string(), serde_json::Value::String(model));
-        }
-        agent_entry.insert(name.clone(), serde_json::Value::Object(agent_config));
-        updated = true;
     }
 
     if updated {
@@ -4200,6 +4214,7 @@ async fn resolve_opencode_installer_fetcher(
 
     None
 }
+
 
 async fn opencode_binary_available(workspace_exec: &WorkspaceExec, cwd: &std::path::Path) -> bool {
     if command_available(workspace_exec, cwd, "opencode").await {
@@ -5857,5 +5872,98 @@ impl From<&MissionRunner> for RunningMissionInfo {
             subtask_total: runner.subtasks.len(),
             subtask_completed: runner.subtasks.iter().filter(|s| s.completed).count(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sync_opencode_agent_config;
+    use std::fs;
+
+    #[test]
+    fn sync_opencode_agent_config_removes_overrides_when_plugin_enabled() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let config_dir = temp_dir.path();
+
+        fs::write(
+            config_dir.join("oh-my-opencode.json"),
+            r#"{
+  "agents": {
+    "prometheus": { "model": "openai/gpt-4o" },
+    "sisyphus": {}
+  }
+}"#,
+        )
+        .expect("write oh-my-opencode.json");
+
+        fs::write(
+            config_dir.join("opencode.json"),
+            r#"{
+  "plugin": ["oh-my-opencode@0.0.1"],
+  "agent": {
+    "prometheus": { "model": "openai/gpt-4o-mini", "foo": "bar" },
+    "sisyphus": {},
+    "custom": { "model": "openai/gpt-4o" }
+  }
+}"#,
+        )
+        .expect("write opencode.json");
+
+        sync_opencode_agent_config(config_dir, Some("openai/gpt-4o-mini"), true, false, false);
+
+        let opencode_json: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(config_dir.join("opencode.json")).expect("read opencode.json"),
+        )
+        .expect("parse opencode.json");
+        let agents = opencode_json
+            .get("agent")
+            .and_then(|v| v.as_object())
+            .expect("agent object");
+
+        assert!(agents.get("prometheus").is_none());
+        assert!(agents.get("sisyphus").is_none());
+        assert!(agents.get("custom").is_some());
+    }
+
+    #[test]
+    fn sync_opencode_agent_config_writes_overrides_when_plugin_disabled() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let config_dir = temp_dir.path();
+
+        fs::write(
+            config_dir.join("oh-my-opencode.json"),
+            r#"{
+  "agents": {
+    "prometheus": { "model": "openai/gpt-4o" },
+    "sisyphus": {}
+  }
+}"#,
+        )
+        .expect("write oh-my-opencode.json");
+
+        sync_opencode_agent_config(config_dir, Some("openai/gpt-4o-mini"), true, false, false);
+
+        let opencode_json: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(config_dir.join("opencode.json")).expect("read opencode.json"),
+        )
+        .expect("parse opencode.json");
+        let agents = opencode_json
+            .get("agent")
+            .and_then(|v| v.as_object())
+            .expect("agent object");
+
+        let prometheus_model = agents
+            .get("prometheus")
+            .and_then(|v| v.get("model"))
+            .and_then(|v| v.as_str())
+            .expect("prometheus model");
+        let sisyphus_model = agents
+            .get("sisyphus")
+            .and_then(|v| v.get("model"))
+            .and_then(|v| v.as_str())
+            .expect("sisyphus model");
+
+        assert_eq!(prometheus_model, "openai/gpt-4o");
+        assert_eq!(sisyphus_model, "openai/gpt-4o-mini");
     }
 }
