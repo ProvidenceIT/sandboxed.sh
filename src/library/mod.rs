@@ -106,8 +106,45 @@ impl LibraryStore {
     }
 
     /// Pull latest changes from remote.
+    /// After pulling, encrypts any unversioned <encrypted> tags in skill files.
     pub async fn sync(&self) -> Result<()> {
-        git::pull(&self.path).await
+        git::pull(&self.path).await?;
+
+        // Encrypt any unversioned encrypted tags in all skills
+        self.encrypt_all_skill_files().await?;
+
+        Ok(())
+    }
+
+    /// Encrypt unversioned <encrypted> tags in all skill files.
+    /// This ensures secrets pulled from git are encrypted on disk.
+    pub async fn encrypt_all_skill_files(&self) -> Result<()> {
+        let skills_dir = self.skills_dir();
+        if !skills_dir.exists() {
+            return Ok(());
+        }
+
+        let mut entries = fs::read_dir(&skills_dir).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            if entry.file_type().await?.is_dir() {
+                let name = entry.file_name();
+                if let Some(name_str) = name.to_str() {
+                    // Skip hidden directories
+                    if name_str.starts_with('.') {
+                        continue;
+                    }
+                    if let Err(e) = self.encrypt_skill_file(name_str).await {
+                        tracing::warn!(
+                            skill = %name_str,
+                            error = %e,
+                            "Failed to encrypt skill file"
+                        );
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// Commit all changes with a message and optional author.
@@ -684,8 +721,55 @@ impl LibraryStore {
         // Clean up temp directory
         let _ = fs::remove_dir_all(&temp_dir).await;
 
+        // Encrypt any unversioned <encrypted> tags in the imported SKILL.md
+        self.encrypt_skill_file(target_name).await?;
+
         // Return the imported skill
         self.get_skill(target_name).await
+    }
+
+    /// Encrypt unversioned <encrypted> tags in a skill's SKILL.md file.
+    /// This is called after importing or syncing to ensure secrets are encrypted on disk.
+    async fn encrypt_skill_file(&self, name: &str) -> Result<()> {
+        let skill_md = self.skills_dir().join(name).join("SKILL.md");
+        if !skill_md.exists() {
+            return Ok(());
+        }
+
+        let content = fs::read_to_string(&skill_md).await?;
+
+        // Check if there are any unversioned encrypted tags that need encryption
+        if !env_crypto::has_encrypted_tags(&content) {
+            return Ok(());
+        }
+
+        // Only encrypt if there are unversioned tags (user input format)
+        let has_unversioned = content.contains("<encrypted>")
+            && !content
+                .lines()
+                .filter(|l| l.contains("<encrypted>"))
+                .all(|l| l.contains("<encrypted v=\""));
+
+        if !has_unversioned {
+            return Ok(());
+        }
+
+        tracing::info!(
+            skill = %name,
+            "Encrypting unversioned <encrypted> tags in imported skill"
+        );
+
+        let key = env_crypto::ensure_private_key()
+            .await
+            .context("Failed to ensure encryption key")?;
+        let encrypted_content = env_crypto::encrypt_content_tags(&key, &content)?;
+
+        if encrypted_content != content {
+            fs::write(&skill_md, &encrypted_content).await?;
+            tracing::debug!(skill = %name, "Skill file encrypted and saved");
+        }
+
+        Ok(())
     }
 
     /// Recursively copy a directory.
@@ -1982,5 +2066,198 @@ This is the body."#;
     #[test]
     fn test_validate_name_rejects_empty() {
         assert!(LibraryStore::validate_name("").is_err());
+    }
+}
+
+#[cfg(test)]
+mod skill_encryption_tests {
+    use super::*;
+
+    /// Helper to set up a test encryption key
+    fn setup_test_key() {
+        let test_key = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+        std::env::set_var(env_crypto::PRIVATE_KEY_ENV, test_key);
+    }
+
+    #[tokio::test]
+    async fn test_save_skill_encrypts_unversioned_tags() {
+        setup_test_key();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = LibraryStore::with_test_store(temp.path().to_path_buf()).await;
+
+        // Create skills directory
+        fs::create_dir_all(store.skills_dir()).await.unwrap();
+
+        // Save a skill with unversioned encrypted tag
+        let content = r#"---
+description: Test skill with secret
+---
+
+# Test Skill
+
+API Key: <encrypted>sk-secret-key-12345</encrypted>
+"#;
+
+        store.save_skill("test-skill", content).await.unwrap();
+
+        // Read the raw file from disk
+        let skill_md = store.skills_dir().join("test-skill").join("SKILL.md");
+        let raw_content = fs::read_to_string(&skill_md).await.unwrap();
+
+        // Verify the file has versioned (encrypted) tags, not plaintext
+        assert!(
+            raw_content.contains("<encrypted v=\"1\">"),
+            "File should contain versioned encrypted tag"
+        );
+        assert!(
+            !raw_content.contains("<encrypted>sk-secret-key-12345</encrypted>"),
+            "File should NOT contain plaintext secret"
+        );
+        assert!(
+            !raw_content.contains("sk-secret-key-12345"),
+            "Plaintext secret should not appear anywhere in file"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_skill_decrypts_for_display() {
+        setup_test_key();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = LibraryStore::with_test_store(temp.path().to_path_buf()).await;
+
+        // Create skills directory
+        fs::create_dir_all(store.skills_dir()).await.unwrap();
+
+        // Save a skill with unversioned encrypted tag
+        let content = r#"---
+description: Test skill with secret
+---
+
+# Test Skill
+
+API Key: <encrypted>sk-secret-key-12345</encrypted>
+"#;
+
+        store.save_skill("test-skill", content).await.unwrap();
+
+        // Get the skill (should decrypt for display)
+        let skill = store.get_skill("test-skill").await.unwrap();
+
+        // The returned content should have unversioned tags with plaintext
+        assert!(
+            skill.content.contains("<encrypted>sk-secret-key-12345</encrypted>"),
+            "Skill content should show decrypted value in unversioned tag format"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_encrypt_skill_file_processes_unversioned_tags() {
+        setup_test_key();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = LibraryStore::with_test_store(temp.path().to_path_buf()).await;
+
+        // Create skill directory and write file with unversioned tag (simulating git pull)
+        let skill_dir = store.skills_dir().join("imported-skill");
+        fs::create_dir_all(&skill_dir).await.unwrap();
+
+        let content = r#"---
+description: Imported skill
+---
+
+Secret: <encrypted>my-api-key</encrypted>
+"#;
+        fs::write(skill_dir.join("SKILL.md"), content)
+            .await
+            .unwrap();
+
+        // Encrypt the skill file
+        store.encrypt_skill_file("imported-skill").await.unwrap();
+
+        // Verify the file is now encrypted
+        let raw_content = fs::read_to_string(skill_dir.join("SKILL.md"))
+            .await
+            .unwrap();
+
+        assert!(
+            raw_content.contains("<encrypted v=\"1\">"),
+            "File should be encrypted after encrypt_skill_file"
+        );
+        assert!(
+            !raw_content.contains("<encrypted>my-api-key</encrypted>"),
+            "Plaintext should be replaced with ciphertext"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_encrypt_all_skill_files() {
+        setup_test_key();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = LibraryStore::with_test_store(temp.path().to_path_buf()).await;
+
+        // Create multiple skills with unversioned tags
+        let skills_dir = store.skills_dir();
+        fs::create_dir_all(&skills_dir).await.unwrap();
+
+        for name in ["skill-a", "skill-b"] {
+            let skill_dir = skills_dir.join(name);
+            fs::create_dir_all(&skill_dir).await.unwrap();
+            let content = format!(
+                "---\ndescription: {}\n---\n\nKey: <encrypted>secret-{}</encrypted>\n",
+                name, name
+            );
+            fs::write(skill_dir.join("SKILL.md"), content)
+                .await
+                .unwrap();
+        }
+
+        // Encrypt all skills
+        store.encrypt_all_skill_files().await.unwrap();
+
+        // Verify both are encrypted
+        for name in ["skill-a", "skill-b"] {
+            let raw = fs::read_to_string(skills_dir.join(name).join("SKILL.md"))
+                .await
+                .unwrap();
+            assert!(
+                raw.contains("<encrypted v=\"1\">"),
+                "Skill {} should be encrypted",
+                name
+            );
+            assert!(
+                !raw.contains(&format!("secret-{}", name)),
+                "Skill {} should not have plaintext secret",
+                name
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_already_encrypted_not_double_encrypted() {
+        setup_test_key();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = LibraryStore::with_test_store(temp.path().to_path_buf()).await;
+
+        fs::create_dir_all(store.skills_dir()).await.unwrap();
+
+        // Save a skill (gets encrypted)
+        let content = "---\ndescription: test\n---\n\nKey: <encrypted>secret</encrypted>\n";
+        store.save_skill("test-skill", content).await.unwrap();
+
+        // Read the encrypted content
+        let skill_md = store.skills_dir().join("test-skill").join("SKILL.md");
+        let first_save = fs::read_to_string(&skill_md).await.unwrap();
+
+        // Save again (should not change)
+        store.save_skill("test-skill", content).await.unwrap();
+        let second_save = fs::read_to_string(&skill_md).await.unwrap();
+
+        // Both saves should produce encrypted content (though ciphertext may differ due to random nonce)
+        assert!(first_save.contains("<encrypted v=\"1\">"));
+        assert!(second_save.contains("<encrypted v=\"1\">"));
+
+        // The number of encrypted tags should be the same
+        let count1 = first_save.matches("<encrypted v=\"1\">").count();
+        let count2 = second_save.matches("<encrypted v=\"1\">").count();
+        assert_eq!(count1, count2, "Should not create additional encrypted tags");
     }
 }
