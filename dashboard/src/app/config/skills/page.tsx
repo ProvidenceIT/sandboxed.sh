@@ -1308,75 +1308,79 @@ Describe what this skill does.
 
             {/* Browse Tab */}
             {activeTab === 'browse' && (
-              <div className="p-2">
-                <div className="relative mb-3">
-                  <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-white/40" />
-                  <input
-                    type="text"
-                    placeholder="Search skills.sh..."
-                    value={registrySearch}
-                    onChange={(e) => handleRegistrySearch(e.target.value)}
-                    className="w-full pl-8 pr-3 py-2 text-xs bg-white/[0.04] border border-white/[0.08] rounded-lg text-white placeholder:text-white/30 focus:outline-none focus:border-indigo-500/50"
-                  />
-                  {searchingRegistry && (
-                    <Loader className="absolute right-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-white/40 animate-spin" />
-                  )}
+              <div className="h-full flex flex-col">
+                <div className="p-2 pb-0">
+                  <div className="relative mb-2">
+                    <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-white/40" />
+                    <input
+                      type="text"
+                      placeholder="Search skills.sh..."
+                      value={registrySearch}
+                      onChange={(e) => handleRegistrySearch(e.target.value)}
+                      className="w-full pl-8 pr-3 py-2 text-xs bg-white/[0.04] border border-white/[0.08] rounded-lg text-white placeholder:text-white/30 focus:outline-none focus:border-indigo-500/50"
+                    />
+                    {searchingRegistry && (
+                      <Loader className="absolute right-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-white/40 animate-spin" />
+                    )}
+                  </div>
                 </div>
-                {!registrySearch ? (
-                  <div className="text-center py-6">
-                    <Globe className="h-8 w-8 text-white/20 mx-auto mb-2" />
-                    <p className="text-xs text-white/40 mb-1">Search the skills.sh registry</p>
-                    <p className="text-[10px] text-white/30">
-                      Try &quot;react&quot;, &quot;typescript&quot;, or &quot;vercel-labs&quot;
-                    </p>
-                  </div>
-                ) : registryResults.length === 0 && !searchingRegistry ? (
-                  <div className="text-center py-6">
-                    <Search className="h-6 w-6 text-white/20 mx-auto mb-2" />
-                    <p className="text-xs text-white/40">No results found</p>
-                  </div>
-                ) : (
-                  registryResults.map((result) => {
-                    const skillKey = `${result.identifier}@${result.name}`;
-                    const installed = isSkillInstalled(result.identifier, result.name);
-                    const installing = installingSkill === skillKey;
-                    return (
-                      <div
-                        key={skillKey}
-                        className="p-2.5 rounded-lg bg-white/[0.02] hover:bg-white/[0.04] transition-colors mb-1.5 border border-white/[0.04]"
-                      >
-                        <div className="flex items-start justify-between gap-2">
-                          <div className="min-w-0 flex-1">
-                            <p className="text-sm font-medium text-white truncate">{result.name}</p>
-                            <p className="text-[10px] text-white/40 truncate">{result.identifier}</p>
-                            {result.description && (
-                              <p className="text-xs text-white/50 mt-1 line-clamp-2">{result.description}</p>
+                <div className="flex-1 min-h-0 overflow-y-auto px-2">
+                  {!registrySearch ? (
+                    <div className="text-center py-6">
+                      <Globe className="h-8 w-8 text-white/20 mx-auto mb-2" />
+                      <p className="text-xs text-white/40 mb-1">Search the skills.sh registry</p>
+                      <p className="text-[10px] text-white/30">
+                        Try &quot;react&quot;, &quot;typescript&quot;, or &quot;vercel-labs&quot;
+                      </p>
+                    </div>
+                  ) : registryResults.length === 0 && !searchingRegistry ? (
+                    <div className="text-center py-6">
+                      <Search className="h-6 w-6 text-white/20 mx-auto mb-2" />
+                      <p className="text-xs text-white/40">No results found</p>
+                    </div>
+                  ) : (
+                    registryResults.map((result) => {
+                      const skillKey = `${result.identifier}@${result.name}`;
+                      const installed = isSkillInstalled(result.identifier, result.name);
+                      const installing = installingSkill === skillKey;
+                      return (
+                        <div
+                          key={skillKey}
+                          className="p-2.5 rounded-lg bg-white/[0.02] hover:bg-white/[0.04] transition-colors mb-1.5 border border-white/[0.04]"
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0 flex-1">
+                              <p className="text-sm font-medium text-white truncate">{result.name}</p>
+                              <p className="text-[10px] text-white/40 truncate">{result.identifier}</p>
+                              {result.description && (
+                                <p className="text-xs text-white/50 mt-1 line-clamp-2">{result.description}</p>
+                              )}
+                            </div>
+                            {installed ? (
+                              <span className="text-[10px] text-emerald-400 bg-emerald-500/10 px-2 py-1 rounded flex-shrink-0">
+                                Installed
+                              </span>
+                            ) : (
+                              <button
+                                onClick={() => handleInstallFromRegistry(result.identifier, result.name)}
+                                disabled={installing}
+                                className="text-xs text-indigo-400 hover:text-indigo-300 bg-indigo-500/10 hover:bg-indigo-500/20 px-2.5 py-1 rounded transition-colors disabled:opacity-50 flex-shrink-0 flex items-center gap-1"
+                              >
+                                {installing ? (
+                                  <Loader className="h-3 w-3 animate-spin" />
+                                ) : (
+                                  <Plus className="h-3 w-3" />
+                                )}
+                                Add
+                              </button>
                             )}
                           </div>
-                          {installed ? (
-                            <span className="text-[10px] text-emerald-400 bg-emerald-500/10 px-2 py-1 rounded flex-shrink-0">
-                              Installed
-                            </span>
-                          ) : (
-                            <button
-                              onClick={() => handleInstallFromRegistry(result.identifier, result.name)}
-                              disabled={installing}
-                              className="text-xs text-indigo-400 hover:text-indigo-300 bg-indigo-500/10 hover:bg-indigo-500/20 px-2.5 py-1 rounded transition-colors disabled:opacity-50 flex-shrink-0 flex items-center gap-1"
-                            >
-                              {installing ? (
-                                <Loader className="h-3 w-3 animate-spin" />
-                              ) : (
-                                <Plus className="h-3 w-3" />
-                              )}
-                              Add
-                            </button>
-                          )}
                         </div>
-                      </div>
-                    );
-                  })
-                )}
-                <div className="mt-3 pt-3 border-t border-white/[0.06]">
+                      );
+                    })
+                  )}
+                </div>
+                <div className="p-2 pt-1.5 border-t border-white/[0.06]">
                   <a
                     href="https://skills.sh"
                     target="_blank"
