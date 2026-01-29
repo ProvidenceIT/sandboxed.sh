@@ -43,6 +43,7 @@ import { LibraryUnavailable } from '@/components/library-unavailable';
 import { useLibrary } from '@/contexts/library-context';
 import { ConfigCodeEditor } from '@/components/config-code-editor';
 import { RenameDialog } from '@/components/rename-dialog';
+import { useToast } from '@/components/toast';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -728,6 +729,7 @@ export default function SkillsPage() {
     committing,
     pushing,
   } = useLibrary();
+  const { showError } = useToast();
 
   // Skill selection state
   const [selectedSkill, setSelectedSkill] = useState<Skill | null>(null);
@@ -1045,8 +1047,10 @@ Describe what this skill does.
 
   // Registry search with debounce
   const searchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const currentSearchRef = useRef<string>('');
   const handleRegistrySearch = useCallback((query: string) => {
     setRegistrySearch(query);
+    currentSearchRef.current = query;
     if (searchTimeoutRef.current) {
       clearTimeout(searchTimeoutRef.current);
     }
@@ -1058,12 +1062,19 @@ Describe what this skill does.
       setSearchingRegistry(true);
       try {
         const results = await searchSkillsRegistry(query);
-        setRegistryResults(results);
+        // Only update results if query hasn't changed (avoid race condition)
+        if (currentSearchRef.current === query) {
+          setRegistryResults(results);
+        }
       } catch (err) {
         console.error('Failed to search registry:', err);
-        setRegistryResults([]);
+        if (currentSearchRef.current === query) {
+          setRegistryResults([]);
+        }
       } finally {
-        setSearchingRegistry(false);
+        if (currentSearchRef.current === query) {
+          setSearchingRegistry(false);
+        }
       }
     }, 300);
   }, []);
@@ -1087,6 +1098,7 @@ Describe what this skill does.
       setActiveTab('installed');
     } catch (err) {
       console.error('Failed to install skill:', err);
+      showError(err instanceof Error ? err.message : 'Failed to install skill', 'Installation Failed');
     } finally {
       setInstallingSkills(prev => {
         const next = new Set(prev);

@@ -1348,12 +1348,14 @@ export function updatePlugin(
   const url = apiUrl(`/api/system/plugins/${encodeURIComponent(packageName)}/update`);
 
   const eventSource = new EventSource(url, { withCredentials: true });
+  let completed = false;
 
   eventSource.onmessage = (event) => {
     try {
       const data = JSON.parse(event.data);
       onEvent(data);
       if (data.event_type === "complete" || data.event_type === "error") {
+        completed = true;
         eventSource.close();
       }
     } catch (e) {
@@ -1363,11 +1365,15 @@ export function updatePlugin(
 
   eventSource.onerror = () => {
     eventSource.close();
-    onEvent({
-      event_type: "error",
-      message: "Connection error: failed to connect to server",
-      progress: undefined,
-    });
+    // Only report error if we didn't receive a complete/error event
+    // (server closing connection after complete triggers onerror)
+    if (!completed) {
+      onEvent({
+        event_type: "error",
+        message: "Connection error: failed to connect to server",
+        progress: undefined,
+      });
+    }
   };
 
   return () => eventSource.close();
