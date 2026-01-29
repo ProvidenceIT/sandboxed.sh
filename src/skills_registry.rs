@@ -175,7 +175,10 @@ pub async fn install_skill(
     cmd.current_dir(target_dir);
     cmd.env("NO_COLOR", "1");
 
-    let output = cmd.output().await.context("Failed to run bunx skills add")?;
+    let output = cmd
+        .output()
+        .await
+        .context("Failed to run bunx skills add")?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);

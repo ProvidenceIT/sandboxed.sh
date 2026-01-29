@@ -610,7 +610,10 @@ async fn import_skill(
     // Validate skill name
     let skill_name = req.name.trim().to_lowercase();
     if skill_name.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "Skill name is required".to_string()));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Skill name is required".to_string(),
+        ));
     }
     if !skill_name
         .chars()
@@ -633,51 +636,60 @@ async fn import_skill(
 
     // Extract file from multipart
     let mut file_data: Option<(String, Vec<u8>)> = None;
-    while let Some(field) = multipart
-        .next_field()
-        .await
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Failed to read upload: {}", e)))?
-    {
+    while let Some(field) = multipart.next_field().await.map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Failed to read upload: {}", e),
+        )
+    })? {
         if field.name() == Some("file") {
             let filename = field
                 .file_name()
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| "upload".to_string());
-            let data = field
-                .bytes()
-                .await
-                .map_err(|e| (StatusCode::BAD_REQUEST, format!("Failed to read file: {}", e)))?;
+            let data = field.bytes().await.map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("Failed to read file: {}", e),
+                )
+            })?;
             file_data = Some((filename, data.to_vec()));
             break;
         }
     }
 
-    let (filename, data) = file_data
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, "No file uploaded".to_string()))?;
+    let (filename, data) =
+        file_data.ok_or_else(|| (StatusCode::BAD_REQUEST, "No file uploaded".to_string()))?;
 
     // Create skill directory
-    tokio::fs::create_dir_all(&skill_dir)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create skill directory: {}", e)))?;
+    tokio::fs::create_dir_all(&skill_dir).await.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to create skill directory: {}", e),
+        )
+    })?;
 
     // Handle based on file type
     let filename_lower = filename.to_lowercase();
     if filename_lower.ends_with(".zip") {
         // Extract ZIP file
-        import_skill_from_zip(&skill_dir, &data).await.map_err(|e| {
-            // Clean up on error
-            let _ = std::fs::remove_dir_all(&skill_dir);
-            (StatusCode::BAD_REQUEST, e)
-        })?;
+        import_skill_from_zip(&skill_dir, &data)
+            .await
+            .map_err(|e| {
+                // Clean up on error
+                let _ = std::fs::remove_dir_all(&skill_dir);
+                (StatusCode::BAD_REQUEST, e)
+            })?;
     } else if filename_lower.ends_with(".md") {
         // Single markdown file - save as SKILL.md
         let skill_md_path = skill_dir.join("SKILL.md");
-        tokio::fs::write(&skill_md_path, &data)
-            .await
-            .map_err(|e| {
-                let _ = std::fs::remove_dir_all(&skill_dir);
-                (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to write SKILL.md: {}", e))
-            })?;
+        tokio::fs::write(&skill_md_path, &data).await.map_err(|e| {
+            let _ = std::fs::remove_dir_all(&skill_dir);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to write SKILL.md: {}", e),
+            )
+        })?;
     } else {
         let _ = std::fs::remove_dir_all(&skill_dir);
         return Err((
@@ -698,7 +710,10 @@ async fn import_skill(
 
     // Load and return the skill
     let skill = library.get_skill(&skill_name).await.map_err(|e| {
-        (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to load imported skill: {}", e))
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to load imported skill: {}", e),
+        )
     })?;
 
     sync_skill_to_workspaces(&state, library.as_ref(), &skill_name).await;
@@ -710,8 +725,8 @@ async fn import_skill_from_zip(skill_dir: &std::path::Path, data: &[u8]) -> Resu
     use std::io::{Cursor, Read};
 
     let cursor = Cursor::new(data);
-    let mut archive = zip::ZipArchive::new(cursor)
-        .map_err(|e| format!("Invalid ZIP file: {}", e))?;
+    let mut archive =
+        zip::ZipArchive::new(cursor).map_err(|e| format!("Invalid ZIP file: {}", e))?;
 
     // Find the common prefix (for archives with a single root folder)
     let prefix = find_zip_prefix(&mut archive);
@@ -2065,10 +2080,7 @@ mod tests {
 
     #[test]
     fn test_find_zip_prefix_file_at_root() {
-        let zip_data = create_zip(&[
-            ("SKILL.md", "# Test"),
-            ("refs/file.md", "content"),
-        ]);
+        let zip_data = create_zip(&[("SKILL.md", "# Test"), ("refs/file.md", "content")]);
         let cursor = Cursor::new(zip_data.as_slice());
         let mut archive = zip::ZipArchive::new(cursor).unwrap();
         let prefix = find_zip_prefix(&mut archive);
@@ -2100,7 +2112,10 @@ mod tests {
     async fn test_import_skill_from_zip_with_root_folder() {
         // Simulate a GitHub-style archive with a root folder
         let zip_data = create_zip(&[
-            ("my-skill-main/SKILL.md", "---\ndescription: GitHub style\n---\n\n# Test"),
+            (
+                "my-skill-main/SKILL.md",
+                "---\ndescription: GitHub style\n---\n\n# Test",
+            ),
             ("my-skill-main/refs/doc.md", "Documentation"),
         ]);
 

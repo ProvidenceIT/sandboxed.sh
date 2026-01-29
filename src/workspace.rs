@@ -1117,8 +1117,10 @@ async fn write_opencode_config(
                                 .insert(model.id.clone(), serde_json::Value::Object(model_config));
                         }
                         if !models_map.is_empty() {
-                            provider_config
-                                .insert("models".to_string(), serde_json::Value::Object(models_map));
+                            provider_config.insert(
+                                "models".to_string(),
+                                serde_json::Value::Object(models_map),
+                            );
                         }
                     }
 
@@ -1126,7 +1128,10 @@ async fn write_opencode_config(
                 }
 
                 if !provider_map.is_empty() {
-                    base_obj.insert("provider".to_string(), serde_json::Value::Object(provider_map));
+                    base_obj.insert(
+                        "provider".to_string(),
+                        serde_json::Value::Object(provider_map),
+                    );
                 }
             }
         }
@@ -2559,12 +2564,7 @@ pub async fn prepare_mission_workspace_with_skills(
     mission_id: Uuid,
 ) -> anyhow::Result<PathBuf> {
     prepare_mission_workspace_with_skills_backend(
-        workspace,
-        mcp,
-        library,
-        mission_id,
-        "opencode",
-        None,
+        workspace, mcp, library, mission_id, "opencode", None,
     )
     .await
 }
@@ -2574,11 +2574,9 @@ fn read_custom_providers_from_file(workspace_root: &Path) -> Vec<AIProvider> {
     // Try both possible locations for ai_providers.json
     let candidates = [
         workspace_root.join(".openagent").join("ai_providers.json"),
-        std::path::PathBuf::from(
-            std::env::var("HOME").unwrap_or_else(|_| "/root".to_string()),
-        )
-        .join(".openagent")
-        .join("ai_providers.json"),
+        std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/root".to_string()))
+            .join(".openagent")
+            .join("ai_providers.json"),
     ];
 
     for path in &candidates {
@@ -3616,7 +3614,11 @@ async fn run_workspace_init_script(
             };
 
             match library
-                .assemble_init_script(&workspace.init_scripts, custom, skill_setup_commands.as_deref())
+                .assemble_init_script(
+                    &workspace.init_scripts,
+                    custom,
+                    skill_setup_commands.as_deref(),
+                )
                 .await
             {
                 Ok(assembled) => assembled,

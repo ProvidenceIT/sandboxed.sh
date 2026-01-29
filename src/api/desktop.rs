@@ -310,7 +310,10 @@ async fn cleanup_stopped_sessions(State(state): State<Arc<AppState>>) -> Json<Op
         }
     }
 
-    tracing::info!(removed = removed_count, "Stopped desktop sessions cleanup complete");
+    tracing::info!(
+        removed = removed_count,
+        "Stopped desktop sessions cleanup complete"
+    );
 
     Json(OperationResponse {
         success: true,
@@ -319,7 +322,10 @@ async fn cleanup_stopped_sessions(State(state): State<Arc<AppState>>) -> Json<Op
 }
 
 /// Remove a session from storage (from the mission's desktop_sessions vector).
-async fn remove_session_from_storage(state: &Arc<AppState>, display_id: &str) -> Result<(), String> {
+async fn remove_session_from_storage(
+    state: &Arc<AppState>,
+    display_id: &str,
+) -> Result<(), String> {
     let mission_store = state.control.get_mission_store().await;
     let missions = mission_store.list_missions(1000, 0).await?;
 

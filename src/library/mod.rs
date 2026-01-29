@@ -1723,14 +1723,19 @@ impl LibraryStore {
             }
 
             // If the library file is empty but the system config exists, prefer the system version.
-            if library_settings.as_object().map(|o| o.is_empty()).unwrap_or(true) {
+            if library_settings
+                .as_object()
+                .map(|o| o.is_empty())
+                .unwrap_or(true)
+            {
                 if let Some(system_settings) = system_settings.clone() {
                     library_settings = system_settings;
                     changed = true;
                 }
             } else if let Some(system_settings) = system_settings.as_ref() {
                 // Merge missing agents from the system config (preserve library overrides).
-                if let Some(system_agents) = system_settings.get("agents").and_then(|v| v.as_object())
+                if let Some(system_agents) =
+                    system_settings.get("agents").and_then(|v| v.as_object())
                 {
                     let lib_agents = library_settings
                         .get_mut("agents")
@@ -1747,10 +1752,10 @@ impl LibraryStore {
                         }
                         None => {
                             if !system_agents.is_empty() {
-                                library_settings
-                                    .as_object_mut()
-                                    .unwrap()
-                                    .insert("agents".to_string(), serde_json::Value::Object(system_agents.clone()));
+                                library_settings.as_object_mut().unwrap().insert(
+                                    "agents".to_string(),
+                                    serde_json::Value::Object(system_agents.clone()),
+                                );
                                 changed = true;
                             }
                         }
@@ -2057,23 +2062,22 @@ mod opencode_settings_tests {
         std::env::set_var("OPENCODE_CONFIG_DIR", &system_path);
 
         let store = LibraryStore::with_test_store(library_path).await;
-        let merged = store
-            .get_opencode_settings()
-            .await
-            .expect("get settings");
+        let merged = store.get_opencode_settings().await.expect("get settings");
 
         let agents = merged.get("agents").and_then(|v| v.as_object()).unwrap();
         assert!(agents.contains_key("sisyphus"));
         assert!(agents.contains_key("prometheus"));
 
         // Library file should be updated with prometheus.
-        let updated = tokio::fs::read_to_string(
-            temp.path().join("library/opencode/oh-my-opencode.json"),
-        )
-        .await
-        .expect("read updated library");
+        let updated =
+            tokio::fs::read_to_string(temp.path().join("library/opencode/oh-my-opencode.json"))
+                .await
+                .expect("read updated library");
         let updated_value: serde_json::Value = serde_json::from_str(&updated).unwrap();
-        let updated_agents = updated_value.get("agents").and_then(|v| v.as_object()).unwrap();
+        let updated_agents = updated_value
+            .get("agents")
+            .and_then(|v| v.as_object())
+            .unwrap();
         assert!(updated_agents.contains_key("prometheus"));
     }
 }
@@ -2219,7 +2223,9 @@ API Key: <encrypted>sk-secret-key-12345</encrypted>
 
         // The returned content should have unversioned tags with plaintext
         assert!(
-            skill.content.contains("<encrypted>sk-secret-key-12345</encrypted>"),
+            skill
+                .content
+                .contains("<encrypted>sk-secret-key-12345</encrypted>"),
             "Skill content should show decrypted value in unversioned tag format"
         );
     }
@@ -2332,6 +2338,9 @@ Secret: <encrypted>my-api-key</encrypted>
         // The number of encrypted tags should be the same
         let count1 = first_save.matches("<encrypted v=\"1\">").count();
         let count2 = second_save.matches("<encrypted v=\"1\">").count();
-        assert_eq!(count1, count2, "Should not create additional encrypted tags");
+        assert_eq!(
+            count1, count2,
+            "Should not create additional encrypted tags"
+        );
     }
 }

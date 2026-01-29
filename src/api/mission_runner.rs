@@ -4216,7 +4216,6 @@ async fn resolve_opencode_installer_fetcher(
     None
 }
 
-
 async fn opencode_binary_available(workspace_exec: &WorkspaceExec, cwd: &std::path::Path) -> bool {
     if command_available(workspace_exec, cwd, "opencode").await {
         return true;
