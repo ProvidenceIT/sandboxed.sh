@@ -1602,17 +1602,40 @@ pub fn run_claudecode_turn<'a>(
             args.push(m.to_string());
         }
 
-        // For continuation turns, use --resume to resume existing session
-        // For first turn, use --session-id to create new session with that ID
-        if is_continuation {
+        // For continuation turns, use --resume to resume existing session.
+        // For first turn, use --session-id to create new session with that ID.
+        //
+        // Important: We use a marker file to track if the session was ever initiated.
+        // This prevents "Session ID already in use" errors when a turn is cancelled
+        // after the session is created but before any assistant response is recorded.
+        let session_marker = work_dir.join(".claude-session-initiated");
+        let session_was_initiated = session_marker.exists();
+
+        // Determine if we should use --resume:
+        // - If we have assistant messages in history (normal continuation)
+        // - OR if the session was previously initiated (handles crash/cancel case)
+        let use_resume = is_continuation || session_was_initiated;
+
+        if use_resume {
             args.push("--resume".to_string());
             args.push(session_id.clone());
             tracing::debug!(
                 mission_id = %mission_id,
                 session_id = %session_id,
+                is_continuation = is_continuation,
+                session_was_initiated = session_was_initiated,
                 "Resuming existing Claude Code session"
             );
         } else {
+            // Create the marker file BEFORE starting the CLI to prevent races
+            if let Err(e) = std::fs::write(&session_marker, &session_id) {
+                tracing::warn!(
+                    mission_id = %mission_id,
+                    error = %e,
+                    "Failed to write session marker file"
+                );
+            }
+
             args.push("--session-id".to_string());
             args.push(session_id.clone());
             tracing::debug!(

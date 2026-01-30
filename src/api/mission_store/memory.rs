@@ -72,6 +72,7 @@ impl MissionStore for InMemoryMissionStore {
             resumable: false,
             desktop_sessions: Vec::new(),
             session_id: Some(Uuid::new_v4().to_string()),
+            session_initiated: false,
             terminal_reason: None,
         };
         self.missions
@@ -158,6 +159,16 @@ impl MissionStore for InMemoryMissionStore {
             .get_mut(&id)
             .ok_or_else(|| format!("Mission {} not found", id))?;
         mission.session_id = Some(session_id.to_string());
+        mission.updated_at = now_string();
+        Ok(())
+    }
+
+    async fn mark_session_initiated(&self, id: Uuid) -> Result<(), String> {
+        let mut missions = self.missions.write().await;
+        let mission = missions
+            .get_mut(&id)
+            .ok_or_else(|| format!("Mission {} not found", id))?;
+        mission.session_initiated = true;
         mission.updated_at = now_string();
         Ok(())
     }
