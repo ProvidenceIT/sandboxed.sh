@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import useSWR from 'swr';
 import {
   getLibraryOpenCodeSettings,
@@ -18,8 +18,18 @@ import {
   ClaudeCodeConfig,
   listBackendAgents,
   listProviders,
+  listConfigProfiles,
+  createConfigProfile,
+  getLibraryOpenCodeSettingsForProfile,
+  saveLibraryOpenCodeSettingsForProfile,
+  getOpenAgentConfigForProfile,
+  saveOpenAgentConfigForProfile,
+  getClaudeCodeConfigForProfile,
+  saveClaudeCodeConfigForProfile,
+  ConfigProfileSummary,
+  DivergedHistoryError,
 } from '@/lib/api';
-import { Save, Loader, AlertCircle, Check, RefreshCw, RotateCcw, Eye, EyeOff, AlertTriangle, X, GitBranch, Upload, Info, Download, GitMerge } from 'lucide-react';
+import { Save, Loader, AlertCircle, Check, RefreshCw, RotateCcw, Eye, EyeOff, AlertTriangle, X, GitBranch, Upload, Info, Download, GitMerge, ChevronDown, Plus, Layers } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { ConfigCodeEditor } from '@/components/config-code-editor';
 import { useLibrary } from '@/contexts/library-context';
@@ -92,6 +102,18 @@ export default function SettingsPage() {
     return true;
   });
 
+  // Config Profiles
+  const { data: profiles = [], mutate: mutateProfiles } = useSWR(
+    'config-profiles',
+    listConfigProfiles,
+    { revalidateOnFocus: false }
+  );
+  const [selectedProfile, setSelectedProfile] = useState<string>('default');
+  const [showProfileDropdown, setShowProfileDropdown] = useState(false);
+  const [showNewProfileDialog, setShowNewProfileDialog] = useState(false);
+  const [newProfileName, setNewProfileName] = useState('');
+  const [creatingProfile, setCreatingProfile] = useState(false);
+
   // OpenCode settings state
   const [settings, setSettings] = useState<string>('');
   const [originalSettings, setOriginalSettings] = useState<string>('');
@@ -137,8 +159,9 @@ export default function SettingsPage() {
   const [showCommitDialog, setShowCommitDialog] = useState(false);
   const [commitMessage, setCommitMessage] = useState('');
   const [showForceSyncDialog, setShowForceSyncDialog] = useState(false);
-  const [forceSyncing, setForceSyncing] = useState(false);
-  const [forcePushing, setForcePushing] = useState(false);
+
+  // Ref for profile dropdown click-outside handling
+  const profileDropdownRef = useRef<HTMLDivElement>(null);
 
   const isDirty = settings !== originalSettings;
   const isOpenAgentDirty =
@@ -160,28 +183,32 @@ export default function SettingsPage() {
   const isOutOfSync = systemSettings && originalSettings &&
     normalizeJson(systemSettings) !== normalizeJson(originalSettings);
 
-  const loadSettings = useCallback(async () => {
+  const loadSettings = useCallback(async (profile: string = selectedProfile) => {
     try {
       setLoading(true);
       setError(null);
 
-      // Load OpenCode settings from Library
-      const data = await getLibraryOpenCodeSettings();
+      // Load OpenCode settings from Library for the selected profile
+      const data = await getLibraryOpenCodeSettingsForProfile(profile);
       const formatted = JSON.stringify(data, null, 2);
       setSettings(formatted);
       setOriginalSettings(formatted);
 
-      // Load system settings (for sync status comparison)
-      try {
-        const sysData = await getOpenCodeSettings();
-        setSystemSettings(JSON.stringify(sysData, null, 2));
-      } catch {
-        // System settings might not exist yet
+      // Load system settings (for sync status comparison) - only relevant for default profile
+      if (profile === 'default') {
+        try {
+          const sysData = await getOpenCodeSettings();
+          setSystemSettings(JSON.stringify(sysData, null, 2));
+        } catch {
+          // System settings might not exist yet
+          setSystemSettings('');
+        }
+      } else {
         setSystemSettings('');
       }
 
-      // Load OpenAgent config
-      const openAgentData = await getOpenAgentConfig();
+      // Load OpenAgent config for the selected profile
+      const openAgentData = await getOpenAgentConfigForProfile(profile);
       setOpenAgentConfig(openAgentData);
       setOriginalOpenAgentConfig(openAgentData);
 
@@ -189,9 +216,9 @@ export default function SettingsPage() {
       const agents = await listOpenCodeAgents();
       setAllAgents(parseAgentNames(agents));
 
-      // Load Claude Code config
+      // Load Claude Code config for the selected profile
       try {
-        const claudeData = await getClaudeCodeConfig();
+        const claudeData = await getClaudeCodeConfigForProfile(profile);
         setClaudeCodeConfig({
           ...claudeData,
           hidden_agents: claudeData.hidden_agents || [],
@@ -202,6 +229,16 @@ export default function SettingsPage() {
         });
       } catch {
         // Claude Code config might not exist yet
+        setClaudeCodeConfig({
+          default_model: null,
+          default_agent: null,
+          hidden_agents: [],
+        });
+        setOriginalClaudeCodeConfig({
+          default_model: null,
+          default_agent: null,
+          hidden_agents: [],
+        });
       }
 
       // Load Claude Code agents for visibility settings
@@ -217,7 +254,7 @@ export default function SettingsPage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [selectedProfile]);
 
   useEffect(() => {
     loadSettings();
@@ -247,12 +284,26 @@ export default function SettingsPage() {
         }
       }
       if (e.key === 'Escape') {
+        if (showProfileDropdown) setShowProfileDropdown(false);
         if (showCommitDialog) setShowCommitDialog(false);
       }
     };
     document.addEventListener('keydown', handleKeyDown);
     return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [isDirty, parseError, settings, showCommitDialog]);
+  }, [isDirty, parseError, settings, showCommitDialog, showProfileDropdown]);
+
+  // Click outside to close profile dropdown
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (profileDropdownRef.current && !profileDropdownRef.current.contains(e.target as Node)) {
+        setShowProfileDropdown(false);
+      }
+    };
+    if (showProfileDropdown) {
+      document.addEventListener('mousedown', handleClickOutside);
+      return () => document.removeEventListener('mousedown', handleClickOutside);
+    }
+  }, [showProfileDropdown]);
 
   const handleSave = async () => {
     if (parseError) return;
@@ -261,11 +312,13 @@ export default function SettingsPage() {
       setSaving(true);
       setError(null);
       const parsed = JSON.parse(settings);
-      await saveLibraryOpenCodeSettings(parsed);
+      await saveLibraryOpenCodeSettingsForProfile(selectedProfile, parsed);
       setOriginalSettings(settings);
-      setSystemSettings(settings); // Sync happened, update local system state
+      if (selectedProfile === 'default') {
+        setSystemSettings(settings); // Sync happened, update local system state
+        setShowRestartModal(true); // Show modal asking to restart - only for default profile
+      }
       setSaveSuccess(true);
-      setShowRestartModal(true); // Show modal asking to restart
       setTimeout(() => setSaveSuccess(false), 2000);
       await refreshStatus(); // Update git status bar
     } catch (err) {
@@ -289,7 +342,7 @@ export default function SettingsPage() {
     try {
       setSavingOpenAgent(true);
       setError(null);
-      await saveOpenAgentConfig(openAgentConfig);
+      await saveOpenAgentConfigForProfile(selectedProfile, openAgentConfig);
       setOriginalOpenAgentConfig({ ...openAgentConfig });
       setOpenAgentSaveSuccess(true);
       setTimeout(() => setOpenAgentSaveSuccess(false), 2000);
@@ -305,7 +358,7 @@ export default function SettingsPage() {
     try {
       setSavingClaudeCode(true);
       setError(null);
-      await saveClaudeCodeConfig(claudeCodeConfig);
+      await saveClaudeCodeConfigForProfile(selectedProfile, claudeCodeConfig);
       setOriginalClaudeCodeConfig({ ...claudeCodeConfig });
       setClaudeCodeSaveSuccess(true);
       setTimeout(() => setClaudeCodeSaveSuccess(false), 2000);
@@ -315,6 +368,31 @@ export default function SettingsPage() {
     } finally {
       setSavingClaudeCode(false);
     }
+  };
+
+  const handleCreateProfile = async () => {
+    if (!newProfileName.trim()) return;
+    try {
+      setCreatingProfile(true);
+      setError(null);
+      await createConfigProfile(newProfileName.trim(), selectedProfile);
+      await mutateProfiles();
+      setSelectedProfile(newProfileName.trim());
+      setNewProfileName('');
+      setShowNewProfileDialog(false);
+      await loadSettings(newProfileName.trim());
+      await refreshStatus();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to create profile');
+    } finally {
+      setCreatingProfile(false);
+    }
+  };
+
+  const handleProfileChange = async (profileName: string) => {
+    setSelectedProfile(profileName);
+    setShowProfileDropdown(false);
+    await loadSettings(profileName);
   };
 
   const handleRestart = async () => {
@@ -343,9 +421,9 @@ export default function SettingsPage() {
     try {
       await sync();
       await loadSettings();
-    } catch {
+    } catch (err) {
       // If diverged history error, show the force sync dialog
-      if (divergedHistory) {
+      if (err instanceof DivergedHistoryError) {
         setShowForceSyncDialog(true);
       }
       // Other errors handled by context
@@ -354,27 +432,21 @@ export default function SettingsPage() {
 
   const handleForceSync = async () => {
     try {
-      setForceSyncing(true);
       await forceSync();
       setShowForceSyncDialog(false);
       await loadSettings();
     } catch {
       // Error handled by context
-    } finally {
-      setForceSyncing(false);
     }
   };
 
   const handleForcePush = async () => {
     try {
-      setForcePushing(true);
       await forcePush();
       setShowForceSyncDialog(false);
       await refreshStatus();
     } catch {
       // Error handled by context
-    } finally {
-      setForcePushing(false);
     }
   };
 
@@ -594,23 +666,151 @@ export default function SettingsPage() {
         </div>
       )}
 
-      {/* Harness Tabs */}
-      <div className="flex items-center gap-2 mb-2">
-        {enabledBackends.map((backend) => (
+      {/* Harness Tabs and Profile Selector */}
+      <div className="flex items-center justify-between mb-2">
+        {/* Harness Tabs - Left */}
+        <div className="flex items-center gap-2">
+          {enabledBackends.map((backend) => (
+            <button
+              key={backend.id}
+              onClick={() => setActiveHarness(backend.id as 'opencode' | 'claudecode' | 'amp')}
+              className={cn(
+                'px-4 py-2 rounded-lg text-sm font-medium border transition-colors',
+                activeHarness === backend.id
+                  ? 'bg-white/[0.08] border-white/[0.12] text-white'
+                  : 'bg-white/[0.02] border-white/[0.06] text-white/50 hover:text-white/70'
+              )}
+            >
+              {backend.name}
+            </button>
+          ))}
+        </div>
+
+        {/* Profile Selector - Right */}
+        <div className="relative" ref={profileDropdownRef}>
           <button
-            key={backend.id}
-            onClick={() => setActiveHarness(backend.id as 'opencode' | 'claudecode' | 'amp')}
-            className={cn(
-              'px-4 py-2 rounded-lg text-sm font-medium border transition-colors',
-              activeHarness === backend.id
-                ? 'bg-white/[0.08] border-white/[0.12] text-white'
-                : 'bg-white/[0.02] border-white/[0.06] text-white/50 hover:text-white/70'
-            )}
+            onClick={() => setShowProfileDropdown(!showProfileDropdown)}
+            className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium border border-white/[0.08] bg-white/[0.04] hover:bg-white/[0.06] text-white/80 transition-colors"
           >
-            {backend.name}
+            <Layers className="h-4 w-4 text-white/50" />
+            <span>{selectedProfile}</span>
+            <ChevronDown className={cn('h-4 w-4 text-white/40 transition-transform', showProfileDropdown && 'rotate-180')} />
           </button>
-        ))}
+
+          {/* Profile Dropdown */}
+          {showProfileDropdown && (
+            <div className="absolute right-0 top-full mt-1 w-56 rounded-lg border border-white/[0.08] bg-[#1a1a1f] shadow-xl z-50">
+              <div className="p-1">
+                {profiles.map((profile) => (
+                  <button
+                    key={profile.name}
+                    onClick={() => handleProfileChange(profile.name)}
+                    className={cn(
+                      'w-full flex items-center gap-2 px-3 py-2 text-sm rounded-md transition-colors text-left',
+                      selectedProfile === profile.name
+                        ? 'bg-indigo-500/20 text-indigo-300'
+                        : 'text-white/70 hover:bg-white/[0.06]'
+                    )}
+                  >
+                    <Layers className="h-4 w-4 flex-shrink-0" />
+                    <span className="flex-1 truncate">{profile.name}</span>
+                    {profile.is_default && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-white/[0.06] text-white/40">default</span>
+                    )}
+                  </button>
+                ))}
+              </div>
+              <div className="border-t border-white/[0.06] p-1">
+                <button
+                  onClick={() => {
+                    setShowProfileDropdown(false);
+                    setShowNewProfileDialog(true);
+                  }}
+                  className="w-full flex items-center gap-2 px-3 py-2 text-sm text-white/70 hover:bg-white/[0.06] rounded-md transition-colors"
+                >
+                  <Plus className="h-4 w-4" />
+                  <span>New Profile</span>
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
       </div>
+
+      {/* New Profile Dialog */}
+      {showNewProfileDialog && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="w-full max-w-md mx-4 p-6 rounded-xl bg-[#1a1a1f] border border-white/10 shadow-2xl">
+            <div className="flex items-start justify-between mb-4">
+              <div className="flex items-center gap-3">
+                <div className="p-2 rounded-lg bg-indigo-500/10">
+                  <Plus className="h-5 w-5 text-indigo-400" />
+                </div>
+                <h3 className="text-lg font-semibold text-white">New Config Profile</h3>
+              </div>
+              <button
+                onClick={() => {
+                  setShowNewProfileDialog(false);
+                  setNewProfileName('');
+                }}
+                className="p-1 text-white/40 hover:text-white transition-colors"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <p className="text-sm text-white/60 mb-4">
+              Create a new configuration profile. It will be initialized with a copy of the current profile's settings.
+            </p>
+            <div className="mb-6">
+              <label className="text-xs text-white/40 block mb-2">Profile Name</label>
+              <input
+                value={newProfileName}
+                onChange={(e) => setNewProfileName(e.target.value)}
+                placeholder="e.g., development, production"
+                className="w-full px-3 py-2 rounded-lg bg-black/20 border border-white/[0.06] text-sm text-white placeholder:text-white/25 focus:outline-none focus:border-indigo-500/50"
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && newProfileName.trim()) {
+                    handleCreateProfile();
+                  }
+                  if (e.key === 'Escape') {
+                    setShowNewProfileDialog(false);
+                    setNewProfileName('');
+                  }
+                }}
+                autoFocus
+              />
+            </div>
+            <div className="flex gap-3">
+              <button
+                onClick={() => {
+                  setShowNewProfileDialog(false);
+                  setNewProfileName('');
+                }}
+                className="flex-1 px-4 py-2 text-sm font-medium text-white/70 bg-white/[0.04] hover:bg-white/[0.08] rounded-lg transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleCreateProfile}
+                disabled={creatingProfile || !newProfileName.trim()}
+                className="flex-1 px-4 py-2 text-sm font-medium text-white bg-indigo-500 hover:bg-indigo-600 rounded-lg transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
+              >
+                {creatingProfile ? (
+                  <>
+                    <Loader className="h-4 w-4 animate-spin" />
+                    Creating...
+                  </>
+                ) : (
+                  <>
+                    <Plus className="h-4 w-4" />
+                    Create Profile
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {activeHarness === 'opencode' ? (
         <>
@@ -650,7 +850,7 @@ export default function SettingsPage() {
               {saving ? 'Saving...' : saveSuccess ? 'Saved!' : 'Save'}
             </button>
             <button
-              onClick={loadSettings}
+              onClick={() => loadSettings()}
               disabled={loading}
               title="Reloads the source from disk"
               className="flex items-center gap-2 px-3 py-1.5 text-sm text-white/70 hover:text-white bg-white/[0.04] hover:bg-white/[0.08] rounded-lg transition-colors disabled:opacity-50"
@@ -801,7 +1001,7 @@ export default function SettingsPage() {
               {savingOpenAgent ? 'Saving...' : openAgentSaveSuccess ? 'Saved!' : 'Save'}
             </button>
             <button
-              onClick={loadSettings}
+              onClick={() => loadSettings()}
               disabled={loading}
               title="Reloads the source from disk"
               className="flex items-center gap-2 px-3 py-1.5 text-sm text-white/70 hover:text-white bg-white/[0.04] hover:bg-white/[0.08] rounded-lg transition-colors disabled:opacity-50"
@@ -925,7 +1125,7 @@ export default function SettingsPage() {
                 {savingClaudeCode ? 'Saving...' : claudeCodeSaveSuccess ? 'Saved!' : 'Save'}
               </button>
               <button
-                onClick={loadSettings}
+                onClick={() => loadSettings()}
                 disabled={loading}
                 title="Reloads the source from disk"
                 className="flex items-center gap-2 px-3 py-1.5 text-sm text-white/70 hover:text-white bg-white/[0.04] hover:bg-white/[0.08] rounded-lg transition-colors disabled:opacity-50"
@@ -1186,10 +1386,10 @@ export default function SettingsPage() {
                     </div>
                     <button
                       onClick={handleForceSync}
-                      disabled={forceSyncing || forcePushing}
+                      disabled={syncing || pushing}
                       className="flex-shrink-0 flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-white bg-blue-500 hover:bg-blue-600 rounded-lg disabled:opacity-50 transition-colors"
                     >
-                      {forceSyncing ? <Loader className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+                      {syncing ? <Loader className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
                       Force Pull
                     </button>
                   </div>
@@ -1207,10 +1407,10 @@ export default function SettingsPage() {
                     </div>
                     <button
                       onClick={handleForcePush}
-                      disabled={forceSyncing || forcePushing}
+                      disabled={syncing || pushing}
                       className="flex-shrink-0 flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-white bg-orange-500 hover:bg-orange-600 rounded-lg disabled:opacity-50 transition-colors"
                     >
-                      {forcePushing ? <Loader className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}
+                      {pushing ? <Loader className="h-3.5 w-3.5 animate-spin" /> : <Upload className="h-3.5 w-3.5" />}
                       Force Push
                     </button>
                   </div>

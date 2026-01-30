@@ -1293,26 +1293,7 @@ struct ControlView: View {
                 messages.removeAll { ($0.isThinking && !$0.thinkingDone) || $0.isPhase }
 
                 // Mark any remaining active tool calls as completed
-                for i in messages.indices {
-                    if messages[i].isToolCall && messages[i].isActiveToolCall {
-                        if var toolData = messages[i].toolData {
-                            toolData.endTime = Date()
-                            if toolData.result == nil {
-                                toolData.state = .success // Assume success if no result yet
-                            }
-                            messages[i].toolData = toolData
-                        }
-                        if let name = messages[i].toolCallName {
-                            messages[i] = ChatMessage(
-                                id: messages[i].id,
-                                type: .toolCall(name: name, isActive: false),
-                                content: messages[i].content,
-                                toolData: messages[i].toolData,
-                                timestamp: messages[i].timestamp
-                            )
-                        }
-                    }
-                }
+                markActiveToolCallsAsCompleted(withState: .success)
 
                 let message = ChatMessage(
                     id: id,
@@ -1418,25 +1399,7 @@ struct ControlView: View {
                     messages.append(message)
                 } else {
                     // Mark any previous active tool calls as completed (success by default, will update if error)
-                    for i in messages.indices {
-                        if messages[i].isToolCall && messages[i].isActiveToolCall {
-                            if var toolData = messages[i].toolData {
-                                toolData.endTime = Date()
-                                toolData.state = .success
-                                messages[i].toolData = toolData
-                            }
-                            // Update the type to mark as not active
-                            if let name = messages[i].toolCallName {
-                                messages[i] = ChatMessage(
-                                    id: messages[i].id,
-                                    type: .toolCall(name: name, isActive: false),
-                                    content: messages[i].content,
-                                    toolData: messages[i].toolData,
-                                    timestamp: messages[i].timestamp
-                                )
-                            }
-                        }
-                    }
+                    markActiveToolCallsAsCompleted(withState: .success)
 
                     // Create tool call data for tracking
                     let toolData = ToolCallData(
@@ -1460,10 +1423,11 @@ struct ControlView: View {
             }
 
         case "tool_result":
-            if let toolCallId = data["tool_call_id"] as? String {
-                let result = data["result"]
-                let name = data["name"] as? String ?? ""
+            let result = data["result"]
+            let name = data["name"] as? String ?? ""
 
+            // Update the matching tool call message if we have a tool_call_id
+            if let toolCallId = data["tool_call_id"] as? String {
                 // Find the matching tool call message and update it
                 if let index = messages.firstIndex(where: { $0.id == "tool-\(toolCallId)" }) {
                     if var toolData = messages[index].toolData {
@@ -1496,22 +1460,22 @@ struct ControlView: View {
                         )
                     }
                 }
+            }
 
-                // Extract display ID from desktop_start_session tool result
-                if name == "desktop_start_session" || name == "desktop_desktop_start_session" ||
-                   name.contains("desktop_start_session") {
-                    // Handle result as either a dictionary or a JSON string
-                    var resultDict: [String: Any]? = result as? [String: Any]
-                    if resultDict == nil, let resultString = result as? String,
-                       let jsonData = resultString.data(using: .utf8),
-                       let parsed = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] {
-                        resultDict = parsed
-                    }
-                    if let display = resultDict?["display"] as? String {
-                        desktopDisplayId = display
-                        // Auto-open desktop stream when session starts
-                        showDesktopStream = true
-                    }
+            // Extract display ID from desktop_start_session tool result (doesn't require tool_call_id)
+            if name == "desktop_start_session" || name == "desktop_desktop_start_session" ||
+               name.contains("desktop_start_session") {
+                // Handle result as either a dictionary or a JSON string
+                var resultDict: [String: Any]? = result as? [String: Any]
+                if resultDict == nil, let resultString = result as? String,
+                   let jsonData = resultString.data(using: .utf8),
+                   let parsed = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any] {
+                    resultDict = parsed
+                }
+                if let display = resultDict?["display"] as? String {
+                    desktopDisplayId = display
+                    // Auto-open desktop stream when session starts
+                    showDesktopStream = true
                 }
             }
 
@@ -1525,25 +1489,7 @@ struct ControlView: View {
                 // If mission is no longer active AND it's the currently viewed mission,
                 // mark all pending tools as cancelled
                 if newStatus != .active && viewingMissionId == missionId {
-                    for i in messages.indices {
-                        if messages[i].isToolCall && messages[i].isActiveToolCall {
-                            if var toolData = messages[i].toolData {
-                                toolData.endTime = Date()
-                                toolData.state = .cancelled
-                                messages[i].toolData = toolData
-                            }
-                            // Update the type to mark as not active
-                            if let name = messages[i].toolCallName {
-                                messages[i] = ChatMessage(
-                                    id: messages[i].id,
-                                    type: .toolCall(name: name, isActive: false),
-                                    content: messages[i].content,
-                                    toolData: messages[i].toolData,
-                                    timestamp: messages[i].timestamp
-                                )
-                            }
-                        }
-                    }
+                    markActiveToolCallsAsCompleted(withState: .cancelled)
                 }
 
                 // Update the viewing mission status if it matches
@@ -1562,6 +1508,31 @@ struct ControlView: View {
 
         default:
             break
+        }
+    }
+
+    /// Marks all active tool calls as completed with the given state.
+    /// - Parameter state: The final state to set for active tool calls (e.g., .success, .cancelled)
+    private func markActiveToolCallsAsCompleted(withState state: ToolCallState) {
+        for i in messages.indices {
+            if messages[i].isToolCall && messages[i].isActiveToolCall {
+                if var toolData = messages[i].toolData {
+                    toolData.endTime = Date()
+                    if toolData.result == nil || state == .cancelled {
+                        toolData.state = state
+                    }
+                    messages[i].toolData = toolData
+                }
+                if let name = messages[i].toolCallName {
+                    messages[i] = ChatMessage(
+                        id: messages[i].id,
+                        type: .toolCall(name: name, isActive: false),
+                        content: messages[i].content,
+                        toolData: messages[i].toolData,
+                        timestamp: messages[i].timestamp
+                    )
+                }
+            }
         }
     }
 }
@@ -2129,11 +2100,7 @@ private struct ToolCallBubble: View {
     }
 
     private var formattedElapsed: String {
-        if elapsedSeconds <= 0 { return "<1s" }
-        if elapsedSeconds < 60 { return "\(elapsedSeconds)s" }
-        let mins = elapsedSeconds / 60
-        let secs = elapsedSeconds % 60
-        return secs > 0 ? "\(mins)m \(secs)s" : "\(mins)m"
+        formatDurationString(elapsedSeconds)
     }
 
     private func startTimer() {
@@ -2276,13 +2243,7 @@ private struct ThinkingBubble: View {
     }
     
     private var formattedDuration: String {
-        if elapsedSeconds < 60 {
-            return "\(elapsedSeconds)s"
-        } else {
-            let mins = elapsedSeconds / 60
-            let secs = elapsedSeconds % 60
-            return secs > 0 ? "\(mins)m \(secs)s" : "\(mins)m"
-        }
+        formatDurationString(elapsedSeconds)
     }
     
     private func startTimer() {
@@ -2393,7 +2354,7 @@ private struct ThoughtRow: View {
                         .foregroundStyle(message.thinkingDone ? Theme.textMuted : Theme.accent)
                         .symbolEffect(.pulse, options: message.thinkingDone ? .nonRepeating : .repeating)
 
-                    Text(message.thinkingDone ? "Thought for \(formatDuration(elapsedSeconds))" : "Thinking for \(formatDuration(elapsedSeconds))")
+                    Text(message.thinkingDone ? "Thought for \(formatDurationString(elapsedSeconds))" : "Thinking for \(formatDurationString(elapsedSeconds))")
                         .font(.caption)
                         .foregroundStyle(Theme.textSecondary)
 
@@ -2458,15 +2419,6 @@ private struct ThoughtRow: View {
         }
     }
 
-    private func formatDuration(_ seconds: Int) -> String {
-        if seconds < 60 {
-            return "\(seconds)s"
-        } else {
-            let mins = seconds / 60
-            let secs = seconds % 60
-            return secs > 0 ? "\(mins)m \(secs)s" : "\(mins)m"
-        }
-    }
 }
 
 // MARK: - Flow Layout

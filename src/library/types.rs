@@ -202,6 +202,10 @@ pub struct WorkspaceTemplate {
     /// Empty = use default MCPs (those with `default_enabled = true`).
     #[serde(default)]
     pub mcps: Vec<String>,
+    /// Config profile to use for workspaces created from this template.
+    /// Defaults to "default" if not specified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_profile: Option<String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -508,6 +512,44 @@ pub struct ClaudeCodeConfig {
     /// These agents won't appear in the dropdown but can still be used via API.
     #[serde(default)]
     pub hidden_agents: Vec<String>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Config Profile Types
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Config profile summary for listing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfigProfileSummary {
+    /// Profile name (folder name, e.g., "default", "development", "production")
+    pub name: String,
+    /// Whether this is the default profile used when creating new workspaces
+    #[serde(default)]
+    pub is_default: bool,
+    /// Path relative to library root (e.g., "configs/default")
+    pub path: String,
+}
+
+/// Full config profile with all harness configurations.
+/// A profile is an instance of configs for OpenCode, Claude Code, and Amp.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfigProfile {
+    /// Profile name
+    pub name: String,
+    /// Whether this is the default profile
+    #[serde(default)]
+    pub is_default: bool,
+    /// Path relative to library root
+    pub path: String,
+    /// OpenCode settings (oh-my-opencode.json content)
+    #[serde(default)]
+    pub opencode_settings: serde_json::Value,
+    /// OpenAgent config
+    #[serde(default)]
+    pub openagent_config: OpenAgentConfig,
+    /// Claude Code config
+    #[serde(default)]
+    pub claudecode_config: ClaudeCodeConfig,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

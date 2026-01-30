@@ -103,6 +103,7 @@ import {
   FileArchive,
   File,
   ExternalLink,
+  MessageSquare,
 } from "lucide-react";
 
 type StreamDiagnosticsState = {
@@ -477,7 +478,13 @@ function hasHistoryChanged(
 
   // If current items have MORE messages than API history, the API is stale (SSE delivered
   // messages that haven't been persisted yet). Don't replace - we'd lose messages.
-  if (currentFingerprints.length > newFingerprints.length) return false;
+  // But first verify the overlapping content matches to detect content mismatches.
+  if (currentFingerprints.length > newFingerprints.length) {
+    // Verify that all API messages match the corresponding local messages
+    const hasContentMismatch = newFingerprints.some((fp, i) => fp !== currentFingerprints[i]);
+    // If content matches, keep local (has more messages). If mismatch, history changed.
+    return hasContentMismatch;
+  }
 
   // If API has more messages, history has changed (e.g., messages from another session)
   if (currentFingerprints.length < newFingerprints.length) return true;
@@ -1933,6 +1940,7 @@ export default function ControlClient() {
   const [viewingMission, setViewingMission] = useState<Mission | null>(null);
   const [missionLoading, setMissionLoading] = useState(false);
   const [recentMissions, setRecentMissions] = useState<Mission[]>([]);
+  const [dismissedResumeUI, setDismissedResumeUI] = useState(false);
 
   // Workspaces for mission creation
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
@@ -3412,11 +3420,13 @@ export default function ControlClient() {
   // and could be from any mission. We only cache when explicitly loading from API.
 
   // Handle creating a new mission
+  // Returns the mission ID for the NewMissionDialog to handle navigation
   const handleNewMission = async (options?: {
     workspaceId?: string;
     agent?: string;
     modelOverride?: string;
     backend?: string;
+    openInNewTab?: boolean;
   }) => {
     try {
       setMissionLoading(true);
@@ -3426,21 +3436,29 @@ export default function ControlClient() {
         modelOverride: options?.modelOverride,
         backend: options?.backend,
       });
-      pendingMissionNavRef.current = mission.id;
-      router.replace(`/control?mission=${mission.id}`, { scroll: false });
-      setCurrentMission(mission);
-      setViewingMission(mission);
-      setViewingMissionId(mission.id); // Also update viewing to the new mission
-      setItems([]);
-      setHasDesktopSession(false);
+
+      // Only update local state for same-tab navigation
+      // For new tab, the new tab will load its own state
+      if (!options?.openInNewTab) {
+        pendingMissionNavRef.current = mission.id;
+        setCurrentMission(mission);
+        setViewingMission(mission);
+        setViewingMissionId(mission.id);
+        setItems([]);
+        setHasDesktopSession(false);
+      }
+
       // Refresh running missions to get accurate state
       const running = await getRunningMissions();
       setRunningMissions(running);
       refreshRecentMissions();
       toast.success("New mission created");
+      // Return ID for dialog to handle navigation
+      return { id: mission.id };
     } catch (err) {
       console.error("Failed to create mission:", err);
       toast.error("Failed to create new mission");
+      throw err; // Re-throw so dialog knows creation failed
     } finally {
       setMissionLoading(false);
     }
@@ -4383,14 +4401,22 @@ export default function ControlClient() {
     // Sync mission state before sending (backend needs current_mission set correctly)
     if (targetMissionId) {
       try {
-        const mission = await loadMission(targetMissionId);
+        let mission = await loadMission(targetMissionId);
+
+        // If the mission is in a resumable state (failed/interrupted/blocked),
+        // resume it first to update the status before sending the message.
+        // Use skipMessage to avoid the auto-generated "MISSION RESUMED" message
+        // since the user is about to send their own custom message.
+        if (["failed", "interrupted", "blocked"].includes(mission.status)) {
+          mission = await resumeMission(mission.id, { skipMessage: true });
+        }
+
         setCurrentMission(mission);
         setViewingMission(mission);
         setViewingMissionId(mission.id);
-        // Only update items if history content has actually changed
-        if (hasHistoryChanged(items, mission.history)) {
-          setItems(missionHistoryToItems(mission));
-        }
+        // Don't sync items from persisted history here - the local items state
+        // is the source of truth and may contain SSE-delivered content that
+        // hasn't been persisted yet. Replacing items would cause messages to disappear.
         applyDesktopSessionState(mission);
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : String(err);
@@ -4525,7 +4551,13 @@ export default function ControlClient() {
   const showResumeUI = activeMission &&
     !viewingMissionIsRunning &&
     !waitingForResponse &&
+    !dismissedResumeUI &&
     (isFailed || (!lastTurnCompleted && (activeMission.status === 'interrupted' || activeMission.status === 'blocked')));
+
+  // Reset dismissedResumeUI when switching missions
+  useEffect(() => {
+    setDismissedResumeUI(false);
+  }, [activeMission?.id]);
 
   return (
     <div className="flex h-screen flex-col p-6">
@@ -4608,6 +4640,11 @@ export default function ControlClient() {
             providers={providers}
             disabled={missionLoading}
             onCreate={handleNewMission}
+            initialValues={activeMission ? {
+              workspaceId: activeMission.workspace_id,
+              agent: activeMission.agent,
+              backend: activeMission.backend,
+            } : undefined}
           />
 
           {/* Thinking panel toggle */}
@@ -5706,6 +5743,13 @@ export default function ControlClient() {
               >
                 <PlayCircle className="h-4 w-4" />
                 {activeMission.status === 'blocked' ? 'Continue' : activeMission.status === 'failed' ? 'Retry' : 'Resume'}
+              </button>
+              <button
+                onClick={() => setDismissedResumeUI(true)}
+                className="flex items-center gap-2 rounded-xl border border-white/[0.06] bg-white/[0.02] hover:bg-white/[0.04] px-5 py-3 text-sm font-medium text-white/70 transition-colors"
+              >
+                <MessageSquare className="h-4 w-4" />
+                Custom Message
               </button>
             </div>
           ) : (
