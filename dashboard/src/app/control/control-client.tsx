@@ -4414,10 +4414,9 @@ export default function ControlClient() {
         setCurrentMission(mission);
         setViewingMission(mission);
         setViewingMissionId(mission.id);
-        // Only update items if history content has actually changed
-        if (hasHistoryChanged(items, mission.history)) {
-          setItems(missionHistoryToItems(mission));
-        }
+        // Don't sync items from persisted history here - the local items state
+        // is the source of truth and may contain SSE-delivered content that
+        // hasn't been persisted yet. Replacing items would cause messages to disappear.
         applyDesktopSessionState(mission);
       } catch (err) {
         const errMsg = err instanceof Error ? err.message : String(err);
