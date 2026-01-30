@@ -103,6 +103,7 @@ import {
   FileArchive,
   File,
   ExternalLink,
+  MessageSquare,
 } from "lucide-react";
 
 type StreamDiagnosticsState = {
@@ -1926,6 +1927,7 @@ export default function ControlClient() {
   const [viewingMission, setViewingMission] = useState<Mission | null>(null);
   const [missionLoading, setMissionLoading] = useState(false);
   const [recentMissions, setRecentMissions] = useState<Mission[]>([]);
+  const [dismissedResumeUI, setDismissedResumeUI] = useState(false);
 
   // Workspaces for mission creation
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
@@ -4565,7 +4567,13 @@ export default function ControlClient() {
   const showResumeUI = activeMission &&
     !viewingMissionIsRunning &&
     !waitingForResponse &&
+    !dismissedResumeUI &&
     (isFailed || (!lastTurnCompleted && (activeMission.status === 'interrupted' || activeMission.status === 'blocked')));
+
+  // Reset dismissedResumeUI when switching missions
+  useEffect(() => {
+    setDismissedResumeUI(false);
+  }, [activeMission?.id]);
 
   return (
     <div className="flex h-screen flex-col p-6">
@@ -5746,6 +5754,13 @@ export default function ControlClient() {
               >
                 <PlayCircle className="h-4 w-4" />
                 {activeMission.status === 'blocked' ? 'Continue' : activeMission.status === 'failed' ? 'Retry' : 'Resume'}
+              </button>
+              <button
+                onClick={() => setDismissedResumeUI(true)}
+                className="flex items-center gap-2 rounded-xl border border-white/[0.06] bg-white/[0.02] hover:bg-white/[0.04] px-5 py-3 text-sm font-medium text-white/70 transition-colors"
+              >
+                <MessageSquare className="h-4 w-4" />
+                Custom Message
               </button>
             </div>
           ) : (
