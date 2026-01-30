@@ -2041,7 +2041,12 @@ async fn save_config_profile(
     library
         .save_config_profile(&name, &profile)
         .await
-        .map(|_| (StatusCode::OK, "Config profile saved successfully".to_string()))
+        .map(|_| {
+            (
+                StatusCode::OK,
+                "Config profile saved successfully".to_string(),
+            )
+        })
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
@@ -2055,7 +2060,12 @@ async fn delete_config_profile(
     library
         .delete_config_profile(&name)
         .await
-        .map(|_| (StatusCode::OK, "Config profile deleted successfully".to_string()))
+        .map(|_| {
+            (
+                StatusCode::OK,
+                "Config profile deleted successfully".to_string(),
+            )
+        })
         .map_err(|e| {
             if e.to_string().contains("Cannot delete") {
                 (StatusCode::BAD_REQUEST, e.to_string())
@@ -2098,7 +2108,12 @@ async fn save_opencode_settings_for_profile(
     library
         .save_opencode_settings_for_profile(&name, &settings)
         .await
-        .map(|_| (StatusCode::OK, "OpenCode settings saved successfully".to_string()))
+        .map(|_| {
+            (
+                StatusCode::OK,
+                "OpenCode settings saved successfully".to_string(),
+            )
+        })
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
@@ -2127,7 +2142,12 @@ async fn save_openagent_config_for_profile(
     library
         .save_openagent_config_for_profile(&name, &config)
         .await
-        .map(|_| (StatusCode::OK, "OpenAgent config saved successfully".to_string()))
+        .map(|_| {
+            (
+                StatusCode::OK,
+                "OpenAgent config saved successfully".to_string(),
+            )
+        })
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
@@ -2156,7 +2176,12 @@ async fn save_claudecode_config_for_profile(
     library
         .save_claudecode_config_for_profile(&name, &config)
         .await
-        .map(|_| (StatusCode::OK, "Claude Code config saved successfully".to_string()))
+        .map(|_| {
+            (
+                StatusCode::OK,
+                "Claude Code config saved successfully".to_string(),
+            )
+        })
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
