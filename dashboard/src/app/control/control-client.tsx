@@ -477,7 +477,13 @@ function hasHistoryChanged(
 
   // If current items have MORE messages than API history, the API is stale (SSE delivered
   // messages that haven't been persisted yet). Don't replace - we'd lose messages.
-  if (currentFingerprints.length > newFingerprints.length) return false;
+  // But first verify the overlapping content matches to detect content mismatches.
+  if (currentFingerprints.length > newFingerprints.length) {
+    // Verify that all API messages match the corresponding local messages
+    const hasContentMismatch = newFingerprints.some((fp, i) => fp !== currentFingerprints[i]);
+    // If content matches, keep local (has more messages). If mismatch, history changed.
+    return hasContentMismatch;
+  }
 
   // If API has more messages, history has changed (e.g., messages from another session)
   if (currentFingerprints.length < newFingerprints.length) return true;

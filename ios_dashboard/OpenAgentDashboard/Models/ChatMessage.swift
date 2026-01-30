@@ -7,6 +7,19 @@
 
 import Foundation
 
+// MARK: - Duration Formatting
+
+/// Formats a duration in seconds to a human-readable string.
+/// - Parameter seconds: The duration in seconds
+/// - Returns: Formatted string like "<1s", "5s", "1m 30s", or "2m"
+func formatDurationString(_ seconds: Int) -> String {
+    if seconds <= 0 { return "<1s" }
+    if seconds < 60 { return "\(seconds)s" }
+    let mins = seconds / 60
+    let secs = seconds % 60
+    return secs > 0 ? "\(mins)m \(secs)s" : "\(mins)m"
+}
+
 // MARK: - Shared File
 
 /// A file shared by the agent (images render inline, other files show as download links).
@@ -147,12 +160,7 @@ struct ToolCallData {
 
     /// Formatted duration string
     var durationFormatted: String {
-        let seconds = Int(duration)
-        if seconds <= 0 { return "<1s" }
-        if seconds < 60 { return "\(seconds)s" }
-        let mins = seconds / 60
-        let secs = seconds % 60
-        return secs > 0 ? "\(mins)m \(secs)s" : "\(mins)m"
+        formatDurationString(Int(duration))
     }
 
     /// Preview of arguments (truncated)
