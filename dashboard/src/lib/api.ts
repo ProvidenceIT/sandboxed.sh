@@ -1490,6 +1490,7 @@ export interface WorkspaceTemplate {
   init_scripts: string[];
   init_script: string;
   shared_network?: boolean | null;
+  config_profile?: string;
 }
 
 export async function listWorkspaceTemplates(): Promise<WorkspaceTemplateSummary[]> {
@@ -1511,6 +1512,7 @@ export async function saveWorkspaceTemplate(
     init_scripts?: string[];
     init_script?: string;
     shared_network?: boolean | null;
+    config_profile?: string;
   }
 ): Promise<void> {
   return libPut(`/api/library/workspace-template/${encodeURIComponent(name)}`, data, "Failed to save workspace template");
@@ -1771,6 +1773,117 @@ export async function saveClaudeCodeConfig(
   config: ClaudeCodeConfig
 ): Promise<void> {
   return apiPut("/api/library/claudecode/config", config, "Failed to save Claude Code config");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Config Profiles API
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface ConfigProfileSummary {
+  name: string;
+  is_default: boolean;
+  path: string;
+}
+
+export interface ConfigProfile {
+  name: string;
+  is_default: boolean;
+  path: string;
+  opencode_settings: Record<string, unknown>;
+  openagent_config: OpenAgentConfig;
+  claudecode_config: ClaudeCodeConfig;
+}
+
+// List all config profiles
+export async function listConfigProfiles(): Promise<ConfigProfileSummary[]> {
+  return apiGet("/api/library/config-profile", "Failed to list config profiles");
+}
+
+// Create a new config profile
+export async function createConfigProfile(
+  name: string,
+  baseProfile?: string
+): Promise<ConfigProfile> {
+  return apiPost(
+    "/api/library/config-profile",
+    { name, base_profile: baseProfile },
+    "Failed to create config profile"
+  );
+}
+
+// Get a config profile by name
+export async function getConfigProfile(name: string): Promise<ConfigProfile> {
+  return apiGet(`/api/library/config-profile/${encodeURIComponent(name)}`, "Failed to get config profile");
+}
+
+// Save a config profile
+export async function saveConfigProfile(name: string, profile: ConfigProfile): Promise<void> {
+  return apiPut(`/api/library/config-profile/${encodeURIComponent(name)}`, profile, "Failed to save config profile");
+}
+
+// Delete a config profile
+export async function deleteConfigProfile(name: string): Promise<void> {
+  return apiDel(`/api/library/config-profile/${encodeURIComponent(name)}`, "Failed to delete config profile");
+}
+
+// Get OpenCode settings for a specific profile
+export async function getLibraryOpenCodeSettingsForProfile(profile: string): Promise<Record<string, unknown>> {
+  return apiGet(
+    `/api/library/config-profile/${encodeURIComponent(profile)}/opencode/settings`,
+    "Failed to get OpenCode settings for profile"
+  );
+}
+
+// Save OpenCode settings for a specific profile
+export async function saveLibraryOpenCodeSettingsForProfile(
+  profile: string,
+  settings: Record<string, unknown>
+): Promise<void> {
+  return apiPut(
+    `/api/library/config-profile/${encodeURIComponent(profile)}/opencode/settings`,
+    settings,
+    "Failed to save OpenCode settings for profile"
+  );
+}
+
+// Get OpenAgent config for a specific profile
+export async function getOpenAgentConfigForProfile(profile: string): Promise<OpenAgentConfig> {
+  return apiGet(
+    `/api/library/config-profile/${encodeURIComponent(profile)}/openagent/config`,
+    "Failed to get OpenAgent config for profile"
+  );
+}
+
+// Save OpenAgent config for a specific profile
+export async function saveOpenAgentConfigForProfile(
+  profile: string,
+  config: OpenAgentConfig
+): Promise<void> {
+  return apiPut(
+    `/api/library/config-profile/${encodeURIComponent(profile)}/openagent/config`,
+    config,
+    "Failed to save OpenAgent config for profile"
+  );
+}
+
+// Get Claude Code config for a specific profile
+export async function getClaudeCodeConfigForProfile(profile: string): Promise<ClaudeCodeConfig> {
+  return apiGet(
+    `/api/library/config-profile/${encodeURIComponent(profile)}/claudecode/config`,
+    "Failed to get Claude Code config for profile"
+  );
+}
+
+// Save Claude Code config for a specific profile
+export async function saveClaudeCodeConfigForProfile(
+  profile: string,
+  config: ClaudeCodeConfig
+): Promise<void> {
+  return apiPut(
+    `/api/library/config-profile/${encodeURIComponent(profile)}/claudecode/config`,
+    config,
+    "Failed to save Claude Code config for profile"
+  );
 }
 
 // AI Provider types and functions are now exported from ./api/providers

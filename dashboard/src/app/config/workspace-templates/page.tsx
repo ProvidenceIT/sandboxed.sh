@@ -12,12 +12,14 @@ import {
   getInitScript,
   saveInitScript,
   deleteInitScript,
+  listConfigProfiles,
   CONTAINER_DISTROS,
   type WorkspaceTemplate,
   type WorkspaceTemplateSummary,
   type SkillSummary,
   type InitScriptSummary,
   type InitScript,
+  type ConfigProfileSummary,
 } from '@/lib/api';
 import {
   GitBranch,
@@ -37,6 +39,7 @@ import {
   ChevronUp,
   ChevronDown,
   FileCode,
+  Layers,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { LibraryUnavailable } from '@/components/library-unavailable';
@@ -63,6 +66,7 @@ const buildSnapshot = (data: {
   initScripts: string[];
   initScript: string;
   sharedNetwork: boolean | null;
+  configProfile: string | null;
 }) =>
   JSON.stringify({
     description: data.description,
@@ -72,6 +76,7 @@ const buildSnapshot = (data: {
     initScripts: data.initScripts,
     initScript: data.initScript,
     sharedNetwork: data.sharedNetwork,
+    configProfile: data.configProfile,
   });
 
 export default function WorkspaceTemplatesPage() {
@@ -113,8 +118,12 @@ export default function WorkspaceTemplatesPage() {
   const [selectedInitScripts, setSelectedInitScripts] = useState<string[]>([]);
   const [initScript, setInitScript] = useState('');
   const [sharedNetwork, setSharedNetwork] = useState<boolean | null>(null);
+  const [configProfile, setConfigProfile] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
+
+  // Config profiles state
+  const [configProfiles, setConfigProfiles] = useState<ConfigProfileSummary[]>([]);
 
   const [showNewDialog, setShowNewDialog] = useState(false);
   const [newTemplateName, setNewTemplateName] = useState('');
@@ -150,8 +159,9 @@ export default function WorkspaceTemplatesPage() {
         initScripts: selectedInitScripts,
         initScript,
         sharedNetwork,
+        configProfile,
       }),
-    [description, distro, selectedSkills, envRows, selectedInitScripts, initScript, sharedNetwork]
+    [description, distro, selectedSkills, envRows, selectedInitScripts, initScript, sharedNetwork, configProfile]
   );
 
   useEffect(() => {
@@ -217,12 +227,23 @@ export default function WorkspaceTemplatesPage() {
     }
   }, []);
 
+  const loadConfigProfiles = useCallback(async () => {
+    try {
+      const data = await listConfigProfiles();
+      setConfigProfiles(data);
+    } catch (err) {
+      setConfigProfiles([]);
+      console.error('Failed to load config profiles:', err);
+    }
+  }, []);
+
   useEffect(() => {
     if (libraryUnavailable || loading) return;
     loadTemplates();
     loadSkills();
     loadInitScriptFragments();
-  }, [libraryUnavailable, loading, loadTemplates, loadSkills, loadInitScriptFragments]);
+    loadConfigProfiles();
+  }, [libraryUnavailable, loading, loadTemplates, loadSkills, loadInitScriptFragments, loadConfigProfiles]);
 
   const loadTemplate = useCallback(async (name: string) => {
     try {
@@ -245,6 +266,7 @@ export default function WorkspaceTemplatesPage() {
       setSelectedInitScripts(template.init_scripts || []);
       setInitScript(template.init_script || '');
       setSharedNetwork(template.shared_network ?? null);
+      setConfigProfile(template.config_profile ?? null);
       baselineRef.current = buildSnapshot({
         description: template.description || '',
         distro: template.distro || '',
@@ -253,6 +275,7 @@ export default function WorkspaceTemplatesPage() {
         initScripts: template.init_scripts || [],
         initScript: template.init_script || '',
         sharedNetwork: template.shared_network ?? null,
+        configProfile: template.config_profile ?? null,
       });
       setDirty(false);
     } catch (err) {
@@ -291,6 +314,7 @@ export default function WorkspaceTemplatesPage() {
         init_scripts: selectedInitScripts,
         init_script: initScript,
         shared_network: sharedNetwork,
+        config_profile: configProfile ?? undefined,
       });
       baselineRef.current = snapshot;
       setDirty(false);
@@ -340,6 +364,7 @@ export default function WorkspaceTemplatesPage() {
       setSelectedInitScripts([]);
       setInitScript('');
       setSharedNetwork(null);
+      setConfigProfile(null);
       setDirty(false);
       await loadTemplates();
     } catch (err) {
@@ -869,6 +894,36 @@ set -e
                         placeholder="Short description for this template"
                         className="w-full px-3 py-2 rounded-lg bg-black/20 border border-white/[0.06] text-xs text-white placeholder:text-white/25 focus:outline-none focus:border-indigo-500/50 resize-none"
                       />
+                    </div>
+
+                    {/* Config Profile Selector */}
+                    <div className="rounded-xl bg-white/[0.02] border border-white/[0.05] p-4">
+                      <div className="flex items-center gap-2 mb-2">
+                        <Layers className="h-4 w-4 text-indigo-400" />
+                        <label className="text-xs text-white/40">Config Profile</label>
+                      </div>
+                      <p className="text-[10px] text-white/25 mb-3">
+                        Configuration profile to use for workspaces created from this template.
+                      </p>
+                      <select
+                        value={configProfile || ''}
+                        onChange={(e) => setConfigProfile(e.target.value || null)}
+                        className="w-full px-3 py-2 rounded-lg bg-black/20 border border-white/[0.06] text-xs text-white focus:outline-none focus:border-indigo-500/50 appearance-none cursor-pointer"
+                        style={{
+                          backgroundImage:
+                            "url(\"data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e\")",
+                          backgroundPosition: 'right 0.75rem center',
+                          backgroundRepeat: 'no-repeat',
+                          backgroundSize: '1.25em 1.25em',
+                        }}
+                      >
+                        <option value="">Default</option>
+                        {configProfiles.map((profile) => (
+                          <option key={profile.name} value={profile.name}>
+                            {profile.name}{profile.is_default ? ' (default)' : ''}
+                          </option>
+                        ))}
+                      </select>
                     </div>
 
                     <div className="rounded-xl bg-white/[0.02] border border-white/[0.05] p-4">

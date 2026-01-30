@@ -25,10 +25,10 @@ use tokio::sync::RwLock;
 
 use crate::library::{
     rename::{ItemType, RenameResult},
-    ClaudeCodeConfig, Command, CommandSummary, GitAuthor, InitScript, InitScriptSummary,
-    LibraryAgent, LibraryAgentSummary, LibraryStatus, LibraryStore, LibraryTool,
-    LibraryToolSummary, McpServer, MigrationReport, OpenAgentConfig, Plugin, Skill, SkillSummary,
-    WorkspaceTemplate, WorkspaceTemplateSummary,
+    ClaudeCodeConfig, Command, CommandSummary, ConfigProfile, ConfigProfileSummary, GitAuthor,
+    InitScript, InitScriptSummary, LibraryAgent, LibraryAgentSummary, LibraryStatus, LibraryStore,
+    LibraryTool, LibraryToolSummary, McpServer, MigrationReport, OpenAgentConfig, Plugin, Skill,
+    SkillSummary, WorkspaceTemplate, WorkspaceTemplateSummary,
 };
 use crate::nspawn::NspawnDistro;
 use crate::workspace::{self, WorkspaceType, DEFAULT_WORKSPACE_ID};
@@ -271,6 +271,37 @@ pub fn routes() -> Router<Arc<super::routes::AppState>> {
         // Claude Code Config
         .route("/claudecode/config", get(get_claudecode_config))
         .route("/claudecode/config", put(save_claudecode_config))
+        // Config Profiles
+        .route("/config-profile", get(list_config_profiles))
+        .route("/config-profile", post(create_config_profile))
+        .route("/config-profile/:name", get(get_config_profile))
+        .route("/config-profile/:name", put(save_config_profile))
+        .route("/config-profile/:name", delete(delete_config_profile))
+        // Profile-specific config endpoints
+        .route(
+            "/config-profile/:name/opencode/settings",
+            get(get_opencode_settings_for_profile),
+        )
+        .route(
+            "/config-profile/:name/opencode/settings",
+            put(save_opencode_settings_for_profile),
+        )
+        .route(
+            "/config-profile/:name/openagent/config",
+            get(get_openagent_config_for_profile),
+        )
+        .route(
+            "/config-profile/:name/openagent/config",
+            put(save_openagent_config_for_profile),
+        )
+        .route(
+            "/config-profile/:name/claudecode/config",
+            get(get_claudecode_config_for_profile),
+        )
+        .route(
+            "/config-profile/:name/claudecode/config",
+            put(save_claudecode_config_for_profile),
+        )
         // Skills Registry (skills.sh)
         .route("/skill/registry/search", get(search_registry))
         .route("/skill/registry/list/:identifier", get(list_repo_skills))
@@ -332,6 +363,9 @@ pub struct SaveWorkspaceTemplateRequest {
     /// MCP server names to enable for workspaces created from this template.
     #[serde(default)]
     pub mcps: Option<Vec<String>>,
+    /// Config profile to use for workspaces created from this template.
+    #[serde(default)]
+    pub config_profile: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -341,6 +375,15 @@ pub struct RenameRequest {
     /// If true, return what would be changed without actually changing anything.
     #[serde(default)]
     pub dry_run: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateConfigProfileRequest {
+    /// Name for the new profile
+    pub name: String,
+    /// Optional base profile to copy settings from
+    #[serde(default)]
+    pub base_profile: Option<String>,
 }
 
 fn sanitize_skill_list(skills: Vec<String>) -> Vec<String> {
@@ -1321,6 +1364,7 @@ async fn save_workspace_template(
         init_script: req.init_script.unwrap_or_default(),
         shared_network: req.shared_network,
         mcps: req.mcps.unwrap_or_default(),
+        config_profile: req.config_profile.clone(),
     };
 
     library
@@ -1927,6 +1971,193 @@ async fn save_claudecode_config(
         StatusCode::OK,
         "Claude Code config saved successfully".to_string(),
     ))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Config Profiles
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// GET /api/library/config-profile - List all config profiles.
+async fn list_config_profiles(
+    State(state): State<Arc<super::routes::AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<ConfigProfileSummary>>, (StatusCode, String)> {
+    let library = ensure_library(&state, &headers).await?;
+    library
+        .list_config_profiles()
+        .await
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+/// POST /api/library/config-profile - Create a new config profile.
+async fn create_config_profile(
+    State(state): State<Arc<super::routes::AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<CreateConfigProfileRequest>,
+) -> Result<Json<ConfigProfile>, (StatusCode, String)> {
+    let library = ensure_library(&state, &headers).await?;
+    library
+        .create_config_profile(&req.name, req.base_profile.as_deref())
+        .await
+        .map(Json)
+        .map_err(|e| {
+            if e.to_string().contains("already exists") {
+                (StatusCode::CONFLICT, e.to_string())
+            } else {
+                (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+            }
+        })
+}
+
+/// GET /api/library/config-profile/:name - Get a config profile by name.
+async fn get_config_profile(
+    State(state): State<Arc<super::routes::AppState>>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<ConfigProfile>, (StatusCode, String)> {
+    let library = ensure_library(&state, &headers).await?;
+    library
+        .get_config_profile(&name)
+        .await
+        .map(Json)
+        .map_err(|e| {
+            if e.to_string().contains("not found") {
+                (StatusCode::NOT_FOUND, e.to_string())
+            } else {
+                (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+            }
+        })
+}
+
+/// PUT /api/library/config-profile/:name - Save a config profile.
+async fn save_config_profile(
+    State(state): State<Arc<super::routes::AppState>>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+    Json(profile): Json<ConfigProfile>,
+) -> Result<(StatusCode, String), (StatusCode, String)> {
+    let library = ensure_library(&state, &headers).await?;
+    library
+        .save_config_profile(&name, &profile)
+        .await
+        .map(|_| (StatusCode::OK, "Config profile saved successfully".to_string()))
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+/// DELETE /api/library/config-profile/:name - Delete a config profile.
+async fn delete_config_profile(
+    State(state): State<Arc<super::routes::AppState>>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+) -> Result<(StatusCode, String), (StatusCode, String)> {
+    let library = ensure_library(&state, &headers).await?;
+    library
+        .delete_config_profile(&name)
+        .await
+        .map(|_| (StatusCode::OK, "Config profile deleted successfully".to_string()))
+        .map_err(|e| {
+            if e.to_string().contains("Cannot delete") {
+                (StatusCode::BAD_REQUEST, e.to_string())
+            } else {
+                (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+            }
+        })
+}
+
+/// GET /api/library/config-profile/:name/opencode/settings - Get OpenCode settings for a profile.
+async fn get_opencode_settings_for_profile(
+    State(state): State<Arc<super::routes::AppState>>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let library = ensure_library(&state, &headers).await?;
+    library
+        .get_opencode_settings_for_profile(&name)
+        .await
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+/// PUT /api/library/config-profile/:name/opencode/settings - Save OpenCode settings for a profile.
+async fn save_opencode_settings_for_profile(
+    State(state): State<Arc<super::routes::AppState>>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+    Json(settings): Json<serde_json::Value>,
+) -> Result<(StatusCode, String), (StatusCode, String)> {
+    let library = ensure_library(&state, &headers).await?;
+
+    if !settings.is_object() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Settings must be a JSON object".to_string(),
+        ));
+    }
+
+    library
+        .save_opencode_settings_for_profile(&name, &settings)
+        .await
+        .map(|_| (StatusCode::OK, "OpenCode settings saved successfully".to_string()))
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+/// GET /api/library/config-profile/:name/openagent/config - Get OpenAgent config for a profile.
+async fn get_openagent_config_for_profile(
+    State(state): State<Arc<super::routes::AppState>>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<OpenAgentConfig>, (StatusCode, String)> {
+    let library = ensure_library(&state, &headers).await?;
+    library
+        .get_openagent_config_for_profile(&name)
+        .await
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+/// PUT /api/library/config-profile/:name/openagent/config - Save OpenAgent config for a profile.
+async fn save_openagent_config_for_profile(
+    State(state): State<Arc<super::routes::AppState>>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+    Json(config): Json<OpenAgentConfig>,
+) -> Result<(StatusCode, String), (StatusCode, String)> {
+    let library = ensure_library(&state, &headers).await?;
+    library
+        .save_openagent_config_for_profile(&name, &config)
+        .await
+        .map(|_| (StatusCode::OK, "OpenAgent config saved successfully".to_string()))
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+/// GET /api/library/config-profile/:name/claudecode/config - Get Claude Code config for a profile.
+async fn get_claudecode_config_for_profile(
+    State(state): State<Arc<super::routes::AppState>>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<ClaudeCodeConfig>, (StatusCode, String)> {
+    let library = ensure_library(&state, &headers).await?;
+    library
+        .get_claudecode_config_for_profile(&name)
+        .await
+        .map(Json)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+/// PUT /api/library/config-profile/:name/claudecode/config - Save Claude Code config for a profile.
+async fn save_claudecode_config_for_profile(
+    State(state): State<Arc<super::routes::AppState>>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+    Json(config): Json<ClaudeCodeConfig>,
+) -> Result<(StatusCode, String), (StatusCode, String)> {
+    let library = ensure_library(&state, &headers).await?;
+    library
+        .save_claudecode_config_for_profile(&name, &config)
+        .await
+        .map(|_| (StatusCode::OK, "Claude Code config saved successfully".to_string()))
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
