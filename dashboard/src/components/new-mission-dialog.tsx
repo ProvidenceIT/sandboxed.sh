@@ -268,12 +268,14 @@ export function NewMissionDialog({
     const handleClickOutside = (event: MouseEvent) => {
       if (dialogRef.current && !dialogRef.current.contains(event.target as Node)) {
         setOpen(false);
+        setDefaultSet(false);
       }
     };
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         setOpen(false);
+        setDefaultSet(false);
       }
     };
 

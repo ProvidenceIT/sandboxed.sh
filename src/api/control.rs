@@ -182,7 +182,7 @@ fn build_history_context(history: &[(String, String)], max_chars: usize) -> Stri
     result
 }
 
-async fn resolve_claudecode_default_model(
+pub(crate) async fn resolve_claudecode_default_model(
     library: &SharedLibrary,
     config_profile: Option<&str>,
 ) -> Option<String> {

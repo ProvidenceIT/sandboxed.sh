@@ -29,8 +29,8 @@ use crate::workspace::{self, Workspace, WorkspaceType};
 use crate::workspace_exec::WorkspaceExec;
 
 use super::control::{
-    safe_truncate_index, AgentEvent, AgentTreeNode, ControlStatus, ExecutionProgress,
-    FrontendToolHub,
+    resolve_claudecode_default_model, safe_truncate_index, AgentEvent, AgentTreeNode,
+    ControlStatus, ExecutionProgress, FrontendToolHub,
 };
 use super::library::SharedLibrary;
 
@@ -866,36 +866,6 @@ fn build_history_context(history: &[(String, String)], max_chars: usize) -> Stri
         total_chars += entry.len();
     }
     result
-}
-
-async fn resolve_claudecode_default_model(
-    library: &SharedLibrary,
-    config_profile: Option<&str>,
-) -> Option<String> {
-    let lib = {
-        let guard = library.read().await;
-        guard.clone()
-    }?;
-
-    let profile = config_profile.unwrap_or("default");
-    match lib.get_claudecode_config_for_profile(profile).await {
-        Ok(config) => config.default_model.and_then(|model| {
-            let trimmed = model.trim().to_string();
-            if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed)
-            }
-        }),
-        Err(err) => {
-            tracing::warn!(
-                "Failed to load Claude Code config from library (profile: {}): {}",
-                profile,
-                err
-            );
-            None
-        }
-    }
 }
 
 /// Try to resolve a library command from a user message starting with `/`.
