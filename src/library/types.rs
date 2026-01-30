@@ -514,6 +514,15 @@ pub struct ClaudeCodeConfig {
     pub hidden_agents: Vec<String>,
 }
 
+/// Amp Code configuration stored in the Library.
+/// Controls default mode and settings for Amp backend.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AmpCodeConfig {
+    /// Default mode to use for Amp missions ("smart" or "rush").
+    #[serde(default)]
+    pub default_mode: Option<String>,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Config Profile Types
 // ─────────────────────────────────────────────────────────────────────────────
@@ -530,8 +539,23 @@ pub struct ConfigProfileSummary {
     pub path: String,
 }
 
+/// A file within a config profile (for file-based editing).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfigProfileFile {
+    /// Relative path within the profile (e.g., ".opencode/settings.json")
+    pub path: String,
+    /// File content as string
+    pub content: String,
+}
+
 /// Full config profile with all harness configurations.
-/// A profile is an instance of configs for OpenCode, Claude Code, and Amp.
+/// A profile is an instance of configs for OpenCode, Claude Code, Amp, and OpenAgent.
+///
+/// Directory structure mirrors actual harness config directories:
+/// - `.opencode/` - OpenCode settings (settings.json, oh-my-opencode.json)
+/// - `.claudecode/` - Claude Code settings (settings.json)
+/// - `.ampcode/` - Amp settings (settings.json)
+/// - `.openagent/` - OpenAgent config (config.json)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfigProfile {
     /// Profile name
@@ -541,15 +565,21 @@ pub struct ConfigProfile {
     pub is_default: bool,
     /// Path relative to library root
     pub path: String,
-    /// OpenCode settings (oh-my-opencode.json content)
+    /// All files in the profile (for file-based editing)
+    #[serde(default)]
+    pub files: Vec<ConfigProfileFile>,
+    /// OpenCode settings (oh-my-opencode.json content) - legacy, for backward compat
     #[serde(default)]
     pub opencode_settings: serde_json::Value,
-    /// OpenAgent config
+    /// OpenAgent config - legacy, for backward compat
     #[serde(default)]
     pub openagent_config: OpenAgentConfig,
-    /// Claude Code config
+    /// Claude Code config - legacy, for backward compat
     #[serde(default)]
     pub claudecode_config: ClaudeCodeConfig,
+    /// Amp Code config
+    #[serde(default)]
+    pub ampcode_config: AmpCodeConfig,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

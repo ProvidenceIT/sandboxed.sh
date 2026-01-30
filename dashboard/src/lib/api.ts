@@ -1785,13 +1785,24 @@ export interface ConfigProfileSummary {
   path: string;
 }
 
+export interface ConfigProfileFile {
+  path: string;
+  content: string;
+}
+
+export interface AmpCodeConfig {
+  default_mode?: string | null;
+}
+
 export interface ConfigProfile {
   name: string;
   is_default: boolean;
   path: string;
+  files: ConfigProfileFile[];
   opencode_settings: Record<string, unknown>;
   openagent_config: OpenAgentConfig;
   claudecode_config: ClaudeCodeConfig;
+  ampcode_config: AmpCodeConfig;
 }
 
 // List all config profiles
@@ -1884,6 +1895,70 @@ export async function saveClaudeCodeConfigForProfile(
     config,
     "Failed to save Claude Code config for profile"
   );
+}
+
+// Get Amp Code config for a specific profile
+export async function getAmpCodeConfigForProfile(profile: string): Promise<AmpCodeConfig> {
+  return apiGet(
+    `/api/library/config-profile/${encodeURIComponent(profile)}/ampcode/config`,
+    "Failed to get Amp Code config for profile"
+  );
+}
+
+// Save Amp Code config for a specific profile
+export async function saveAmpCodeConfigForProfile(
+  profile: string,
+  config: AmpCodeConfig
+): Promise<void> {
+  return apiPut(
+    `/api/library/config-profile/${encodeURIComponent(profile)}/ampcode/config`,
+    config,
+    "Failed to save Amp Code config for profile"
+  );
+}
+
+// List all files in a config profile
+export async function listConfigProfileFiles(profile: string): Promise<string[]> {
+  return apiGet(
+    `/api/library/config-profile/${encodeURIComponent(profile)}/files`,
+    "Failed to list config profile files"
+  );
+}
+
+// Get a specific file from a config profile
+export async function getConfigProfileFile(profile: string, filePath: string): Promise<string> {
+  const response = await fetch(
+    `${API_BASE_URL}/api/library/config-profile/${encodeURIComponent(profile)}/file/${filePath}`,
+    {
+      headers: getAuthHeaders(),
+    }
+  );
+  if (!response.ok) {
+    throw new Error(`Failed to get config profile file: ${response.statusText}`);
+  }
+  return response.text();
+}
+
+// Save a specific file in a config profile
+export async function saveConfigProfileFile(
+  profile: string,
+  filePath: string,
+  content: string
+): Promise<void> {
+  const response = await fetch(
+    `${API_BASE_URL}/api/library/config-profile/${encodeURIComponent(profile)}/file/${filePath}`,
+    {
+      method: "PUT",
+      headers: {
+        ...getAuthHeaders(),
+        "Content-Type": "text/plain",
+      },
+      body: content,
+    }
+  );
+  if (!response.ok) {
+    throw new Error(`Failed to save config profile file: ${response.statusText}`);
+  }
 }
 
 // AI Provider types and functions are now exported from ./api/providers

@@ -7,8 +7,11 @@
 //! - Plugins registry (`plugins.json`)
 //! - Library agents (`agent/*.md`)
 //! - Library tools (`tool/*.ts`)
-//! - OpenCode settings (`opencode/oh-my-opencode.json`)
-//! - OpenAgent config (`openagent/config.json`)
+//! - Config profiles (`configs/<profile>/`) with harness-specific settings:
+//!   - `.opencode/` - OpenCode settings (settings.json, oh-my-opencode.json)
+//!   - `.claudecode/` - Claude Code settings (settings.json)
+//!   - `.ampcode/` - Amp settings (settings.json)
+//!   - `.openagent/` - OpenAgent config (config.json)
 
 pub mod env_crypto;
 mod git;
@@ -1817,72 +1820,142 @@ impl LibraryStore {
     }
 
     /// Get a config profile by name with full content.
+    /// Uses new directory structure: .opencode/, .claudecode/, .ampcode/, .openagent/
     pub async fn get_config_profile(&self, name: &str) -> Result<ConfigProfile> {
         Self::validate_name(name)?;
 
         let profile_dir = self.path.join(CONFIGS_DIR).join(name);
-        let opencode_path = profile_dir.join("opencode").join("oh-my-opencode.json");
-        let openagent_path = profile_dir.join("openagent").join("config.json");
-        let claudecode_path = profile_dir.join("claudecode").join("config.json");
 
-        // Load OpenCode settings
-        let opencode_settings = if opencode_path.exists() {
-            let content = fs::read_to_string(&opencode_path)
+        // New paths (dot-prefixed to mirror harness directories)
+        let opencode_settings_path = profile_dir.join(".opencode").join("settings.json");
+        let claudecode_settings_path = profile_dir.join(".claudecode").join("settings.json");
+        let ampcode_settings_path = profile_dir.join(".ampcode").join("settings.json");
+        let openagent_config_path = profile_dir.join(".openagent").join("config.json");
+
+        // Legacy paths for backward compatibility
+        let legacy_opencode_path = profile_dir.join("opencode").join("oh-my-opencode.json");
+        let legacy_openagent_path = profile_dir.join("openagent").join("config.json");
+        let legacy_claudecode_path = profile_dir.join("claudecode").join("config.json");
+
+        // Collect all files in the profile for file-based editing
+        let mut files = Vec::new();
+
+        // Load OpenCode settings (try new path first, then legacy)
+        let opencode_settings = if opencode_settings_path.exists() {
+            let content = fs::read_to_string(&opencode_settings_path)
                 .await
                 .context("Failed to read opencode settings")?;
+            files.push(ConfigProfileFile {
+                path: ".opencode/settings.json".to_string(),
+                content: content.clone(),
+            });
+            serde_json::from_str(&content).unwrap_or_default()
+        } else if legacy_opencode_path.exists() {
+            let content = fs::read_to_string(&legacy_opencode_path)
+                .await
+                .context("Failed to read opencode settings")?;
+            files.push(ConfigProfileFile {
+                path: ".opencode/settings.json".to_string(),
+                content: content.clone(),
+            });
             serde_json::from_str(&content).unwrap_or_default()
         } else {
             serde_json::json!({})
         };
 
-        // Load OpenAgent config
-        let openagent_config = if openagent_path.exists() {
-            let content = fs::read_to_string(&openagent_path)
+        // Load OpenAgent config (try new path first, then legacy)
+        let openagent_config = if openagent_config_path.exists() {
+            let content = fs::read_to_string(&openagent_config_path)
                 .await
                 .context("Failed to read openagent config")?;
+            files.push(ConfigProfileFile {
+                path: ".openagent/config.json".to_string(),
+                content: content.clone(),
+            });
+            serde_json::from_str(&content).unwrap_or_default()
+        } else if legacy_openagent_path.exists() {
+            let content = fs::read_to_string(&legacy_openagent_path)
+                .await
+                .context("Failed to read openagent config")?;
+            files.push(ConfigProfileFile {
+                path: ".openagent/config.json".to_string(),
+                content: content.clone(),
+            });
             serde_json::from_str(&content).unwrap_or_default()
         } else {
             OpenAgentConfig::default()
         };
 
-        // Load Claude Code config
-        let claudecode_config = if claudecode_path.exists() {
-            let content = fs::read_to_string(&claudecode_path)
+        // Load Claude Code config (try new path first, then legacy)
+        let claudecode_config = if claudecode_settings_path.exists() {
+            let content = fs::read_to_string(&claudecode_settings_path)
                 .await
                 .context("Failed to read claudecode config")?;
+            files.push(ConfigProfileFile {
+                path: ".claudecode/settings.json".to_string(),
+                content: content.clone(),
+            });
+            serde_json::from_str(&content).unwrap_or_default()
+        } else if legacy_claudecode_path.exists() {
+            let content = fs::read_to_string(&legacy_claudecode_path)
+                .await
+                .context("Failed to read claudecode config")?;
+            files.push(ConfigProfileFile {
+                path: ".claudecode/settings.json".to_string(),
+                content: content.clone(),
+            });
             serde_json::from_str(&content).unwrap_or_default()
         } else {
             ClaudeCodeConfig::default()
+        };
+
+        // Load Amp Code config (new only)
+        let ampcode_config = if ampcode_settings_path.exists() {
+            let content = fs::read_to_string(&ampcode_settings_path)
+                .await
+                .context("Failed to read ampcode config")?;
+            files.push(ConfigProfileFile {
+                path: ".ampcode/settings.json".to_string(),
+                content: content.clone(),
+            });
+            serde_json::from_str(&content).unwrap_or_default()
+        } else {
+            AmpCodeConfig::default()
         };
 
         Ok(ConfigProfile {
             name: name.to_string(),
             is_default: name == DEFAULT_PROFILE,
             path: format!("{}/{}", CONFIGS_DIR, name),
+            files,
             opencode_settings,
             openagent_config,
             claudecode_config,
+            ampcode_config,
         })
     }
 
     /// Save a config profile.
+    /// Uses new directory structure: .opencode/, .claudecode/, .ampcode/, .openagent/
     pub async fn save_config_profile(&self, name: &str, profile: &ConfigProfile) -> Result<()> {
         Self::validate_name(name)?;
 
         let profile_dir = self.path.join(CONFIGS_DIR).join(name);
 
-        // Create profile directories
-        let opencode_dir = profile_dir.join("opencode");
-        let openagent_dir = profile_dir.join("openagent");
-        let claudecode_dir = profile_dir.join("claudecode");
+        // Create profile directories with dot-prefix (mirroring harness directories)
+        let opencode_dir = profile_dir.join(".opencode");
+        let openagent_dir = profile_dir.join(".openagent");
+        let claudecode_dir = profile_dir.join(".claudecode");
+        let ampcode_dir = profile_dir.join(".ampcode");
 
         fs::create_dir_all(&opencode_dir).await?;
         fs::create_dir_all(&openagent_dir).await?;
         fs::create_dir_all(&claudecode_dir).await?;
+        fs::create_dir_all(&ampcode_dir).await?;
 
         // Save OpenCode settings
         let opencode_content = serde_json::to_string_pretty(&profile.opencode_settings)?;
-        fs::write(opencode_dir.join("oh-my-opencode.json"), opencode_content)
+        fs::write(opencode_dir.join("settings.json"), opencode_content)
             .await
             .context("Failed to write opencode settings")?;
 
@@ -1894,9 +1967,15 @@ impl LibraryStore {
 
         // Save Claude Code config
         let claudecode_content = serde_json::to_string_pretty(&profile.claudecode_config)?;
-        fs::write(claudecode_dir.join("config.json"), claudecode_content)
+        fs::write(claudecode_dir.join("settings.json"), claudecode_content)
             .await
             .context("Failed to write claudecode config")?;
+
+        // Save Amp Code config
+        let ampcode_content = serde_json::to_string_pretty(&profile.ampcode_config)?;
+        fs::write(ampcode_dir.join("settings.json"), ampcode_content)
+            .await
+            .context("Failed to write ampcode config")?;
 
         Ok(())
     }
@@ -1943,9 +2022,11 @@ impl LibraryStore {
                 name: name.to_string(),
                 is_default: false,
                 path: format!("{}/{}", CONFIGS_DIR, name),
+                files: Vec::new(),
                 opencode_settings: serde_json::json!({}),
                 openagent_config: OpenAgentConfig::default(),
                 claudecode_config: ClaudeCodeConfig::default(),
+                ampcode_config: AmpCodeConfig::default(),
             }
         };
 
@@ -1953,9 +2034,11 @@ impl LibraryStore {
             name: name.to_string(),
             is_default: false,
             path: format!("{}/{}", CONFIGS_DIR, name),
+            files: Vec::new(), // Files will be populated on next get_config_profile
             opencode_settings: base.opencode_settings,
             openagent_config: base.openagent_config,
             claudecode_config: base.claudecode_config,
+            ampcode_config: base.ampcode_config,
         };
 
         self.save_config_profile(name, &new_profile).await?;
@@ -1971,11 +2054,17 @@ impl LibraryStore {
         Self::validate_name(profile)?;
 
         let profile_dir = self.path.join(CONFIGS_DIR).join(profile);
-        let path = profile_dir.join("opencode").join("oh-my-opencode.json");
+        // Try new path first, then legacy
+        let new_path = profile_dir.join(".opencode").join("settings.json");
+        let legacy_path = profile_dir.join("opencode").join("oh-my-opencode.json");
 
-        if !path.exists() {
+        let path = if new_path.exists() {
+            new_path
+        } else if legacy_path.exists() {
+            legacy_path
+        } else {
             return Ok(serde_json::json!({}));
-        }
+        };
 
         let content = fs::read_to_string(&path)
             .await
@@ -1993,12 +2082,12 @@ impl LibraryStore {
         Self::validate_name(profile)?;
 
         let profile_dir = self.path.join(CONFIGS_DIR).join(profile);
-        let opencode_dir = profile_dir.join("opencode");
+        let opencode_dir = profile_dir.join(".opencode");
 
         fs::create_dir_all(&opencode_dir).await?;
 
         let content = serde_json::to_string_pretty(settings)?;
-        fs::write(opencode_dir.join("oh-my-opencode.json"), content)
+        fs::write(opencode_dir.join("settings.json"), content)
             .await
             .context("Failed to write opencode settings")?;
 
@@ -2010,11 +2099,17 @@ impl LibraryStore {
         Self::validate_name(profile)?;
 
         let profile_dir = self.path.join(CONFIGS_DIR).join(profile);
-        let path = profile_dir.join("openagent").join("config.json");
+        // Try new path first, then legacy
+        let new_path = profile_dir.join(".openagent").join("config.json");
+        let legacy_path = profile_dir.join("openagent").join("config.json");
 
-        if !path.exists() {
+        let path = if new_path.exists() {
+            new_path
+        } else if legacy_path.exists() {
+            legacy_path
+        } else {
             return Ok(OpenAgentConfig::default());
-        }
+        };
 
         let content = fs::read_to_string(&path)
             .await
@@ -2032,7 +2127,7 @@ impl LibraryStore {
         Self::validate_name(profile)?;
 
         let profile_dir = self.path.join(CONFIGS_DIR).join(profile);
-        let openagent_dir = profile_dir.join("openagent");
+        let openagent_dir = profile_dir.join(".openagent");
 
         fs::create_dir_all(&openagent_dir).await?;
 
@@ -2052,11 +2147,17 @@ impl LibraryStore {
         Self::validate_name(profile)?;
 
         let profile_dir = self.path.join(CONFIGS_DIR).join(profile);
-        let path = profile_dir.join("claudecode").join("config.json");
+        // Try new path first, then legacy
+        let new_path = profile_dir.join(".claudecode").join("settings.json");
+        let legacy_path = profile_dir.join("claudecode").join("config.json");
 
-        if !path.exists() {
+        let path = if new_path.exists() {
+            new_path
+        } else if legacy_path.exists() {
+            legacy_path
+        } else {
             return Ok(ClaudeCodeConfig::default());
-        }
+        };
 
         let content = fs::read_to_string(&path)
             .await
@@ -2074,14 +2175,144 @@ impl LibraryStore {
         Self::validate_name(profile)?;
 
         let profile_dir = self.path.join(CONFIGS_DIR).join(profile);
-        let claudecode_dir = profile_dir.join("claudecode");
+        let claudecode_dir = profile_dir.join(".claudecode");
 
         fs::create_dir_all(&claudecode_dir).await?;
 
         let content = serde_json::to_string_pretty(config)?;
-        fs::write(claudecode_dir.join("config.json"), content)
+        fs::write(claudecode_dir.join("settings.json"), content)
             .await
             .context("Failed to write claudecode config")?;
+
+        Ok(())
+    }
+
+    /// Get Amp Code config from a specific profile.
+    pub async fn get_ampcode_config_for_profile(
+        &self,
+        profile: &str,
+    ) -> Result<AmpCodeConfig> {
+        Self::validate_name(profile)?;
+
+        let profile_dir = self.path.join(CONFIGS_DIR).join(profile);
+        let path = profile_dir.join(".ampcode").join("settings.json");
+
+        if !path.exists() {
+            return Ok(AmpCodeConfig::default());
+        }
+
+        let content = fs::read_to_string(&path)
+            .await
+            .context("Failed to read ampcode config")?;
+
+        serde_json::from_str(&content).context("Failed to parse ampcode config")
+    }
+
+    /// Save Amp Code config to a specific profile.
+    pub async fn save_ampcode_config_for_profile(
+        &self,
+        profile: &str,
+        config: &AmpCodeConfig,
+    ) -> Result<()> {
+        Self::validate_name(profile)?;
+
+        let profile_dir = self.path.join(CONFIGS_DIR).join(profile);
+        let ampcode_dir = profile_dir.join(".ampcode");
+
+        fs::create_dir_all(&ampcode_dir).await?;
+
+        let content = serde_json::to_string_pretty(config)?;
+        fs::write(ampcode_dir.join("settings.json"), content)
+            .await
+            .context("Failed to write ampcode config")?;
+
+        Ok(())
+    }
+
+    /// Get a specific file from a config profile.
+    pub async fn get_config_profile_file(
+        &self,
+        profile: &str,
+        file_path: &str,
+    ) -> Result<String> {
+        Self::validate_name(profile)?;
+
+        let profile_dir = self.path.join(CONFIGS_DIR).join(profile);
+        let path = profile_dir.join(file_path);
+
+        if !path.exists() {
+            anyhow::bail!("File not found: {}", file_path);
+        }
+
+        fs::read_to_string(&path)
+            .await
+            .context("Failed to read config file")
+    }
+
+    /// Save a specific file in a config profile.
+    pub async fn save_config_profile_file(
+        &self,
+        profile: &str,
+        file_path: &str,
+        content: &str,
+    ) -> Result<()> {
+        Self::validate_name(profile)?;
+
+        let profile_dir = self.path.join(CONFIGS_DIR).join(profile);
+        let path = profile_dir.join(file_path);
+
+        // Ensure parent directory exists
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+
+        fs::write(&path, content)
+            .await
+            .context("Failed to write config file")?;
+
+        Ok(())
+    }
+
+    /// List all files in a config profile.
+    pub async fn list_config_profile_files(&self, profile: &str) -> Result<Vec<String>> {
+        Self::validate_name(profile)?;
+
+        let profile_dir = self.path.join(CONFIGS_DIR).join(profile);
+        if !profile_dir.exists() {
+            return Ok(Vec::new());
+        }
+
+        let mut files = Vec::new();
+        Self::collect_files_recursive(&profile_dir, &profile_dir, &mut files).await?;
+
+        files.sort();
+        Ok(files)
+    }
+
+    /// Recursively collect all files in a directory.
+    #[async_recursion::async_recursion]
+    async fn collect_files_recursive(
+        base_dir: &Path,
+        current_dir: &Path,
+        files: &mut Vec<String>,
+    ) -> Result<()> {
+        let mut entries = fs::read_dir(current_dir).await?;
+
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            let metadata = fs::metadata(&path).await?;
+
+            if metadata.is_dir() {
+                Self::collect_files_recursive(base_dir, &path, files).await?;
+            } else if metadata.is_file() {
+                let relative_path = path
+                    .strip_prefix(base_dir)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .to_string();
+                files.push(relative_path);
+            }
+        }
 
         Ok(())
     }

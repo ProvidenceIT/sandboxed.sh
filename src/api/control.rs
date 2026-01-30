@@ -1265,8 +1265,10 @@ pub struct CreateMissionRequest {
     pub workspace_id: Option<Uuid>,
     /// Agent name from library (e.g., "code-reviewer")
     pub agent: Option<String>,
-    /// Optional model override (provider/model)
+    /// Optional model override (provider/model) - deprecated, use config_profile instead
     pub model_override: Option<String>,
+    /// Config profile to use for this mission (overrides workspace's default profile)
+    pub config_profile: Option<String>,
     /// Backend to use for this mission ("opencode" or "claudecode")
     pub backend: Option<String>,
 }
@@ -1278,17 +1280,18 @@ pub async fn create_mission(
 ) -> Result<Json<Mission>, (StatusCode, String)> {
     let (tx, rx) = oneshot::channel();
 
-    let (title, workspace_id, agent, model_override, mut backend) = body
+    let (title, workspace_id, agent, model_override, config_profile, mut backend) = body
         .map(|b| {
             (
                 b.title.clone(),
                 b.workspace_id,
                 b.agent.clone(),
                 b.model_override.clone(),
+                b.config_profile.clone(),
                 b.backend.clone(),
             )
         })
-        .unwrap_or((None, None, None, None, None));
+        .unwrap_or((None, None, None, None, None, None));
 
     let mut model_override = model_override;
     if let Some(value) = backend.as_ref() {
@@ -1324,19 +1327,26 @@ pub async fn create_mission(
         }
     }
 
+    // Resolve the effective config profile:
+    // 1. Use explicit config_profile from request if provided
+    // 2. Otherwise use workspace's config_profile
+    // 3. Fall back to "default"
+    let effective_config_profile = if let Some(ref profile) = config_profile {
+        Some(profile.clone())
+    } else if let Some(ws_id) = workspace_id {
+        state
+            .workspaces
+            .get(ws_id)
+            .await
+            .and_then(|ws| ws.config_profile)
+    } else {
+        None
+    };
+
+    // If no model_override specified, resolve from config profile for Claude Code
     if backend.as_deref() == Some("claudecode") && model_override.is_none() {
-        // Get workspace's config profile to use the right Claude Code config
-        let config_profile = if let Some(ws_id) = workspace_id {
-            state
-                .workspaces
-                .get(ws_id)
-                .await
-                .and_then(|ws| ws.config_profile)
-        } else {
-            None
-        };
         if let Some(default_model) =
-            resolve_claudecode_default_model(&state.library, config_profile.as_deref()).await
+            resolve_claudecode_default_model(&state.library, effective_config_profile.as_deref()).await
         {
             model_override = Some(default_model);
         }

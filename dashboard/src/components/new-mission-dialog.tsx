@@ -2,15 +2,18 @@
 
 import { useEffect, useRef, useState, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
-import { Plus, X, ExternalLink } from 'lucide-react';
+import { Plus, X, ExternalLink, Layers } from 'lucide-react';
 import useSWR from 'swr';
-import { getVisibleAgents, getOpenAgentConfig, listBackends, listBackendAgents, getBackendConfig, getClaudeCodeConfig, type Backend, type BackendAgent } from '@/lib/api';
+import { getVisibleAgents, getOpenAgentConfig, listBackends, listBackendAgents, getBackendConfig, getClaudeCodeConfig, listConfigProfiles, type Backend, type BackendAgent, type ConfigProfileSummary } from '@/lib/api';
 import type { Provider, Workspace } from '@/lib/api';
 
 export interface CreateMissionOptions {
   workspaceId?: string;
   agent?: string;
+  /** @deprecated Use configProfile instead */
   modelOverride?: string;
+  /** Config profile to use for this mission (overrides workspace's default) */
+  configProfile?: string;
   backend?: string;
   /** Whether the mission will be opened in a new tab (skip local state updates) */
   openInNewTab?: boolean;
@@ -85,7 +88,7 @@ export function NewMissionDialog({
   const [newMissionWorkspace, setNewMissionWorkspace] = useState('');
   // Combined value: "backend:agent" or empty for default
   const [selectedAgentValue, setSelectedAgentValue] = useState('');
-  const [newMissionModelOverride, setNewMissionModelOverride] = useState('');
+  const [selectedConfigProfile, setSelectedConfigProfile] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [defaultSet, setDefaultSet] = useState(false);
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -152,6 +155,13 @@ export function NewMissionDialog({
   const { data: claudeCodeLibConfig } = useSWR(
     enabledBackends.some(b => b.id === 'claudecode') ? 'claudecode-lib-config' : null,
     getClaudeCodeConfig,
+    { revalidateOnFocus: false, dedupingInterval: 30000 }
+  );
+
+  // SWR: fetch config profiles
+  const { data: configProfiles = [] } = useSWR<ConfigProfileSummary[]>(
+    'config-profiles',
+    listConfigProfiles,
     { revalidateOnFocus: false, dedupingInterval: 30000 }
   );
 
@@ -249,15 +259,7 @@ export function NewMissionDialog({
   const formatWorkspaceType = (type: Workspace['workspace_type']) =>
     type === 'host' ? 'host' : 'isolated';
 
-  // Reset model override when switching to Claude Code or Amp if current model is provider-prefixed
-  useEffect(() => {
-    if ((selectedBackend === 'claudecode' || selectedBackend === 'amp') && newMissionModelOverride) {
-      // Claude Code and Amp expect raw model IDs (no provider prefix).
-      if (newMissionModelOverride.includes('/')) {
-        setNewMissionModelOverride('');
-      }
-    }
-  }, [selectedBackend, newMissionModelOverride]);
+  // Config profile applies to all backends now - no need for model-specific handling
 
   // Click outside and Escape key handler
   useEffect(() => {
@@ -336,7 +338,7 @@ export function NewMissionDialog({
   const resetForm = () => {
     setNewMissionWorkspace('');
     setSelectedAgentValue('');
-    setNewMissionModelOverride('');
+    setSelectedConfigProfile('');
     setDefaultSet(false);
   };
 
@@ -350,7 +352,7 @@ export function NewMissionDialog({
     return {
       workspaceId: newMissionWorkspace || undefined,
       agent: parsed?.agent || undefined,
-      modelOverride: newMissionModelOverride || undefined,
+      configProfile: selectedConfigProfile || undefined,
       backend: parsed?.backend || 'opencode',
     };
   };
@@ -478,12 +480,15 @@ export function NewMissionDialog({
               </p>
             </div>
 
-            {/* Model override */}
+            {/* Config Profile */}
             <div>
-              <label className="block text-xs text-white/50 mb-1.5">Model Override</label>
+              <label className="block text-xs text-white/50 mb-1.5 flex items-center gap-1.5">
+                <Layers className="h-3 w-3" />
+                Config Profile
+              </label>
               <select
-                value={newMissionModelOverride}
-                onChange={(e) => setNewMissionModelOverride(e.target.value)}
+                value={selectedConfigProfile}
+                onChange={(e) => setSelectedConfigProfile(e.target.value)}
                 className="w-full rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2.5 text-sm text-white focus:border-indigo-500/50 focus:outline-none appearance-none cursor-pointer"
                 style={{
                   backgroundImage:
@@ -495,28 +500,20 @@ export function NewMissionDialog({
                 }}
               >
                 <option value="" className="bg-[#1a1a1a]">
-                  Default (agent or global)
+                  Default (from workspace)
                 </option>
-                {filteredProviders.map((provider) => (
-                  <optgroup key={provider.id} label={provider.name} className="bg-[#1a1a1a]">
-                    {provider.models.map((model) => {
-                      const value =
-                        (selectedBackend === 'claudecode' || selectedBackend === 'amp') ? model.id : `${provider.id}/${model.id}`;
-                      return (
-                        <option
-                          key={`${provider.id}/${model.id}`}
-                          value={value}
-                          className="bg-[#1a1a1a]"
-                        >
-                          {model.name || model.id}
-                        </option>
-                      );
-                    })}
-                  </optgroup>
+                {configProfiles.map((profile) => (
+                  <option
+                    key={profile.name}
+                    value={profile.name}
+                    className="bg-[#1a1a1a]"
+                  >
+                    {profile.name}{profile.is_default ? ' (default)' : ''}
+                  </option>
                 ))}
               </select>
               <p className="text-xs text-white/30 mt-1.5">
-                Overrides the model for this mission
+                Override config settings (model, mode, etc.)
               </p>
             </div>
 
