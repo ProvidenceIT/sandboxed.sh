@@ -1765,18 +1765,27 @@ pub fn run_claudecode_turn<'a>(
                 }
                 Ok(Ok(false)) => {
                     tracing::error!(mission_id = %mission_id, "Stdin write failed");
-                    return AgentResult::failure("Failed to write prompt to Claude CLI".to_string(), 0)
-                        .with_terminal_reason(TerminalReason::LlmError);
+                    return AgentResult::failure(
+                        "Failed to write prompt to Claude CLI".to_string(),
+                        0,
+                    )
+                    .with_terminal_reason(TerminalReason::LlmError);
                 }
                 Ok(Err(e)) => {
                     tracing::error!(mission_id = %mission_id, "Stdin task panicked: {:?}", e);
-                    return AgentResult::failure("Failed to write prompt to Claude CLI (task panic)".to_string(), 0)
-                        .with_terminal_reason(TerminalReason::LlmError);
+                    return AgentResult::failure(
+                        "Failed to write prompt to Claude CLI (task panic)".to_string(),
+                        0,
+                    )
+                    .with_terminal_reason(TerminalReason::LlmError);
                 }
                 Err(_) => {
                     tracing::error!(mission_id = %mission_id, "Stdin write timed out after 5s");
-                    return AgentResult::failure("Timed out writing prompt to Claude CLI".to_string(), 0)
-                        .with_terminal_reason(TerminalReason::LlmError);
+                    return AgentResult::failure(
+                        "Timed out writing prompt to Claude CLI".to_string(),
+                        0,
+                    )
+                    .with_terminal_reason(TerminalReason::LlmError);
                 }
             }
         }
