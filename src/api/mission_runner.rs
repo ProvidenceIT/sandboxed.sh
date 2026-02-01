@@ -1823,15 +1823,17 @@ pub fn run_claudecode_turn<'a>(
                         || stderr_content.contains("ENOTFOUND")
                         || stderr_content.contains("getaddrinfo");
 
+                    // Pre-compute truncated stderr to avoid duplication
+                    let truncated_stderr = if stderr_content.len() > 500 {
+                        let end = safe_truncate_index(&stderr_content, 500);
+                        format!("{}...", &stderr_content[..end])
+                    } else {
+                        stderr_content.to_string()
+                    };
+
                     let err_msg = if !received_any_event && auth_missing {
                         "Claude Code produced no output. No Anthropic credentials detected; please authenticate in Settings → AI Providers or set CLAUDE_CODE_OAUTH_TOKEN/ANTHROPIC_API_KEY.".to_string()
                     } else if has_network_error {
-                        let truncated_stderr = if stderr_content.len() > 500 {
-                            let end = safe_truncate_index(&stderr_content, 500);
-                            format!("{}...", &stderr_content[..end])
-                        } else {
-                            stderr_content.to_string()
-                        };
                         format!(
                             "Claude Code appears stuck due to network issues. Check workspace DNS/network configuration. Stderr: {}",
                             truncated_stderr
@@ -1840,13 +1842,7 @@ pub fn run_claudecode_turn<'a>(
                         let stderr_hint = if stderr_content.is_empty() {
                             String::new()
                         } else {
-                            let truncated = if stderr_content.len() > 500 {
-                                let end = safe_truncate_index(&stderr_content, 500);
-                                format!("{}...", &stderr_content[..end])
-                            } else {
-                                stderr_content.to_string()
-                            };
-                            format!(" Stderr: {}", truncated)
+                            format!(" Stderr: {}", truncated_stderr)
                         };
                         format!(
                             "Claude Code produced no output after {}s. This may indicate network connectivity issues, missing API credentials, or a CLI startup failure.{}",
@@ -5168,6 +5164,10 @@ pub async fn run_opencode_turn(
                             }
                         } else {
                             // Non-JSON line - this is the expected output format without --format json
+                            // Track activity for timeout detection (same as JSON events)
+                            received_any_event = true;
+                            last_activity = std::time::Instant::now();
+
                             tracing::debug!(mission_id = %mission_id, line = %trimmed, "OpenCode stdout");
                             final_result.push_str(trimmed);
                             final_result.push('\n');
