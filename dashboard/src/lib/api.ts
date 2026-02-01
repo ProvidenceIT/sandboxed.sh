@@ -2262,15 +2262,16 @@ export async function getSystemComponents(): Promise<SystemComponentsResponse> {
   return apiGet('/api/system/components', 'Failed to get system components');
 }
 
-// Update a system component (streams progress via SSE)
-export async function updateSystemComponent(
-  name: string,
+// Shared helper for streaming system component operations via SSE
+async function streamComponentOperation(
+  url: string,
+  operationName: string,
   onProgress: (event: UpdateProgressEvent) => void,
   onComplete: () => void,
   onError: (error: string) => void
 ): Promise<void> {
   try {
-    const res = await apiFetch(`/api/system/components/${name}/update`, {
+    const res = await apiFetch(url, {
       method: 'POST',
       headers: {
         'Accept': 'text/event-stream',
@@ -2279,7 +2280,7 @@ export async function updateSystemComponent(
 
     if (!res.ok) {
       const text = await res.text();
-      onError(text || 'Failed to start update');
+      onError(text || `Failed to start ${operationName}`);
       return;
     }
 
@@ -2330,6 +2331,22 @@ export async function updateSystemComponent(
   }
 }
 
+// Update a system component (streams progress via SSE)
+export async function updateSystemComponent(
+  name: string,
+  onProgress: (event: UpdateProgressEvent) => void,
+  onComplete: () => void,
+  onError: (error: string) => void
+): Promise<void> {
+  return streamComponentOperation(
+    `/api/system/components/${name}/update`,
+    'update',
+    onProgress,
+    onComplete,
+    onError
+  );
+}
+
 // Uninstall a system component (streams progress via SSE)
 export async function uninstallSystemComponent(
   name: string,
@@ -2337,65 +2354,13 @@ export async function uninstallSystemComponent(
   onComplete: () => void,
   onError: (error: string) => void
 ): Promise<void> {
-  try {
-    const res = await apiFetch(`/api/system/components/${name}/uninstall`, {
-      method: 'POST',
-      headers: {
-        'Accept': 'text/event-stream',
-      },
-    });
-
-    if (!res.ok) {
-      const text = await res.text();
-      onError(text || 'Failed to start uninstall');
-      return;
-    }
-
-    if (!res.body) {
-      onError('No response body');
-      return;
-    }
-
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-
-      // Parse SSE events from buffer
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || ''; // Keep incomplete line in buffer
-
-      for (const line of lines) {
-        if (line.startsWith('data: ')) {
-          const jsonData = line.slice(6);
-          try {
-            const data: UpdateProgressEvent = JSON.parse(jsonData);
-            onProgress(data);
-
-            if (data.event_type === 'complete') {
-              onComplete();
-              return;
-            } else if (data.event_type === 'error') {
-              onError(data.message);
-              return;
-            }
-          } catch (e) {
-            console.error('Failed to parse SSE event:', e, jsonData);
-          }
-        }
-      }
-    }
-
-    // Stream ended without explicit completion
-    onComplete();
-  } catch (e) {
-    onError(e instanceof Error ? e.message : 'Unknown error');
-  }
+  return streamComponentOperation(
+    `/api/system/components/${name}/uninstall`,
+    'uninstall',
+    onProgress,
+    onComplete,
+    onError
+  );
 }
 
 // ============================================
@@ -2505,7 +2470,7 @@ export async function downloadBackup(): Promise<void> {
 
   // Get filename from Content-Disposition header or use default
   const contentDisposition = res.headers.get('Content-Disposition');
-  let filename = 'openagent-backup.zip';
+  let filename = 'sandboxed-backup.zip';
   if (contentDisposition) {
     const match = contentDisposition.match(/filename="([^"]+)"/);
     if (match) filename = match[1];
