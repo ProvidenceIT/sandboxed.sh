@@ -1723,15 +1723,62 @@ pub fn run_claudecode_turn<'a>(
         };
 
         // Write message to stdin (use effective_message which may have been transformed from slash commands)
-        if let Some(mut stdin) = child.stdin.take() {
+        // Important: We spawn a task but also track it to ensure stdin is written
+        let stdin_task = if let Some(mut stdin) = child.stdin.take() {
             let msg = effective_message.clone();
-            tokio::spawn(async move {
-                if let Err(e) = stdin.write_all(msg.as_bytes()).await {
-                    tracing::error!("Failed to write to Claude stdin: {}", e);
+            let mission_id_for_stdin = mission_id;
+            Some(tokio::spawn(async move {
+                // Ensure message ends with a newline (some CLIs require this)
+                let msg_with_newline = if msg.ends_with('\n') {
+                    msg
+                } else {
+                    format!("{}\n", msg)
+                };
+                tracing::debug!(
+                    mission_id = %mission_id_for_stdin,
+                    msg_len = msg_with_newline.len(),
+                    "Writing message to Claude stdin"
+                );
+                if let Err(e) = stdin.write_all(msg_with_newline.as_bytes()).await {
+                    tracing::error!(mission_id = %mission_id_for_stdin, "Failed to write to Claude stdin: {}", e);
+                    return false;
+                }
+                tracing::debug!(mission_id = %mission_id_for_stdin, "Successfully wrote message to Claude stdin");
+                // Flush to ensure data is sent
+                if let Err(e) = stdin.flush().await {
+                    tracing::error!(mission_id = %mission_id_for_stdin, "Failed to flush Claude stdin: {}", e);
                 }
                 // Close stdin to signal end of input
                 drop(stdin);
-            });
+                tracing::debug!(mission_id = %mission_id_for_stdin, "Closed Claude stdin (EOF signaled)");
+                true
+            }))
+        } else {
+            None
+        };
+
+        // Wait for stdin to be written before proceeding (with timeout)
+        if let Some(task) = stdin_task {
+            match tokio::time::timeout(std::time::Duration::from_secs(5), task).await {
+                Ok(Ok(true)) => {
+                    tracing::debug!(mission_id = %mission_id, "Stdin write completed successfully");
+                }
+                Ok(Ok(false)) => {
+                    tracing::error!(mission_id = %mission_id, "Stdin write failed");
+                    return AgentResult::failure("Failed to write prompt to Claude CLI".to_string(), 0)
+                        .with_terminal_reason(TerminalReason::LlmError);
+                }
+                Ok(Err(e)) => {
+                    tracing::error!(mission_id = %mission_id, "Stdin task panicked: {:?}", e);
+                    return AgentResult::failure("Failed to write prompt to Claude CLI (task panic)".to_string(), 0)
+                        .with_terminal_reason(TerminalReason::LlmError);
+                }
+                Err(_) => {
+                    tracing::error!(mission_id = %mission_id, "Stdin write timed out after 5s");
+                    return AgentResult::failure("Timed out writing prompt to Claude CLI".to_string(), 0)
+                        .with_terminal_reason(TerminalReason::LlmError);
+                }
+            }
         }
 
         // Get stdout for reading events
@@ -2126,10 +2173,17 @@ pub fn run_claudecode_turn<'a>(
                         }
                         Ok(None) => {
                             // EOF - process finished
+                            tracing::debug!(
+                                mission_id = %mission_id,
+                                received_any_event = received_any_event,
+                                final_result_len = final_result.len(),
+                                had_error = had_error,
+                                "Claude stdout EOF reached"
+                            );
                             break;
                         }
                         Err(e) => {
-                            tracing::error!("Error reading from Claude CLI: {}", e);
+                            tracing::error!(mission_id = %mission_id, "Error reading from Claude CLI: {}", e);
                             break;
                         }
                     }
@@ -2138,7 +2192,9 @@ pub fn run_claudecode_turn<'a>(
         }
 
         // Wait for child process to finish and clean up
+        tracing::debug!(mission_id = %mission_id, "Event loop completed, waiting for child process");
         let exit_status = child.wait().await;
+        tracing::debug!(mission_id = %mission_id, exit_status = ?exit_status, "Child process exited");
 
         // Wait for stderr capture to complete
         if let Some(handle) = stderr_handle {
