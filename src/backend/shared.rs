@@ -63,6 +63,26 @@ pub enum CliEvent {
     Result(ResultEvent),
 }
 
+/// MCP server status in the init event.
+/// Claude Code 2.1+ returns objects with name/status, older versions return strings.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum McpServerInfo {
+    /// New format: object with name and status
+    Object { name: String, status: String },
+    /// Legacy format: just the server name as a string
+    String(String),
+}
+
+impl McpServerInfo {
+    pub fn name(&self) -> &str {
+        match self {
+            McpServerInfo::Object { name, .. } => name,
+            McpServerInfo::String(s) => s,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct SystemEvent {
     pub subtype: String,
@@ -75,9 +95,10 @@ pub struct SystemEvent {
     pub agents: Vec<String>,
     #[serde(default)]
     pub cwd: Option<String>,
-    /// Amp extension.
+    /// MCP servers configured for this session.
+    /// Claude Code 2.1+ returns objects with {name, status}, older versions return strings.
     #[serde(default)]
-    pub mcp_servers: Vec<String>,
+    pub mcp_servers: Vec<McpServerInfo>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
