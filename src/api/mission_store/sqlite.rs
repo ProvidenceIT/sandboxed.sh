@@ -437,7 +437,7 @@ impl MissionStore for SqliteMissionStore {
         let now = now_string();
         let id = Uuid::new_v4();
         let workspace_id = workspace_id.unwrap_or(crate::workspace::DEFAULT_WORKSPACE_ID);
-        let backend = backend.unwrap_or("opencode").to_string();
+        let backend = backend.unwrap_or("claudecode").to_string();
         // Generate session_id for conversation persistence (used by Claude Code --session-id)
         let session_id = Uuid::new_v4().to_string();
 

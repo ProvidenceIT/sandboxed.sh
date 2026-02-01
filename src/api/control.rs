@@ -1327,6 +1327,13 @@ pub async fn create_mission(
         }
     }
 
+    // If no backend specified, use the default from registry
+    if backend.is_none() {
+        let registry = state.backend_registry.read().await;
+        backend = Some(registry.default_id().to_string());
+    }
+
+    // Validate backend exists
     if let Some(ref backend_id) = backend {
         let registry = state.backend_registry.read().await;
         if registry.get(backend_id).is_none() {

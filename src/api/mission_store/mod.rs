@@ -65,7 +65,7 @@ pub struct Mission {
 }
 
 fn default_backend() -> String {
-    "opencode".to_string()
+    "claudecode".to_string()
 }
 
 fn default_workspace_id() -> Uuid {
