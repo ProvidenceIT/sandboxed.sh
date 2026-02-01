@@ -39,6 +39,7 @@ import {
   Save,
   Bookmark,
   Sparkles,
+  Play,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useToast } from '@/components/toast';
@@ -1013,12 +1014,25 @@ export default function WorkspacesPage() {
 
             {/* Footer */}
             <div className="px-6 py-4 border-t border-white/[0.06] flex items-center justify-between gap-4">
-              <button
-                onClick={() => setSelectedWorkspace(null)}
-                className="text-sm text-white/50 hover:text-white/80 transition-colors"
-              >
-                Close
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setSelectedWorkspace(null)}
+                  className="text-sm text-white/50 hover:text-white/80 transition-colors"
+                >
+                  Close
+                </button>
+                {selectedWorkspace.status === 'ready' && (
+                  <button
+                    onClick={() => {
+                      router.push(`/console?workspace=${selectedWorkspace.id}&name=${encodeURIComponent(selectedWorkspace.name)}`);
+                    }}
+                    className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-white/[0.06] hover:bg-white/[0.1] rounded-lg transition-colors"
+                  >
+                    <Terminal className="h-3.5 w-3.5" />
+                    Shell
+                  </button>
+                )}
+              </div>
               <div className="flex items-center gap-2">
                 {selectedWorkspace.id !== DEFAULT_WORKSPACE_ID && (
                   <button
@@ -1046,12 +1060,12 @@ export default function WorkspacesPage() {
                 {selectedWorkspace.status === 'ready' && (
                   <button
                     onClick={() => {
-                      router.push(`/console?workspace=${selectedWorkspace.id}&name=${encodeURIComponent(selectedWorkspace.name)}`);
+                      router.push(`/?workspace=${selectedWorkspace.id}`);
                     }}
                     className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-indigo-500 hover:bg-indigo-600 rounded-lg transition-colors"
                   >
-                    <Terminal className="h-3.5 w-3.5" />
-                    Shell
+                    <Play className="h-3.5 w-3.5" />
+                    Start Mission
                   </button>
                 )}
               </div>
