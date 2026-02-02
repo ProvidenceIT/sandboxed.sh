@@ -2445,8 +2445,9 @@ async fn control_actor_loop(
     mission_store: Arc<dyn MissionStore>,
     secrets: Option<Arc<SecretsStore>>,
 ) {
-    // Queue stores (id, content, agent) for the current/primary mission
-    let mut queue: VecDeque<(Uuid, String, Option<String>)> = VecDeque::new();
+    // Queue stores (id, content, agent, target_mission_id) for the current/primary mission
+    // The target_mission_id tracks which mission each queued message is intended for
+    let mut queue: VecDeque<(Uuid, String, Option<String>, Option<Uuid>)> = VecDeque::new();
     let mut history: Vec<(String, String)> = Vec::new(); // (role, content) pairs (user/assistant)
     let mut running: Option<tokio::task::JoinHandle<(Uuid, String, crate::agents::AgentResult)>> =
         None;
@@ -3011,11 +3012,14 @@ async fn control_actor_loop(
 
                         let was_running = running.is_some();
                         let content_clone = content.clone();
-                        queue.push_back((id, content, msg_agent));
+                        // Capture the target mission ID once, before queuing
+                        // This ensures we use the same mission_id for events and execution
+                        let target_mission_id = current_mission.read().await.clone();
+                        queue.push_back((id, content, msg_agent, target_mission_id));
                         let status_mission_id = if running.is_some() {
                             running_mission_id
                         } else {
-                            current_mission.read().await.clone()
+                            target_mission_id
                         };
                         set_and_emit_status(
                             &status,
@@ -3025,25 +3029,23 @@ async fn control_actor_loop(
                             status_mission_id,
                         ).await;
                         if was_running {
-                            let current_mid = current_mission.read().await.clone();
                             let _ = events_tx.send(AgentEvent::UserMessage {
                                 id,
                                 content: content_clone,
                                 queued: true,
-                                mission_id: current_mid,
+                                mission_id: target_mission_id,
                             });
                         }
                         if running.is_none() {
-                            if let Some((mid, msg, per_msg_agent)) = queue.pop_front() {
-                                let current_mid = current_mission.read().await.clone();
+                            if let Some((mid, msg, per_msg_agent, msg_target_mid)) = queue.pop_front() {
                                 set_and_emit_status(
                                     &status,
                                     &events_tx,
                                     ControlRunState::Running,
                                     queue.len(),
-                                    current_mid,
+                                    msg_target_mid,
                                 ).await;
-                                let _ = events_tx.send(AgentEvent::UserMessage { id: mid, content: msg.clone(), queued: false, mission_id: current_mid });
+                                let _ = events_tx.send(AgentEvent::UserMessage { id: mid, content: msg.clone(), queued: false, mission_id: msg_target_mid });
 
                                 // Immediately persist user message so it's visible when loading mission
                                 history.push(("user".to_string(), msg.clone()));
@@ -3066,8 +3068,9 @@ async fn control_actor_loop(
                                 };
                                 let tree_ref = Arc::clone(&current_tree);
                                 let progress_ref = Arc::clone(&progress);
-                                // Capture which mission this task is working on
-                                let mission_id = current_mission.read().await.clone();
+                                // Use the mission ID that was captured when message was queued
+                                // This prevents race conditions where current_mission changes between queueing and execution
+                                let mission_id = msg_target_mid;
                                 let (workspace_id, model_override, mission_agent, backend_id, session_id, mission_config_profile) = if let Some(mid) = mission_id {
                                     match mission_store.get_mission(mid).await {
                                         Ok(Some(mission)) => {
@@ -3478,12 +3481,12 @@ async fn control_actor_loop(
                                 // Skip if the caller just wants to update the status (e.g., before sending a custom message)
                                 if !skip_message {
                                     let msg_id = Uuid::new_v4();
-                                    queue.push_back((msg_id, resume_prompt, None));
+                                    queue.push_back((msg_id, resume_prompt, None, Some(mission_id)));
                                 }
 
                                 // Start execution if not already running
                                 if running.is_none() {
-                                    if let Some((mid, msg, _per_msg_agent)) = queue.pop_front() {
+                                    if let Some((mid, msg, _per_msg_agent, msg_target_mid)) = queue.pop_front() {
                                         set_and_emit_status(
                                             &status,
                                             &events_tx,
@@ -3642,14 +3645,14 @@ async fn control_actor_loop(
                         let _ = respond.send(interrupted_ids);
                     }
                     ControlCommand::GetQueue { respond } => {
-                        // Collect queued messages from main runner
+                        // Collect queued messages from main runner with their target mission IDs
                         let mut queued: Vec<QueuedMessage> = queue
                             .iter()
-                            .map(|(id, content, agent)| QueuedMessage {
+                            .map(|(id, content, agent, target_mid)| QueuedMessage {
                                 id: *id,
                                 content: content.clone(),
                                 agent: agent.clone(),
-                                mission_id: running_mission_id,
+                                mission_id: *target_mid,
                             })
                             .collect();
                         // Also collect queued messages from parallel runners
@@ -3666,11 +3669,14 @@ async fn control_actor_loop(
                         let _ = respond.send(queued);
                     }
                     ControlCommand::RemoveFromQueue { message_id, respond } => {
+                        let mut removed = false;
+
+                        // Try to remove from main queue
                         let before_len = queue.len();
-                        queue.retain(|(id, _, _)| *id != message_id);
-                        let removed = queue.len() < before_len;
-                        if removed {
-                            // Emit event to notify frontend
+                        queue.retain(|(id, _, _, _)| *id != message_id);
+                        if queue.len() < before_len {
+                            removed = true;
+                            // Emit event for main queue change
                             let _ = events_tx.send(AgentEvent::Status {
                                 state: if running.is_some() {
                                     ControlRunState::Running
@@ -3678,15 +3684,34 @@ async fn control_actor_loop(
                                     ControlRunState::Idle
                                 },
                                 queue_len: queue.len(),
-                                mission_id: current_mission.read().await.clone(),
+                                mission_id: if running.is_some() {
+                                    running_mission_id
+                                } else {
+                                    current_mission.read().await.clone()
+                                },
                             });
                         }
+
+                        // Also try to remove from parallel runner queues
+                        for (mid, runner) in parallel_runners.iter_mut() {
+                            if runner.remove_from_queue(message_id) {
+                                removed = true;
+                                tracing::info!("Removed message {} from parallel mission {}", message_id, mid);
+                            }
+                        }
+
                         let _ = respond.send(removed);
                     }
                     ControlCommand::ClearQueue { respond } => {
-                        let cleared = queue.len();
+                        let mut cleared = queue.len();
                         queue.clear();
-                        // Emit event to notify frontend
+
+                        // Also clear parallel runner queues
+                        for (_mid, runner) in parallel_runners.iter_mut() {
+                            cleared += runner.clear_queue();
+                        }
+
+                        // Emit event to notify frontend (main queue only)
                         let _ = events_tx.send(AgentEvent::Status {
                             state: if running.is_some() {
                                 ControlRunState::Running
@@ -3694,8 +3719,14 @@ async fn control_actor_loop(
                                 ControlRunState::Idle
                             },
                             queue_len: 0,
-                            mission_id: current_mission.read().await.clone(),
+                            mission_id: if running.is_some() {
+                                running_mission_id
+                            } else {
+                                current_mission.read().await.clone()
+                            },
                         });
+
+                        tracing::info!("Cleared {} total queued messages (main + parallel)", cleared);
                         let _ = respond.send(cleared);
                     }
                 }
@@ -3970,16 +4001,15 @@ async fn control_actor_loop(
                 }
 
                 // Start next queued message, if any.
-                if let Some((mid, msg, per_msg_agent)) = queue.pop_front() {
-                    let current_mid = current_mission.read().await.clone();
+                if let Some((mid, msg, per_msg_agent, msg_target_mid)) = queue.pop_front() {
                     set_and_emit_status(
                         &status,
                         &events_tx,
                         ControlRunState::Running,
                         queue.len(),
-                        current_mid,
+                        msg_target_mid,
                     ).await;
-                    let _ = events_tx.send(AgentEvent::UserMessage { id: mid, content: msg.clone(), queued: false, mission_id: current_mid });
+                    let _ = events_tx.send(AgentEvent::UserMessage { id: mid, content: msg.clone(), queued: false, mission_id: msg_target_mid });
 
                     // Immediately persist user message so it's visible when loading mission
                     history.push(("user".to_string(), msg.clone()));
@@ -4003,8 +4033,9 @@ async fn control_actor_loop(
                     let tree_ref = Arc::clone(&current_tree);
                     let progress_ref = Arc::clone(&progress);
                     running_cancel = Some(cancel.clone());
-                    // Capture which mission this task is working on
-                    let mission_id = current_mission.read().await.clone();
+                    // Use the mission ID that was captured when message was queued
+                    // This prevents race conditions where current_mission changes between queueing and execution
+                    let mission_id = msg_target_mid;
                     let (workspace_id, model_override, mission_agent, backend_id, session_id, mission_config_profile) = if let Some(mid) = mission_id {
                         match mission_store.get_mission(mid).await {
                             Ok(Some(mission)) => (

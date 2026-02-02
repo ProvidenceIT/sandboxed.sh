@@ -703,6 +703,22 @@ impl MissionRunner {
         }
     }
 
+    /// Remove a specific message from the queue by ID.
+    /// Returns true if the message was found and removed.
+    pub fn remove_from_queue(&mut self, message_id: Uuid) -> bool {
+        let before_len = self.queue.len();
+        self.queue.retain(|qm| qm.id != message_id);
+        self.queue.len() < before_len
+    }
+
+    /// Clear all queued messages.
+    /// Returns the number of messages that were cleared.
+    pub fn clear_queue(&mut self) -> usize {
+        let cleared = self.queue.len();
+        self.queue.clear();
+        cleared
+    }
+
     /// Start executing the next queued message (if any and not already running).
     /// Returns true if execution was started.
     pub fn start_next(
