@@ -1858,6 +1858,7 @@ pub fn run_claudecode_turn<'a>(
         let mut thinking_buffer: HashMap<u32, String> = HashMap::new();
         let mut text_buffer: HashMap<u32, String> = HashMap::new();
         let mut last_thinking_len: usize = 0; // Track last emitted length to avoid re-sending same content
+        let mut last_text_len: usize = 0; // Track last emitted text length for streaming text deltas
 
         let auth_missing = api_auth.is_none();
         let auth_timeout = std::time::Duration::from_secs(45);
@@ -2035,7 +2036,19 @@ pub fn run_claudecode_turn<'a>(
                                                         // Accumulate text content (will be used for final response)
                                                         let buffer = text_buffer.entry(index).or_default();
                                                         buffer.push_str(&text);
-                                                        // Don't send text deltas as thinking events
+
+                                                        // Stream text deltas similar to thinking panel
+                                                        // This allows users to see tool use descriptions as they're generated
+                                                        let total_len = text_buffer.values().map(|s| s.len()).sum::<usize>();
+                                                        if total_len > last_text_len {
+                                                            let accumulated: String = text_buffer.values().cloned().collect::<Vec<_>>().join("");
+                                                            last_text_len = total_len;
+
+                                                            let _ = events_tx.send(AgentEvent::TextDelta {
+                                                                content: accumulated,
+                                                                mission_id: Some(mission_id),
+                                                            });
+                                                        }
                                                     }
                                                 }
                                             }
