@@ -6,6 +6,7 @@ import { toast } from '@/components/toast';
 import {
   getSystemComponents,
   updateSystemComponent,
+  uninstallSystemComponent,
   ComponentInfo,
   UpdateProgressEvent,
 } from '@/lib/api';
@@ -18,6 +19,7 @@ import {
   Loader,
   ChevronDown,
   ChevronUp,
+  Trash2,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -68,6 +70,7 @@ export function ServerConnectionCard({
 }: ServerConnectionCardProps) {
   const [componentsExpanded, setComponentsExpanded] = useState(true);
   const [updatingComponent, setUpdatingComponent] = useState<string | null>(null);
+  const [uninstallingComponent, setUninstallingComponent] = useState<string | null>(null);
   const [updateLogs, setUpdateLogs] = useState<UpdateLog[]>([]);
 
   // SWR: fetch system components
@@ -81,13 +84,23 @@ export function ServerConnectionCard({
   );
   const components = data ?? [];
 
-  const handleUpdate = async (component: ComponentInfo) => {
-    if (updatingComponent) return;
+  const performComponentOperation = async (
+    component: ComponentInfo,
+    operationFn: (
+      componentName: string,
+      onProgress: (event: UpdateProgressEvent) => void,
+      onComplete: () => Promise<void>,
+      onError: (error: string) => void
+    ) => Promise<void>,
+    stateSetter: (name: string | null) => void,
+    actionName: string
+  ) => {
+    if (updatingComponent || uninstallingComponent) return;
 
-    setUpdatingComponent(component.name);
+    stateSetter(component.name);
     setUpdateLogs([]);
 
-    await updateSystemComponent(
+    await operationFn(
       component.name,
       (event: UpdateProgressEvent) => {
         setUpdateLogs((prev) => [
@@ -105,21 +118,45 @@ export function ServerConnectionCard({
       },
       async () => {
         toast.success(
-          `${componentNames[component.name] || component.name} updated successfully!`
+          `${componentNames[component.name] || component.name} ${actionName} successfully!`
         );
-        setUpdatingComponent(null);
+        stateSetter(null);
         // Force SWR to refetch fresh data (bypass cache).
         await mutate(undefined, { revalidate: true });
       },
       (error: string) => {
-        toast.error(`Update failed: ${error}`);
-        setUpdatingComponent(null);
+        toast.error(`${actionName.charAt(0).toUpperCase() + actionName.slice(1)} failed: ${error}`);
+        stateSetter(null);
       }
     );
   };
 
+  const handleUpdate = async (component: ComponentInfo) => {
+    await performComponentOperation(
+      component,
+      updateSystemComponent,
+      setUpdatingComponent,
+      'updated'
+    );
+  };
+
+  const handleUninstall = async (component: ComponentInfo) => {
+    // Don't allow uninstalling sandboxed_sh
+    if (component.name === 'sandboxed_sh') {
+      toast.error('Cannot uninstall sandboxed.sh - it is the main application');
+      return;
+    }
+
+    await performComponentOperation(
+      component,
+      uninstallSystemComponent,
+      setUninstallingComponent,
+      'uninstalled'
+    );
+  };
+
   const getStatusIcon = (component: ComponentInfo) => {
-    if (updatingComponent === component.name) {
+    if (updatingComponent === component.name || uninstallingComponent === component.name) {
       return <Loader className="h-3.5 w-3.5 animate-spin text-indigo-400" />;
     }
     if (component.status === 'update_available') {
@@ -305,7 +342,7 @@ export function ServerConnectionCard({
                     {component.status === 'update_available' && (
                       <button
                         onClick={() => handleUpdate(component)}
-                        disabled={updatingComponent !== null}
+                        disabled={updatingComponent !== null || uninstallingComponent !== null}
                         className="flex items-center gap-1.5 rounded-lg bg-indigo-500/20 border border-indigo-500/30 px-2.5 py-1 text-xs text-indigo-300 hover:bg-indigo-500/30 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                       >
                         <ArrowUp className="h-3 w-3" />
@@ -317,17 +354,29 @@ export function ServerConnectionCard({
                     {component.status === 'not_installed' && (
                       <button
                         onClick={() => handleUpdate(component)}
-                        disabled={updatingComponent !== null}
+                        disabled={updatingComponent !== null || uninstallingComponent !== null}
                         className="flex items-center gap-1.5 rounded-lg bg-emerald-500/20 border border-emerald-500/30 px-2.5 py-1 text-xs text-emerald-300 hover:bg-emerald-500/30 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                       >
                         <ArrowUp className="h-3 w-3" />
                         Install
                       </button>
                     )}
+
+                    {/* Uninstall button for installed components (except sandboxed_sh) */}
+                    {component.installed && component.name !== 'sandboxed_sh' && (
+                      <button
+                        onClick={() => handleUninstall(component)}
+                        disabled={updatingComponent !== null || uninstallingComponent !== null}
+                        className="p-1.5 rounded-lg text-white/30 hover:text-red-400 hover:bg-red-500/10 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                        title={`Uninstall ${componentNames[component.name] || component.name}`}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    )}
                   </div>
 
-                  {/* Update logs */}
-                  {updatingComponent === component.name && updateLogs.length > 0 && (
+                  {/* Update/Uninstall logs */}
+                  {(updatingComponent === component.name || uninstallingComponent === component.name) && updateLogs.length > 0 && (
                     <div className="border-t border-white/[0.06] px-3 py-2">
                       <div className="max-h-32 overflow-y-auto text-xs space-y-1 font-mono">
                         {updateLogs.map((log, i) => (

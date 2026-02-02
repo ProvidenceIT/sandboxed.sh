@@ -1,5 +1,27 @@
 # Agents and Execution Architecture
 
+> **⚠️ Debugging Issues?** Before investigating any runtime problems, **always
+> read [DEBUGGING.md](DEBUGGING.md) first**. It contains:
+> - Remote server SSH access (Thomas/Ben servers)
+> - Systemd service management commands
+> - Log viewing and common troubleshooting steps
+> - Deployment procedures
+>
+> The dashboard typically runs locally but connects to **remote backends**. Debug
+> on the server, not locally.
+
+> **⚠️ IMPORTANT: Format Check Before Pushing**
+>
+> **ALWAYS run `cargo fmt --all` before committing Rust code changes!**
+>
+> The CI pipeline will fail if code is not properly formatted. To check locally:
+> ```bash
+> cargo fmt --all --check  # Check if formatting is needed
+> cargo fmt --all          # Apply formatting
+> ```
+>
+> Make this part of your pre-commit routine to avoid CI failures.
+
 This document describes how Sandboxed.sh executes missions after the per-workspace
 harness refactor ("ralph" plan). The core change: **OpenCode and Claude Code run
 inside the target workspace**, so native bash and file effects are scoped to the

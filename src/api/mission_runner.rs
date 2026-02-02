@@ -703,6 +703,22 @@ impl MissionRunner {
         }
     }
 
+    /// Remove a specific message from the queue by ID.
+    /// Returns true if the message was found and removed.
+    pub fn remove_from_queue(&mut self, message_id: Uuid) -> bool {
+        let before_len = self.queue.len();
+        self.queue.retain(|qm| qm.id != message_id);
+        self.queue.len() < before_len
+    }
+
+    /// Clear all queued messages.
+    /// Returns the number of messages that were cleared.
+    pub fn clear_queue(&mut self) -> usize {
+        let cleared = self.queue.len();
+        self.queue.clear();
+        cleared
+    }
+
     /// Start executing the next queued message (if any and not already running).
     /// Returns true if execution was started.
     pub fn start_next(
@@ -1544,6 +1560,13 @@ pub fn run_claudecode_turn<'a>(
                 }
             };
 
+        // Proactive network connectivity check - fail fast if API is unreachable
+        // This catches DNS/network issues immediately instead of waiting for a timeout
+        if let Err(err_msg) = check_claudecode_connectivity(&workspace_exec, work_dir).await {
+            tracing::error!(mission_id = %mission_id, "{}", err_msg);
+            return AgentResult::failure(err_msg, 0).with_terminal_reason(TerminalReason::LlmError);
+        }
+
         tracing::info!(
             mission_id = %mission_id,
             session_id = %session_id,
@@ -1716,15 +1739,75 @@ pub fn run_claudecode_turn<'a>(
         };
 
         // Write message to stdin (use effective_message which may have been transformed from slash commands)
-        if let Some(mut stdin) = child.stdin.take() {
+        // Important: We spawn a task but also track it to ensure stdin is written
+        let stdin_task = if let Some(mut stdin) = child.stdin.take() {
             let msg = effective_message.clone();
-            tokio::spawn(async move {
-                if let Err(e) = stdin.write_all(msg.as_bytes()).await {
-                    tracing::error!("Failed to write to Claude stdin: {}", e);
+            let mission_id_for_stdin = mission_id;
+            Some(tokio::spawn(async move {
+                // Ensure message ends with a newline (some CLIs require this)
+                let msg_with_newline = if msg.ends_with('\n') {
+                    msg
+                } else {
+                    format!("{}\n", msg)
+                };
+                tracing::debug!(
+                    mission_id = %mission_id_for_stdin,
+                    msg_len = msg_with_newline.len(),
+                    "Writing message to Claude stdin"
+                );
+                if let Err(e) = stdin.write_all(msg_with_newline.as_bytes()).await {
+                    tracing::error!(mission_id = %mission_id_for_stdin, "Failed to write to Claude stdin: {}", e);
+                    return false;
+                }
+                tracing::debug!(mission_id = %mission_id_for_stdin, "Successfully wrote message to Claude stdin");
+                // Flush to ensure data is sent
+                if let Err(e) = stdin.flush().await {
+                    tracing::error!(mission_id = %mission_id_for_stdin, "Failed to flush Claude stdin: {}", e);
+                    return false;
                 }
                 // Close stdin to signal end of input
                 drop(stdin);
-            });
+                tracing::debug!(mission_id = %mission_id_for_stdin, "Closed Claude stdin (EOF signaled)");
+                true
+            }))
+        } else {
+            None
+        };
+
+        // Wait for stdin to be written before proceeding (with timeout)
+        if let Some(task) = stdin_task {
+            match tokio::time::timeout(std::time::Duration::from_secs(5), task).await {
+                Ok(Ok(true)) => {
+                    tracing::debug!(mission_id = %mission_id, "Stdin write completed successfully");
+                }
+                Ok(Ok(false)) => {
+                    tracing::error!(mission_id = %mission_id, "Stdin write failed");
+                    let _ = child.kill().await;
+                    return AgentResult::failure(
+                        "Failed to write prompt to Claude CLI".to_string(),
+                        0,
+                    )
+                    .with_terminal_reason(TerminalReason::LlmError);
+                }
+                Ok(Err(e)) => {
+                    tracing::error!(mission_id = %mission_id, "Stdin task panicked: {:?}", e);
+                    let _ = child.kill().await;
+                    return AgentResult::failure(
+                        "Failed to write prompt to Claude CLI (task panic)".to_string(),
+                        0,
+                    )
+                    .with_terminal_reason(TerminalReason::LlmError);
+                }
+                Err(_) => {
+                    tracing::error!(mission_id = %mission_id, "Stdin write timed out after 5s");
+                    let _ = child.kill().await;
+                    return AgentResult::failure(
+                        "Timed out writing prompt to Claude CLI".to_string(),
+                        0,
+                    )
+                    .with_terminal_reason(TerminalReason::LlmError);
+                }
+            }
         }
 
         // Get stdout for reading events
@@ -1775,9 +1858,17 @@ pub fn run_claudecode_turn<'a>(
         let mut thinking_buffer: HashMap<u32, String> = HashMap::new();
         let mut text_buffer: HashMap<u32, String> = HashMap::new();
         let mut last_thinking_len: usize = 0; // Track last emitted length to avoid re-sending same content
+        let mut last_text_len: usize = 0; // Track last emitted text length for streaming text deltas
 
         let auth_missing = api_auth.is_none();
         let auth_timeout = std::time::Duration::from_secs(45);
+        // General inactivity timeout - if no output for 5 minutes, something is likely wrong
+        let inactivity_timeout = std::time::Duration::from_secs(300);
+        // Much longer timeout when tools are in progress (30 minutes) - some bash commands
+        // or web fetches can take a very long time
+        let tool_in_progress_timeout = std::time::Duration::from_secs(1800);
+        let mut received_any_event = false;
+        let mut last_activity = std::time::Instant::now();
 
         // Create a buffered reader for stdout
         let reader = BufReader::new(stdout);
@@ -1785,7 +1876,21 @@ pub fn run_claudecode_turn<'a>(
 
         // Process events until completion or cancellation
         loop {
-            let mut timeout = tokio::time::sleep(auth_timeout);
+            // Use auth timeout initially (45s), then inactivity timeout (5min) after first event
+            // Exception: if tools are in progress, use a much longer timeout (30min)
+            let timeout_duration = if !pending_tools.is_empty() {
+                tool_in_progress_timeout
+            } else if received_any_event {
+                inactivity_timeout
+            } else if auth_missing {
+                auth_timeout
+            } else {
+                // Initial startup timeout - allow 2 minutes for CLI to start and connect
+                std::time::Duration::from_secs(120)
+            };
+            let time_since_activity = last_activity.elapsed();
+            let remaining = timeout_duration.saturating_sub(time_since_activity);
+            let mut timeout = tokio::time::sleep(remaining);
             tokio::pin!(timeout);
             tokio::select! {
                 _ = cancel.cancelled() => {
@@ -1798,14 +1903,62 @@ pub fn run_claudecode_turn<'a>(
                     return AgentResult::failure("Cancelled".to_string(), 0)
                         .with_terminal_reason(TerminalReason::Cancelled);
                 }
-                _ = &mut timeout, if auth_missing => {
-                    let err_msg = "Claude Code produced no output. No Anthropic credentials detected; please authenticate in Settings → AI Providers or set CLAUDE_CODE_OAUTH_TOKEN/ANTHROPIC_API_KEY.";
+                _ = &mut timeout => {
+                    // Timeout fired - determine the appropriate error message
+                    let stderr_content = stderr_capture.lock().await;
+                    let has_network_error = stderr_content.contains("Could not resolve host")
+                        || stderr_content.contains("Connection refused")
+                        || stderr_content.contains("Network is unreachable")
+                        || stderr_content.contains("DNS")
+                        || stderr_content.contains("ENOTFOUND")
+                        || stderr_content.contains("getaddrinfo");
+
+                    // Pre-compute truncated stderr to avoid duplication
+                    let truncated_stderr = if stderr_content.len() > 500 {
+                        let end = safe_truncate_index(&stderr_content, 500);
+                        format!("{}...", &stderr_content[..end])
+                    } else {
+                        stderr_content.to_string()
+                    };
+
+                    let err_msg = if !received_any_event && auth_missing {
+                        "Claude Code produced no output. No Anthropic credentials detected; please authenticate in Settings → AI Providers or set CLAUDE_CODE_OAUTH_TOKEN/ANTHROPIC_API_KEY.".to_string()
+                    } else if has_network_error {
+                        format!(
+                            "Claude Code appears stuck due to network issues. Check workspace DNS/network configuration. Stderr: {}",
+                            truncated_stderr
+                        )
+                    } else if !received_any_event {
+                        let stderr_hint = if stderr_content.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" Stderr: {}", truncated_stderr)
+                        };
+                        format!(
+                            "Claude Code produced no output after {}s. This may indicate network connectivity issues, missing API credentials, or a CLI startup failure.{}",
+                            timeout_duration.as_secs(),
+                            stderr_hint
+                        )
+                    } else if !pending_tools.is_empty() {
+                        let tool_names: Vec<_> = pending_tools.values().cloned().collect();
+                        format!(
+                            "Claude Code stopped responding after {}s while waiting for tool(s): {}. The tool(s) may be stuck or taking too long.",
+                            tool_in_progress_timeout.as_secs(),
+                            tool_names.join(", ")
+                        )
+                    } else {
+                        format!(
+                            "Claude Code stopped responding after {}s of inactivity. This may indicate a network issue or API timeout.",
+                            inactivity_timeout.as_secs()
+                        )
+                    };
+
                     tracing::warn!(mission_id = %mission_id, "{}", err_msg);
                     let _ = child.kill().await;
                     if let Some(handle) = stderr_handle.take() {
                         handle.abort();
                     }
-                    return AgentResult::failure(err_msg.to_string(), 0)
+                    return AgentResult::failure(err_msg, 0)
                         .with_terminal_reason(TerminalReason::LlmError);
                 }
                 line_result = lines.next_line() => {
@@ -1833,6 +1986,10 @@ pub fn run_claudecode_turn<'a>(
                                 }
                             };
 
+                            // Track activity for timeout detection
+                            received_any_event = true;
+                            last_activity = std::time::Instant::now();
+
                             match claude_event {
                                 ClaudeEvent::System(sys) => {
                                     tracing::debug!(
@@ -1847,12 +2004,14 @@ pub fn run_claudecode_turn<'a>(
                                             // "thinking_delta" -> thinking panel (uses delta.thinking field)
                                             // "text_delta" -> text output (uses delta.text field)
                                             if delta.delta_type == "thinking_delta" {
-                                                // For thinking deltas, content is in the `thinking` field, not `text`
-                                                if let Some(thinking_text) = delta.thinking {
-                                                    if !thinking_text.is_empty() {
+                                                // For thinking deltas, check both `thinking` and `text` fields
+                                                // Extended thinking uses `thinking`, but some versions use `text`
+                                                let thinking_text = delta.thinking.or(delta.text.clone());
+                                                if let Some(thinking_content) = thinking_text {
+                                                    if !thinking_content.is_empty() {
                                                         // Accumulate thinking content
                                                         let buffer = thinking_buffer.entry(index).or_default();
-                                                        buffer.push_str(&thinking_text);
+                                                        buffer.push_str(&thinking_content);
 
                                                         // Send accumulated thinking content (cumulative, like OpenCode)
                                                         // Only send if we have new content since last emit
@@ -1877,7 +2036,19 @@ pub fn run_claudecode_turn<'a>(
                                                         // Accumulate text content (will be used for final response)
                                                         let buffer = text_buffer.entry(index).or_default();
                                                         buffer.push_str(&text);
-                                                        // Don't send text deltas as thinking events
+
+                                                        // Stream text deltas similar to thinking panel
+                                                        // This allows users to see tool use descriptions as they're generated
+                                                        let total_len = text_buffer.values().map(|s| s.len()).sum::<usize>();
+                                                        if total_len > last_text_len {
+                                                            let accumulated: String = text_buffer.values().cloned().collect::<Vec<_>>().join("");
+                                                            last_text_len = total_len;
+
+                                                            let _ = events_tx.send(AgentEvent::TextDelta {
+                                                                content: accumulated,
+                                                                mission_id: Some(mission_id),
+                                                            });
+                                                        }
                                                     }
                                                 }
                                             }
@@ -1998,9 +2169,9 @@ pub fn run_claudecode_turn<'a>(
                                 ClaudeEvent::User(evt) => {
                                     for block in evt.message.content {
                                         if let ContentBlock::ToolResult { tool_use_id, content, is_error } = block {
+                                            // Get tool name and remove from pending (tool is now complete)
                                             let name = pending_tools
-                                                .get(&tool_use_id)
-                                                .cloned()
+                                                .remove(&tool_use_id)
                                                 .unwrap_or_else(|| "unknown".to_string());
 
                                             // Convert content to string representation (handles both text and image results)
@@ -2009,8 +2180,8 @@ pub fn run_claudecode_turn<'a>(
                                             let result_value = if let Some(ref extra) = evt.tool_use_result {
                                                 serde_json::json!({
                                                     "content": content_str,
-                                                    "stdout": extra.stdout,
-                                                    "stderr": extra.stderr,
+                                                    "stdout": extra.stdout(),
+                                                    "stderr": extra.stderr(),
                                                     "is_error": is_error,
                                                 })
                                             } else {
@@ -2059,10 +2230,17 @@ pub fn run_claudecode_turn<'a>(
                         }
                         Ok(None) => {
                             // EOF - process finished
+                            tracing::debug!(
+                                mission_id = %mission_id,
+                                received_any_event = received_any_event,
+                                final_result_len = final_result.len(),
+                                had_error = had_error,
+                                "Claude stdout EOF reached"
+                            );
                             break;
                         }
                         Err(e) => {
-                            tracing::error!("Error reading from Claude CLI: {}", e);
+                            tracing::error!(mission_id = %mission_id, "Error reading from Claude CLI: {}", e);
                             break;
                         }
                     }
@@ -2071,7 +2249,9 @@ pub fn run_claudecode_turn<'a>(
         }
 
         // Wait for child process to finish and clean up
+        tracing::debug!(mission_id = %mission_id, "Event loop completed, waiting for child process");
         let exit_status = child.wait().await;
+        tracing::debug!(mission_id = %mission_id, exit_status = ?exit_status, "Child process exited");
 
         // Wait for stderr capture to complete
         if let Some(handle) = stderr_handle {
@@ -4083,6 +4263,311 @@ async fn command_available(
     false
 }
 
+/// Check basic internet connectivity using a reliable public endpoint.
+/// This verifies the workspace has any network access at all.
+async fn check_basic_internet_connectivity(
+    workspace_exec: &WorkspaceExec,
+    cwd: &std::path::Path,
+) -> Result<(), String> {
+    // Use Cloudflare's 1.1.1.1 which is highly reliable and fast
+    let test_cmd = "curl -sI --max-time 5 https://1.1.1.1 2>&1 | head -1";
+
+    let output = match workspace_exec
+        .output(
+            cwd,
+            "/bin/sh",
+            &["-c".to_string(), test_cmd.to_string()],
+            std::collections::HashMap::new(),
+        )
+        .await
+    {
+        Ok(out) => out,
+        Err(e) => {
+            return Err(format!(
+                "Network connectivity check failed: {}. The workspace may have networking issues.",
+                e
+            ));
+        }
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let combined = format!("{}{}", stdout, stderr);
+
+    // Check for network-level errors
+    if combined.contains("Network is unreachable") {
+        return Err("No internet connectivity: Network is unreachable. \
+             The workspace has no network access."
+            .to_string());
+    }
+    if combined.contains("Connection timed out") || combined.contains("Operation timed out") {
+        return Err("No internet connectivity: Connection timed out. \
+             The workspace cannot reach the internet."
+            .to_string());
+    }
+
+    // Check for successful HTTP response
+    if stdout.starts_with("HTTP/") || combined.contains("HTTP/") {
+        tracing::debug!("Basic internet connectivity check passed");
+        return Ok(());
+    }
+
+    // If curl failed completely
+    if !output.status.success() {
+        return Err(format!(
+            "No internet connectivity: Network check failed (exit code {}). \
+             The workspace may not have network access configured.",
+            output.status.code().unwrap_or(-1)
+        ));
+    }
+
+    Ok(())
+}
+
+/// Check DNS resolution for a specific hostname.
+async fn check_dns_resolution(
+    workspace_exec: &WorkspaceExec,
+    cwd: &std::path::Path,
+    hostname: &str,
+) -> Result<(), String> {
+    // Use getent or nslookup to test DNS resolution
+    let test_cmd = format!(
+        "getent hosts {} 2>&1 || nslookup {} 2>&1 | head -3",
+        hostname, hostname
+    );
+
+    let output = match workspace_exec
+        .output(
+            cwd,
+            "/bin/sh",
+            &["-c".to_string(), test_cmd],
+            std::collections::HashMap::new(),
+        )
+        .await
+    {
+        Ok(out) => out,
+        Err(e) => {
+            return Err(format!("DNS resolution check failed: {}", e));
+        }
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let combined = format!("{}{}", stdout, stderr);
+
+    // Check for DNS failure indicators
+    if combined.contains("not found")
+        || combined.contains("NXDOMAIN")
+        || combined.contains("no address")
+        || combined.contains("Name or service not known")
+    {
+        return Err(format!(
+            "DNS resolution failed for '{}'. \
+             The workspace DNS is not properly configured. \
+             For Tailscale workspaces, ensure the VPN connection is established.",
+            hostname
+        ));
+    }
+
+    // If getent succeeded (exit code 0), DNS works
+    if output.status.success() {
+        tracing::debug!("DNS resolution check passed for {}", hostname);
+        return Ok(());
+    }
+
+    // Check if we got any IP address in the output (nslookup format)
+    let has_ip = combined.lines().any(|line| {
+        line.contains("Address:")
+            || line
+                .split_whitespace()
+                .any(|w| w.parse::<std::net::IpAddr>().is_ok())
+    });
+
+    if has_ip {
+        tracing::debug!("DNS resolution check passed for {} (found IP)", hostname);
+        return Ok(());
+    }
+
+    Err(format!(
+        "DNS resolution failed for '{}'. Check network configuration.",
+        hostname
+    ))
+}
+
+/// Check if a specific API endpoint is reachable.
+/// Returns detailed error messages for different failure modes.
+async fn check_api_reachability(
+    workspace_exec: &WorkspaceExec,
+    cwd: &std::path::Path,
+    api_name: &str,
+    api_url: &str,
+) -> Result<(), String> {
+    // Use curl to test HTTPS connectivity to the API
+    let test_cmd = format!("curl -sI --max-time 10 {} 2>&1 | head -1", api_url);
+
+    let output = match workspace_exec
+        .output(
+            cwd,
+            "/bin/sh",
+            &["-c".to_string(), test_cmd],
+            std::collections::HashMap::new(),
+        )
+        .await
+    {
+        Ok(out) => out,
+        Err(e) => {
+            return Err(format!("Cannot connect to {} API: {}", api_name, e));
+        }
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let combined = format!("{}{}", stdout, stderr);
+
+    // Check for common error patterns
+    if combined.contains("Could not resolve host") {
+        return Err(format!(
+            "Cannot connect to {} API: DNS resolution failed. \
+             The workspace network is not properly configured.",
+            api_name
+        ));
+    }
+    if combined.contains("Connection refused") {
+        return Err(format!(
+            "Cannot connect to {} API: Connection refused. \
+             Check if network access is blocked or if a proxy is required.",
+            api_name
+        ));
+    }
+    if combined.contains("Network is unreachable") {
+        return Err(format!(
+            "Cannot connect to {} API: Network is unreachable.",
+            api_name
+        ));
+    }
+    if combined.contains("Connection timed out") || combined.contains("Operation timed out") {
+        return Err(format!(
+            "Cannot connect to {} API: Connection timed out. \
+             The network may be slow or firewalled.",
+            api_name
+        ));
+    }
+    if combined.contains("SSL") || combined.contains("certificate") {
+        return Err(format!(
+            "Cannot connect to {} API: SSL/TLS error. \
+             Check if there's a proxy intercepting HTTPS traffic.",
+            api_name
+        ));
+    }
+
+    // Check for successful HTTP response (any HTTP response means connectivity works)
+    if stdout.starts_with("HTTP/") || combined.contains("HTTP/") {
+        tracing::debug!("{} API connectivity check passed", api_name);
+        return Ok(());
+    }
+
+    // If curl failed with no clear error
+    if !output.status.success() {
+        return Err(format!(
+            "Cannot connect to {} API: Network check failed (exit code {}). \
+             Output: {}",
+            api_name,
+            output.status.code().unwrap_or(-1),
+            combined.trim()
+        ));
+    }
+
+    Ok(())
+}
+
+/// API endpoint configurations for different providers
+struct ApiEndpoint {
+    name: &'static str,
+    url: &'static str,
+    hostname: &'static str,
+}
+
+const ANTHROPIC_API: ApiEndpoint = ApiEndpoint {
+    name: "Anthropic",
+    url: "https://api.anthropic.com/v1/messages",
+    hostname: "api.anthropic.com",
+};
+
+const OPENAI_API: ApiEndpoint = ApiEndpoint {
+    name: "OpenAI",
+    url: "https://api.openai.com/v1/models",
+    hostname: "api.openai.com",
+};
+
+const GOOGLE_AI_API: ApiEndpoint = ApiEndpoint {
+    name: "Google AI",
+    url: "https://generativelanguage.googleapis.com/",
+    hostname: "generativelanguage.googleapis.com",
+};
+
+/// Proactive API connectivity check for Claude Code.
+/// Tests basic internet, then DNS, then Anthropic API reachability.
+async fn check_claudecode_connectivity(
+    workspace_exec: &WorkspaceExec,
+    cwd: &std::path::Path,
+) -> Result<(), String> {
+    // First check basic internet connectivity
+    if let Err(e) = check_basic_internet_connectivity(workspace_exec, cwd).await {
+        return Err(e);
+    }
+
+    // Then check DNS for Anthropic
+    if let Err(e) = check_dns_resolution(workspace_exec, cwd, ANTHROPIC_API.hostname).await {
+        return Err(e);
+    }
+
+    // Finally check Anthropic API reachability
+    check_api_reachability(workspace_exec, cwd, ANTHROPIC_API.name, ANTHROPIC_API.url).await
+}
+
+/// Proactive API connectivity check for OpenCode.
+/// Tests basic internet, then checks the appropriate API based on configured providers.
+async fn check_opencode_connectivity(
+    workspace_exec: &WorkspaceExec,
+    cwd: &std::path::Path,
+    has_openai: bool,
+    has_anthropic: bool,
+    has_google: bool,
+) -> Result<(), String> {
+    // First check basic internet connectivity
+    if let Err(e) = check_basic_internet_connectivity(workspace_exec, cwd).await {
+        return Err(e);
+    }
+
+    // Determine which API to check based on configured providers
+    // Priority: OpenAI > Anthropic > Google (most common first)
+    // If none are explicitly configured, we already verified internet works
+    let api = if has_openai {
+        Some(&OPENAI_API)
+    } else if has_anthropic {
+        Some(&ANTHROPIC_API)
+    } else if has_google {
+        Some(&GOOGLE_AI_API)
+    } else {
+        // No specific provider detected - basic internet check is sufficient
+        // The actual API will be determined by OpenCode's config
+        None
+    };
+
+    if let Some(api) = api {
+        // Check DNS for the selected API
+        if let Err(e) = check_dns_resolution(workspace_exec, cwd, api.hostname).await {
+            return Err(e);
+        }
+
+        // Check API reachability
+        check_api_reachability(workspace_exec, cwd, api.name, api.url).await
+    } else {
+        tracing::debug!("No specific provider detected, skipping API-specific connectivity check");
+        Ok(())
+    }
+}
+
 /// Returns the path to the Claude Code CLI that should be used.
 /// If the CLI is not available, it will be auto-installed via bun or npm.
 async fn ensure_claudecode_cli_available(
@@ -4515,6 +5000,21 @@ pub async fn run_opencode_turn(
             return AgentResult::failure(err_msg, 0).with_terminal_reason(TerminalReason::LlmError);
         }
     };
+
+    // Proactive network connectivity check - fail fast if API is unreachable
+    // This catches DNS/network issues immediately instead of waiting for a timeout
+    if let Err(err_msg) = check_opencode_connectivity(
+        &workspace_exec,
+        work_dir,
+        has_openai,
+        has_anthropic,
+        has_google,
+    )
+    .await
+    {
+        tracing::error!(mission_id = %mission_id, "{}", err_msg);
+        return AgentResult::failure(err_msg, 0).with_terminal_reason(TerminalReason::LlmError);
+    }
 
     tracing::info!(
         mission_id = %mission_id,
@@ -4957,7 +5457,31 @@ pub async fn run_opencode_turn(
     let stdout_reader = BufReader::new(stdout);
     let mut stdout_lines = stdout_reader.lines();
     let mut state = OpencodeSseState::default();
+
+    // Timeout handling for stalled missions
+    let startup_timeout = std::time::Duration::from_secs(120);
+    let inactivity_timeout = std::time::Duration::from_secs(300);
+    // Much longer timeout when tools are in progress (30 minutes) - some bash commands
+    // or web fetches can take a very long time
+    let tool_in_progress_timeout = std::time::Duration::from_secs(1800);
+    let mut received_any_event = false;
+    let mut last_activity = std::time::Instant::now();
+
     loop {
+        // Check if any tools are pending (started but not completed)
+        let has_pending_tools = state.emitted_tool_calls.len() > state.emitted_tool_results.len();
+        let timeout_duration = if has_pending_tools {
+            tool_in_progress_timeout
+        } else if received_any_event {
+            inactivity_timeout
+        } else {
+            startup_timeout
+        };
+        let time_since_activity = last_activity.elapsed();
+        let remaining = timeout_duration.saturating_sub(time_since_activity);
+        let mut timeout = tokio::time::sleep(remaining);
+        tokio::pin!(timeout);
+
         tokio::select! {
             _ = cancel.cancelled() => {
                 tracing::info!(mission_id = %mission_id, "OpenCode execution cancelled, killing process");
@@ -4965,8 +5489,41 @@ pub async fn run_opencode_turn(
                 if let Some(handle) = stderr_handle {
                     handle.abort();
                 }
+                sse_cancel.cancel();
+                if let Some(handle) = sse_handle {
+                    handle.abort();
+                }
                 return AgentResult::failure("Cancelled".to_string(), 0)
                     .with_terminal_reason(TerminalReason::Cancelled);
+            }
+            _ = &mut timeout => {
+                let err_msg = if !received_any_event {
+                    format!(
+                        "OpenCode produced no output after {}s. This may indicate network connectivity issues, missing API credentials, or a CLI startup failure.",
+                        startup_timeout.as_secs()
+                    )
+                } else if has_pending_tools {
+                    format!(
+                        "OpenCode stopped responding after {}s while waiting for tool(s) to complete. The tool(s) may be stuck or taking too long.",
+                        tool_in_progress_timeout.as_secs()
+                    )
+                } else {
+                    format!(
+                        "OpenCode stopped responding after {}s of inactivity. This may indicate a network issue or API timeout.",
+                        inactivity_timeout.as_secs()
+                    )
+                };
+                tracing::warn!(mission_id = %mission_id, "{}", err_msg);
+                let _ = child.kill().await;
+                if let Some(handle) = stderr_handle {
+                    handle.abort();
+                }
+                sse_cancel.cancel();
+                if let Some(handle) = sse_handle {
+                    handle.abort();
+                }
+                return AgentResult::failure(err_msg, 0)
+                    .with_terminal_reason(TerminalReason::LlmError);
             }
             line_result = stdout_lines.next_line() => {
                 match line_result {
@@ -4982,6 +5539,10 @@ pub async fn run_opencode_turn(
 
                         // Try to parse as JSON event
                         if let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                            // Track activity for timeout detection
+                            received_any_event = true;
+                            last_activity = std::time::Instant::now();
+
                             let event_type = json.get("type").and_then(|t| t.as_str()).unwrap_or("");
                             tracing::debug!(
                                 mission_id = %mission_id,
@@ -5055,6 +5616,10 @@ pub async fn run_opencode_turn(
                             }
                         } else {
                             // Non-JSON line - this is the expected output format without --format json
+                            // Track activity for timeout detection (same as JSON events)
+                            received_any_event = true;
+                            last_activity = std::time::Instant::now();
+
                             tracing::debug!(mission_id = %mission_id, line = %trimmed, "OpenCode stdout");
                             final_result.push_str(trimmed);
                             final_result.push('\n');
@@ -5497,8 +6062,30 @@ pub async fn run_amp_turn(
     let reader = BufReader::new(stdout);
     let mut lines = reader.lines();
 
+    // Timeout handling for stalled missions
+    let startup_timeout = std::time::Duration::from_secs(120);
+    let inactivity_timeout = std::time::Duration::from_secs(300);
+    // Much longer timeout when tools are in progress (30 minutes) - some bash commands
+    // or web fetches can take a very long time
+    let tool_in_progress_timeout = std::time::Duration::from_secs(1800);
+    let mut received_any_event = false;
+    let mut last_activity = std::time::Instant::now();
+
     // Process events until completion or cancellation
     loop {
+        // Use longer timeout when tools are in progress
+        let timeout_duration = if !pending_tools.is_empty() {
+            tool_in_progress_timeout
+        } else if received_any_event {
+            inactivity_timeout
+        } else {
+            startup_timeout
+        };
+        let time_since_activity = last_activity.elapsed();
+        let remaining = timeout_duration.saturating_sub(time_since_activity);
+        let mut timeout = tokio::time::sleep(remaining);
+        tokio::pin!(timeout);
+
         tokio::select! {
             _ = cancel.cancelled() => {
                 tracing::info!(mission_id = %mission_id, "Amp execution cancelled, killing process");
@@ -5508,6 +6095,33 @@ pub async fn run_amp_turn(
                 }
                 return AgentResult::failure("Cancelled".to_string(), 0)
                     .with_terminal_reason(TerminalReason::Cancelled);
+            }
+            _ = &mut timeout => {
+                let err_msg = if !received_any_event {
+                    format!(
+                        "Amp produced no output after {}s. This may indicate network connectivity issues, missing API credentials, or a CLI startup failure.",
+                        startup_timeout.as_secs()
+                    )
+                } else if !pending_tools.is_empty() {
+                    let tool_names: Vec<_> = pending_tools.values().cloned().collect();
+                    format!(
+                        "Amp stopped responding after {}s while waiting for tool(s): {}. The tool(s) may be stuck or taking too long.",
+                        tool_in_progress_timeout.as_secs(),
+                        tool_names.join(", ")
+                    )
+                } else {
+                    format!(
+                        "Amp stopped responding after {}s of inactivity. This may indicate a network issue or API timeout.",
+                        inactivity_timeout.as_secs()
+                    )
+                };
+                tracing::warn!(mission_id = %mission_id, "{}", err_msg);
+                let _ = child.kill().await;
+                if let Some(handle) = stderr_handle {
+                    handle.abort();
+                }
+                return AgentResult::failure(err_msg, 0)
+                    .with_terminal_reason(TerminalReason::LlmError);
             }
             line_result = lines.next_line() => {
                 match line_result {
@@ -5528,6 +6142,10 @@ pub async fn run_amp_turn(
                                 continue;
                             }
                         };
+
+                        // Track activity for timeout detection
+                        received_any_event = true;
+                        last_activity = std::time::Instant::now();
 
                         match amp_event {
                             AmpEvent::System(sys) => {
@@ -5658,9 +6276,9 @@ pub async fn run_amp_turn(
                             AmpEvent::User(evt) => {
                                 for block in evt.message.content {
                                     if let ContentBlock::ToolResult { tool_use_id, content, is_error } = block {
+                                        // Get tool name and remove from pending (tool is now complete)
                                         let name = pending_tools
-                                            .get(&tool_use_id)
-                                            .cloned()
+                                            .remove(&tool_use_id)
                                             .unwrap_or_else(|| "unknown".to_string());
 
                                         let content_str = content.to_string_lossy();
@@ -5668,10 +6286,10 @@ pub async fn run_amp_turn(
                                         let result_value = if let Some(ref extra) = evt.tool_use_result {
                                             serde_json::json!({
                                                 "content": content_str,
-                                                "stdout": extra.stdout,
-                                                "stderr": extra.stderr,
+                                                "stdout": extra.stdout(),
+                                                "stderr": extra.stderr(),
                                                 "is_error": is_error,
-                                                "interrupted": extra.interrupted,
+                                                "interrupted": extra.interrupted(),
                                             })
                                         } else {
                                             serde_json::json!(content_str)

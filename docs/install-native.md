@@ -480,18 +480,20 @@ cd /opt/sandboxed_sh/vaduz-v1
 source /root/.cargo/env
 
 # Debug build (fast) - recommended for rapid iteration
-cargo build --bin sandboxed_sh
+cargo build --bin sandboxed_sh --bin workspace-mcp --bin desktop-mcp
 install -m 0755 target/debug/sandboxed_sh /usr/local/bin/sandboxed_sh
+install -m 0755 target/debug/workspace-mcp /usr/local/bin/workspace-mcp
+install -m 0755 target/debug/desktop-mcp /usr/local/bin/desktop-mcp
 
 # Or: Release build (slower compile, faster runtime)
-# cargo build --release --bin sandboxed_sh
+# cargo build --release --bin sandboxed_sh --bin workspace-mcp --bin desktop-mcp
 # install -m 0755 target/release/sandboxed_sh /usr/local/bin/sandboxed_sh
-
-# Optional: build MCP helpers if you want legacy workspace/desktop tools
-# cargo build --release --bin workspace-mcp --bin desktop-mcp
 # install -m 0755 target/release/workspace-mcp /usr/local/bin/workspace-mcp
 # install -m 0755 target/release/desktop-mcp /usr/local/bin/desktop-mcp
 ```
+
+> **Note:** The MCP binaries (`workspace-mcp`, `desktop-mcp`) are required for
+> host workspace missions and the Extensions page. They must be in PATH.
 
 ---
 
@@ -831,14 +833,16 @@ install -m 0755 target/debug/desktop-mcp /usr/local/bin/desktop-mcp
 systemctl restart sandboxed_sh.service
 ```
 
-Optional: if you no longer use legacy workspace/desktop MCP tools, build only
-`sandboxed_sh`:
+Quick rebuild (main binary only, if MCP binaries haven't changed):
 
 ```bash
 cargo build --bin sandboxed_sh
 install -m 0755 target/debug/sandboxed_sh /usr/local/bin/sandboxed_sh
 systemctl restart sandboxed_sh.service
 ```
+
+> **Note:** Always rebuild and install all binaries after pulling changes that
+> modify the MCP tools, otherwise the Extensions page will show connection errors.
 
 Or to follow the latest master branch:
 

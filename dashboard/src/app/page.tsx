@@ -1,8 +1,8 @@
 'use client';
 
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { Suspense, useCallback, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import useSWR from 'swr';
 import { toast } from '@/components/toast';
 import { StatsCard } from '@/components/stats-card';
@@ -128,10 +128,22 @@ function CompactMissionCard({
   );
 }
 
-export default function OverviewPage() {
+function OverviewPageContent() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [creatingMission, setCreatingMission] = useState(false);
   const hasShownErrorRef = useRef(false);
+
+  // Check if we should auto-open the new mission dialog (e.g., from workspaces page)
+  const initialWorkspaceId = searchParams.get('workspace');
+  const shouldAutoOpen = Boolean(initialWorkspaceId);
+
+  // Clear URL params when dialog closes
+  const handleDialogClose = useCallback(() => {
+    if (initialWorkspaceId) {
+      router.replace('/', { scroll: false });
+    }
+  }, [initialWorkspaceId, router]);
 
   // SWR: poll stats every 3 seconds
   const { data: stats, isLoading: statsLoading, error: statsError } = useSWR(
@@ -296,6 +308,9 @@ export default function OverviewPage() {
             workspaces={workspaces}
             disabled={creatingMission}
             onCreate={handleNewMission}
+            autoOpen={shouldAutoOpen}
+            initialValues={initialWorkspaceId ? { workspaceId: initialWorkspaceId } : undefined}
+            onClose={handleDialogClose}
           />
         </div>
 
@@ -388,5 +403,13 @@ export default function OverviewPage() {
         <RecentTasks />
       </div>
     </div>
+  );
+}
+
+export default function OverviewPage() {
+  return (
+    <Suspense fallback={<div className="flex h-screen items-center justify-center"><Loader className="h-6 w-6 animate-spin text-white/50" /></div>}>
+      <OverviewPageContent />
+    </Suspense>
   );
 }

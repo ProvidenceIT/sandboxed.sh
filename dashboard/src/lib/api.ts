@@ -2262,15 +2262,16 @@ export async function getSystemComponents(): Promise<SystemComponentsResponse> {
   return apiGet('/api/system/components', 'Failed to get system components');
 }
 
-// Update a system component (streams progress via SSE)
-export async function updateSystemComponent(
-  name: string,
+// Shared helper for streaming system component operations via SSE
+async function streamComponentOperation(
+  url: string,
+  operationName: string,
   onProgress: (event: UpdateProgressEvent) => void,
   onComplete: () => void,
   onError: (error: string) => void
 ): Promise<void> {
   try {
-    const res = await apiFetch(`/api/system/components/${name}/update`, {
+    const res = await apiFetch(url, {
       method: 'POST',
       headers: {
         'Accept': 'text/event-stream',
@@ -2279,7 +2280,7 @@ export async function updateSystemComponent(
 
     if (!res.ok) {
       const text = await res.text();
-      onError(text || 'Failed to start update');
+      onError(text || `Failed to start ${operationName}`);
       return;
     }
 
@@ -2328,6 +2329,38 @@ export async function updateSystemComponent(
   } catch (e) {
     onError(e instanceof Error ? e.message : 'Unknown error');
   }
+}
+
+// Update a system component (streams progress via SSE)
+export async function updateSystemComponent(
+  name: string,
+  onProgress: (event: UpdateProgressEvent) => void,
+  onComplete: () => void,
+  onError: (error: string) => void
+): Promise<void> {
+  return streamComponentOperation(
+    `/api/system/components/${name}/update`,
+    'update',
+    onProgress,
+    onComplete,
+    onError
+  );
+}
+
+// Uninstall a system component (streams progress via SSE)
+export async function uninstallSystemComponent(
+  name: string,
+  onProgress: (event: UpdateProgressEvent) => void,
+  onComplete: () => void,
+  onError: (error: string) => void
+): Promise<void> {
+  return streamComponentOperation(
+    `/api/system/components/${name}/uninstall`,
+    'uninstall',
+    onProgress,
+    onComplete,
+    onError
+  );
 }
 
 // ============================================
@@ -2384,6 +2417,8 @@ export interface BackendConfig {
   name: string;
   enabled: boolean;
   settings: Record<string, unknown>;
+  /** Whether the CLI for this backend is available on the system */
+  cli_available?: boolean;
 }
 
 // List all available backends
@@ -2437,7 +2472,7 @@ export async function downloadBackup(): Promise<void> {
 
   // Get filename from Content-Disposition header or use default
   const contentDisposition = res.headers.get('Content-Disposition');
-  let filename = 'openagent-backup.zip';
+  let filename = 'sandboxed-backup.zip';
   if (contentDisposition) {
     const match = contentDisposition.match(/filename="([^"]+)"/);
     if (match) filename = match[1];

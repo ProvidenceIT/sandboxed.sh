@@ -40,6 +40,10 @@ interface NewMissionDialogProps {
   controlPath?: string;
   /** Initial values to pre-fill the form (from current mission) */
   initialValues?: InitialMissionValues;
+  /** Auto-open the dialog on mount (e.g., when navigating from workspaces page) */
+  autoOpen?: boolean;
+  /** Callback when dialog closes (for clearing URL params, etc.) */
+  onClose?: () => void;
 }
 
 // Combined agent with backend info
@@ -81,9 +85,11 @@ export function NewMissionDialog({
   onCreate,
   controlPath = '/control',
   initialValues,
+  autoOpen = false,
+  onClose,
 }: NewMissionDialogProps) {
   const router = useRouter();
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(autoOpen);
   const [newMissionWorkspace, setNewMissionWorkspace] = useState('');
   // Combined value: "backend:agent" or empty for default
   const [selectedAgentValue, setSelectedAgentValue] = useState('');
@@ -113,12 +119,18 @@ export function NewMissionDialog({
     dedupingInterval: 30000,
   });
 
-  // Filter to only enabled backends
+  // Filter to only enabled backends with CLI available
   const enabledBackends = useMemo(() => {
     return backends?.filter((b) => {
-      if (b.id === 'opencode') return opencodeConfig?.enabled !== false;
-      if (b.id === 'claudecode') return claudecodeConfig?.enabled !== false;
-      if (b.id === 'amp') return ampConfig?.enabled !== false;
+      if (b.id === 'opencode') {
+        return opencodeConfig?.enabled !== false && opencodeConfig?.cli_available !== false;
+      }
+      if (b.id === 'claudecode') {
+        return claudecodeConfig?.enabled !== false && claudecodeConfig?.cli_available !== false;
+      }
+      if (b.id === 'amp') {
+        return ampConfig?.enabled !== false && ampConfig?.cli_available !== false;
+      }
       return true;
     }) || [];
   }, [backends, opencodeConfig, claudecodeConfig, ampConfig]);
@@ -249,6 +261,7 @@ export function NewMissionDialog({
       if (dialogRef.current && !dialogRef.current.contains(event.target as Node)) {
         setOpen(false);
         setDefaultSet(false);
+        onClose?.();
       }
     };
 
@@ -256,6 +269,7 @@ export function NewMissionDialog({
       if (event.key === 'Escape') {
         setOpen(false);
         setDefaultSet(false);
+        onClose?.();
       }
     };
 
@@ -265,7 +279,7 @@ export function NewMissionDialog({
       document.removeEventListener('mousedown', handleClickOutside);
       document.removeEventListener('keydown', handleKeyDown);
     };
-  }, [open]);
+  }, [open, onClose]);
 
   // Set initial values when dialog opens (only once per open)
   useEffect(() => {
@@ -302,15 +316,38 @@ export function NewMissionDialog({
       }
     }
 
-    // Fallback: try Sisyphus in OpenCode
+    // Fallback: use first available backend with priority claudecode → opencode → amp
+    // Try Claude Code first
+    const claudeCodeAgent = allAgents.find(a => a.backend === 'claudecode');
+    if (claudeCodeAgent) {
+      setSelectedAgentValue(claudeCodeAgent.value);
+      setDefaultSet(true);
+      return;
+    }
+
+    // Try OpenCode second (prefer Sisyphus if available)
     const sisyphus = allAgents.find(a => a.backend === 'opencode' && a.agent === 'Sisyphus');
     if (sisyphus) {
       setSelectedAgentValue(sisyphus.value);
       setDefaultSet(true);
       return;
     }
+    const openCodeAgent = allAgents.find(a => a.backend === 'opencode');
+    if (openCodeAgent) {
+      setSelectedAgentValue(openCodeAgent.value);
+      setDefaultSet(true);
+      return;
+    }
 
-    // Fallback: use first available agent
+    // Try Amp third
+    const ampAgent = allAgents.find(a => a.backend === 'amp');
+    if (ampAgent) {
+      setSelectedAgentValue(ampAgent.value);
+      setDefaultSet(true);
+      return;
+    }
+
+    // Final fallback: use first available agent (shouldn't reach here)
     if (allAgents.length > 0) {
       setSelectedAgentValue(allAgents[0].value);
     }
@@ -327,6 +364,7 @@ export function NewMissionDialog({
   const handleClose = () => {
     setOpen(false);
     resetForm();
+    onClose?.();
   };
 
   const getCreateOptions = (): NewMissionDialogOptions => {
@@ -335,7 +373,7 @@ export function NewMissionDialog({
       workspaceId: newMissionWorkspace || undefined,
       agent: parsed?.agent || undefined,
       configProfile: selectedConfigProfile || undefined,
-      backend: parsed?.backend || 'opencode',
+      backend: parsed?.backend || 'claudecode',
     };
   };
 
@@ -355,6 +393,7 @@ export function NewMissionDialog({
 
       setOpen(false);
       resetForm();
+      onClose?.();
     } finally {
       setSubmitting(false);
     }
