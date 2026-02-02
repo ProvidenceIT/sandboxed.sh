@@ -3487,14 +3487,15 @@ async fn control_actor_loop(
                                 // Start execution if not already running
                                 if running.is_none() {
                                     if let Some((mid, msg, _per_msg_agent, msg_target_mid)) = queue.pop_front() {
+                                        let target_mid = msg_target_mid.unwrap_or(mission_id);
                                         set_and_emit_status(
                                             &status,
                                             &events_tx,
                                             ControlRunState::Running,
                                             queue.len(),
-                                            Some(mission_id),
+                                            Some(target_mid),
                                         ).await;
-                                        let _ = events_tx.send(AgentEvent::UserMessage { id: mid, content: msg.clone(), queued: false, mission_id: Some(mission_id) });
+                                        let _ = events_tx.send(AgentEvent::UserMessage { id: mid, content: msg.clone(), queued: false, mission_id: Some(target_mid) });
                                         let cfg = config.clone();
                                         let agent = Arc::clone(&root_agent);
                                         let mcp_ref = Arc::clone(&mcp);
@@ -4149,30 +4150,29 @@ async fn control_actor_loop(
                                 );
                             }
 
-                            // Update mission status based on result
-                            let new_status = if result.success {
-                                MissionStatus::Completed
-                            } else {
-                                MissionStatus::Failed
-                            };
-                            if let Err(e) = mission_store
-                                .update_mission_status(*mission_id, new_status)
-                                .await
-                            {
-                                tracing::warn!(
-                                    "Failed to update parallel mission status: {}",
-                                    e
-                                );
-                            } else {
-                                let _ = events_tx.send(AgentEvent::MissionStatusChanged {
-                                    mission_id: *mission_id,
-                                    status: new_status,
-                                    summary: None,
-                                });
-                            }
-
-                            // If runner has no more queued messages, mark for cleanup
+                            // If runner has no more queued messages, update status and mark for cleanup
                             if runner.queue.is_empty() && !runner.is_running() {
+                                // Update mission status based on result
+                                let new_status = if result.success {
+                                    MissionStatus::Completed
+                                } else {
+                                    MissionStatus::Failed
+                                };
+                                if let Err(e) = mission_store
+                                    .update_mission_status(*mission_id, new_status)
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        "Failed to update parallel mission status: {}",
+                                        e
+                                    );
+                                } else {
+                                    let _ = events_tx.send(AgentEvent::MissionStatusChanged {
+                                        mission_id: *mission_id,
+                                        status: new_status,
+                                        summary: None,
+                                    });
+                                }
                                 completed_missions.push(*mission_id);
                             }
                         }

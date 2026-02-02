@@ -84,13 +84,23 @@ export function ServerConnectionCard({
   );
   const components = data ?? [];
 
-  const handleUpdate = async (component: ComponentInfo) => {
+  const performComponentOperation = async (
+    component: ComponentInfo,
+    operationFn: (
+      componentName: string,
+      onProgress: (event: UpdateProgressEvent) => void,
+      onComplete: () => Promise<void>,
+      onError: (error: string) => void
+    ) => Promise<void>,
+    stateSetter: (name: string | null) => void,
+    actionName: string
+  ) => {
     if (updatingComponent || uninstallingComponent) return;
 
-    setUpdatingComponent(component.name);
+    stateSetter(component.name);
     setUpdateLogs([]);
 
-    await updateSystemComponent(
+    await operationFn(
       component.name,
       (event: UpdateProgressEvent) => {
         setUpdateLogs((prev) => [
@@ -108,59 +118,40 @@ export function ServerConnectionCard({
       },
       async () => {
         toast.success(
-          `${componentNames[component.name] || component.name} updated successfully!`
+          `${componentNames[component.name] || component.name} ${actionName} successfully!`
         );
-        setUpdatingComponent(null);
+        stateSetter(null);
         // Force SWR to refetch fresh data (bypass cache).
         await mutate(undefined, { revalidate: true });
       },
       (error: string) => {
-        toast.error(`Update failed: ${error}`);
-        setUpdatingComponent(null);
+        toast.error(`${actionName.charAt(0).toUpperCase() + actionName.slice(1)} failed: ${error}`);
+        stateSetter(null);
       }
     );
   };
 
-  const handleUninstall = async (component: ComponentInfo) => {
-    if (updatingComponent || uninstallingComponent) return;
+  const handleUpdate = async (component: ComponentInfo) => {
+    await performComponentOperation(
+      component,
+      updateSystemComponent,
+      setUpdatingComponent,
+      'updated'
+    );
+  };
 
+  const handleUninstall = async (component: ComponentInfo) => {
     // Don't allow uninstalling sandboxed_sh
     if (component.name === 'sandboxed_sh') {
       toast.error('Cannot uninstall sandboxed.sh - it is the main application');
       return;
     }
 
-    setUninstallingComponent(component.name);
-    setUpdateLogs([]);
-
-    await uninstallSystemComponent(
-      component.name,
-      (event: UpdateProgressEvent) => {
-        setUpdateLogs((prev) => [
-          ...prev,
-          {
-            message: event.message,
-            progress: event.progress ?? undefined,
-            type: event.event_type === 'complete'
-              ? 'complete'
-              : event.event_type === 'error'
-              ? 'error'
-              : 'log',
-          },
-        ]);
-      },
-      async () => {
-        toast.success(
-          `${componentNames[component.name] || component.name} uninstalled successfully!`
-        );
-        setUninstallingComponent(null);
-        // Force SWR to refetch fresh data (bypass cache).
-        await mutate(undefined, { revalidate: true });
-      },
-      (error: string) => {
-        toast.error(`Uninstall failed: ${error}`);
-        setUninstallingComponent(null);
-      }
+    await performComponentOperation(
+      component,
+      uninstallSystemComponent,
+      setUninstallingComponent,
+      'uninstalled'
     );
   };
 
