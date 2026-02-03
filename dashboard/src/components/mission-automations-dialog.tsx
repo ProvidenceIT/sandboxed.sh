@@ -190,22 +190,35 @@ export function MissionAutomationsDialog({
     }
     setCreating(true);
     try {
-      let created = await createMissionAutomation(missionId, {
+      const created = await createMissionAutomation(missionId, {
         commandName: name,
         intervalSeconds,
       });
+      let finalAutomation = created;
+      let activeUpdateError: string | null = null;
       if (!createActive) {
-        created = await updateAutomationActive(created.id, false);
+        try {
+          finalAutomation = await updateAutomationActive(created.id, false);
+        } catch (err) {
+          activeUpdateError =
+            err instanceof Error ? err.message : 'Failed to pause automation';
+        }
       }
       setAutomationsForMission(
         missionId,
-        [created, ...automationsRef.current.filter((a) => a.id !== created.id)]
+        [
+          finalAutomation,
+          ...automationsRef.current.filter((a) => a.id !== finalAutomation.id),
+        ]
       );
       setCommandName('');
       setIntervalValue('5');
       setIntervalUnit('minutes');
       setCreateActive(true);
       toast.success('Automation created');
+      if (activeUpdateError) {
+        toast.error(`${activeUpdateError}. Automation remains active.`);
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to create automation';
       toast.error(message);
