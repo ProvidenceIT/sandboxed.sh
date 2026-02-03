@@ -93,6 +93,9 @@ function editorTheme(padding: number | undefined): Extension {
         backgroundColor: 'transparent',
         color: 'rgba(255, 255, 255, 0.9)',
       },
+      '&.cm-editor': {
+        backgroundColor: 'transparent',
+      },
       '.cm-scroller': {
         backgroundColor: 'transparent',
         fontFamily:
@@ -106,6 +109,7 @@ function editorTheme(padding: number | undefined): Extension {
         color: 'rgba(255, 255, 255, 0.35)',
       },
       '.cm-content': {
+        backgroundColor: 'transparent',
         padding: paddingValue,
         caretColor: 'white',
         fontVariantLigatures: 'none',
@@ -199,6 +203,7 @@ export function ConfigCodeEditor({
         onChange={onChange}
         editable={!disabled}
         extensions={extensions}
+        theme="none"
         minHeight={typeof minHeight === 'number' ? `${minHeight}px` : minHeight}
         className={cn('config-code-editor', editorClassName)}
         basicSetup={{
