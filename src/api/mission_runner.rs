@@ -68,6 +68,37 @@ fn extract_part_text<'a>(part: &'a serde_json::Value, part_type: &str) -> Option
     }
 }
 
+fn extract_thought_line(text: &str) -> Option<(String, String)> {
+    let mut thought: Option<String> = None;
+    let mut remaining: Vec<&str> = Vec::new();
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+        let lower = trimmed.to_lowercase();
+        let is_thought = lower.starts_with("thought:")
+            || lower.starts_with("thoughts:")
+            || lower.starts_with("thinking:");
+        if thought.is_none() && is_thought {
+            let content = trimmed
+                .splitn(2, ':')
+                .nth(1)
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if !content.is_empty() {
+                thought = Some(content);
+            }
+            continue;
+        }
+        remaining.push(line);
+    }
+
+    thought.map(|t| {
+        let cleaned = remaining.join("\n").trim().to_string();
+        (t, cleaned)
+    })
+}
+
 fn is_opencode_status_line(line: &str) -> bool {
     let trimmed = line.trim();
     if trimmed.is_empty() {
@@ -1874,6 +1905,7 @@ pub fn run_claudecode_turn<'a>(
         let mut text_buffer: HashMap<u32, String> = HashMap::new();
         let mut last_thinking_len: usize = 0; // Track last emitted length to avoid re-sending same content
         let mut last_text_len: usize = 0; // Track last emitted text length for streaming text deltas
+        let mut thinking_emitted = false;
 
         let auth_missing = api_auth.is_none();
         let auth_timeout = std::time::Duration::from_secs(45);
@@ -2015,10 +2047,18 @@ pub fn run_claudecode_turn<'a>(
                                 ClaudeEvent::StreamEvent(wrapper) => {
                                     match wrapper.event {
                                         StreamEvent::ContentBlockDelta { index, delta } => {
+                                            let block_type = block_types
+                                                .get(&index)
+                                                .map(|value| value.as_str());
+                                            let is_thinking_block =
+                                                matches!(block_type, Some("thinking"));
                                             // Check the delta type to determine where to route content
                                             // "thinking_delta" -> thinking panel (uses delta.thinking field)
                                             // "text_delta" -> text output (uses delta.text field)
-                                            if delta.delta_type == "thinking_delta" {
+                                            if delta.delta_type == "thinking_delta"
+                                                || (is_thinking_block
+                                                    && delta.delta_type == "text_delta")
+                                            {
                                                 // For thinking deltas, check both `thinking` and `text` fields
                                                 // Extended thinking uses `thinking`, but some versions use `text`
                                                 let thinking_text = delta.thinking.or(delta.text.clone());
@@ -2041,6 +2081,7 @@ pub fn run_claudecode_turn<'a>(
                                                                 done: false,
                                                                 mission_id: Some(mission_id),
                                                             });
+                                                            thinking_emitted = true;
                                                         }
                                                     }
                                                 }
@@ -2089,7 +2130,29 @@ pub fn run_claudecode_turn<'a>(
                                                 // Text content is the final assistant response
                                                 // Don't send as Thinking - it will be in the final AssistantMessage
                                                 if !text.is_empty() {
-                                                    final_result = text;
+                                                    if !thinking_emitted {
+                                                        if let Some((thought, cleaned)) =
+                                                            extract_thought_line(&text)
+                                                        {
+                                                            let _ = events_tx.send(
+                                                                AgentEvent::Thinking {
+                                                                    content: thought,
+                                                                    done: true,
+                                                                    mission_id: Some(mission_id),
+                                                                },
+                                                            );
+                                                            thinking_emitted = true;
+                                                            if !cleaned.is_empty() {
+                                                                final_result = cleaned;
+                                                            } else {
+                                                                final_result = text;
+                                                            }
+                                                        } else {
+                                                            final_result = text;
+                                                        }
+                                                    } else {
+                                                        final_result = text;
+                                                    }
                                                 }
                                             }
                                             ContentBlock::ToolUse { id, name, input } => {
@@ -2175,6 +2238,7 @@ pub fn run_claudecode_turn<'a>(
                                                         done: true, // Mark as done since this is the final block
                                                         mission_id: Some(mission_id),
                                                     });
+                                                    thinking_emitted = true;
                                                 }
                                             }
                                             _ => {}
@@ -5730,6 +5794,18 @@ pub async fn run_opencode_turn(
         }
     }
 
+    if !sse_emitted && !emitted_thinking {
+        if let Some((thought, cleaned)) = extract_thought_line(&final_result) {
+            let _ = events_tx.send(AgentEvent::Thinking {
+                content: thought,
+                done: false,
+                mission_id: Some(mission_id),
+            });
+            emitted_thinking = true;
+            final_result = cleaned;
+        }
+    }
+
     if emitted_thinking {
         let _ = events_tx.send(AgentEvent::Thinking {
             content: String::new(),
@@ -6183,8 +6259,17 @@ pub async fn run_amp_turn(
                             AmpEvent::StreamEvent(wrapper) => {
                                 match wrapper.event {
                                     StreamEvent::ContentBlockDelta { index, delta } => {
-                                        if delta.delta_type == "thinking_delta" {
-                                            if let Some(thinking_text) = delta.thinking {
+                                        let block_type = block_types
+                                            .get(&index)
+                                            .map(|value| value.as_str());
+                                        let is_thinking_block =
+                                            matches!(block_type, Some("thinking"));
+                                        if delta.delta_type == "thinking_delta"
+                                            || (is_thinking_block
+                                                && delta.delta_type == "text_delta")
+                                        {
+                                            let thinking_text = delta.thinking.or(delta.text.clone());
+                                            if let Some(thinking_text) = thinking_text {
                                                 if !thinking_text.is_empty() {
                                                     let buffer = thinking_buffer.entry(index).or_default();
                                                     buffer.push_str(&thinking_text);
@@ -6254,7 +6339,29 @@ pub async fn run_amp_turn(
                                     match block {
                                         ContentBlock::Text { text } => {
                                             if !text.is_empty() {
-                                                final_result = text;
+                                                if !thinking_streamed {
+                                                    if let Some((thought, cleaned)) =
+                                                        extract_thought_line(&text)
+                                                    {
+                                                        let _ = events_tx.send(
+                                                            AgentEvent::Thinking {
+                                                                content: thought,
+                                                                done: true,
+                                                                mission_id: Some(mission_id),
+                                                            },
+                                                        );
+                                                        thinking_streamed = true;
+                                                        if !cleaned.is_empty() {
+                                                            final_result = cleaned;
+                                                        } else {
+                                                            final_result = text;
+                                                        }
+                                                    } else {
+                                                        final_result = text;
+                                                    }
+                                                } else {
+                                                    final_result = text;
+                                                }
                                             }
                                         }
                                         ContentBlock::ToolUse { id, name, input } => {
@@ -6613,6 +6720,8 @@ pub async fn run_codex_turn(
     let mut last_activity = std::time::Instant::now();
     let mut pending_tools: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
+    let mut thinking_emitted = false;
+    let mut thinking_done_emitted = false;
 
     // Timeout configuration (similar to Amp)
     let startup_timeout = std::time::Duration::from_secs(30);
@@ -6679,6 +6788,7 @@ pub async fn run_codex_turn(
                             done: false,
                             mission_id: Some(mission_id),
                         });
+                        thinking_emitted = true;
                     }
                     ExecutionEvent::ToolCall { id, name, args } => {
                         pending_tools.insert(id.clone(), name.clone());
@@ -6713,6 +6823,29 @@ pub async fn run_codex_turn(
                 break;
             }
         }
+    }
+
+    if !thinking_emitted {
+        if let Some((thought, cleaned)) = extract_thought_line(&assistant_message) {
+            let _ = events_tx.send(AgentEvent::Thinking {
+                content: thought,
+                done: true,
+                mission_id: Some(mission_id),
+            });
+            thinking_emitted = true;
+            thinking_done_emitted = true;
+            if !cleaned.is_empty() {
+                assistant_message = cleaned;
+            }
+        }
+    }
+
+    if thinking_emitted && !thinking_done_emitted {
+        let _ = events_tx.send(AgentEvent::Thinking {
+            content: String::new(),
+            done: true,
+            mission_id: Some(mission_id),
+        });
     }
 
     let final_message = if let Some(err) = error_message {

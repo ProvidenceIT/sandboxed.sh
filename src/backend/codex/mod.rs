@@ -170,48 +170,40 @@ fn convert_codex_event(
         CodexEvent::ItemCreated { item } | CodexEvent::ItemUpdated { item } => {
             // Handle different item types
             match item.item_type.as_str() {
-                "message" => {
+                "message" | "agent_message" | "assistant_message" => {
                     // Extract message content
-                    if let Some(content) = item.data.get("content") {
-                        if let Some(text) = content.as_str() {
-                            if !text.is_empty() {
-                                // Check if this is new content or an update
-                                let last_content = item_content_cache.get(&item.id);
-                                let new_content = if let Some(last) = last_content {
-                                    // ItemUpdated: only emit the delta (new text)
-                                    if text.starts_with(last) {
-                                        text[last.len()..].to_string()
-                                    } else {
-                                        // Content was replaced, emit full text
-                                        text.to_string()
-                                    }
-                                } else {
-                                    // ItemCreated: emit full text
-                                    text.to_string()
-                                };
-
-                                if !new_content.is_empty() {
-                                    results.push(ExecutionEvent::TextDelta {
-                                        content: new_content,
-                                    });
-                                }
-
-                                // Update cache with current full content
-                                item_content_cache.insert(item.id.clone(), text.to_string());
+                    if let Some(text) = extract_text_field(&item.data) {
+                        // Check if this is new content or an update
+                        let last_content = item_content_cache.get(&item.id);
+                        let new_content = if let Some(last) = last_content {
+                            // ItemUpdated: only emit the delta (new text)
+                            if text.starts_with(last) {
+                                text[last.len()..].to_string()
+                            } else {
+                                // Content was replaced, emit full text
+                                text.to_string()
                             }
+                        } else {
+                            // ItemCreated: emit full text
+                            text.to_string()
+                        };
+
+                        if !new_content.is_empty() {
+                            results.push(ExecutionEvent::TextDelta {
+                                content: new_content,
+                            });
                         }
+
+                        // Update cache with current full content
+                        item_content_cache.insert(item.id.clone(), text.to_string());
                     }
                 }
                 "reasoning" | "thinking" => {
                     // Extract thinking/reasoning content
-                    if let Some(content) = item.data.get("content") {
-                        if let Some(text) = content.as_str() {
-                            if !text.is_empty() {
-                                results.push(ExecutionEvent::Thinking {
-                                    content: text.to_string(),
-                                });
-                            }
-                        }
+                    if let Some(text) = extract_text_field(&item.data) {
+                        results.push(ExecutionEvent::Thinking {
+                            content: text.to_string(),
+                        });
                     }
                 }
                 "command" | "tool" => {
@@ -233,17 +225,34 @@ fn convert_codex_event(
         }
 
         CodexEvent::ItemCompleted { item } => {
-            // Extract tool result if available
-            if item.item_type == "command" || item.item_type == "tool" {
-                if let Some(result) = item.data.get("result") {
-                    if let Some(name) = item.data.get("name").and_then(|v| v.as_str()) {
-                        results.push(ExecutionEvent::ToolResult {
-                            id: item.id.clone(),
-                            name: name.to_string(),
-                            result: result.clone(),
+            match item.item_type.as_str() {
+                "command" | "tool" => {
+                    // Extract tool result if available
+                    if let Some(result) = item.data.get("result") {
+                        if let Some(name) = item.data.get("name").and_then(|v| v.as_str()) {
+                            results.push(ExecutionEvent::ToolResult {
+                                id: item.id.clone(),
+                                name: name.to_string(),
+                                result: result.clone(),
+                            });
+                        }
+                    }
+                }
+                "message" | "agent_message" | "assistant_message" => {
+                    if let Some(text) = extract_text_field(&item.data) {
+                        results.push(ExecutionEvent::TextDelta {
+                            content: text.to_string(),
                         });
                     }
                 }
+                "reasoning" | "thinking" => {
+                    if let Some(text) = extract_text_field(&item.data) {
+                        results.push(ExecutionEvent::Thinking {
+                            content: text.to_string(),
+                        });
+                    }
+                }
+                _ => {}
             }
         }
 
@@ -257,6 +266,17 @@ fn convert_codex_event(
     }
 
     results
+}
+
+fn extract_text_field(data: &std::collections::HashMap<String, serde_json::Value>) -> Option<&str> {
+    data.get("text")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            data.get("content")
+                .and_then(|value| value.as_str())
+                .filter(|value| !value.is_empty())
+        })
 }
 
 /// Create a registry entry for the Codex backend.

@@ -1657,6 +1657,14 @@ pub async fn validate_agent_exists(
         return Ok(());
     }
 
+    if agent_names.is_empty() && raw_agent_names.is_empty() {
+        tracing::warn!(
+            "No OpenCode agents available to validate '{}'; skipping validation",
+            agent_name
+        );
+        return Ok(());
+    }
+
     let suggestions = if agent_names.is_empty() {
         raw_agent_names.join(", ")
     } else {

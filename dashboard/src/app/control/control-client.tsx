@@ -6,6 +6,7 @@ import { toast } from "@/components/toast";
 import { MarkdownContent } from "@/components/markdown-content";
 import { StreamingMarkdown } from "@/components/streaming-markdown";
 import { EnhancedInput, type SubmitPayload, type EnhancedInputHandle } from "@/components/enhanced-input";
+import { MissionAutomationsDialog } from "@/components/mission-automations-dialog";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { cn } from "@/lib/utils";
@@ -1959,6 +1960,7 @@ export default function ControlClient() {
     []
   );
   const [showMissionSwitcher, setShowMissionSwitcher] = useState(false);
+  const [showAutomationsDialog, setShowAutomationsDialog] = useState(false);
 
   // Track which mission's events we're viewing (for parallel missions)
   // This can differ from currentMission when viewing a parallel mission
@@ -4598,6 +4600,19 @@ export default function ControlClient() {
         onRefresh={refreshRecentMissions}
       />
 
+      <MissionAutomationsDialog
+        open={showAutomationsDialog}
+        missionId={activeMission?.id ?? null}
+        missionLabel={
+          activeMission
+            ? activeWorkspaceLabel
+              ? `${activeWorkspaceLabel} · ${getMissionShortName(activeMission.id)}`
+              : getMissionShortName(activeMission.id)
+            : null
+        }
+        onClose={() => setShowAutomationsDialog(false)}
+      />
+
       {/* Header */}
       <div className="relative z-10 mb-6 flex items-center justify-between gap-4">
         <div className="flex items-center gap-3">
@@ -4654,6 +4669,21 @@ export default function ControlClient() {
               backend: activeMission.backend,
             } : undefined}
           />
+
+          <button
+            onClick={() => setShowAutomationsDialog(true)}
+            disabled={!activeMission}
+            className={cn(
+              "flex items-center gap-2 rounded-lg border px-3 py-2 text-sm transition-colors",
+              activeMission
+                ? "border-white/[0.06] bg-white/[0.02] text-white/70 hover:bg-white/[0.04]"
+                : "border-white/[0.04] bg-white/[0.01] text-white/30 cursor-not-allowed"
+            )}
+            title={activeMission ? "Manage mission automations" : "Select a mission to manage automations"}
+          >
+            <Clock className="h-4 w-4" />
+            <span className="hidden sm:inline">Automations</span>
+          </button>
 
           {/* Thinking panel toggle */}
           <button

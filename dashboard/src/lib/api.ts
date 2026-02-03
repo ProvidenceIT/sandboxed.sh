@@ -15,6 +15,7 @@ export * from "./api/core";
 export * from "./api/missions";
 export * from "./api/workspaces";
 export * from "./api/providers";
+export * from "./api/automations";
 
 // Import core utilities for use in this file (remaining APIs not yet split)
 import {
@@ -1709,7 +1710,7 @@ export interface OpenAgentConfig {
 // Get OpenAgent config from Library
 export async function getOpenAgentConfig(): Promise<OpenAgentConfig> {
   try {
-    return await apiGet("/api/library/openagent/config", "Failed to get OpenAgent config");
+    return await apiGet("/api/library/sandboxed-sh/config", "Failed to get OpenAgent config");
   } catch {
     // Return default config if endpoint doesn't exist (not yet implemented)
     return { hidden_agents: [], default_agent: null };
@@ -1718,13 +1719,13 @@ export async function getOpenAgentConfig(): Promise<OpenAgentConfig> {
 
 // Save OpenAgent config to Library
 export async function saveOpenAgentConfig(config: OpenAgentConfig): Promise<void> {
-  return apiPut("/api/library/openagent/config", config, "Failed to save OpenAgent config");
+  return apiPut("/api/library/sandboxed-sh/config", config, "Failed to save OpenAgent config");
 }
 
 // Get visible agents (filtered by OpenAgent config)
 export async function getVisibleAgents(): Promise<unknown> {
   try {
-    return await apiGet("/api/library/openagent/agents", "Failed to get visible agents");
+    return await apiGet("/api/library/sandboxed-sh/agents", "Failed to get visible agents");
   } catch {
     // Return empty array if endpoint doesn't exist (not yet implemented)
     return [];
@@ -1836,7 +1837,7 @@ export async function saveLibraryOpenCodeSettingsForProfile(
 export async function getOpenAgentConfigForProfile(profile: string): Promise<OpenAgentConfig> {
   try {
     return await apiGet(
-      `/api/library/config-profile/${encodeURIComponent(profile)}/openagent/config`,
+      `/api/library/config-profile/${encodeURIComponent(profile)}/sandboxed-sh/config`,
       "Failed to get OpenAgent config for profile"
     );
   } catch {
@@ -1851,7 +1852,7 @@ export async function saveOpenAgentConfigForProfile(
   config: OpenAgentConfig
 ): Promise<void> {
   return apiPut(
-    `/api/library/config-profile/${encodeURIComponent(profile)}/openagent/config`,
+    `/api/library/config-profile/${encodeURIComponent(profile)}/sandboxed-sh/config`,
     config,
     "Failed to save OpenAgent config for profile"
   );
