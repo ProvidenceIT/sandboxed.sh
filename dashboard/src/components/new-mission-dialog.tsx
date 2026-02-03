@@ -404,13 +404,14 @@ export function NewMissionDialog({
 
       if (openInNewTab) {
         window.open(url, '_blank');
+        setOpen(false);
+        resetForm();
+        onClose?.();
       } else {
         router.push(url);
+        setOpen(false);
+        resetForm();
       }
-
-      setOpen(false);
-      resetForm();
-      onClose?.();
     } finally {
       setSubmitting(false);
     }

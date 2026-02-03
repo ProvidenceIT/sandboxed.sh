@@ -143,6 +143,49 @@ function parseFrontmatter(content: string): { frontmatter: Frontmatter; body: st
   return { frontmatter, body };
 }
 
+function validateFrontmatterBlock(content: string): string | null {
+  if (!content.startsWith('---')) {
+    return null;
+  }
+
+  const endIndex = content.indexOf('\n---', 3);
+  if (endIndex === -1) {
+    return 'Frontmatter is missing a closing "---"';
+  }
+
+  const yamlStr = content.substring(4, endIndex);
+  const lines = yamlStr.split('\n');
+  let expectingListItem = false;
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const rawLine = lines[i];
+    const line = rawLine.trim();
+
+    if (!line || line.startsWith('#')) {
+      continue;
+    }
+
+    if (line.startsWith('-')) {
+      if (!expectingListItem) {
+        return `Invalid frontmatter at line ${i + 1}: list item without a key`;
+      }
+      continue;
+    }
+
+    expectingListItem = false;
+    const match = line.match(/^([A-Za-z0-9_-]+):(.*)$/);
+    if (!match) {
+      return `Invalid frontmatter at line ${i + 1}: "${rawLine}"`;
+    }
+
+    if (match[2].trim() === '') {
+      expectingListItem = true;
+    }
+  }
+
+  return null;
+}
+
 // YAML special characters that require quoting
 const YAML_SPECIAL_CHARS = [':', '[', ']', '{', '}', '#', '&', '*', '!', '|', '>', "'", '"', '%', '@', '`'];
 
@@ -866,6 +909,11 @@ export default function SkillsPage() {
     try {
       if (selectedFile === 'SKILL.md') {
         const content = buildContent(frontmatter, bodyContent);
+        const validationError = validateFrontmatterBlock(content);
+        if (validationError) {
+          showError(validationError);
+          return;
+        }
         await saveSkill(selectedSkill.name, content);
         // Reload skill to get updated references
         const updated = await getLibrarySkill(selectedSkill.name);

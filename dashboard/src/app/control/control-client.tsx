@@ -9,6 +9,7 @@ import { EnhancedInput, type SubmitPayload, type EnhancedInputHandle } from "@/c
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { cn } from "@/lib/utils";
+import { getMissionShortName } from "@/lib/mission-display";
 import { getRuntimeApiBase } from "@/lib/settings";
 import { authHeader } from "@/lib/auth";
 import {
@@ -4542,6 +4543,7 @@ export default function ControlClient() {
   };
 
   const activeMission = viewingMission ?? currentMission;
+  const activeWorkspaceLabel = activeMission?.workspace_name || activeMission?.workspace_id;
   const missionStatus = activeMission
     ? missionStatusLabel(activeMission.status)
     : null;
@@ -4613,22 +4615,16 @@ export default function ControlClient() {
                     )}
                     title={missionStatus?.label}
                   />
-                  {activeMission.workspace_name && (
-                    <span className="hidden sm:flex items-center gap-2">
-                      <span className="text-sm font-medium text-white/50">
-                        {activeMission.workspace_name}
+                  {activeWorkspaceLabel && (
+                    <>
+                      <span className="text-sm font-medium text-white/50 truncate max-w-[160px] sm:max-w-[220px]">
+                        {activeWorkspaceLabel}
                       </span>
-                      <div className="h-4 w-px bg-white/20" />
-                    </span>
+                      <span className="text-white/40">·</span>
+                    </>
                   )}
-                  <span className="text-sm font-medium text-white/70">
-                    {activeMission.agent && (
-                      <span className="hidden sm:inline">
-                        {activeMission.agent}
-                        <span className="mx-1.5 text-white/40">·</span>
-                      </span>
-                    )}
-                    {activeMission.id.slice(0, 8)}
+                  <span className="text-sm font-medium text-white/70 truncate max-w-[140px] sm:max-w-[180px]">
+                    {getMissionShortName(activeMission.id)}
                   </span>
                 </>
               ) : (

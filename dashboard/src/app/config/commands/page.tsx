@@ -23,6 +23,50 @@ import { LibraryUnavailable } from '@/components/library-unavailable';
 import { useLibrary } from '@/contexts/library-context';
 import { ConfigCodeEditor } from '@/components/config-code-editor';
 import { RenameDialog } from '@/components/rename-dialog';
+import { useToast } from '@/components/toast';
+
+function validateFrontmatterBlock(content: string): string | null {
+  if (!content.startsWith('---')) {
+    return null;
+  }
+
+  const endIndex = content.indexOf('\n---', 3);
+  if (endIndex === -1) {
+    return 'Frontmatter is missing a closing "---"';
+  }
+
+  const yamlStr = content.substring(4, endIndex);
+  const lines = yamlStr.split('\n');
+  let expectingListItem = false;
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const rawLine = lines[i];
+    const line = rawLine.trim();
+
+    if (!line || line.startsWith('#')) {
+      continue;
+    }
+
+    if (line.startsWith('-')) {
+      if (!expectingListItem) {
+        return `Invalid frontmatter at line ${i + 1}: list item without a key`;
+      }
+      continue;
+    }
+
+    expectingListItem = false;
+    const match = line.match(/^([A-Za-z0-9_-]+):(.*)$/);
+    if (!match) {
+      return `Invalid frontmatter at line ${i + 1}: "${rawLine}"`;
+    }
+
+    if (match[2].trim() === '') {
+      expectingListItem = true;
+    }
+  }
+
+  return null;
+}
 
 export default function CommandsPage() {
   const {
@@ -41,6 +85,7 @@ export default function CommandsPage() {
     committing,
     pushing,
   } = useLibrary();
+  const { showError } = useToast();
 
   const [selectedCommand, setSelectedCommand] = useState<Command | null>(null);
   const [commandContent, setCommandContent] = useState('');
@@ -117,6 +162,11 @@ export default function CommandsPage() {
     const contentBeingSaved = commandContent;
     try {
       setCommandSaving(true);
+      const validationError = validateFrontmatterBlock(contentBeingSaved);
+      if (validationError) {
+        showError(validationError);
+        return;
+      }
       await saveCommand(selectedCommand.name, contentBeingSaved);
       // Only clear dirty if content hasn't changed during save
       if (commandContentRef.current === contentBeingSaved) {

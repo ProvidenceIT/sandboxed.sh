@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, useMemo, useCallback } from 'react';
 import { Search, XCircle, Check, Loader2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { type Mission, type MissionStatus, type RunningMissionInfo } from '@/lib/api';
+import { getMissionShortName } from '@/lib/mission-display';
 import { STATUS_DOT_COLORS, STATUS_LABELS, getMissionDotColor, getMissionTitle } from '@/lib/mission-status';
 
 interface MissionSwitcherProps {
@@ -20,9 +21,11 @@ interface MissionSwitcherProps {
 
 function getMissionDisplayName(mission: Mission): string {
   const parts: string[] = [];
-  if (mission.workspace_name) parts.push(mission.workspace_name);
-  if (mission.agent) parts.push(mission.agent);
-  parts.push(mission.id.slice(0, 8));
+  const workspaceLabel = mission.workspace_name || mission.workspace_id;
+  if (workspaceLabel) {
+    parts.push(workspaceLabel);
+  }
+  parts.push(getMissionShortName(mission.id));
   return parts.join(' · ');
 }
 
@@ -349,7 +352,7 @@ export function MissionSwitcher({
                           <span className="font-medium text-sm truncate">
                             {mission
                               ? getMissionDisplayName(mission)
-                              : item.id.slice(0, 8)}
+                              : getMissionShortName(item.id)}
                           </span>
                           {isStalled && (
                             <span className="text-[10px] text-amber-400 tabular-nums shrink-0">
