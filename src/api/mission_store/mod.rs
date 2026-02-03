@@ -263,6 +263,11 @@ pub trait MissionStore: Send + Sync {
         Ok(vec![])
     }
 
+    /// List all active automations across missions.
+    async fn list_active_automations(&self) -> Result<Vec<Automation>, String> {
+        Ok(vec![])
+    }
+
     /// Get an automation by ID.
     async fn get_automation(&self, id: Uuid) -> Result<Option<Automation>, String> {
         let _ = id;

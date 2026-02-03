@@ -2316,142 +2316,148 @@ async fn automation_scheduler_loop(
 
     tracing::info!("Automation scheduler task started");
 
+    let mut logged_unsupported = false;
+
     loop {
         tokio::time::sleep(check_interval).await;
 
-        // Get all active missions
-        let active_missions = match mission_store.get_all_active_missions().await {
-            Ok(missions) => missions,
+        let automations = match mission_store.list_active_automations().await {
+            Ok(automations) => automations,
             Err(e) => {
-                tracing::warn!("Failed to get active missions for automation: {}", e);
+                if !logged_unsupported {
+                    tracing::warn!("Automation scheduler disabled: {}", e);
+                    logged_unsupported = true;
+                }
                 continue;
             }
         };
 
-        // For each active mission, check its automations
-        for mission in active_missions {
-            let automations = match mission_store.get_mission_automations(mission.id).await {
-                Ok(automations) => automations,
-                Err(e) => {
+        for automation in automations {
+            let mission = match mission_store.get_mission(automation.mission_id).await {
+                Ok(Some(mission)) => mission,
+                Ok(None) => {
                     tracing::debug!(
-                        "Failed to get automations for mission {}: {}",
-                        mission.id,
+                        "Automation {} references missing mission {}",
+                        automation.id,
+                        automation.mission_id
+                    );
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to load mission {} for automation {}: {}",
+                        automation.mission_id,
+                        automation.id,
                         e
                     );
                     continue;
                 }
             };
 
-            // Filter to active automations only
-            for automation in automations.into_iter().filter(|a| a.active) {
-                // Check if enough time has passed since last trigger
-                let should_trigger = if let Some(ref last_triggered) = automation.last_triggered_at
-                {
-                    match chrono::DateTime::parse_from_rfc3339(last_triggered) {
-                        Ok(last_time) => {
-                            let elapsed = chrono::Utc::now()
-                                .signed_duration_since(last_time.with_timezone(&chrono::Utc));
-                            elapsed.num_seconds() >= automation.interval_seconds as i64
-                        }
-                        Err(_) => true, // If we can't parse, trigger anyway
+            // Check if enough time has passed since last trigger
+            let should_trigger = if let Some(ref last_triggered) = automation.last_triggered_at {
+                match chrono::DateTime::parse_from_rfc3339(last_triggered) {
+                    Ok(last_time) => {
+                        let elapsed = chrono::Utc::now()
+                            .signed_duration_since(last_time.with_timezone(&chrono::Utc));
+                        elapsed.num_seconds() >= automation.interval_seconds as i64
                     }
-                } else {
-                    // Never triggered before, should trigger now
-                    true
-                };
+                    Err(_) => true, // If we can't parse, trigger anyway
+                }
+            } else {
+                // Never triggered before, should trigger now
+                true
+            };
 
-                if !should_trigger {
+            if !should_trigger {
+                continue;
+            }
+
+            // Check if the mission is currently busy (has a running task or queued messages)
+            let is_busy = {
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                if cmd_tx
+                    .send(ControlCommand::ListRunning { respond: tx })
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!("Failed to send ListRunning command for automation busy check");
                     continue;
                 }
-
-                // Check if the mission is currently busy (has a running task or queued messages)
-                let is_busy = {
-                    let (tx, rx) = tokio::sync::oneshot::channel();
-                    if cmd_tx
-                        .send(ControlCommand::ListRunning { respond: tx })
-                        .await
-                        .is_err()
-                    {
+                match rx.await {
+                    Ok(running) => running.iter().any(|r| {
+                        r.mission_id == mission.id
+                            && (r.queue_len > 0
+                                || r.state == "running"
+                                || r.state == "waiting_for_tool")
+                    }),
+                    Err(_) => {
                         tracing::warn!(
-                            "Failed to send ListRunning command for automation busy check"
+                            "Failed to receive ListRunning response for automation busy check"
                         );
                         continue;
                     }
-                    match rx.await {
-                        Ok(running) => running.iter().any(|r| {
-                            r.mission_id == mission.id
-                                && (r.queue_len > 0
-                                    || r.state == "running"
-                                    || r.state == "waiting_for_tool")
-                        }),
-                        Err(_) => {
-                            tracing::warn!(
-                                "Failed to receive ListRunning response for automation busy check"
-                            );
-                            continue;
-                        }
-                    }
-                };
-
-                if is_busy {
-                    tracing::debug!(
-                        "Mission {} is busy, skipping automation trigger for command '{}'",
-                        mission.id,
-                        automation.command_name
-                    );
-                    continue;
                 }
+            };
 
-                // Fetch the command content from the library
-                let command_content = if let Some(lib) = library.read().await.as_ref() {
-                    match lib.get_command(&automation.command_name).await {
-                        Ok(command) => command.content,
-                        Err(e) => {
-                            tracing::warn!(
-                                "Failed to fetch command '{}' for automation {}: {}",
-                                automation.command_name,
-                                automation.id,
-                                e
-                            );
-                            continue;
-                        }
-                    }
-                } else {
-                    tracing::debug!("Library not initialized, skipping automation trigger");
-                    continue;
-                };
-
-                tracing::info!(
-                    "Triggering automation {} for mission {}: command '{}'",
-                    automation.id,
+            if is_busy {
+                tracing::debug!(
+                    "Mission {} is busy, skipping automation trigger for command '{}'",
                     mission.id,
                     automation.command_name
                 );
+                continue;
+            }
 
-                // Send the message to the mission
-                let message_id = Uuid::new_v4();
-                let (respond_tx, _respond_rx) = tokio::sync::oneshot::channel();
-                if let Err(e) = cmd_tx
-                    .send(ControlCommand::UserMessage {
-                        id: message_id,
-                        content: command_content,
-                        agent: None,
-                        target_mission_id: Some(mission.id),
-                        respond: respond_tx,
-                    })
-                    .await
-                {
-                    tracing::warn!("Failed to send automation message: {}", e);
-                    continue;
+            // Fetch the command content from the library
+            let command_content = if let Some(lib) = library.read().await.as_ref() {
+                match lib.get_command(&automation.command_name).await {
+                    Ok(command) => command.content,
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to fetch command '{}' for automation {}: {}",
+                            automation.command_name,
+                            automation.id,
+                            e
+                        );
+                        continue;
+                    }
                 }
+            } else {
+                tracing::debug!("Library not initialized, skipping automation trigger");
+                continue;
+            };
 
-                // Update last triggered time
-                if let Err(e) = mission_store
-                    .update_automation_last_triggered(automation.id)
-                    .await
-                {
-                    tracing::warn!("Failed to update automation last triggered time: {}", e);
-                }
+            tracing::info!(
+                "Triggering automation {} for mission {}: command '{}'",
+                automation.id,
+                mission.id,
+                automation.command_name
+            );
+
+            // Send the message to the mission
+            let message_id = Uuid::new_v4();
+            let (respond_tx, _respond_rx) = tokio::sync::oneshot::channel();
+            if let Err(e) = cmd_tx
+                .send(ControlCommand::UserMessage {
+                    id: message_id,
+                    content: command_content,
+                    agent: None,
+                    target_mission_id: Some(mission.id),
+                    respond: respond_tx,
+                })
+                .await
+            {
+                tracing::warn!("Failed to send automation message: {}", e);
+                continue;
+            }
+
+            // Update last triggered time
+            if let Err(e) = mission_store
+                .update_automation_last_triggered(automation.id)
+                .await
+            {
+                tracing::warn!("Failed to update automation last triggered time: {}", e);
             }
         }
     }

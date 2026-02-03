@@ -1260,6 +1260,50 @@ impl MissionStore for SqliteMissionStore {
         .map_err(|e| format!("Task join error: {}", e))?
     }
 
+    async fn list_active_automations(&self) -> Result<Vec<Automation>, String> {
+        let conn = self.conn.clone();
+
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.blocking_lock();
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, mission_id, command_name, interval_seconds, active, created_at, last_triggered_at
+                     FROM automations WHERE active = 1 ORDER BY created_at DESC",
+                )
+                .map_err(|e| e.to_string())?;
+
+            let automations = stmt
+                .query_map([], |row| {
+                    let id: String = row.get(0)?;
+                    let mission_id: String = row.get(1)?;
+                    let command_name: String = row.get(2)?;
+                    let interval_seconds: i64 = row.get(3)?;
+                    let active: i64 = row.get(4)?;
+                    let created_at: String = row.get(5)?;
+                    let last_triggered_at: Option<String> = row.get(6)?;
+
+                    Ok(Automation {
+                        id: Uuid::parse_str(&id)
+                            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,
+                        mission_id: Uuid::parse_str(&mission_id)
+                            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,
+                        command_name,
+                        interval_seconds: interval_seconds as u64,
+                        active: active != 0,
+                        created_at,
+                        last_triggered_at,
+                    })
+                })
+                .map_err(|e| e.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?;
+
+            Ok(automations)
+        })
+        .await
+        .map_err(|e| format!("Task join error: {}", e))?
+    }
+
     async fn get_automation(&self, id: Uuid) -> Result<Option<Automation>, String> {
         let conn = self.conn.clone();
         let id_str = id.to_string();
