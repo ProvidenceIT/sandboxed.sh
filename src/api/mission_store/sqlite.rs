@@ -99,7 +99,6 @@ CREATE TABLE IF NOT EXISTS automations (
 
 CREATE INDEX IF NOT EXISTS idx_automations_mission ON automations(mission_id);
 CREATE INDEX IF NOT EXISTS idx_automations_active ON automations(mission_id, active);
-CREATE INDEX IF NOT EXISTS idx_automations_webhook_id ON automations(json_extract(trigger_data, '$.webhook_id')) WHERE trigger_type = 'webhook';
 
 CREATE TABLE IF NOT EXISTS automation_executions (
     id TEXT PRIMARY KEY NOT NULL,
@@ -416,6 +415,7 @@ impl SqliteMissionStore {
 
         // Migrate automations table to new schema
         Self::migrate_automations_table(conn)?;
+        Self::ensure_automation_indexes(conn)?;
 
         Ok(())
     }
@@ -572,6 +572,24 @@ impl SqliteMissionStore {
                 )
                 .map_err(|e| format!("Failed to create automation_executions table: {}", e))?;
             }
+        }
+
+        Ok(())
+    }
+
+    fn ensure_automation_indexes(conn: &Connection) -> Result<(), String> {
+        let has_trigger_data: bool = conn
+            .prepare("SELECT 1 FROM pragma_table_info('automations') WHERE name = 'trigger_data'")
+            .map_err(|e| format!("Failed to check automations columns: {}", e))?
+            .exists([])
+            .map_err(|e| format!("Failed to query table info: {}", e))?;
+
+        if has_trigger_data {
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_automations_webhook_id ON automations(json_extract(trigger_data, '$.webhook_id')) WHERE trigger_type = 'webhook'",
+                [],
+            )
+            .map_err(|e| format!("Failed to create automation webhook index: {}", e))?;
         }
 
         Ok(())
