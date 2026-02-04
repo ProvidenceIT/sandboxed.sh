@@ -2191,12 +2191,14 @@ fn spawn_control_session(
     }
 
     // Spawn automation scheduler task
-    if state.mission_store.is_persistent() {
+    if state.mission_store.is_persistent() && config.automations_enabled {
         tokio::spawn(automation_scheduler_loop(
             Arc::clone(&state.mission_store),
             library.clone(),
             state.cmd_tx.clone(),
         ));
+    } else if state.mission_store.is_persistent() {
+        tracing::info!("Automation scheduler disabled by config");
     }
 
     state
