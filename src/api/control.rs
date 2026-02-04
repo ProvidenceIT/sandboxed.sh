@@ -2316,9 +2316,7 @@ async fn automation_scheduler_loop(
     workspaces: workspace::SharedWorkspaceStore,
 ) {
     use super::automation_variables::{substitute_variables, SubstitutionContext};
-    use super::mission_store::{
-        AutomationExecution, CommandSource, ExecutionStatus, TriggerType,
-    };
+    use super::mission_store::{AutomationExecution, CommandSource, ExecutionStatus, TriggerType};
 
     // Check every 5 seconds for automations that need to run
     let check_interval = std::time::Duration::from_secs(5);
@@ -2617,11 +2615,8 @@ async fn automation_scheduler_loop(
                             let mut exec = execution.clone();
                             exec.status = ExecutionStatus::Failed;
                             exec.completed_at = Some(mission_store::now_string());
-                            exec.error = Some(format!(
-                                "Failed after {} retries: {}",
-                                max_retries + 1,
-                                e
-                            ));
+                            exec.error =
+                                Some(format!("Failed after {} retries: {}", max_retries + 1, e));
                             exec.retry_count = retry_attempt;
 
                             if let Err(e) = mission_store.update_automation_execution(exec).await {
@@ -5336,12 +5331,18 @@ pub async fn webhook_receiver(
     headers: HeaderMap,
     Json(payload): Json<serde_json::Value>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-    use super::automation_variables::{apply_webhook_mappings, substitute_variables, SubstitutionContext};
+    use super::automation_variables::{
+        apply_webhook_mappings, substitute_variables, SubstitutionContext,
+    };
     use super::mission_store::{AutomationExecution, CommandSource, ExecutionStatus, TriggerType};
     use sha2::{Digest, Sha256};
 
     // Access control directly (no auth required for webhooks)
-    let control = state.control.lock().await;
+    let webhook_user = AuthUser {
+        id: "webhook".to_string(),
+        username: "webhook".to_string(),
+    };
+    let control = state.control.get_or_spawn(&webhook_user).await;
 
     // Find automation by webhook_id
     let automation = control
@@ -5394,8 +5395,12 @@ pub async fn webhook_receiver(
 
         if let Some(signature) = signature_header {
             // Compute expected signature
-            let payload_bytes = serde_json::to_vec(&payload)
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to serialize payload: {}", e)))?;
+            let payload_bytes = serde_json::to_vec(&payload).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to serialize payload: {}", e),
+                )
+            })?;
 
             let mut mac = Sha256::new();
             mac.update(secret.as_bytes());
@@ -5436,7 +5441,7 @@ pub async fn webhook_receiver(
     let command_content = match &automation.command_source {
         CommandSource::Library { name } => {
             if let Some(lib) = state.library.read().await.as_ref() {
-                match lib.get_command(name).await {
+                match lib.get_command(name.as_str()).await {
                     Ok(command) => command.content,
                     Err(e) => {
                         return Err((
@@ -5513,7 +5518,11 @@ pub async fn webhook_receiver(
         retry_count: 0,
     };
 
-    let mut execution = match control.mission_store.create_automation_execution(execution).await {
+    let mut execution = match control
+        .mission_store
+        .create_automation_execution(execution)
+        .await
+    {
         Ok(exec) => exec,
         Err(e) => {
             return Err((
@@ -5533,7 +5542,11 @@ pub async fn webhook_receiver(
 
     // Update execution status to Running
     execution.status = ExecutionStatus::Running;
-    if let Err(e) = control.mission_store.update_automation_execution(execution.clone()).await {
+    if let Err(e) = control
+        .mission_store
+        .update_automation_execution(execution.clone())
+        .await
+    {
         tracing::warn!(
             "Failed to update execution status to running for {}: {}",
             execution_id,

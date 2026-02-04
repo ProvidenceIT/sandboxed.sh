@@ -112,7 +112,7 @@ pub enum CommandSource {
 }
 
 /// Webhook configuration for webhook-triggered automations.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WebhookConfig {
     /// Unique webhook ID (part of the webhook URL path)
     pub webhook_id: String,
