@@ -52,16 +52,19 @@ function normalizeAutomation(raw: Automation): Automation {
 }
 
 export async function listMissionAutomations(missionId: string): Promise<Automation[]> {
-  const data = await apiGet(
+  const data = await apiGet<Automation[]>(
     `/api/control/missions/${missionId}/automations`,
     "Failed to fetch automations"
   );
-  return (data as Automation[]).map(normalizeAutomation);
+  return data.map(normalizeAutomation);
 }
 
 export async function listActiveAutomations(): Promise<Automation[]> {
-  const data = await apiGet(`/api/control/automations`, "Failed to fetch active automations");
-  return (data as Automation[]).map(normalizeAutomation);
+  const data = await apiGet<Automation[]>(
+    `/api/control/automations`,
+    "Failed to fetch active automations"
+  );
+  return data.map(normalizeAutomation);
 }
 
 export async function createMissionAutomation(
@@ -91,23 +94,23 @@ export async function createMissionAutomation(
 }
 
 export async function getAutomation(automationId: string): Promise<Automation> {
-  const data = await apiGet(
+  const data = await apiGet<Automation>(
     `/api/control/automations/${automationId}`,
     "Failed to fetch automation"
   );
-  return normalizeAutomation(data as Automation);
+  return normalizeAutomation(data);
 }
 
 export async function updateAutomationActive(
   automationId: string,
   active: boolean
 ): Promise<Automation> {
-  const data = await apiPatch(
+  const data = await apiPatch<Automation>(
     `/api/control/automations/${automationId}`,
     { active },
     "Failed to update automation"
   );
-  return normalizeAutomation(data as Automation);
+  return normalizeAutomation(data);
 }
 
 export async function deleteAutomation(automationId: string): Promise<void> {
