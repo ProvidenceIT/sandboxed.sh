@@ -2041,7 +2041,7 @@ export default function ControlClient() {
   }, []);
 
   const HISTORY_EVENT_TYPES = useMemo(
-    () => ["user_message", "assistant_message", "tool_call", "tool_result"],
+    () => ["user_message", "assistant_message", "tool_call", "tool_result", "text_delta"],
     []
   );
   const loadHistoryEvents = useCallback(
@@ -2724,6 +2724,10 @@ export default function ControlClient() {
     // Track current in-progress thinking item index for consolidation
     // Multiple thinking events (deltas) are streamed and stored; we consolidate them here
     let currentThinkingIdx: number | null = null;
+    let lastTextDelta:
+      | { id: string; content: string; timestamp: number }
+      | null = null;
+    let lastAssistantTimestamp = 0;
 
     // Helper to finalize pending thinking item
     const finalizePendingThinking = (endTime: number) => {
@@ -2798,6 +2802,18 @@ export default function ControlClient() {
             model: typeof meta.model === "string" ? meta.model : null,
             timestamp,
           });
+          lastAssistantTimestamp = timestamp;
+          break;
+        }
+
+        case "text_delta": {
+          const content = event.content || "";
+          if (content.trim().length === 0) break;
+          lastTextDelta = {
+            id: event.event_id ?? `text-delta-${event.id}`,
+            content,
+            timestamp,
+          };
           break;
         }
 
@@ -2896,6 +2912,18 @@ export default function ControlClient() {
 
     // Finalize any pending thinking item (e.g., if done event wasn't stored)
     finalizePendingThinking(Date.now());
+
+    if (lastTextDelta && lastTextDelta.timestamp >= lastAssistantTimestamp) {
+      items.push({
+        kind: "assistant" as const,
+        id: lastTextDelta.id,
+        content: lastTextDelta.content,
+        success: true,
+        costCents: 0,
+        model: null,
+        timestamp: lastTextDelta.timestamp,
+      });
+    }
 
     return items;
   }, []);

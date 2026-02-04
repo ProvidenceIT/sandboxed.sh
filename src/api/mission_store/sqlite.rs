@@ -1327,6 +1327,14 @@ impl MissionStore for SqliteMissionStore {
                 message.clone(),
                 serde_json::json!({ "resumable": resumable }),
             ),
+            AgentEvent::TextDelta { content, .. } => (
+                "text_delta",
+                Some("text_delta_latest".to_string()),
+                None,
+                None,
+                content.clone(),
+                serde_json::json!({}),
+            ),
             AgentEvent::MissionStatusChanged {
                 status, summary, ..
             } => (
@@ -1343,7 +1351,6 @@ impl MissionStore for SqliteMissionStore {
             | AgentEvent::AgentTree { .. }
             | AgentEvent::Progress { .. }
             | AgentEvent::SessionIdUpdate { .. }
-            | AgentEvent::TextDelta { .. }
             | AgentEvent::MissionActivity { .. } => return Ok(()),
         };
 
@@ -1367,9 +1374,18 @@ impl MissionStore for SqliteMissionStore {
                     .unwrap_or(None);
 
                 if let Some(row_id) = existing {
+                    let (content_inline, content_file) = SqliteMissionStore::store_content(
+                        &content_dir,
+                        mission_id,
+                        row_id,
+                        &event_type,
+                        &content,
+                    );
                     conn.execute(
-                        "UPDATE mission_events SET metadata = ?1, timestamp = ?2 WHERE id = ?3",
-                        params![metadata_str, now, row_id],
+                        "UPDATE mission_events
+                         SET metadata = ?1, timestamp = ?2, content = ?3, content_file = ?4
+                         WHERE id = ?5",
+                        params![metadata_str, now, content_inline, content_file, row_id],
                     )
                     .map_err(|e| e.to_string())?;
                     return Ok(());
