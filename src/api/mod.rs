@@ -18,6 +18,7 @@
 pub mod ai_providers;
 pub mod ampcode;
 mod auth;
+pub mod automation_variables;
 pub mod backends;
 pub mod claudecode;
 mod console;

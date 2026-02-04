@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use axum::{
     extract::{Extension, Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::sse::{Event, Sse},
     Json,
 };
@@ -2196,6 +2196,7 @@ fn spawn_control_session(
             Arc::clone(&state.mission_store),
             library.clone(),
             state.cmd_tx.clone(),
+            workspaces.clone(),
         ));
     } else if state.mission_store.is_persistent() {
         tracing::info!("Automation scheduler disabled by config");
@@ -2312,7 +2313,13 @@ async fn automation_scheduler_loop(
     mission_store: Arc<dyn MissionStore>,
     library: SharedLibrary,
     cmd_tx: mpsc::Sender<ControlCommand>,
+    workspaces: workspace::SharedWorkspaceStore,
 ) {
+    use super::automation_variables::{substitute_variables, SubstitutionContext};
+    use super::mission_store::{
+        AutomationExecution, CommandSource, ExecutionStatus, TriggerType,
+    };
+
     // Check every 5 seconds for automations that need to run
     let check_interval = std::time::Duration::from_secs(5);
 
@@ -2335,6 +2342,15 @@ async fn automation_scheduler_loop(
         };
 
         for automation in automations {
+            // Only trigger interval-based automations (webhooks are triggered via HTTP endpoint)
+            let interval_seconds = match &automation.trigger {
+                TriggerType::Interval { seconds } => *seconds,
+                TriggerType::Webhook { .. } => {
+                    // Skip webhook automations - they're triggered via HTTP
+                    continue;
+                }
+            };
+
             let mission = match mission_store.get_mission(automation.mission_id).await {
                 Ok(Some(mission)) => mission,
                 Ok(None) => {
@@ -2362,7 +2378,7 @@ async fn automation_scheduler_loop(
                     Ok(last_time) => {
                         let elapsed = chrono::Utc::now()
                             .signed_duration_since(last_time.with_timezone(&chrono::Utc));
-                        elapsed.num_seconds() >= automation.interval_seconds as i64
+                        elapsed.num_seconds() >= interval_seconds as i64
                     }
                     Err(_) => true, // If we can't parse, trigger anyway
                 }
@@ -2404,62 +2420,222 @@ async fn automation_scheduler_loop(
 
             if is_busy {
                 tracing::debug!(
-                    "Mission {} is busy, skipping automation trigger for command '{}'",
-                    mission.id,
-                    automation.command_name
+                    "Mission {} is busy, skipping automation trigger",
+                    mission.id
                 );
                 continue;
             }
 
-            // Fetch the command content from the library
-            let command_content = if let Some(lib) = library.read().await.as_ref() {
-                match lib.get_command(&automation.command_name).await {
-                    Ok(command) => command.content,
-                    Err(e) => {
-                        tracing::warn!(
-                            "Failed to fetch command '{}' for automation {}: {}",
-                            automation.command_name,
-                            automation.id,
-                            e
-                        );
+            // Get workspace for reading local files
+            let workspace = workspaces.get(mission.workspace_id).await;
+
+            // Fetch the command content based on the command source
+            let command_content = match &automation.command_source {
+                CommandSource::Library { name } => {
+                    if let Some(lib) = library.read().await.as_ref() {
+                        match lib.get_command(name).await {
+                            Ok(command) => command.content,
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to fetch command '{}' for automation {}: {}",
+                                    name,
+                                    automation.id,
+                                    e
+                                );
+                                continue;
+                            }
+                        }
+                    } else {
+                        tracing::debug!("Library not initialized, skipping automation trigger");
                         continue;
                     }
                 }
-            } else {
-                tracing::debug!("Library not initialized, skipping automation trigger");
-                continue;
+                CommandSource::LocalFile { path } => {
+                    // Read file from mission workspace
+                    let file_path = if let Some(ws) = workspace.as_ref() {
+                        ws.path.join(path)
+                    } else {
+                        tracing::warn!(
+                            "Workspace {} not found for automation {}",
+                            mission.workspace_id,
+                            automation.id
+                        );
+                        continue;
+                    };
+
+                    match tokio::fs::read_to_string(&file_path).await {
+                        Ok(content) => content,
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to read file '{}' for automation {}: {}",
+                                file_path.display(),
+                                automation.id,
+                                e
+                            );
+                            continue;
+                        }
+                    }
+                }
+                CommandSource::Inline { content } => content.clone(),
+            };
+
+            // Build substitution context for variable replacement
+            let mut context = SubstitutionContext::new(mission.id);
+            if let Some(ref title) = mission.title {
+                context = context.with_mission_name(title.clone());
+            }
+            if let Some(ws) = workspace.as_ref() {
+                context = context.with_working_directory(ws.path.to_string_lossy().to_string());
+            }
+            context = context.with_custom_variables(automation.variables.clone());
+
+            // Apply variable substitution
+            let substituted_content = substitute_variables(&command_content, &context);
+
+            // Create execution record before execution
+            let execution_id = Uuid::new_v4();
+            let execution = AutomationExecution {
+                id: execution_id,
+                automation_id: automation.id,
+                mission_id: mission.id,
+                triggered_at: mission_store::now_string(),
+                trigger_source: "interval".to_string(),
+                status: ExecutionStatus::Pending,
+                webhook_payload: None,
+                variables_used: automation.variables.clone(),
+                completed_at: None,
+                error: None,
+                retry_count: 0,
+            };
+
+            let execution = match mission_store.create_automation_execution(execution).await {
+                Ok(exec) => exec,
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to create execution record for automation {}: {}",
+                        automation.id,
+                        e
+                    );
+                    continue;
+                }
             };
 
             tracing::info!(
-                "Triggering automation {} for mission {}: command '{}'",
+                "Triggering automation {} (execution {}) for mission {}",
                 automation.id,
-                mission.id,
-                automation.command_name
+                execution_id,
+                mission.id
             );
 
-            // Send the message to the mission
-            let message_id = Uuid::new_v4();
-            let (respond_tx, _respond_rx) = tokio::sync::oneshot::channel();
-            if let Err(e) = cmd_tx
-                .send(ControlCommand::UserMessage {
-                    id: message_id,
-                    content: command_content,
-                    agent: None,
-                    target_mission_id: Some(mission.id),
-                    respond: respond_tx,
-                })
-                .await
-            {
-                tracing::warn!("Failed to send automation message: {}", e);
-                continue;
+            // Update execution status to Running
+            let mut exec = execution.clone();
+            exec.status = ExecutionStatus::Running;
+            if let Err(e) = mission_store.update_automation_execution(exec).await {
+                tracing::warn!(
+                    "Failed to update execution status to running for {}: {}",
+                    execution_id,
+                    e
+                );
             }
 
-            // Update last triggered time
-            if let Err(e) = mission_store
-                .update_automation_last_triggered(automation.id)
-                .await
-            {
-                tracing::warn!("Failed to update automation last triggered time: {}", e);
+            // Send the message to the mission with retry logic
+            let mut retry_attempt = 0;
+            let max_retries = automation.retry_config.max_retries;
+            let base_delay = automation.retry_config.retry_delay_seconds;
+            let backoff_multiplier = automation.retry_config.backoff_multiplier;
+
+            loop {
+                let message_id = Uuid::new_v4();
+                let (respond_tx, _respond_rx) = tokio::sync::oneshot::channel();
+
+                let send_result = cmd_tx
+                    .send(ControlCommand::UserMessage {
+                        id: message_id,
+                        content: substituted_content.clone(),
+                        agent: None,
+                        target_mission_id: Some(mission.id),
+                        respond: respond_tx,
+                    })
+                    .await;
+
+                match send_result {
+                    Ok(_) => {
+                        // Success - update execution status
+                        let mut exec = execution.clone();
+                        exec.status = ExecutionStatus::Success;
+                        exec.completed_at = Some(mission_store::now_string());
+                        exec.retry_count = retry_attempt;
+
+                        if let Err(e) = mission_store.update_automation_execution(exec).await {
+                            tracing::warn!(
+                                "Failed to update execution status to success for {}: {}",
+                                execution_id,
+                                e
+                            );
+                        }
+
+                        // Update last triggered time
+                        if let Err(e) = mission_store
+                            .update_automation_last_triggered(automation.id)
+                            .await
+                        {
+                            tracing::warn!(
+                                "Failed to update automation last triggered time: {}",
+                                e
+                            );
+                        }
+
+                        break;
+                    }
+                    Err(e) => {
+                        if retry_attempt < max_retries {
+                            // Calculate exponential backoff delay
+                            let delay_seconds =
+                                base_delay as f64 * backoff_multiplier.powi(retry_attempt as i32);
+
+                            tracing::warn!(
+                                "Failed to send automation message (attempt {}/{}): {}. Retrying in {:.1}s",
+                                retry_attempt + 1,
+                                max_retries + 1,
+                                e,
+                                delay_seconds
+                            );
+
+                            retry_attempt += 1;
+
+                            // Wait before retry
+                            tokio::time::sleep(std::time::Duration::from_secs_f64(delay_seconds))
+                                .await;
+                        } else {
+                            // Max retries exceeded - mark as failed
+                            tracing::error!(
+                                "Failed to send automation message after {} attempts: {}",
+                                max_retries + 1,
+                                e
+                            );
+
+                            let mut exec = execution.clone();
+                            exec.status = ExecutionStatus::Failed;
+                            exec.completed_at = Some(mission_store::now_string());
+                            exec.error = Some(format!(
+                                "Failed after {} retries: {}",
+                                max_retries + 1,
+                                e
+                            ));
+                            exec.retry_count = retry_attempt;
+
+                            if let Err(e) = mission_store.update_automation_execution(exec).await {
+                                tracing::warn!(
+                                    "Failed to update execution status to failed for {}: {}",
+                                    execution_id,
+                                    e
+                                );
+                            }
+
+                            break;
+                        }
+                    }
+                }
             }
         }
     }
@@ -4849,12 +5025,20 @@ async fn run_single_control_turn(
 
 #[derive(Debug, Deserialize)]
 pub struct CreateAutomationRequest {
-    pub command_name: String,
-    pub interval_seconds: u64,
+    pub command_source: mission_store::CommandSource,
+    pub trigger: mission_store::TriggerType,
+    #[serde(default)]
+    pub variables: HashMap<String, String>,
+    #[serde(default)]
+    pub retry_config: Option<mission_store::RetryConfig>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateAutomationRequest {
+    pub command_source: Option<mission_store::CommandSource>,
+    pub trigger: Option<mission_store::TriggerType>,
+    pub variables: Option<HashMap<String, String>>,
+    pub retry_config: Option<mission_store::RetryConfig>,
     pub active: Option<bool>,
 }
 
@@ -4900,36 +5084,63 @@ pub async fn create_automation(
 ) -> Result<Json<mission_store::Automation>, (StatusCode, String)> {
     let control = control_for_user(&state, &user).await;
 
-    // Validate the command exists in the library
-    if let Some(lib) = state.library.read().await.as_ref() {
-        match lib.get_command(&req.command_name).await {
-            Ok(_) => {} // Command exists, continue
-            Err(e) => {
-                // Check if it's a "not found" error
-                let error_msg = e.to_string();
-                if error_msg.contains("not found") || error_msg.contains("does not exist") {
-                    return Err((
-                        StatusCode::BAD_REQUEST,
-                        format!("Command '{}' not found in library", req.command_name),
-                    ));
-                } else {
-                    return Err((
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        format!("Failed to validate command: {}", e),
-                    ));
+    // Validate the command exists in the library if CommandSource::Library
+    if let mission_store::CommandSource::Library { ref name } = req.command_source {
+        if let Some(lib) = state.library.read().await.as_ref() {
+            match lib.get_command(name).await {
+                Ok(_) => {} // Command exists, continue
+                Err(e) => {
+                    // Check if it's a "not found" error
+                    let error_msg = e.to_string();
+                    if error_msg.contains("not found") || error_msg.contains("does not exist") {
+                        return Err((
+                            StatusCode::BAD_REQUEST,
+                            format!("Command '{}' not found in library", name),
+                        ));
+                    } else {
+                        return Err((
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("Failed to validate command: {}", e),
+                        ));
+                    }
                 }
             }
+        } else {
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Library not initialized".to_string(),
+            ));
         }
-    } else {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Library not initialized".to_string(),
-        ));
     }
+
+    // Generate webhook_id if trigger type is Webhook
+    let trigger = match req.trigger {
+        mission_store::TriggerType::Webhook { mut config } => {
+            // Generate a unique webhook_id if not provided or empty
+            if config.webhook_id.is_empty() {
+                config.webhook_id = Uuid::new_v4().to_string();
+            }
+            mission_store::TriggerType::Webhook { config }
+        }
+        other => other,
+    };
+
+    // Build the complete Automation struct
+    let automation = mission_store::Automation {
+        id: Uuid::new_v4(),
+        mission_id,
+        command_source: req.command_source,
+        trigger,
+        variables: req.variables,
+        active: true,
+        created_at: mission_store::now_string(),
+        last_triggered_at: None,
+        retry_config: req.retry_config.unwrap_or_default(),
+    };
 
     let automation = control
         .mission_store
-        .create_automation(mission_id, &req.command_name, req.interval_seconds)
+        .create_automation(automation)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
@@ -4957,7 +5168,7 @@ pub async fn get_automation(
     Ok(Json(automation))
 }
 
-/// Update an automation (currently only supports changing active status).
+/// Update an automation.
 pub async fn update_automation(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthUser>,
@@ -4967,7 +5178,7 @@ pub async fn update_automation(
     let control = control_for_user(&state, &user).await;
 
     // Verify automation exists
-    let automation = control
+    let mut automation = control
         .mission_store
         .get_automation(automation_id)
         .await
@@ -4977,27 +5188,75 @@ pub async fn update_automation(
             format!("Automation {} not found", automation_id),
         ))?;
 
-    // Update active status if provided
-    if let Some(active) = req.active {
-        control
-            .mission_store
-            .update_automation_active(automation_id, active)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    // Validate the command exists in the library if CommandSource::Library is being updated
+    if let Some(ref command_source) = req.command_source {
+        if let mission_store::CommandSource::Library { ref name } = command_source {
+            if let Some(lib) = state.library.read().await.as_ref() {
+                match lib.get_command(name).await {
+                    Ok(_) => {} // Command exists, continue
+                    Err(e) => {
+                        // Check if it's a "not found" error
+                        let error_msg = e.to_string();
+                        if error_msg.contains("not found") || error_msg.contains("does not exist") {
+                            return Err((
+                                StatusCode::BAD_REQUEST,
+                                format!("Command '{}' not found in library", name),
+                            ));
+                        } else {
+                            return Err((
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                format!("Failed to validate command: {}", e),
+                            ));
+                        }
+                    }
+                }
+            } else {
+                return Err((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Library not initialized".to_string(),
+                ));
+            }
+        }
     }
 
-    // Return updated automation
-    let updated = control
-        .mission_store
-        .get_automation(automation_id)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
-        .ok_or((
-            StatusCode::NOT_FOUND,
-            format!("Automation {} not found", automation_id),
-        ))?;
+    // Update fields if provided
+    if let Some(command_source) = req.command_source {
+        automation.command_source = command_source;
+    }
 
-    Ok(Json(updated))
+    if let Some(trigger) = req.trigger {
+        // Generate webhook_id if trigger type is Webhook and webhook_id is empty
+        automation.trigger = match trigger {
+            mission_store::TriggerType::Webhook { mut config } => {
+                if config.webhook_id.is_empty() {
+                    config.webhook_id = Uuid::new_v4().to_string();
+                }
+                mission_store::TriggerType::Webhook { config }
+            }
+            other => other,
+        };
+    }
+
+    if let Some(variables) = req.variables {
+        automation.variables = variables;
+    }
+
+    if let Some(retry_config) = req.retry_config {
+        automation.retry_config = retry_config;
+    }
+
+    if let Some(active) = req.active {
+        automation.active = active;
+    }
+
+    // Update automation in the store
+    control
+        .mission_store
+        .update_automation(automation.clone())
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(Json(automation))
 }
 
 /// Delete an automation.
@@ -5021,5 +5280,319 @@ pub async fn delete_automation(
             StatusCode::NOT_FOUND,
             format!("Automation {} not found", automation_id),
         ))
+    }
+}
+
+/// Get execution history for an automation.
+pub async fn get_automation_executions(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+    Path(automation_id): Path<Uuid>,
+) -> Result<Json<Vec<mission_store::AutomationExecution>>, (StatusCode, String)> {
+    let control = control_for_user(&state, &user).await;
+
+    // Verify automation exists
+    let _automation = control
+        .mission_store
+        .get_automation(automation_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            format!("Automation {} not found", automation_id),
+        ))?;
+
+    let executions = control
+        .mission_store
+        .get_automation_executions(automation_id, Some(100))
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(Json(executions))
+}
+
+/// Get all automation executions for a mission.
+pub async fn get_mission_automation_executions(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+    Path(mission_id): Path<Uuid>,
+) -> Result<Json<Vec<mission_store::AutomationExecution>>, (StatusCode, String)> {
+    let control = control_for_user(&state, &user).await;
+
+    let executions = control
+        .mission_store
+        .get_mission_automation_executions(mission_id, Some(100))
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    Ok(Json(executions))
+}
+
+/// Webhook receiver endpoint for triggering automations.
+/// Accepts POST requests with JSON body and validates webhook secret if configured.
+pub async fn webhook_receiver(
+    State(state): State<Arc<AppState>>,
+    Path((mission_id, webhook_id)): Path<(Uuid, String)>,
+    headers: HeaderMap,
+    Json(payload): Json<serde_json::Value>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    use super::automation_variables::{apply_webhook_mappings, substitute_variables, SubstitutionContext};
+    use super::mission_store::{AutomationExecution, CommandSource, ExecutionStatus, TriggerType};
+    use sha2::{Digest, Sha256};
+
+    // Access control directly (no auth required for webhooks)
+    let control = state.control.lock().await;
+
+    // Find automation by webhook_id
+    let automation = control
+        .mission_store
+        .get_automation_by_webhook_id(&webhook_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            format!("Webhook {} not found", webhook_id),
+        ))?;
+
+    // Verify mission_id matches
+    if automation.mission_id != mission_id {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "Webhook {} does not belong to mission {}",
+                webhook_id, mission_id
+            ),
+        ));
+    }
+
+    // Check if automation is active
+    if !automation.active {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("Automation {} is not active", automation.id),
+        ));
+    }
+
+    // Extract webhook config
+    let webhook_config = match &automation.trigger {
+        TriggerType::Webhook { config } => config,
+        _ => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Automation is not configured for webhook trigger".to_string(),
+            ));
+        }
+    };
+
+    // Validate webhook secret if configured (HMAC-SHA256)
+    if let Some(ref secret) = webhook_config.secret {
+        // Check for signature in headers (support both GitHub and generic formats)
+        let signature_header = headers
+            .get("x-hub-signature-256")
+            .or_else(|| headers.get("x-webhook-signature"))
+            .and_then(|v| v.to_str().ok());
+
+        if let Some(signature) = signature_header {
+            // Compute expected signature
+            let payload_bytes = serde_json::to_vec(&payload)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to serialize payload: {}", e)))?;
+
+            let mut mac = Sha256::new();
+            mac.update(secret.as_bytes());
+            mac.update(&payload_bytes);
+            let expected_hash = mac.finalize();
+            let expected_signature = format!("sha256={}", hex::encode(expected_hash));
+
+            // Compare signatures (constant-time comparison would be better in production)
+            if signature != expected_signature {
+                return Err((
+                    StatusCode::UNAUTHORIZED,
+                    "Invalid webhook signature".to_string(),
+                ));
+            }
+        } else {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                "Missing webhook signature".to_string(),
+            ));
+        }
+    }
+
+    // Get mission
+    let mission = control
+        .mission_store
+        .get_mission(mission_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            format!("Mission {} not found", mission_id),
+        ))?;
+
+    // Get workspace for reading local files
+    let workspace = state.workspaces.get(mission.workspace_id).await;
+
+    // Fetch the command content based on the command source
+    let command_content = match &automation.command_source {
+        CommandSource::Library { name } => {
+            if let Some(lib) = state.library.read().await.as_ref() {
+                match lib.get_command(name).await {
+                    Ok(command) => command.content,
+                    Err(e) => {
+                        return Err((
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("Failed to fetch command '{}': {}", name, e),
+                        ));
+                    }
+                }
+            } else {
+                return Err((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Library not initialized".to_string(),
+                ));
+            }
+        }
+        CommandSource::LocalFile { path } => {
+            // Read file from mission workspace
+            let file_path = if let Some(ws) = workspace.as_ref() {
+                ws.path.join(path)
+            } else {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Workspace {} not found", mission.workspace_id),
+                ));
+            };
+
+            match tokio::fs::read_to_string(&file_path).await {
+                Ok(content) => content,
+                Err(e) => {
+                    return Err((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("Failed to read file '{}': {}", file_path.display(), e),
+                    ));
+                }
+            }
+        }
+        CommandSource::Inline { content } => content.clone(),
+    };
+
+    // Apply webhook variable mappings
+    let webhook_vars = apply_webhook_mappings(&payload, &webhook_config.variable_mappings);
+
+    // Build substitution context for variable replacement
+    let mut context = SubstitutionContext::new(mission.id);
+    if let Some(ref title) = mission.title {
+        context = context.with_mission_name(title.clone());
+    }
+    if let Some(ws) = workspace.as_ref() {
+        context = context.with_working_directory(ws.path.to_string_lossy().to_string());
+    }
+    context = context.with_webhook_payload(payload.clone());
+
+    // Merge automation variables with webhook variables (webhook vars take precedence)
+    let mut merged_vars = automation.variables.clone();
+    merged_vars.extend(webhook_vars.clone());
+    context = context.with_custom_variables(merged_vars.clone());
+
+    // Apply variable substitution
+    let substituted_content = substitute_variables(&command_content, &context);
+
+    // Create execution record
+    let execution_id = Uuid::new_v4();
+    let execution = AutomationExecution {
+        id: execution_id,
+        automation_id: automation.id,
+        mission_id: mission.id,
+        triggered_at: mission_store::now_string(),
+        trigger_source: "webhook".to_string(),
+        status: ExecutionStatus::Pending,
+        webhook_payload: Some(payload),
+        variables_used: merged_vars,
+        completed_at: None,
+        error: None,
+        retry_count: 0,
+    };
+
+    let mut execution = match control.mission_store.create_automation_execution(execution).await {
+        Ok(exec) => exec,
+        Err(e) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to create execution record: {}", e),
+            ));
+        }
+    };
+
+    tracing::info!(
+        "Webhook {} triggered automation {} (execution {}) for mission {}",
+        webhook_id,
+        automation.id,
+        execution_id,
+        mission.id
+    );
+
+    // Update execution status to Running
+    execution.status = ExecutionStatus::Running;
+    if let Err(e) = control.mission_store.update_automation_execution(execution.clone()).await {
+        tracing::warn!(
+            "Failed to update execution status to running for {}: {}",
+            execution_id,
+            e
+        );
+    }
+
+    // Send the message to the mission
+    let message_id = Uuid::new_v4();
+    let (respond_tx, _respond_rx) = tokio::sync::oneshot::channel();
+
+    let cmd_tx = control.cmd_tx.clone();
+    let mission_store = control.mission_store.clone();
+    drop(control); // Release the lock before sending
+
+    let send_result = cmd_tx
+        .send(ControlCommand::UserMessage {
+            id: message_id,
+            content: substituted_content,
+            agent: None,
+            target_mission_id: Some(mission.id),
+            respond: respond_tx,
+        })
+        .await;
+
+    match send_result {
+        Ok(_) => {
+            // Success - update execution status
+            execution.status = ExecutionStatus::Success;
+            execution.completed_at = Some(mission_store::now_string());
+
+            if let Err(e) = mission_store.update_automation_execution(execution).await {
+                tracing::warn!(
+                    "Failed to update execution status to success for {}: {}",
+                    execution_id,
+                    e
+                );
+            }
+
+            Ok(StatusCode::OK)
+        }
+        Err(e) => {
+            // Failed - update execution status
+            execution.status = ExecutionStatus::Failed;
+            execution.completed_at = Some(mission_store::now_string());
+            execution.error = Some(format!("Failed to send message: {}", e));
+
+            if let Err(e) = mission_store.update_automation_execution(execution).await {
+                tracing::warn!(
+                    "Failed to update execution status to failed for {}: {}",
+                    execution_id,
+                    e
+                );
+            }
+
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to trigger automation: {}", e),
+            ))
+        }
     }
 }

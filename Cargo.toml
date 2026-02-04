@@ -85,6 +85,10 @@ path = "src/bin/desktop_mcp.rs"
 name = "workspace-mcp"
 path = "src/bin/workspace_mcp.rs"
 
+[[bin]]
+name = "automation-manager-mcp"
+path = "src/bin/automation_manager_mcp.rs"
+
 [dev-dependencies]
 tokio-test = "0.4"
 tempfile = "3"

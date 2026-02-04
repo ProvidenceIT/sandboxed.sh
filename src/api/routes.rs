@@ -366,6 +366,11 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     let public_routes = Router::new()
         .route("/api/health", get(health))
         .route("/api/auth/login", post(auth::login))
+        // Webhook receiver endpoint (no auth required - uses webhook secret validation)
+        .route(
+            "/api/webhooks/:mission_id/:webhook_id",
+            post(control::webhook_receiver),
+        )
         // WebSocket console uses subprotocol-based auth (browser can't set Authorization header)
         .route("/api/console/ws", get(console::console_ws))
         // WebSocket workspace shell uses subprotocol-based auth
@@ -483,6 +488,14 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         .route(
             "/api/control/automations/:id",
             axum::routing::delete(control::delete_automation),
+        )
+        .route(
+            "/api/control/automations/:id/executions",
+            get(control::get_automation_executions),
+        )
+        .route(
+            "/api/control/missions/:id/automation-executions",
+            get(control::get_mission_automation_executions),
         )
         // Parallel execution endpoints
         .route("/api/control/running", get(control::list_running_missions))
