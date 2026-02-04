@@ -325,6 +325,7 @@ export default function SettingsPage() {
 
   const loadHostFile = useCallback(async () => {
     if (!hostHandler) {
+      currentHostRequestRef.current += 1;
       setHostFileJson(null);
       setHostError(null);
       setHostLoading(false);

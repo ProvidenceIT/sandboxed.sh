@@ -79,6 +79,51 @@ fn strip_jsonc_comments(input: &str) -> String {
     out
 }
 
+fn strip_trailing_commas(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    let mut in_string = false;
+    let mut escape = false;
+
+    while let Some(c) = chars.next() {
+        if in_string {
+            out.push(c);
+            if escape {
+                escape = false;
+            } else if c == '\\' {
+                escape = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        if c == '"' {
+            in_string = true;
+            out.push(c);
+            continue;
+        }
+
+        if c == ',' {
+            let mut lookahead = chars.clone();
+            while let Some(next) = lookahead.peek() {
+                if next.is_whitespace() {
+                    lookahead.next();
+                } else {
+                    break;
+                }
+            }
+            if matches!(lookahead.peek(), Some('}') | Some(']')) {
+                continue;
+            }
+        }
+
+        out.push(c);
+    }
+
+    out
+}
+
 /// GET /api/amp/config - Read Amp host settings.
 pub async fn get_amp_config() -> Result<Json<Value>, (StatusCode, String)> {
     let config_path = resolve_amp_config_path();
@@ -97,7 +142,8 @@ pub async fn get_amp_config() -> Result<Json<Value>, (StatusCode, String)> {
     let config: Value = serde_json::from_str(&contents)
         .or_else(|_| {
             let stripped = strip_jsonc_comments(&contents);
-            serde_json::from_str(&stripped)
+            let cleaned = strip_trailing_commas(&stripped);
+            serde_json::from_str(&cleaned)
         })
         .map_err(|e| {
             (

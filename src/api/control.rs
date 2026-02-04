@@ -183,6 +183,23 @@ fn build_history_context(history: &[(String, String)], max_chars: usize) -> Stri
     result
 }
 
+async fn mission_has_active_automation(
+    mission_store: &Arc<dyn MissionStore>,
+    mission_id: Uuid,
+) -> bool {
+    match mission_store.get_mission_automations(mission_id).await {
+        Ok(automations) => automations.iter().any(|automation| automation.active),
+        Err(err) => {
+            tracing::warn!(
+                "Failed to load automations for mission {}: {}",
+                mission_id,
+                err
+            );
+            false
+        }
+    }
+}
+
 pub(crate) async fn resolve_claudecode_default_model(
     library: &SharedLibrary,
     config_profile: Option<&str>,
@@ -3966,6 +3983,15 @@ async fn control_actor_loop(
                                     crate::tools::mission::MissionStatusValue::NotFeasible => MissionStatus::NotFeasible,
                                 };
                                 let success = matches!(status, crate::tools::mission::MissionStatusValue::Completed);
+                                if new_status == MissionStatus::Completed
+                                    && mission_has_active_automation(&mission_store, id).await
+                                {
+                                    tracing::info!(
+                                        "Skipping completion for mission {} because active automations are enabled",
+                                        id
+                                    );
+                                    continue;
+                                }
                                 // Save the final tree before updating status
                                 if let Some(tree) = current_tree.read().await.clone() {
                                     if let Err(e) = mission_store.update_mission_tree(id, &tree).await {
@@ -4132,34 +4158,43 @@ async fn control_actor_loop(
                                                     TerminalReason::InfiniteLoop => "infinite_loop",
                                                     TerminalReason::MaxIterations => "max_iterations",
                                                 });
-                                                tracing::info!(
-                                                    "Auto-completing mission {} with status '{:?}' (terminal_reason: {:?})",
-                                                    mission_id, new_status, agent_result.terminal_reason
-                                                );
-                                                if let Err(e) = mission_store
-                                                    .update_mission_status_with_reason(mission_id, new_status, terminal_reason_str)
-                                                    .await
+                                                if new_status == MissionStatus::Completed
+                                                    && mission_has_active_automation(&mission_store, mission_id).await
                                                 {
-                                                    tracing::warn!("Failed to auto-complete mission: {}", e);
+                                                    tracing::info!(
+                                                        "Skipping auto-complete for mission {} because active automations are enabled",
+                                                        mission_id
+                                                    );
                                                 } else {
-                                                    // Send status change event - the actual completion content
-                                                    // is already in the assistant_message event, so we just provide
-                                                    // a clean summary based on how the mission ended
-                                                    let summary = match agent_result.terminal_reason {
-                                                        Some(TerminalReason::Completed) => None, // Normal completion, no extra explanation needed
-                                                        Some(TerminalReason::MaxIterations) => Some("Reached iteration limit".to_string()),
-                                                        Some(TerminalReason::Cancelled) => Some("Cancelled by user".to_string()),
-                                                        Some(TerminalReason::Stalled) => Some("No progress detected".to_string()),
-                                                        Some(TerminalReason::InfiniteLoop) => Some("Detected repetitive behavior".to_string()),
-                                                        Some(TerminalReason::LlmError) => Some("Model error".to_string()),
-                                                        None if agent_result.success => None,
-                                                        None => Some("Unexpected termination".to_string()),
-                                                    };
-                                                    let _ = events_tx.send(AgentEvent::MissionStatusChanged {
-                                                        mission_id,
-                                                        status: new_status,
-                                                        summary,
-                                                    });
+                                                    tracing::info!(
+                                                        "Auto-completing mission {} with status '{:?}' (terminal_reason: {:?})",
+                                                        mission_id, new_status, agent_result.terminal_reason
+                                                    );
+                                                    if let Err(e) = mission_store
+                                                        .update_mission_status_with_reason(mission_id, new_status, terminal_reason_str)
+                                                        .await
+                                                    {
+                                                        tracing::warn!("Failed to auto-complete mission: {}", e);
+                                                    } else {
+                                                        // Send status change event - the actual completion content
+                                                        // is already in the assistant_message event, so we just provide
+                                                        // a clean summary based on how the mission ended
+                                                        let summary = match agent_result.terminal_reason {
+                                                            Some(TerminalReason::Completed) => None, // Normal completion, no extra explanation needed
+                                                            Some(TerminalReason::MaxIterations) => Some("Reached iteration limit".to_string()),
+                                                            Some(TerminalReason::Cancelled) => Some("Cancelled by user".to_string()),
+                                                            Some(TerminalReason::Stalled) => Some("No progress detected".to_string()),
+                                                            Some(TerminalReason::InfiniteLoop) => Some("Detected repetitive behavior".to_string()),
+                                                            Some(TerminalReason::LlmError) => Some("Model error".to_string()),
+                                                            None if agent_result.success => None,
+                                                            None => Some("Unexpected termination".to_string()),
+                                                        };
+                                                        let _ = events_tx.send(AgentEvent::MissionStatusChanged {
+                                                            mission_id,
+                                                            status: new_status,
+                                                            summary,
+                                                        });
+                                                    }
                                                 }
                                             } else {
                                                 tracing::debug!(
@@ -4384,7 +4419,14 @@ async fn control_actor_loop(
                                         } else {
                                             MissionStatus::Failed
                                         };
-                                        if let Err(e) = mission_store
+                                        if new_status == MissionStatus::Completed
+                                            && mission_has_active_automation(&mission_store, *mission_id).await
+                                        {
+                                            tracing::info!(
+                                                "Skipping parallel completion for mission {} because active automations are enabled",
+                                                mission_id
+                                            );
+                                        } else if let Err(e) = mission_store
                                             .update_mission_status(*mission_id, new_status)
                                             .await
                                         {

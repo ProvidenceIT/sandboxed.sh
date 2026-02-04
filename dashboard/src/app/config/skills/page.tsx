@@ -144,23 +144,31 @@ function parseFrontmatter(content: string): { frontmatter: Frontmatter; body: st
 }
 
 function validateFrontmatterBlock(content: string): string | null {
-  if (!content.startsWith('---')) {
+  const lines = content.split(/\r?\n/);
+  if (lines[0]?.trim() !== '---') {
     return null;
   }
 
-  const endIndex = content.indexOf('\n---', 3);
-  if (endIndex === -1) {
+  let endLineIndex = -1;
+  for (let i = 1; i < lines.length; i += 1) {
+    const rawLine = lines[i];
+    if (rawLine.trim() === '---' && rawLine.trimStart() === rawLine) {
+      endLineIndex = i;
+      break;
+    }
+  }
+
+  if (endLineIndex === -1) {
     return 'Frontmatter is missing a closing "---"';
   }
 
-  const yamlStr = content.substring(4, endIndex);
-  const lines = yamlStr.split('\n');
+  const yamlLines = lines.slice(1, endLineIndex);
   let expectingListItem = false;
   let inMultilineBlock = false;
   let multilineIndent = 0;
 
-  for (let i = 0; i < lines.length; i += 1) {
-    const rawLine = lines[i];
+  for (let i = 0; i < yamlLines.length; i += 1) {
+    const rawLine = yamlLines[i];
     const line = rawLine.trim();
     const leadingWhitespace = rawLine.length - rawLine.trimStart().length;
 

@@ -2017,13 +2017,58 @@ export default function ControlClient() {
   // Thinking panel state
   const [showThinkingPanel, setShowThinkingPanel] = useState(false);
 
+  const adjustVisibleItemsLimit = useCallback((historyItems: ChatItem[]) => {
+    let lastAssistantIdx = -1;
+    for (let i = historyItems.length - 1; i >= 0; i--) {
+      if (historyItems[i].kind === "assistant") {
+        lastAssistantIdx = i;
+        break;
+      }
+    }
+
+    if (lastAssistantIdx === -1) {
+      setVisibleItemsLimit(INITIAL_VISIBLE_ITEMS);
+      return;
+    }
+
+    const required = historyItems.length - lastAssistantIdx;
+    if (required <= INITIAL_VISIBLE_ITEMS) {
+      setVisibleItemsLimit(INITIAL_VISIBLE_ITEMS);
+      return;
+    }
+
+    setVisibleItemsLimit(required);
+  }, []);
+
+  const HISTORY_EVENT_TYPES = useMemo(
+    () => ["user_message", "assistant_message", "tool_call", "tool_result"],
+    []
+  );
+  const loadHistoryEvents = useCallback(
+    (id: string) => getMissionEvents(id, { types: HISTORY_EVENT_TYPES }),
+    [HISTORY_EVENT_TYPES]
+  );
+
   // Tool groups expansion state - tracks which groups are expanded by their first tool's id
   const [expandedToolGroups, setExpandedToolGroups] = useState<Set<string>>(new Set());
 
+  const dedupedItems = useMemo(() => {
+    if (items.length <= 1) return items;
+    const seen = new Set<string>();
+    const out: ChatItem[] = [];
+    for (let i = items.length - 1; i >= 0; i--) {
+      const item = items[i];
+      if (seen.has(item.id)) continue;
+      seen.add(item.id);
+      out.push(item);
+    }
+    return out.reverse();
+  }, [items]);
+
   // Extract thinking items for the side panel
   const thinkingItems = useMemo(() =>
-    items.filter((it): it is Extract<ChatItem, { kind: "thinking" }> => it.kind === "thinking"),
-    [items]
+    dedupedItems.filter((it): it is Extract<ChatItem, { kind: "thinking" }> => it.kind === "thinking"),
+    [dedupedItems]
   );
 
   // Deduplicated count for display (same logic as ThinkingPanel)
@@ -2102,7 +2147,7 @@ export default function ControlClient() {
       currentThinkingGroup = [];
     };
 
-    for (const item of items) {
+    for (const item of dedupedItems) {
       if (item.kind === "tool" && !item.isUiTool) {
         // Non-UI tool - flush thinking first, then add to tool group
         flushThinkingGroup();
@@ -2129,7 +2174,7 @@ export default function ControlClient() {
     flushThinkingGroup();
 
     return result;
-  }, [items, showThinkingPanel]);
+  }, [dedupedItems, showThinkingPanel]);
 
   const runningMissionById = useMemo(() => {
     return new Map(runningMissions.map((m) => [m.mission_id, m]));
@@ -2181,6 +2226,22 @@ export default function ControlClient() {
     if (!viewingMissionId) return null;
     return progressByMission[viewingMissionId] ?? null;
   }, [progressByMission, viewingMissionId]);
+
+  useEffect(() => {
+    if (items.length === 0) return;
+    let lastAssistantIdx = -1;
+    for (let i = items.length - 1; i >= 0; i--) {
+      if (items[i].kind === "assistant") {
+        lastAssistantIdx = i;
+        break;
+      }
+    }
+    if (lastAssistantIdx === -1) return;
+    const visibleStart = Math.max(0, items.length - visibleItemsLimit);
+    if (lastAssistantIdx < visibleStart) {
+      setVisibleItemsLimit(items.length - lastAssistantIdx);
+    }
+  }, [items, visibleItemsLimit]);
 
   // Check if the mission we're viewing appears stalled (no activity for 60+ seconds)
   const viewingMissionStallSeconds = useMemo(() => {
@@ -2877,7 +2938,7 @@ export default function ControlClient() {
         // Load mission, events, and queue in parallel for faster load
         const [mission, events, queuedMessages] = await Promise.all([
           loadMission(id),
-          getMissionEvents(id).catch(() => null), // Don't fail if events unavailable
+          loadHistoryEvents(id).catch(() => null), // Don't fail if events unavailable
           getQueue().catch(() => []), // Don't fail if queue unavailable
         ]);
         if (cancelled || fetchingMissionIdRef.current !== id) return;
@@ -2897,6 +2958,14 @@ export default function ControlClient() {
         setViewingMission(mission);
         // Use events if available, otherwise fall back to basic history
         let historyItems = events ? eventsToItems(events) : missionHistoryToItems(mission);
+        if (events && !historyItems.some((item) => item.kind === "assistant")) {
+          const historyHasAssistant = mission.history.some(
+            (entry) => entry.role === "assistant"
+          );
+          if (historyHasAssistant) {
+            historyItems = missionHistoryToItems(mission);
+          }
+        }
         // Merge queued messages that belong to this mission
         const missionQueuedMessages = queuedMessages.filter((qm) => qm.mission_id === id);
         if (missionQueuedMessages.length > 0) {
@@ -2913,6 +2982,7 @@ export default function ControlClient() {
           historyItems = [...historyItems, ...newQueuedItems];
         }
         setItems(historyItems);
+        adjustVisibleItemsLimit(historyItems);
         applyDesktopSessionState(mission);
         // Also check events for desktop sessions (in case mission.desktop_sessions isn't populated yet)
         if (events) {
@@ -2955,14 +3025,26 @@ export default function ControlClient() {
           setCurrentMission(mission);
           setViewingMission(mission);
           // Show basic history immediately, then load full events
-          setItems(missionHistoryToItems(mission));
+          {
+            const basicItems = missionHistoryToItems(mission);
+            setItems(basicItems);
+            adjustVisibleItemsLimit(basicItems);
+          }
           applyDesktopSessionState(mission);
           router.replace(`/control?mission=${mission.id}`, { scroll: false });
           // Load full events and queue in background (including tool calls)
-          Promise.all([getMissionEvents(mission.id), getQueue().catch(() => [])])
+          Promise.all([loadHistoryEvents(mission.id), getQueue().catch(() => [])])
             .then(([events, queuedMessages]) => {
               if (cancelled) return;
               let historyItems = eventsToItems(events);
+              if (!historyItems.some((item) => item.kind === "assistant")) {
+                const historyHasAssistant = mission.history.some(
+                  (entry) => entry.role === "assistant"
+                );
+                if (historyHasAssistant) {
+                  historyItems = missionHistoryToItems(mission);
+                }
+              }
               // Merge queued messages that belong to this mission
               const missionQueuedMessages = queuedMessages.filter((qm) => qm.mission_id === mission.id);
               if (missionQueuedMessages.length > 0) {
@@ -2979,6 +3061,7 @@ export default function ControlClient() {
                 historyItems = [...historyItems, ...newQueuedItems];
               }
               setItems(historyItems);
+              adjustVisibleItemsLimit(historyItems);
               // Also check events for desktop sessions
               applyDesktopSessionFromEvents(events);
             })
@@ -3009,6 +3092,8 @@ export default function ControlClient() {
     searchParams,
     router,
     missionHistoryToItems,
+    adjustVisibleItemsLimit,
+    loadHistoryEvents,
     applyDesktopSessionState,
     applyDesktopSessionFromEvents,
     authRetryTrigger,
@@ -3326,7 +3411,7 @@ export default function ControlClient() {
         // Load mission, events, and queue in parallel for faster load
         const [mission, events, queuedMessages] = await Promise.all([
           getMission(missionId),
-          getMissionEvents(missionId).catch(() => null), // Don't fail if events unavailable
+          loadHistoryEvents(missionId).catch(() => null), // Don't fail if events unavailable
           getQueue().catch(() => []), // Don't fail if queue unavailable
         ]);
 
@@ -3337,6 +3422,14 @@ export default function ControlClient() {
 
         // Use events if available, otherwise fall back to basic history
         let historyItems = events ? eventsToItems(events) : missionHistoryToItems(mission);
+        if (events && !historyItems.some((item) => item.kind === "assistant")) {
+          const historyHasAssistant = mission.history.some(
+            (entry) => entry.role === "assistant"
+          );
+          if (historyHasAssistant) {
+            historyItems = missionHistoryToItems(mission);
+          }
+        }
 
         // Merge queued messages that belong to this mission
         const missionQueuedMessages = queuedMessages.filter((qm) => qm.mission_id === missionId);
@@ -3356,6 +3449,7 @@ export default function ControlClient() {
         }
 
         setItems(historyItems);
+        adjustVisibleItemsLimit(historyItems);
         // Check if mission has an active desktop session (stored metadata or fallback to history)
         applyDesktopSessionState(mission);
         // Also check events for desktop sessions
@@ -3401,7 +3495,15 @@ export default function ControlClient() {
         }
       }
     },
-    [missionItems, missionHistoryToItems, eventsToItems, applyDesktopSessionState, router]
+    [
+      missionItems,
+      missionHistoryToItems,
+      eventsToItems,
+      applyDesktopSessionState,
+      adjustVisibleItemsLimit,
+      loadHistoryEvents,
+      router,
+    ]
   );
 
   // Sync viewingMissionId with currentMission only when there's no explicit viewing mission set
@@ -3498,6 +3600,7 @@ export default function ControlClient() {
       // Show basic history immediately
       const basicItems = missionHistoryToItems(resumed);
       setItems(basicItems);
+      adjustVisibleItemsLimit(basicItems);
       updateMissionItems(resumed.id, basicItems);
       refreshRecentMissions();
       toast.success(
@@ -3508,10 +3611,19 @@ export default function ControlClient() {
             : "Mission resumed"
       );
       // Load full events in background (including tool calls)
-      getMissionEvents(resumed.id)
+      loadHistoryEvents(resumed.id)
         .then((events) => {
-          const fullItems = eventsToItems(events);
+          let fullItems = eventsToItems(events);
+          if (!fullItems.some((item) => item.kind === "assistant")) {
+            const historyHasAssistant = resumed.history.some(
+              (entry) => entry.role === "assistant"
+            );
+            if (historyHasAssistant) {
+              fullItems = missionHistoryToItems(resumed);
+            }
+          }
           setItems(fullItems);
+          adjustVisibleItemsLimit(fullItems);
           updateMissionItems(resumed.id, fullItems);
           // Also check events for desktop sessions
           applyDesktopSessionFromEvents(events);
@@ -3625,10 +3737,18 @@ export default function ControlClient() {
 
         // If we just reconnected, refresh the viewed mission's history to catch missed events
         if (wasReconnecting && viewingId) {
-          Promise.all([getMission(viewingId), getMissionEvents(viewingId), getQueue().catch(() => [])])
+          Promise.all([getMission(viewingId), loadHistoryEvents(viewingId), getQueue().catch(() => [])])
             .then(([mission, events, queuedMessages]) => {
               if (!mounted) return;
               let historyItems = eventsToItems(events);
+              if (!historyItems.some((item) => item.kind === "assistant")) {
+                const historyHasAssistant = mission.history.some(
+                  (entry) => entry.role === "assistant"
+                );
+                if (historyHasAssistant) {
+                  historyItems = missionHistoryToItems(mission);
+                }
+              }
               // Merge queued messages that belong to this mission
               const missionQueuedMessages = queuedMessages.filter((qm) => qm.mission_id === viewingId);
               if (missionQueuedMessages.length > 0) {
@@ -3645,6 +3765,7 @@ export default function ControlClient() {
                 historyItems = [...historyItems, ...newQueuedItems];
               }
               setItems(historyItems);
+              adjustVisibleItemsLimit(historyItems);
               updateMissionItems(viewingId, historyItems);
               // Also check events for desktop sessions
               applyDesktopSessionFromEvents(events);
@@ -3816,6 +3937,7 @@ export default function ControlClient() {
         // Use strict equality to match eventsToItems behavior:
         // undefined means no explicit status, only false means actual failure
         const isFailure = data["success"] === false;
+        const incomingId = String(data["id"] ?? Date.now());
         setItems((prev) => {
           // Filter out incomplete thinking
           let filtered = prev.filter((it) => it.kind !== "thinking" || it.done);
@@ -3836,11 +3958,33 @@ export default function ControlClient() {
             });
           }
 
+          const existingIdx = filtered.findIndex(
+            (item) => item.kind === "assistant" && item.id === incomingId
+          );
+          if (existingIdx !== -1) {
+            const updated = [...filtered];
+            const existing = updated[existingIdx] as Extract<
+              ChatItem,
+              { kind: "assistant" }
+            >;
+            updated[existingIdx] = {
+              ...existing,
+              content: String(data["content"] ?? existing.content),
+              success: !isFailure,
+              costCents: Number(data["cost_cents"] ?? existing.costCents ?? 0),
+              model: data["model"] ? String(data["model"]) : existing.model ?? null,
+              timestamp: Date.now(),
+              sharedFiles: sharedFiles ?? existing.sharedFiles,
+              resumable,
+            };
+            return updated;
+          }
+
           return [
             ...filtered,
             {
               kind: "assistant",
-              id: String(data["id"] ?? Date.now()),
+              id: incomingId,
               content: String(data["content"] ?? ""),
               success: !isFailure,
               costCents: Number(data["cost_cents"] ?? 0),
@@ -3968,19 +4112,28 @@ export default function ControlClient() {
       if (event.type === "tool_call" && isRecord(data)) {
         const name = String(data["name"] ?? "");
         const isUiTool = name.startsWith("ui_") || name === "question";
+        const toolCallId = String(data["tool_call_id"] ?? "");
 
-        setItems((prev) => [
-          ...prev,
-          {
-            kind: "tool",
-            id: `tool-${String(data["tool_call_id"] ?? Date.now())}`,
-            toolCallId: String(data["tool_call_id"] ?? ""),
-            name,
-            args: data["args"],
-            isUiTool,
-            startTime: Date.now(),
-          },
-        ]);
+        setItems((prev) => {
+          const existingIdx = prev.findIndex(
+            (item) => item.kind === "tool" && item.toolCallId === toolCallId
+          );
+          if (existingIdx !== -1) {
+            return prev;
+          }
+          return [
+            ...prev,
+            {
+              kind: "tool",
+              id: `tool-${toolCallId || Date.now()}`,
+              toolCallId,
+              name,
+              args: data["args"],
+              isUiTool,
+              startTime: Date.now(),
+            },
+          ];
+        });
 
         // Detect desktop_start_session from ToolCall (Claude Code/Amp don't emit ToolResult for MCP tools)
         const isDesktopStart =
