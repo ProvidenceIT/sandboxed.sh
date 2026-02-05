@@ -521,10 +521,16 @@ export default function SettingsPage() {
   let normalizedLibrary: string | null = null;
   if (hostSyncAvailable) {
     try {
-      if (!fileContent.trim()) {
-        normalizedLibrary = normalizeJson({});
+      const parsedLibrary = fileContent.trim() ? parseJsonc(fileContent) : {};
+      if (activeHarness === 'claudecode' && selectedFile?.endsWith('/settings.json')) {
+        if (!parsedLibrary || typeof parsedLibrary !== 'object' || Array.isArray(parsedLibrary)) {
+          throw new Error('Claude Code config must be a JSON object.');
+        }
+        normalizedLibrary = normalizeJson(
+          coerceClaudeCodeConfig(parsedLibrary as Record<string, unknown>)
+        );
       } else {
-        normalizedLibrary = normalizeJson(parseJsonc(fileContent));
+        normalizedLibrary = normalizeJson(parsedLibrary);
       }
     } catch {
       normalizedLibrary = null;
