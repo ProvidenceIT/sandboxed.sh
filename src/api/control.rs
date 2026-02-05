@@ -5464,23 +5464,36 @@ pub async fn webhook_receiver(
         )
     })?;
 
-    // Access control directly (no auth required for webhooks)
-    let webhook_user = AuthUser {
-        id: "webhook".to_string(),
-        username: "webhook".to_string(),
-    };
-    let control = state.control.get_or_spawn(&webhook_user).await;
+    // Search across all user sessions for the webhook automation.
+    // Automations are user-scoped, so we must check every session's mission store.
+    let sessions = state.control.all_sessions().await;
+    let mut found: Option<(mission_store::Automation, ControlState)> = None;
+    for session in &sessions {
+        match session
+            .mission_store
+            .get_automation_by_webhook_id(&webhook_id)
+            .await
+        {
+            Ok(Some(automation)) => {
+                found = Some((automation, session.clone()));
+                break;
+            }
+            Ok(None) => continue,
+            Err(e) => {
+                tracing::warn!(
+                    "Error searching webhook {} in session: {}",
+                    webhook_id,
+                    e
+                );
+                continue;
+            }
+        }
+    }
 
-    // Find automation by webhook_id
-    let automation = control
-        .mission_store
-        .get_automation_by_webhook_id(&webhook_id)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
-        .ok_or((
-            StatusCode::NOT_FOUND,
-            format!("Webhook {} not found", webhook_id),
-        ))?;
+    let (automation, control) = found.ok_or((
+        StatusCode::NOT_FOUND,
+        format!("Webhook {} not found", webhook_id),
+    ))?;
 
     // Verify mission_id matches
     if automation.mission_id != mission_id {
@@ -5613,6 +5626,17 @@ pub async fn webhook_receiver(
     // Apply webhook variable mappings
     let webhook_vars = apply_webhook_mappings(&payload, &webhook_config.variable_mappings);
 
+    // Extract direct "variables" from payload (allows callers to pass {"variables": {"key": "value"}})
+    let direct_vars: HashMap<String, String> = payload
+        .get("variables")
+        .and_then(|v| v.as_object())
+        .map(|obj| {
+            obj.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default();
+
     // Build substitution context for variable replacement
     let mut context = SubstitutionContext::new(mission.id);
     if let Some(ref title) = mission.title {
@@ -5623,9 +5647,10 @@ pub async fn webhook_receiver(
     }
     context = context.with_webhook_payload(payload.clone());
 
-    // Merge automation variables with webhook variables (webhook vars take precedence)
+    // Merge variables: automation defaults < webhook mappings < direct variables (highest priority)
     let mut merged_vars = automation.variables.clone();
     merged_vars.extend(webhook_vars.clone());
+    merged_vars.extend(direct_vars);
     context = context.with_custom_variables(merged_vars.clone());
 
     // Apply variable substitution
