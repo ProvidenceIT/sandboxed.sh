@@ -6586,7 +6586,7 @@ pub async fn run_codex_turn(
         "Starting Codex turn"
     );
 
-    // Write Codex credentials to workspace
+    // Write Codex credentials to workspace config.toml
     if let Err(e) = crate::api::ai_providers::write_codex_credentials_for_workspace(workspace) {
         tracing::error!("Failed to write Codex credentials: {}", e);
         return AgentResult::failure(
@@ -6594,6 +6594,17 @@ pub async fn run_codex_turn(
             0,
         )
         .with_terminal_reason(TerminalReason::LlmError);
+    }
+
+    // Read the OAuth access token from the credential store so we can pass it
+    // as OPENAI_OAUTH_TOKEN env var to the Codex CLI. The config.toml alone is
+    // not sufficient when running inside container workspaces via nspawn/nsenter.
+    let oauth_token = crate::api::ai_providers::read_openai_oauth_access_token();
+    if oauth_token.is_none() {
+        tracing::warn!(
+            mission_id = %mission_id,
+            "No OpenAI OAuth access token found in credential store"
+        );
     }
 
     let workspace_exec = WorkspaceExec::new(workspace.clone());
@@ -6619,6 +6630,7 @@ pub async fn run_codex_turn(
 
     let mut codex_config = crate::backend::codex::client::CodexConfig::default();
     codex_config.cli_path = cli_path;
+    codex_config.oauth_token = oauth_token;
 
     // Create Codex backend
     let backend = CodexBackend::with_config_and_workspace(codex_config, workspace_exec);

@@ -717,6 +717,26 @@ pub type CodexAuth = ClaudeCodeAuth;
 /// Get OpenAI auth from OpenCode auth.json (shared with OpenCode).
 
 /// Write Codex config.toml from explicit OAuth values.
+/// Find the host's existing Codex auth.json file.
+///
+/// The Codex CLI stores its auth in `~/.codex/auth.json`, which contains
+/// fields (id_token, account_id) that are only obtained during the interactive
+/// OAuth login flow. We cannot reconstruct these from the credential store,
+/// so we look for an existing auth.json on the host and copy it verbatim.
+fn find_host_codex_auth_json() -> Option<std::path::PathBuf> {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+    let candidates = [
+        std::path::PathBuf::from(&home).join(".codex").join("auth.json"),
+        std::path::PathBuf::from("/var/lib/opencode/.codex/auth.json"),
+    ];
+    for candidate in &candidates {
+        if candidate.exists() {
+            return Some(candidate.clone());
+        }
+    }
+    None
+}
+
 fn write_codex_config_from_entry(
     config_dir: &std::path::Path,
     access_token: &str,
@@ -728,6 +748,7 @@ fn write_codex_config_from_entry(
         return Err(format!("Failed to create Codex config dir: {}", e));
     }
 
+    // Write config.toml (legacy format)
     let config_path = config_dir.join("config.toml");
     let contents = format!(
         "[auth]\ntype = \"oauth\"\naccess_token = \"{}\"\nrefresh_token = \"{}\"\n",
@@ -740,7 +761,60 @@ fn write_codex_config_from_entry(
         .map_err(|e| format!("Failed to write Codex config.toml: {}", e))?;
 
     tracing::debug!("Wrote Codex config.toml to {}", config_path.display());
+
+    // Write auth.json (the format the Codex CLI actually reads for authentication).
+    // The Codex CLI requires fields like id_token and account_id that are only
+    // obtained during the interactive OAuth login flow. We try to copy the host's
+    // existing auth.json first. If that's not available, generate a minimal one
+    // (which may not work for chatgpt auth mode but works for API key mode).
+    let auth_path = config_dir.join("auth.json");
+    if let Some(host_auth) = find_host_codex_auth_json() {
+        // Copy the host's auth.json verbatim - it has all required fields
+        std::fs::copy(&host_auth, &auth_path).map_err(|e| {
+            format!(
+                "Failed to copy host Codex auth.json from {}: {}",
+                host_auth.display(),
+                e
+            )
+        })?;
+        tracing::debug!(
+            "Copied host Codex auth.json from {} to {}",
+            host_auth.display(),
+            auth_path.display()
+        );
+    } else {
+        // Fallback: generate a minimal auth.json from credential store tokens
+        tracing::warn!(
+            "No host Codex auth.json found, generating minimal auth.json (may lack id_token)"
+        );
+        let auth_json = serde_json::json!({
+            "auth_mode": "chatgpt",
+            "OPENAI_API_KEY": null,
+            "tokens": {
+                "id_token": "",
+                "access_token": access_token,
+                "refresh_token": refresh_token,
+            }
+        });
+        let auth_contents = serde_json::to_string_pretty(&auth_json)
+            .map_err(|e| format!("Failed to serialize Codex auth.json: {}", e))?;
+
+        let mut auth_file = std::fs::File::create(&auth_path)
+            .map_err(|e| format!("Failed to create Codex auth.json: {}", e))?;
+        auth_file.write_all(auth_contents.as_bytes())
+            .map_err(|e| format!("Failed to write Codex auth.json: {}", e))?;
+    }
+
+    tracing::debug!("Wrote Codex auth.json to {}", auth_path.display());
     Ok(())
+}
+
+/// Read the OpenAI OAuth access token from the credential store.
+///
+/// Returns the access token string if found, or None.
+/// Used to pass the token as OPENAI_OAUTH_TOKEN env var to the Codex CLI.
+pub fn read_openai_oauth_access_token() -> Option<String> {
+    read_oauth_token_entry(ProviderType::OpenAI).map(|entry| entry.access_token)
 }
 
 /// Write Codex credentials to a workspace.
