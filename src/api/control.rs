@@ -2854,6 +2854,9 @@ async fn control_actor_loop(
             ));
         }
 
+        let workspace_root =
+            workspace::resolve_workspace_root(workspaces, config, Some(mission.workspace_id)).await;
+
         // Clean mission context if requested.
         // Missions share the workspace directory, so we avoid deleting project files.
         if clean_workspace {
@@ -2927,12 +2930,12 @@ async fn control_actor_loop(
             }
         }
 
-        // Scan work directory for artifacts (use mission_dir defined earlier)
-        if mission_dir.exists() {
+        // Scan work directory for artifacts (shared workspace root)
+        if workspace_root.exists() {
             resume_parts.push("\n## Work Directory Contents".to_string());
 
             let mut files_found = Vec::new();
-            if let Ok(entries) = std::fs::read_dir(&mission_dir) {
+            if let Ok(entries) = std::fs::read_dir(&workspace_root) {
                 for entry in entries.filter_map(|e| e.ok()) {
                     let path = entry.path();
                     if path.is_dir() {
@@ -2952,7 +2955,7 @@ async fn control_actor_loop(
                                 let subpath = subentry.path();
                                 if subpath.is_file() {
                                     let rel_path = subpath
-                                        .strip_prefix(&mission_dir)
+                                        .strip_prefix(&workspace_root)
                                         .map(|p| p.display().to_string())
                                         .unwrap_or_else(|_| subpath.display().to_string());
                                     files_found.push(rel_path);
@@ -2961,7 +2964,7 @@ async fn control_actor_loop(
                         }
                     } else if path.is_file() {
                         let rel_path = path
-                            .strip_prefix(&mission_dir)
+                            .strip_prefix(&workspace_root)
                             .map(|p| p.display().to_string())
                             .unwrap_or_else(|_| path.display().to_string());
                         files_found.push(rel_path);
