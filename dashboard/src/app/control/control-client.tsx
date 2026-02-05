@@ -2052,7 +2052,45 @@ export default function ControlClient() {
     []
   );
   const loadHistoryEvents = useCallback(
-    (id: string) => getMissionEvents(id, { types: HISTORY_EVENT_TYPES }),
+    async (id: string) => {
+      const PAGE_LIMIT = 1000;
+      const MAX_EVENTS = 20000;
+      const MAX_PAGES = 200;
+      const all: StoredEvent[] = [];
+      const seenIds = new Set<number>();
+      let offset = 0;
+      for (let page = 0; page < MAX_PAGES; page += 1) {
+        const batch = await getMissionEvents(id, {
+          types: HISTORY_EVENT_TYPES,
+          limit: PAGE_LIMIT,
+          offset,
+        });
+        if (!Array.isArray(batch) || batch.length === 0) break;
+
+        let newCount = 0;
+        for (const event of batch) {
+          if (seenIds.has(event.id)) continue;
+          seenIds.add(event.id);
+          all.push(event);
+          newCount += 1;
+        }
+
+        if (batch.length < PAGE_LIMIT) break;
+        if (newCount === 0) break; // avoid infinite loops if offset is ignored server-side
+        if (all.length >= MAX_EVENTS) break;
+        offset += batch.length;
+      }
+
+      all.sort((a, b) => {
+        if (a.sequence !== b.sequence) return a.sequence - b.sequence;
+        const ta = new Date(a.timestamp).getTime();
+        const tb = new Date(b.timestamp).getTime();
+        if (ta !== tb) return ta - tb;
+        return a.id - b.id;
+      });
+
+      return all;
+    },
     [HISTORY_EVENT_TYPES]
   );
 

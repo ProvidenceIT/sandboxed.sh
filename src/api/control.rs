@@ -3095,9 +3095,18 @@ async fn control_actor_loop(
                                     // Load mission and start in parallel
                                     match load_mission_record(&mission_store, tid).await {
                                         Ok(mission) => {
-                                            // Activate mission: if pending, interrupted, or blocked, update status to active
-                                            if matches!(mission.status, MissionStatus::Pending | MissionStatus::Interrupted | MissionStatus::Blocked) {
-                                                tracing::info!("Activating parallel mission {} (was {})", tid, mission.status);
+                                            // Activate mission: if pending, interrupted, blocked, or completed, update status to active
+                                            if matches!(
+                                                mission.status,
+                                                MissionStatus::Pending
+                                                    | MissionStatus::Interrupted
+                                                    | MissionStatus::Blocked
+                                                    | MissionStatus::Completed
+                                            ) {
+                                                tracing::info!(
+                                                    "Activating parallel mission {} (was {})",
+                                                    tid, mission.status
+                                                );
                                                 if let Err(e) = mission_store.update_mission_status(tid, MissionStatus::Active).await {
                                                     tracing::warn!("Failed to activate parallel mission {}: {}", tid, e);
                                                 } else {
@@ -3178,9 +3187,18 @@ async fn control_actor_loop(
                                                 mission.history.len(), tid
                                             );
                                         }
-                                        // Activate mission if it was interrupted/blocked
-                                        if matches!(mission.status, MissionStatus::Pending | MissionStatus::Interrupted | MissionStatus::Blocked) {
-                                            tracing::info!("Activating main mission {} (was {})", tid, mission.status);
+                                        // Activate mission if it was pending/interrupted/blocked/completed
+                                        if matches!(
+                                            mission.status,
+                                            MissionStatus::Pending
+                                                | MissionStatus::Interrupted
+                                                | MissionStatus::Blocked
+                                                | MissionStatus::Completed
+                                        ) {
+                                            tracing::info!(
+                                                "Activating main mission {} (was {})",
+                                                tid, mission.status
+                                            );
                                             if let Err(e) = mission_store.update_mission_status(tid, MissionStatus::Active).await {
                                                 tracing::warn!("Failed to activate main mission {}: {}", tid, e);
                                             } else {
@@ -3208,9 +3226,18 @@ async fn control_actor_loop(
                                             for entry in &mission.history {
                                                 history.push((entry.role.clone(), entry.content.clone()));
                                             }
-                                            // Activate mission if it was interrupted/blocked
-                                            if matches!(mission.status, MissionStatus::Pending | MissionStatus::Interrupted | MissionStatus::Blocked) {
-                                                tracing::info!("Activating switched mission {} (was {})", tid, mission.status);
+                                            // Activate mission if it was pending/interrupted/blocked/completed
+                                            if matches!(
+                                                mission.status,
+                                                MissionStatus::Pending
+                                                    | MissionStatus::Interrupted
+                                                    | MissionStatus::Blocked
+                                                    | MissionStatus::Completed
+                                            ) {
+                                                tracing::info!(
+                                                    "Activating switched mission {} (was {})",
+                                                    tid, mission.status
+                                                );
                                                 if let Err(e) = mission_store.update_mission_status(tid, MissionStatus::Active).await {
                                                     tracing::warn!("Failed to activate switched mission {}: {}", tid, e);
                                                 } else {
@@ -3239,9 +3266,18 @@ async fn control_actor_loop(
                                                     mission.history.len(), tid
                                                 );
                                             }
-                                            // Activate mission if it was interrupted/blocked (same mission, reloading)
-                                            if matches!(mission.status, MissionStatus::Pending | MissionStatus::Interrupted | MissionStatus::Blocked) {
-                                                tracing::info!("Activating reloaded mission {} (was {})", tid, mission.status);
+                                            // Activate mission if it was pending/interrupted/blocked/completed (same mission, reloading)
+                                            if matches!(
+                                                mission.status,
+                                                MissionStatus::Pending
+                                                    | MissionStatus::Interrupted
+                                                    | MissionStatus::Blocked
+                                                    | MissionStatus::Completed
+                                            ) {
+                                                tracing::info!(
+                                                    "Activating reloaded mission {} (was {})",
+                                                    tid, mission.status
+                                                );
                                                 if let Err(e) = mission_store.update_mission_status(tid, MissionStatus::Active).await {
                                                     tracing::warn!("Failed to activate reloaded mission {}: {}", tid, e);
                                                 } else {
@@ -3322,9 +3358,18 @@ async fn control_actor_loop(
                                 let (workspace_id, model_override, mission_agent, backend_id, session_id, mission_config_profile) = if let Some(mid) = mission_id {
                                     match mission_store.get_mission(mid).await {
                                         Ok(Some(mission)) => {
-                                            // Activate mission: if pending, interrupted, or blocked, update status to active
-                                            if matches!(mission.status, MissionStatus::Pending | MissionStatus::Interrupted | MissionStatus::Blocked) {
-                                                tracing::info!("Activating mission {} (was {})", mid, mission.status);
+                                            // Activate mission: if pending, interrupted, blocked, or completed, update status to active
+                                            if matches!(
+                                                mission.status,
+                                                MissionStatus::Pending
+                                                    | MissionStatus::Interrupted
+                                                    | MissionStatus::Blocked
+                                                    | MissionStatus::Completed
+                                            ) {
+                                                tracing::info!(
+                                                    "Activating mission {} (was {})",
+                                                    mid, mission.status
+                                                );
                                                 if let Err(e) = mission_store.update_mission_status(mid, MissionStatus::Active).await {
                                                     tracing::warn!("Failed to activate mission {}: {}", mid, e);
                                                 } else {
