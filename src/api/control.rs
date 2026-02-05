@@ -3095,13 +3095,14 @@ async fn control_actor_loop(
                                     // Load mission and start in parallel
                                     match load_mission_record(&mission_store, tid).await {
                                         Ok(mission) => {
-                                            // Activate mission: if pending, interrupted, blocked, or completed, update status to active
+                                            // Activate mission: if pending, interrupted, blocked, completed, or failed, update status to active
                                             if matches!(
                                                 mission.status,
                                                 MissionStatus::Pending
                                                     | MissionStatus::Interrupted
                                                     | MissionStatus::Blocked
                                                     | MissionStatus::Completed
+                                                    | MissionStatus::Failed
                                             ) {
                                                 tracing::info!(
                                                     "Activating parallel mission {} (was {})",
@@ -3194,6 +3195,7 @@ async fn control_actor_loop(
                                                 | MissionStatus::Interrupted
                                                 | MissionStatus::Blocked
                                                 | MissionStatus::Completed
+                                                | MissionStatus::Failed
                                         ) {
                                             tracing::info!(
                                                 "Activating main mission {} (was {})",
@@ -3233,6 +3235,7 @@ async fn control_actor_loop(
                                                     | MissionStatus::Interrupted
                                                     | MissionStatus::Blocked
                                                     | MissionStatus::Completed
+                                                    | MissionStatus::Failed
                                             ) {
                                                 tracing::info!(
                                                     "Activating switched mission {} (was {})",
@@ -3273,6 +3276,7 @@ async fn control_actor_loop(
                                                     | MissionStatus::Interrupted
                                                     | MissionStatus::Blocked
                                                     | MissionStatus::Completed
+                                                    | MissionStatus::Failed
                                             ) {
                                                 tracing::info!(
                                                     "Activating reloaded mission {} (was {})",
@@ -3358,13 +3362,14 @@ async fn control_actor_loop(
                                 let (workspace_id, model_override, mission_agent, backend_id, session_id, mission_config_profile) = if let Some(mid) = mission_id {
                                     match mission_store.get_mission(mid).await {
                                         Ok(Some(mission)) => {
-                                            // Activate mission: if pending, interrupted, blocked, or completed, update status to active
+                                            // Activate mission: if pending, interrupted, blocked, completed, or failed, update status to active
                                             if matches!(
                                                 mission.status,
                                                 MissionStatus::Pending
                                                     | MissionStatus::Interrupted
                                                     | MissionStatus::Blocked
                                                     | MissionStatus::Completed
+                                                    | MissionStatus::Failed
                                             ) {
                                                 tracing::info!(
                                                     "Activating mission {} (was {})",
