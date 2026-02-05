@@ -13,6 +13,7 @@ export interface NewMissionDialogOptions {
   agent?: string;
   /** @deprecated Use workspace config profiles instead */
   modelOverride?: string;
+  configProfile?: string;
   backend?: string;
   /** Whether the mission will be opened in a new tab (skip local state updates) */
   openInNewTab?: boolean;
@@ -414,6 +415,7 @@ export function NewMissionDialog({
       workspaceId: newMissionWorkspace || undefined,
       agent: parsed?.agent || undefined,
       backend: parsed?.backend || 'claudecode',
+      configProfile: workspaceProfile || undefined,
     };
   };
 

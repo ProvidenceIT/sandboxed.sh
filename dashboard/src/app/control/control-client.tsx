@@ -3604,6 +3604,7 @@ export default function ControlClient() {
     workspaceId?: string;
     agent?: string;
     modelOverride?: string;
+    configProfile?: string;
     backend?: string;
     openInNewTab?: boolean;
   }) => {
@@ -3613,6 +3614,7 @@ export default function ControlClient() {
         workspaceId: options?.workspaceId,
         agent: options?.agent,
         modelOverride: options?.modelOverride,
+        configProfile: options?.configProfile,
         backend: options?.backend,
       });
 

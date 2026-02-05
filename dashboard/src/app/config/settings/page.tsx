@@ -16,11 +16,14 @@ import {
   updateOpenCodeSettings,
   getOpenCodeConfig,
   updateOpenCodeConfig,
+  getClaudeCodeConfig,
+  saveClaudeCodeConfig,
   getClaudeCodeHostConfig,
   updateClaudeCodeHostConfig,
   getAmpCodeHostConfig,
   updateAmpCodeHostConfig,
   ConfigProfileSummary,
+  ClaudeCodeConfig,
   DivergedHistoryError,
 } from '@/lib/api';
 import { Save, Loader, AlertCircle, Check, RefreshCw, X, GitBranch, Upload, Download, GitMerge, ChevronDown, Plus, Layers, FileJson, FolderOpen, Trash2 } from 'lucide-react';
@@ -116,6 +119,19 @@ function normalizeJson(value: unknown): string {
 
   return JSON.stringify(sortKeys(value));
 }
+
+const coerceClaudeCodeConfig = (value: Record<string, unknown> | null): ClaudeCodeConfig => {
+  if (!value) {
+    return { default_model: null, default_agent: null, hidden_agents: [] };
+  }
+  const defaultModel = typeof value.default_model === 'string' ? value.default_model : null;
+  const defaultAgent = typeof value.default_agent === 'string' ? value.default_agent : null;
+  const hiddenAgentsRaw = value.hidden_agents;
+  const hiddenAgents = Array.isArray(hiddenAgentsRaw)
+    ? hiddenAgentsRaw.filter((entry): entry is string => typeof entry === 'string')
+    : [];
+  return { default_model: defaultModel, default_agent: defaultAgent, hidden_agents: hiddenAgents };
+};
 
 // Harness configuration metadata
 // Maps harness IDs to their profile directory and library directory
@@ -379,6 +395,17 @@ export default function SettingsPage() {
         const content = await getHarnessDefaultFile(harnessConfig.libraryDir, libraryFileName);
         return { content, isDefault: true };
       } catch (err) {
+        if (harnessId === 'claudecode' && libraryFileName === 'config.json') {
+          try {
+            const config = await getClaudeCodeConfig();
+            return { content: JSON.stringify(config, null, 2), isDefault: true };
+          } catch (fallbackErr) {
+            console.warn(
+              'Failed to load Claude Code library config fallback:',
+              fallbackErr instanceof Error ? fallbackErr.message : fallbackErr
+            );
+          }
+        }
         console.warn(
           `Failed to load library default for ${harnessConfig.libraryDir}/${libraryFileName}:`,
           err instanceof Error ? err.message : err
@@ -484,7 +511,13 @@ export default function SettingsPage() {
   }, [hostSyncSuccess]);
 
   const hostSyncAvailable = Boolean(hostHandler && selectedProfile === DEFAULT_PROFILE);
-  const normalizedHost = hostFileJson ? normalizeJson(hostFileJson) : null;
+  const normalizedHost = (() => {
+    if (!hostFileJson) return null;
+    if (activeHarness === 'claudecode' && selectedFile?.endsWith('/settings.json')) {
+      return normalizeJson(coerceClaudeCodeConfig(hostFileJson));
+    }
+    return normalizeJson(hostFileJson);
+  })();
   let normalizedLibrary: string | null = null;
   if (hostSyncAvailable) {
     try {
@@ -567,9 +600,17 @@ export default function SettingsPage() {
     try {
       setHostSyncing(true);
       setError(null);
-      await saveHarnessDefaultFile(harnessConfigEntry.libraryDir, libraryFileName, content);
-      setFileContent(content);
-      setOriginalFileContent(content);
+      if (harnessConfigEntry.libraryDir === 'claudecode' && libraryFileName === 'config.json') {
+        const sanitized = coerceClaudeCodeConfig(hostFileJson);
+        const sanitizedContent = JSON.stringify(sanitized, null, 2);
+        await saveClaudeCodeConfig(sanitized);
+        setFileContent(sanitizedContent);
+        setOriginalFileContent(sanitizedContent);
+      } else {
+        await saveHarnessDefaultFile(harnessConfigEntry.libraryDir, libraryFileName, content);
+        setFileContent(content);
+        setOriginalFileContent(content);
+      }
       setIsLibraryDefault(true);
       setParseError(null);
       setHostSyncSuccess('pull');
@@ -599,7 +640,14 @@ export default function SettingsPage() {
         const fileConfig = harnessConfigEntry.files.find(f => f.name === fileName);
         const libraryFileName = fileConfig?.libraryName || fileName;
         const validHarnessDefaults = ['opencode', 'claudecode', 'ampcode', 'sandboxed'];
-        if (validHarnessDefaults.includes(harnessConfigEntry.libraryDir)) {
+        if (harnessConfigEntry.libraryDir === 'claudecode' && libraryFileName === 'config.json') {
+          const parsed = parseJsonc(fileContent);
+          if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+            throw new Error('Claude Code config must be a JSON object.');
+          }
+          await saveClaudeCodeConfig(coerceClaudeCodeConfig(parsed as Record<string, unknown>));
+          setIsLibraryDefault(true);
+        } else if (validHarnessDefaults.includes(harnessConfigEntry.libraryDir)) {
           await saveHarnessDefaultFile(harnessConfigEntry.libraryDir, libraryFileName, fileContent);
           setIsLibraryDefault(true);
         } else {
