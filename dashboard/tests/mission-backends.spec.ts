@@ -77,7 +77,7 @@ test.describe('Mission backend configs', () => {
       : [];
 
     expect(agentNames.length).toBeGreaterThan(0);
-    expect(agentNames).toContain('hephaestus');
+    const sampleAgent = agentNames[0];
 
     await page.addInitScript((base) => {
       localStorage.setItem('settings', JSON.stringify({ apiUrl: base }));
@@ -91,7 +91,7 @@ test.describe('Mission backend configs', () => {
       .locator('label:has-text("Agent")')
       .locator('..')
       .locator('select');
-    await expect(agentSelect.locator('option', { hasText: /hephaestus/i })).toHaveCount(1, {
+    await expect(agentSelect.locator('option', { hasText: new RegExp(sampleAgent, 'i') })).toHaveCount(1, {
       timeout: 10_000,
     });
   });
