@@ -4935,10 +4935,187 @@ async fn ensure_codex_cli_available(
         return Ok(cli_path.to_string());
     }
 
+    // Container workspaces run the harness inside the container, so host-installed CLIs
+    // (like `codex`) are not visible unless they are installed in the container filesystem.
+    //
+    // Pragmatic fix: if we're in a container workspace and `codex` exists on the host,
+    // copy it into the container root at /usr/local/bin, then retry.
+    if workspace_exec.workspace.workspace_type == WorkspaceType::Container {
+        if let Some(resolved) = resolve_host_executable(program) {
+            if let Ok(dest_in_container) =
+                copy_host_executable_into_container(&workspace_exec.workspace, &resolved)
+            {
+                let rest = cli_path.splitn(2, ' ').nth(1).unwrap_or("").trim();
+                let container_cli = if rest.is_empty() {
+                    dest_in_container.clone()
+                } else {
+                    format!("{} {}", dest_in_container, rest)
+                };
+
+                let dest_program = container_cli
+                    .splitn(2, ' ')
+                    .next()
+                    .unwrap_or(&dest_in_container);
+                if command_available(workspace_exec, cwd, dest_program).await {
+                    tracing::info!(
+                        host_path = %resolved.display(),
+                        container_path = %dest_program,
+                        "Copied Codex CLI into container workspace"
+                    );
+                    return Ok(container_cli);
+                }
+            }
+        }
+    }
+
+    // Check bun's global bin directories (bun installs globals to ~/.cache/.bun/bin/)
+    const BUN_GLOBAL_CODEX_PATHS: &[&str] =
+        &["/root/.cache/.bun/bin/codex", "/root/.bun/bin/codex"];
+    for codex_path in BUN_GLOBAL_CODEX_PATHS {
+        if command_available(workspace_exec, cwd, codex_path).await {
+            tracing::info!(
+                path = %codex_path,
+                "Found Codex CLI in bun global bin"
+            );
+            return Ok(codex_path.to_string());
+        }
+    }
+
+    // Auto-install Codex CLI if enabled (defaults to true)
+    let auto_install = env_var_bool("SANDBOXED_SH_AUTO_INSTALL_CODEX", true);
+    if !auto_install {
+        return Err(format!(
+            "Codex CLI '{}' not found in workspace. Install it or set CODEX_CLI_PATH.",
+            cli_path
+        ));
+    }
+
+    let has_bun = command_available(workspace_exec, cwd, "bun").await
+        || command_available(workspace_exec, cwd, "/root/.bun/bin/bun").await;
+    let has_npm = command_available(workspace_exec, cwd, "npm").await;
+
+    if !has_bun && !has_npm {
+        return Err(format!(
+            "Codex CLI '{}' not found and neither npm nor bun is available in the workspace. Install Node.js/npm or Bun in the workspace template, or set CODEX_CLI_PATH.",
+            cli_path
+        ));
+    }
+
+    let install_cmd = if has_bun {
+        r#"export PATH="/root/.bun/bin:/root/.cache/.bun/bin:$PATH" && bun install -g @openai/codex@latest 2>&1"#
+    } else {
+        "npm install -g @openai/codex@latest 2>&1"
+    };
+
+    tracing::info!(
+        installer = if has_bun { "bun" } else { "npm" },
+        "Auto-installing Codex CLI"
+    );
+
+    let output = workspace_exec
+        .output(
+            cwd,
+            "/bin/sh",
+            &["-lc".to_string(), install_cmd.to_string()],
+            std::collections::HashMap::new(),
+        )
+        .await
+        .map_err(|e| format!("Failed to install Codex CLI: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut message = String::new();
+        if !stderr.trim().is_empty() {
+            message.push_str(stderr.trim());
+        }
+        if !stdout.trim().is_empty() {
+            if !message.is_empty() {
+                message.push_str(" | ");
+            }
+            message.push_str(stdout.trim());
+        }
+        if message.is_empty() {
+            message = "Codex CLI install failed with no output".to_string();
+        }
+        return Err(format!("Codex CLI install failed: {}", message));
+    }
+
+    // Re-check availability after install
+    if command_available(workspace_exec, cwd, cli_path).await {
+        return Ok(cli_path.to_string());
+    }
+    for codex_path in BUN_GLOBAL_CODEX_PATHS {
+        if command_available(workspace_exec, cwd, codex_path).await {
+            tracing::info!(
+                path = %codex_path,
+                "Codex CLI available after auto-install"
+            );
+            return Ok(codex_path.to_string());
+        }
+    }
+
     Err(format!(
-        "Codex CLI '{}' not found in workspace. Install it or set CODEX_CLI_PATH.",
+        "Codex CLI install completed but '{}' is still not available in workspace PATH.",
         cli_path
     ))
+}
+
+fn resolve_host_executable(program: &str) -> Option<std::path::PathBuf> {
+    if program.contains('/') {
+        let p = std::path::PathBuf::from(program);
+        if p.is_file() {
+            return Some(p);
+        }
+        return None;
+    }
+
+    let path_var = std::env::var("PATH").ok()?;
+    for dir in path_var.split(':') {
+        if dir.is_empty() {
+            continue;
+        }
+        let candidate = std::path::Path::new(dir).join(program);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn copy_host_executable_into_container(
+    workspace: &crate::workspace::Workspace,
+    host_executable: &std::path::Path,
+) -> Result<String, String> {
+    let name = host_executable
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| "Host executable has invalid filename".to_string())?;
+
+    let dest_dir = workspace.path.join("usr").join("local").join("bin");
+    std::fs::create_dir_all(&dest_dir)
+        .map_err(|e| format!("Failed to create container /usr/local/bin: {}", e))?;
+
+    let dest = dest_dir.join(name);
+    let tmp = dest_dir.join(format!("{}.tmp", name));
+    std::fs::copy(host_executable, &tmp).map_err(|e| {
+        format!(
+            "Failed to copy host executable {} into container: {}",
+            host_executable.display(),
+            e
+        )
+    })?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755));
+    }
+
+    std::fs::rename(&tmp, &dest)
+        .map_err(|e| format!("Failed to finalize container executable: {}", e))?;
+
+    Ok(format!("/usr/local/bin/{}", name))
 }
 
 fn runner_is_oh_my_opencode(path: &str) -> bool {
