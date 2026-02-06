@@ -700,6 +700,80 @@ pub fn is_anthropic_configured_for_claudecode(working_dir: &Path) -> bool {
 /// Codex authentication material (same as Claude Code auth).
 pub type CodexAuth = ClaudeCodeAuth;
 
+fn looks_like_json_file(path: &std::path::Path) -> bool {
+    let metadata = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+    if metadata.len() == 0 {
+        return false;
+    }
+
+    let contents = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let first = contents.chars().find(|c| !c.is_whitespace());
+    matches!(first, Some('{') | Some('['))
+}
+
+fn get_openai_api_key_from_opencode_auth() -> Option<String> {
+    let auth = read_opencode_auth().ok()?;
+
+    for key in opencode_auth_keys(ProviderType::OpenAI) {
+        let entry = auth.get(key)?;
+        let auth_type = entry.get("type").and_then(|v| v.as_str());
+        if matches!(auth_type, Some("oauth")) {
+            continue;
+        }
+
+        let api_key = entry
+            .get("key")
+            .or_else(|| entry.get("api_key"))
+            .and_then(|v| v.as_str())?;
+        if api_key.trim().is_empty() {
+            continue;
+        }
+        return Some(api_key.to_string());
+    }
+
+    None
+}
+
+fn get_openai_api_key_from_ai_providers(working_dir: &Path) -> Option<String> {
+    let ai_providers_path = working_dir.join(".sandboxed-sh/ai_providers.json");
+    if !ai_providers_path.exists() {
+        return None;
+    }
+
+    let contents = std::fs::read_to_string(&ai_providers_path).ok()?;
+    let providers: Vec<serde_json::Value> = serde_json::from_str(&contents).ok()?;
+
+    for provider in providers {
+        if provider.get("provider_type").and_then(|v| v.as_str()) != Some("openai") {
+            continue;
+        }
+        let api_key = provider.get("api_key").and_then(|v| v.as_str())?;
+        if api_key.trim().is_empty() {
+            continue;
+        }
+        return Some(api_key.to_string());
+    }
+
+    None
+}
+
+fn get_openai_api_key_for_codex(working_dir: &Path) -> Option<String> {
+    if let Ok(value) = std::env::var("OPENAI_API_KEY") {
+        if !value.trim().is_empty() {
+            return Some(value);
+        }
+    }
+
+    get_openai_api_key_from_opencode_auth()
+        .or_else(|| get_openai_api_key_from_ai_providers(working_dir))
+}
+
 /// Get the OpenAI API key or OAuth access token for the Codex backend.
 ///
 /// This checks if the OpenAI provider has "codex" in its use_for_backends
@@ -732,23 +806,6 @@ fn find_host_codex_auth_json() -> Option<std::path::PathBuf> {
         std::path::PathBuf::from("/var/lib/opencode/.codex/auth.json"),
     ];
 
-    fn looks_like_json_file(path: &std::path::Path) -> bool {
-        let metadata = match std::fs::metadata(path) {
-            Ok(m) => m,
-            Err(_) => return false,
-        };
-        if metadata.len() == 0 {
-            return false;
-        }
-
-        let contents = match std::fs::read_to_string(path) {
-            Ok(c) => c,
-            Err(_) => return false,
-        };
-        let first = contents.chars().find(|c| !c.is_whitespace());
-        matches!(first, Some('{') | Some('['))
-    }
-
     for candidate in &candidates {
         if looks_like_json_file(candidate) {
             return Some(candidate.clone());
@@ -757,58 +814,43 @@ fn find_host_codex_auth_json() -> Option<std::path::PathBuf> {
     None
 }
 
-fn write_codex_config_from_entry(
-    config_dir: &std::path::Path,
-    access_token: &str,
-    refresh_token: &str,
-) -> Result<(), String> {
-    use std::io::Write;
-
-    if let Err(e) = std::fs::create_dir_all(config_dir) {
-        return Err(format!("Failed to create Codex config dir: {}", e));
+fn write_codex_auth_json_apikey(config_dir: &std::path::Path, api_key: &str) -> Result<(), String> {
+    if api_key.trim().is_empty() {
+        return Err("OpenAI API key is empty".to_string());
     }
 
-    // Write config.toml (legacy format)
-    let config_path = config_dir.join("config.toml");
-    let contents = format!(
-        "[auth]\ntype = \"oauth\"\naccess_token = \"{}\"\nrefresh_token = \"{}\"\n",
-        access_token, refresh_token
-    );
+    std::fs::create_dir_all(config_dir)
+        .map_err(|e| format!("Failed to create Codex config dir: {}", e))?;
 
-    let mut file = std::fs::File::create(&config_path)
-        .map_err(|e| format!("Failed to create Codex config.toml: {}", e))?;
-    file.write_all(contents.as_bytes())
-        .map_err(|e| format!("Failed to write Codex config.toml: {}", e))?;
-
-    tracing::debug!("Wrote Codex config.toml to {}", config_path.display());
-
-    // Write auth.json (the format the Codex CLI actually reads for authentication).
-    // The Codex CLI requires fields like id_token and account_id that are only
-    // obtained during the interactive OAuth login flow. We try to copy the host's
-    // existing auth.json verbatim. If we cannot find a valid host auth.json, we
-    // return an error with instructions to run `codex login --device-auth`.
     let auth_path = config_dir.join("auth.json");
+    let tmp_path = config_dir.join("auth.json.tmp");
 
-    fn looks_like_json_file(path: &std::path::Path) -> bool {
-        let metadata = match std::fs::metadata(path) {
-            Ok(m) => m,
-            Err(_) => return false,
-        };
-        if metadata.len() == 0 {
-            return false;
-        }
+    let payload = serde_json::json!({
+        "auth_mode": "apikey",
+        "OPENAI_API_KEY": api_key,
+    });
+    let contents = serde_json::to_string_pretty(&payload)
+        .map_err(|e| format!("Failed to serialize auth.json: {}", e))?;
+    std::fs::write(&tmp_path, contents)
+        .map_err(|e| format!("Failed to write Codex auth.json: {}", e))?;
+    std::fs::rename(&tmp_path, &auth_path)
+        .map_err(|e| format!("Failed to finalize Codex auth.json: {}", e))?;
 
-        let contents = match std::fs::read_to_string(path) {
-            Ok(c) => c,
-            Err(_) => return false,
-        };
-        let first = contents.chars().find(|c| !c.is_whitespace());
-        matches!(first, Some('{') | Some('['))
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&auth_path, std::fs::Permissions::from_mode(0o600));
     }
 
-    // If auth.json already exists and is non-empty, do not overwrite it. This
-    // avoids clobbering the host's own Codex auth when HOME points at the same
-    // directory as config_dir (e.g. HOME=/var/lib/opencode in production).
+    tracing::debug!("Wrote Codex auth.json (api key) to {}", auth_path.display());
+    Ok(())
+}
+
+fn ensure_codex_auth_json(config_dir: &std::path::Path) -> Result<(), String> {
+    std::fs::create_dir_all(config_dir)
+        .map_err(|e| format!("Failed to create Codex config dir: {}", e))?;
+
+    let auth_path = config_dir.join("auth.json");
     if looks_like_json_file(&auth_path) {
         tracing::debug!(
             "Codex auth.json already present at {}, leaving as-is",
@@ -828,13 +870,12 @@ fn write_codex_config_from_entry(
         if same_file {
             let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
             return Err(format!(
-                "Codex auth.json is missing or empty at {}. Run `HOME={} codex login --device-auth` on the backend host to (re)create ~/.codex/auth.json.",
+                "Codex auth.json is missing or empty at {}. Run `HOME={} codex login --with-api-key` on the backend host to (re)create ~/.codex/auth.json.",
                 auth_path.display(),
                 home,
             ));
         }
 
-        // Copy the host's auth.json verbatim - it has all required fields.
         std::fs::copy(&host_auth, &auth_path).map_err(|e| {
             format!(
                 "Failed to copy host Codex auth.json from {}: {}",
@@ -851,19 +892,18 @@ fn write_codex_config_from_entry(
         if !looks_like_json_file(&auth_path) {
             let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
             return Err(format!(
-                "Copied Codex auth.json to {} but it is still empty/invalid. Run `HOME={} codex login --device-auth` on the backend host.",
+                "Copied Codex auth.json to {} but it is still empty/invalid. Run `HOME={} codex login --with-api-key` on the backend host.",
                 auth_path.display(),
                 home,
             ));
         }
 
-        tracing::debug!("Wrote Codex auth.json to {}", auth_path.display());
         return Ok(());
     }
 
     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
     Err(format!(
-        "No valid host Codex auth.json found. The Codex CLI requires an interactive login to generate ~/.codex/auth.json (with id_token/account_id). Run `HOME={} codex login --device-auth` on the backend host, then retry.",
+        "No Codex authentication found. Configure an OpenAI API key (Settings → AI Providers) or run `HOME={} codex login --with-api-key` on the backend host, then retry.",
         home,
     ))
 }
@@ -882,11 +922,9 @@ pub fn read_openai_oauth_access_token() -> Option<String> {
 /// For host workspaces, writes to the host's home directory.
 pub fn write_codex_credentials_for_workspace(
     workspace: &crate::workspace::Workspace,
+    working_dir: &Path,
 ) -> Result<(), String> {
     use crate::workspace::WorkspaceType;
-
-    let entry = read_oauth_token_entry(ProviderType::OpenAI)
-        .ok_or_else(|| "No OpenAI OAuth entry found".to_string())?;
 
     let codex_dir = match workspace.workspace_type {
         WorkspaceType::Container => {
@@ -900,12 +938,21 @@ pub fn write_codex_credentials_for_workspace(
         }
     };
 
-    write_codex_config_from_entry(&codex_dir, &entry.access_token, &entry.refresh_token)?;
+    if let Some(api_key) = get_openai_api_key_for_codex(working_dir) {
+        write_codex_auth_json_apikey(&codex_dir, &api_key)?;
+        tracing::info!(
+            workspace_id = %workspace.id,
+            workspace_type = ?workspace.workspace_type,
+            "Wrote Codex auth.json for workspace (api key)"
+        );
+        return Ok(());
+    }
 
+    ensure_codex_auth_json(&codex_dir)?;
     tracing::info!(
         workspace_id = %workspace.id,
         workspace_type = ?workspace.workspace_type,
-        "Wrote Codex credentials for workspace"
+        "Ensured Codex auth.json for workspace"
     );
     Ok(())
 }
