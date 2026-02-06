@@ -1834,7 +1834,7 @@ pub fn run_claudecode_turn<'a>(
         }
 
         // Handle case where cli_path might be a wrapper command like "bun /path/to/claude"
-        let (program, mut full_args) = if cli_path.contains(' ') {
+        let (mut program, mut full_args) = if cli_path.contains(' ') {
             let parts: Vec<&str> = cli_path.splitn(2, ' ').collect();
             let program = parts[0].to_string();
             let mut full_args = if parts.len() > 1 {
@@ -1847,6 +1847,33 @@ pub fn run_claudecode_turn<'a>(
         } else {
             (cli_path.clone(), args.clone())
         };
+
+        // Container workaround:
+        //
+        // Claude Code CLI 2.1.x in our container templates uses Bun APIs in some
+        // code paths (e.g. `Bun.which`). When executed under Node it can crash
+        // with `ReferenceError: Bun is not defined`, which breaks automations.
+        //
+        // If Bun is available in the workspace, prefer running Claude via Bun.
+        if workspace.workspace_type == WorkspaceType::Container
+            && env_var_bool("SANDBOXED_SH_CLAUDECODE_USE_BUN", true)
+            && program != "bun"
+            && !program.ends_with("/bun")
+        {
+            let is_claude_program = program == "claude" || program.ends_with("/claude");
+            if is_claude_program && command_available(&workspace_exec, work_dir, "bun").await {
+                if let Some(claude_path) =
+                    resolve_command_path_in_workspace(&workspace_exec, work_dir, &program).await
+                {
+                    program = "bun".to_string();
+                    full_args.insert(0, claude_path);
+                    tracing::info!(
+                        mission_id = %mission_id,
+                        "Running Claude CLI via bun wrapper (container workspace)"
+                    );
+                }
+            }
+        }
 
         // Use WorkspaceExec to spawn the CLI in the correct workspace context
         let mut child = match workspace_exec
@@ -2271,21 +2298,24 @@ pub fn run_claudecode_turn<'a>(
                                     if let Some(cost) = res.total_cost_usd {
                                         total_cost_usd = cost;
                                     }
-                                    // Check for errors: explicit error flags OR result text that looks like an API error
-                                    let result_text = res.result.clone().unwrap_or_default();
-                                    let looks_like_api_error = result_text.starts_with("API Error:")
-                                        || result_text.contains("\"type\":\"error\"")
-                                        || result_text.contains("\"type\":\"overloaded_error\"")
-                                        || result_text.contains("\"type\":\"api_error\"");
+                                    // Check for errors: explicit error flags OR embedded API error payloads.
+                                    //
+                                    // Note: Claude Code may populate error details in `error` / `message`
+                                    // fields (not just `result`). Use `error_message()` for best-effort
+                                    // extraction.
+                                    let error_msg = res.error_message();
+                                    let looks_like_api_error = error_msg.starts_with("API Error:")
+                                        || error_msg.contains("\"type\":\"error\"")
+                                        || error_msg.contains("\"type\":\"overloaded_error\"")
+                                        || error_msg.contains("\"type\":\"api_error\"");
 
                                     if res.is_error || res.subtype == "error" || looks_like_api_error {
                                         had_error = true;
-                                        let err_msg = if result_text.is_empty() { "Unknown error".to_string() } else { result_text };
                                         // Don't send an Error event here - let the failure propagate
                                         // through the AgentResult. control.rs will emit an AssistantMessage
                                         // with success=false which the UI displays as a failure message.
                                         // Sending Error here would cause duplicate messages.
-                                        final_result = err_msg;
+                                        final_result = error_msg;
                                     } else if let Some(result) = res.result {
                                         final_result = result;
                                     }
@@ -2377,6 +2407,27 @@ pub fn run_claudecode_turn<'a>(
                 final_result =
                     "Claude Code produced no output. Check CLI installation or authentication."
                         .to_string();
+            }
+        }
+
+        // If Claude reported an error but didn't provide a useful message, fall back to stderr.
+        if had_error && (final_result.trim().is_empty() || final_result.trim() == "Unknown error") {
+            let stderr_content = stderr_capture.lock().await;
+            if !stderr_content.is_empty() {
+                tracing::warn!(
+                    mission_id = %mission_id,
+                    stderr = %stderr_content,
+                    exit_status = ?exit_status,
+                    "Claude Code failed with empty/generic error; using stderr excerpt"
+                );
+                final_result = format!(
+                    "Claude Code error: {}",
+                    stderr_content
+                        .lines()
+                        .take(5)
+                        .collect::<Vec<_>>()
+                        .join(" | ")
+                );
             }
         }
 
@@ -4333,6 +4384,34 @@ async fn command_available(
     false
 }
 
+async fn resolve_command_path_in_workspace(
+    workspace_exec: &WorkspaceExec,
+    cwd: &std::path::Path,
+    program: &str,
+) -> Option<String> {
+    if program.contains('/') {
+        return Some(program.to_string());
+    }
+
+    let mut args = Vec::new();
+    args.push("-lc".to_string());
+    args.push(format!("command -v {} 2>/dev/null", program));
+    let output = workspace_exec
+        .output(cwd, "/bin/sh", &args, HashMap::new())
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let path = stdout.lines().next().unwrap_or("").trim();
+    if path.is_empty() {
+        None
+    } else {
+        Some(path.to_string())
+    }
+}
+
 /// Check basic internet connectivity using a reliable public endpoint.
 /// This verifies the workspace has any network access at all.
 async fn check_basic_internet_connectivity(
@@ -4645,9 +4724,24 @@ async fn ensure_claudecode_cli_available(
     cwd: &std::path::Path,
     cli_path: &str,
 ) -> Result<String, String> {
-    // Check if claude is available at the specified path
-    if command_available(workspace_exec, cwd, cli_path).await {
-        return Ok(cli_path.to_string());
+    // Allow wrapper commands like `bun /path/to/claude` by validating the
+    // leading program (and optionally the first argument if it looks like a program).
+    let mut parts = cli_path.split_whitespace();
+    let program = parts.next().unwrap_or(cli_path);
+    let arg0 = parts.next();
+
+    // Check if the wrapper program exists.
+    if command_available(workspace_exec, cwd, program).await {
+        // If a wrapper is used (e.g. bun <script>), also sanity-check that the
+        // wrapped target exists so we don't claim success and then fail at spawn time.
+        if let Some(arg0) = arg0 {
+            // Skip flags like `--something`; only validate likely program/path tokens.
+            if !arg0.starts_with('-') && command_available(workspace_exec, cwd, arg0).await {
+                return Ok(cli_path.to_string());
+            }
+        } else {
+            return Ok(cli_path.to_string());
+        }
     }
 
     // Also check bun's global bin directory (bun installs globals to ~/.cache/.bun/bin/)

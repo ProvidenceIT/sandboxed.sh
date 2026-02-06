@@ -586,7 +586,7 @@ fn opencode_entry_from_mcp(
     workspace_env: &HashMap<String, String>,
     shared_network: Option<bool>,
 ) -> serde_json::Value {
-    fn resolve_command_path(cmd: &str) -> String {
+    fn resolve_host_command_path(cmd: &str) -> String {
         let cmd_path = Path::new(cmd);
         if cmd_path.is_absolute() || cmd.contains('/') {
             return cmd.to_string();
@@ -603,6 +603,62 @@ fn opencode_entry_from_mcp(
             }
         }
 
+        cmd.to_string()
+    }
+
+    fn resolve_container_command_path(
+        cmd: &str,
+        container_root_host: &Path,
+        container_fallback: bool,
+        per_workspace_runner: bool,
+    ) -> String {
+        // Only needed when the harness spawns MCP servers inside the container.
+        // In container fallback mode, commands run on the host, so host paths are correct.
+        if container_fallback || !per_workspace_runner {
+            return resolve_host_command_path(cmd);
+        }
+
+        let cmd_path = Path::new(cmd);
+        let cmd_has_path = cmd_path.is_absolute() || cmd.contains('/');
+
+        // If the MCP config hardcodes an absolute path (e.g. /usr/bin/bunx), validate it
+        // exists in the container rootfs. If it doesn't, try common fallbacks.
+        if cmd_has_path && cmd_path.is_absolute() {
+            let host_candidate = container_root_host.join(cmd.trim_start_matches('/'));
+            if host_candidate.exists() {
+                return cmd.to_string();
+            }
+
+            // Common mismatch: host resolves to /usr/bin, container uses /usr/local/bin.
+            if let Some(base) = cmd_path.file_name().and_then(|n| n.to_str()) {
+                let host_usr_local = container_root_host.join("usr/local/bin").join(base);
+                if host_usr_local.exists() {
+                    return format!("/usr/local/bin/{}", base);
+                }
+
+                let host_usr_bin = container_root_host.join("usr/bin").join(base);
+                if host_usr_bin.exists() {
+                    return format!("/usr/bin/{}", base);
+                }
+            }
+
+            return cmd.to_string();
+        }
+
+        // Bare command: prefer /usr/local/bin then /usr/bin inside the container.
+        if !cmd_has_path {
+            let host_usr_local = container_root_host.join("usr/local/bin").join(cmd);
+            if host_usr_local.exists() {
+                return format!("/usr/local/bin/{}", cmd);
+            }
+
+            let host_usr_bin = container_root_host.join("usr/bin").join(cmd);
+            if host_usr_bin.exists() {
+                return format!("/usr/bin/{}", cmd);
+            }
+        }
+
+        // Relative paths (e.g. ./scripts/foo) should remain as-is.
         cmd.to_string()
     }
 
@@ -703,7 +759,7 @@ fn opencode_entry_from_mcp(
                 nspawn_env.insert("WORKING_DIR".to_string(), rel_str.clone());
 
                 let mut cmd = vec![
-                    resolve_command_path("systemd-nspawn"),
+                    resolve_host_command_path("systemd-nspawn"),
                     "-D".to_string(),
                     workspace_root.to_string_lossy().to_string(),
                     "--quiet".to_string(),
@@ -791,7 +847,16 @@ fn opencode_entry_from_mcp(
                     merged_env.insert("WORKING_DIR".to_string(), rel_str);
                 }
 
-                let mut cmd = vec![resolve_command_path(command)];
+                let resolved_command = match workspace_type {
+                    WorkspaceType::Container => resolve_container_command_path(
+                        command,
+                        workspace_root,
+                        container_fallback,
+                        per_workspace_runner,
+                    ),
+                    WorkspaceType::Host => resolve_host_command_path(command),
+                };
+                let mut cmd = vec![resolved_command];
                 cmd.extend(args.clone());
                 entry.insert("command".to_string(), json!(cmd));
                 if !merged_env.is_empty() {
