@@ -983,7 +983,10 @@ pub struct CreateProviderRequest {
     #[serde(default = "default_true")]
     pub enabled: bool,
     /// Which backends this provider is used for (e.g., ["opencode", "claudecode"])
-    /// Only applicable for Anthropic provider. Defaults to ["opencode"].
+    ///
+    /// Stored in `.sandboxed-sh/provider_backends.json` (not in opencode.json).
+    ///
+    /// Defaults to ["opencode"].
     #[serde(default)]
     pub use_for_backends: Option<Vec<String>>,
     /// Custom models for custom providers
@@ -1095,13 +1098,10 @@ fn build_provider_response(
         }
     };
 
-    // For Anthropic, use configured backends or default to ["opencode"]
-    // For other providers, always use ["opencode"]
-    let use_for_backends = if provider_type == ProviderType::Anthropic {
-        backends.unwrap_or_else(|| vec!["opencode".to_string()])
-    } else {
-        vec!["opencode".to_string()]
-    };
+    // Most providers are only usable via OpenCode, but we still store and render
+    // `use_for_backends` generically so the UI can express intent and we can grow
+    // support without special-casing a single provider forever.
+    let use_for_backends = backends.unwrap_or_else(|| vec!["opencode".to_string()]);
 
     ProviderResponse {
         id: provider_type.id().to_string(),
@@ -3171,13 +3171,10 @@ async fn create_provider(
     let mut opencode_config =
         read_opencode_config(&config_path).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    // For Anthropic, default use_for_backends to ["opencode"] if not specified
-    let use_for_backends = if provider_type == ProviderType::Anthropic {
-        req.use_for_backends
-            .or_else(|| Some(vec!["opencode".to_string()]))
-    } else {
-        None
-    };
+    // Default use_for_backends to ["opencode"] if not specified.
+    let use_for_backends = req
+        .use_for_backends
+        .or_else(|| Some(vec!["opencode".to_string()]));
 
     set_provider_config_entry(
         &mut opencode_config,
@@ -4066,6 +4063,19 @@ async fn oauth_callback_inner(
                 sync_to_opencode_auth(provider_type, refresh_token, access_token, expires_at)
             {
                 tracing::error!("Failed to sync credentials to OpenCode: {}", e);
+            }
+
+            // Persist backend targeting for OpenAI (defaults to ["opencode"]).
+            let backends = req
+                .use_for_backends
+                .clone()
+                .unwrap_or_else(|| vec!["opencode".to_string()]);
+            if let Err(e) = update_provider_backends(
+                &state.config.working_dir,
+                provider_type.id(),
+                backends.clone(),
+            ) {
+                tracing::error!("Failed to save provider backends: {}", e);
             }
 
             let config_path = get_opencode_config_path(&state.config.working_dir);

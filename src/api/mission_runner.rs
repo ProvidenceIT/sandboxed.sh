@@ -5693,6 +5693,7 @@ pub async fn run_opencode_turn(
 
     // Spawn a task to read stderr (just log in JSON mode, events come on stdout)
     let mission_id_clone = mission_id;
+    let stderr_error_capture = sse_error_message.clone();
     let stderr_handle = if let Some(stderr) = stderr {
         Some(tokio::spawn(async move {
             let stderr_reader = BufReader::new(stderr);
@@ -5701,6 +5702,21 @@ pub async fn run_opencode_turn(
                 let clean = line.trim().to_string();
                 if !clean.is_empty() {
                     tracing::debug!(mission_id = %mission_id_clone, line = %clean, "OpenCode CLI stderr");
+
+                    // Detect session errors from stderr
+                    let lower = clean.to_lowercase();
+                    if lower.contains("session.error") || lower.contains("session ended with error")
+                    {
+                        if let Some(pos) = clean.find(": ") {
+                            let err_part = clean[pos + 2..].trim();
+                            if !err_part.is_empty() {
+                                let mut guard = stderr_error_capture.lock().unwrap();
+                                if guard.is_none() {
+                                    *guard = Some(err_part.to_string());
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }))
