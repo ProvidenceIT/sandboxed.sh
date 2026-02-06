@@ -320,10 +320,10 @@ export default function SettingsPage() {
 
   const isDirty = fileContent !== originalFileContent;
   const hostHandler = useMemo(() => {
-    if (selectedProfile !== DEFAULT_PROFILE || !selectedFile) return null;
+    if (!selectedFile) return null;
     const fileName = selectedFile.split('/').pop() || '';
     return HOST_SYNC_MAP[activeHarness]?.[fileName] || null;
-  }, [selectedProfile, selectedFile, activeHarness]);
+  }, [selectedFile, activeHarness]);
 
   // Load profile files when profile or harness changes
   const loadProfileFiles = useCallback(async () => {
@@ -510,7 +510,7 @@ export default function SettingsPage() {
     return () => clearTimeout(timer);
   }, [hostSyncSuccess]);
 
-  const hostSyncAvailable = Boolean(hostHandler && selectedProfile === DEFAULT_PROFILE);
+  const hostSyncAvailable = Boolean(hostHandler);
   const normalizedHost = (() => {
     if (!hostFileJson) return null;
     if (activeHarness === 'claudecode' && selectedFile?.endsWith('/settings.json')) {
@@ -549,6 +549,8 @@ export default function SettingsPage() {
   const hostComparisonInvalid = hostSyncAvailable && normalizedLibrary === null;
   // Always show host sync status when available so it's obvious what the app is comparing against.
   const showHostBanner = hostSyncAvailable;
+  const hostComparisonLabel =
+    selectedProfile === DEFAULT_PROFILE ? 'library default' : `profile "${selectedProfile}"`;
 
   const handleApplyToHost = useCallback(async () => {
     if (!hostHandler || !selectedFile) return;
@@ -621,18 +623,32 @@ export default function SettingsPage() {
     try {
       setHostSyncing(true);
       setError(null);
-      if (harnessConfigEntry.libraryDir === 'claudecode' && libraryFileName === 'config.json') {
-        const sanitized = coerceClaudeCodeConfig(hostFileJson);
-        const sanitizedContent = JSON.stringify(sanitized, null, 2);
-        await saveClaudeCodeConfig(sanitized);
-        setFileContent(sanitizedContent);
-        setOriginalFileContent(sanitizedContent);
+      if (selectedProfile === DEFAULT_PROFILE) {
+        if (harnessConfigEntry.libraryDir === 'claudecode' && libraryFileName === 'config.json') {
+          const sanitized = coerceClaudeCodeConfig(hostFileJson);
+          const sanitizedContent = JSON.stringify(sanitized, null, 2);
+          await saveClaudeCodeConfig(sanitized);
+          setFileContent(sanitizedContent);
+          setOriginalFileContent(sanitizedContent);
+        } else {
+          await saveHarnessDefaultFile(harnessConfigEntry.libraryDir, libraryFileName, content);
+          setFileContent(content);
+          setOriginalFileContent(content);
+        }
+        setIsLibraryDefault(true);
       } else {
-        await saveHarnessDefaultFile(harnessConfigEntry.libraryDir, libraryFileName, content);
-        setFileContent(content);
-        setOriginalFileContent(content);
+        // Pull into the currently selected profile file.
+        // This preserves the ability to diff/apply host config while working in non-default profiles.
+        const payload =
+          activeHarness === 'claudecode' && selectedFile.endsWith('/settings.json')
+            ? JSON.stringify(coerceClaudeCodeConfig(hostFileJson), null, 2)
+            : content;
+        await saveConfigProfileFile(selectedProfile, selectedFile, payload);
+        setFileContent(payload);
+        setOriginalFileContent(payload);
+        setIsLibraryDefault(false);
+        await loadProfileFiles();
       }
-      setIsLibraryDefault(true);
       setParseError(null);
       setHostSyncSuccess('pull');
       await refreshStatus();
@@ -641,7 +657,17 @@ export default function SettingsPage() {
     } finally {
       setHostSyncing(false);
     }
-  }, [hostHandler, selectedFile, hostFileJson, hostMatches, isDirty, refreshStatus]);
+  }, [
+    hostHandler,
+    selectedFile,
+    hostFileJson,
+    hostMatches,
+    isDirty,
+    refreshStatus,
+    selectedProfile,
+    activeHarness,
+    loadProfileFiles,
+  ]);
 
   const handleSave = useCallback(async () => {
     if (parseError || !selectedFile) return;
@@ -1219,9 +1245,28 @@ export default function SettingsPage() {
               )}
 
               {!hostLoading && hostError && (
-                <div className="flex items-center gap-2 text-xs text-red-400">
-                  <AlertCircle className="h-3.5 w-3.5" />
-                  {hostError}
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2 text-xs text-red-400">
+                    <AlertCircle className="h-3.5 w-3.5" />
+                    {hostError}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={handleApplyToHost}
+                      disabled={hostSyncing || !!parseError}
+                      className="px-3 py-1.5 text-xs font-medium text-white/80 bg-white/[0.06] hover:bg-white/[0.1] rounded-lg transition-colors disabled:opacity-50"
+                      title="Apply the current editor content to the host configuration file"
+                    >
+                      Apply to Host
+                    </button>
+                    <button
+                      onClick={() => void loadHostFile()}
+                      disabled={hostSyncing}
+                      className="px-3 py-1.5 text-xs font-medium text-white/80 bg-white/[0.06] hover:bg-white/[0.1] rounded-lg transition-colors disabled:opacity-50"
+                    >
+                      Retry
+                    </button>
+                  </div>
                 </div>
               )}
 
@@ -1246,7 +1291,7 @@ export default function SettingsPage() {
                   <div>
                     <p className="text-xs font-medium text-amber-400">Host differs</p>
                     <p className="text-[11px] text-white/50">
-                      Host {hostHandler?.label} does not match the library default.
+                      Host {hostHandler?.label} does not match the {hostComparisonLabel}.
                     </p>
                   </div>
                   <div className="flex items-center gap-2">
@@ -1273,15 +1318,15 @@ export default function SettingsPage() {
                 !hostComparisonInvalid &&
                 hostMatches &&
                 !hostSyncSuccess && (
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <p className="text-xs font-medium text-emerald-400">Host matches</p>
-                      <p className="text-[11px] text-white/50">
-                        Host {hostHandler?.label} matches the library default
-                        {hostFileJson && Object.keys(hostFileJson).length === 0 ? ' (empty)' : ''}.
-                      </p>
-                    </div>
-                    <div className="flex items-center gap-2">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-xs font-medium text-emerald-400">Host matches</p>
+                    <p className="text-[11px] text-white/50">
+                      Host {hostHandler?.label} matches the {hostComparisonLabel}
+                      {hostFileJson && Object.keys(hostFileJson).length === 0 ? ' (empty)' : ''}.
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
                       <button
                         onClick={handleApplyToHost}
                         disabled={hostSyncing || !!parseError}
@@ -1303,7 +1348,11 @@ export default function SettingsPage() {
               {!hostLoading && !hostError && !hostComparisonInvalid && !hostDiff && hostSyncSuccess && (
                 <div className="flex items-center gap-2 text-xs text-emerald-400">
                   <Check className="h-3.5 w-3.5" />
-                  {hostSyncSuccess === 'push' ? 'Host updated' : 'Library defaults updated'}
+                  {hostSyncSuccess === 'push'
+                    ? 'Host updated'
+                    : selectedProfile === DEFAULT_PROFILE
+                    ? 'Library defaults updated'
+                    : `Profile "${selectedProfile}" updated`}
                 </div>
               )}
             </div>
