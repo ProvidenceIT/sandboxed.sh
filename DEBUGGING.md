@@ -146,6 +146,40 @@ curl "https://agent-backend.thomas.md/api/control/missions/<id>/events" \
 sqlite3 ~/.sandboxed-sh/missions/missions.db "SELECT id, status, created_at FROM missions ORDER BY created_at DESC LIMIT 10;"
 ```
 
+## Mission Streaming Smoke Test
+
+Use the manual smoke test script to validate streaming behavior for Claude Code,
+OpenCode, and Codex against the **development** backend. This is intentionally
+not part of CI.
+
+1. Copy the example env file and fill in values:
+```
+cp scripts/mission_stream_smoke.env.example .env.local
+```
+
+2. Export the variables (or source `.env.local`):
+```
+set -a
+source .env.local
+set +a
+```
+
+3. Run the smoke test (all backends):
+```
+python3 scripts/mission_stream_smoke.py
+```
+
+Optional flags:
+- `--backend claudecode` (repeatable; limit to one backend)
+- `--timeout 180` (seconds per backend)
+- `--allow-no-thinking` (skip the thinking requirement)
+- `--verbose` (print streamed events)
+
+Expected behavior per backend:
+- First message triggers tool calls + results
+- Second message is queued (`queued: true`)
+- Stream includes `thinking`, `text_delta`, `tool_call`, `tool_result`, and `assistant_message`
+
 ## Troubleshooting
 
 **Service won't start (exit code 203/EXEC):** Usually means wrong binary architecture (e.g., macOS ARM binary on Linux). Build on server instead.
