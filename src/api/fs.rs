@@ -234,10 +234,22 @@ async fn resolve_path_for_workspace(
             )
         })?;
         if !parent.exists() {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                format!("Parent directory does not exist: {}", parent.display()),
-            ));
+            // For context paths, create the directory tree automatically
+            // (the mission context directory may not exist yet on the first upload)
+            let is_context_path = path.starts_with("./context") || path.starts_with("context");
+            if is_context_path && mission_id.is_some() {
+                tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("Failed to create context directory: {}", e),
+                    )
+                })?;
+            } else {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    format!("Parent directory does not exist: {}", parent.display()),
+                ));
+            }
         }
         let canonical_parent = parent.canonicalize().map_err(|e| {
             (
