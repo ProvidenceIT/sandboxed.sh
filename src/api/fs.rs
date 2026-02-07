@@ -234,10 +234,29 @@ async fn resolve_path_for_workspace(
             )
         })?;
         if !parent.exists() {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                format!("Parent directory does not exist: {}", parent.display()),
-            ));
+            // For context paths, create the directory tree automatically
+            // (the mission context directory may not exist yet on the first upload)
+            let is_context_path = path.starts_with("./context") || path.starts_with("context");
+            if is_context_path && mission_id.is_some() {
+                // The context root (e.g. /root/context) may be a stale symlink
+                // from a previous mission's workspace prep. Remove it so
+                // create_dir_all can create the real directory tree.
+                let context_root = state.config.working_dir.join("context");
+                if context_root.is_symlink() {
+                    let _ = tokio::fs::remove_file(&context_root).await;
+                }
+                tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("Failed to create context directory: {}", e),
+                    )
+                })?;
+            } else {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    format!("Parent directory does not exist: {}", parent.display()),
+                ));
+            }
         }
         let canonical_parent = parent.canonicalize().map_err(|e| {
             (
