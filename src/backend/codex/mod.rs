@@ -351,8 +351,8 @@ fn convert_codex_event(
                 }
                 "mcp_tool_call" => {
                     if let Some(name) = mcp_tool_name(&item.data) {
-                        if !mark_tool_call_emitted(item_content_cache, &item.id) {
-                            if let Some(args) = mcp_tool_args(&item.data) {
+                        if let Some(args) = mcp_tool_args(&item.data) {
+                            if !mark_tool_call_emitted(item_content_cache, &item.id) {
                                 results.push(ExecutionEvent::ToolCall {
                                     id: item.id.clone(),
                                     name: name.clone(),
