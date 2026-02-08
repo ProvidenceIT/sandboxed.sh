@@ -237,6 +237,11 @@ export function DesktopStream({
           if (Math.hypot(dx, dy) >= 3) {
             mouseDragActiveRef.current = true;
             if (!mouseDownSentRef.current) {
+              pendingClickRef.current = null;
+              if (clickTimeoutRef.current) {
+                clearTimeout(clickTimeoutRef.current);
+                clickTimeoutRef.current = null;
+              }
               sendCommand({
                 t: "mouse_down",
                 x: start.x,
@@ -281,12 +286,17 @@ export function DesktopStream({
         clearTimeout(holdTimeoutRef.current);
         holdTimeoutRef.current = null;
       }
+      if (clickTimeoutRef.current) {
+        clearTimeout(clickTimeoutRef.current);
+        clickTimeoutRef.current = null;
+      }
       holdTimeoutRef.current = window.setTimeout(() => {
         if (
           mouseDownRef.current &&
           !mouseDragActiveRef.current &&
           !mouseDownSentRef.current
         ) {
+          pendingClickRef.current = null;
           sendCommand({
             t: "mouse_down",
             x: coords.x,

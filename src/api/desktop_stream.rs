@@ -240,10 +240,26 @@ async fn handle_desktop_stream(socket: WebSocket, params: StreamParams) {
                     scroll_acc_x = scroll_acc_x.saturating_add(dx);
                     scroll_acc_y = scroll_acc_y.saturating_add(dy);
 
-                    let steps_x = scroll_acc_x / 120;
-                    let steps_y = scroll_acc_y / 120;
+                    let mut steps_x = scroll_acc_x / 120;
+                    let mut steps_y = scroll_acc_y / 120;
+                    let mut force_x = false;
+                    let mut force_y = false;
+                    if steps_x == 0 && dx.abs() >= 100 {
+                        steps_x = dx.signum();
+                        force_x = true;
+                    }
+                    if steps_y == 0 && dy.abs() >= 100 {
+                        steps_y = dy.signum();
+                        force_y = true;
+                    }
                     scroll_acc_x -= steps_x * 120;
                     scroll_acc_y -= steps_y * 120;
+                    if force_x {
+                        scroll_acc_x = 0;
+                    }
+                    if force_y {
+                        scroll_acc_y = 0;
+                    }
 
                     run_xdotool_scroll_steps(&input_display, steps_x, steps_y, x, y).await
                 }
