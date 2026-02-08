@@ -4733,8 +4733,12 @@ async fn check_basic_internet_connectivity(
     workspace_exec: &WorkspaceExec,
     cwd: &std::path::Path,
 ) -> Result<(), String> {
-    // Use Cloudflare's 1.1.1.1 which is highly reliable and fast
-    let test_cmd = "curl -sI --max-time 5 https://1.1.1.1 2>&1 | head -1";
+    // Use Cloudflare's 1.1.1.1 which is highly reliable and fast.
+    //
+    // Avoid piping to `head`: under some shells/environments with `pipefail` enabled, the
+    // upstream `curl` may be terminated with SIGPIPE which yields an exit code of None (-1)
+    // and causes spurious "network check failed" errors.
+    let test_cmd = "curl -sS -o /dev/null -w '%{http_code}' --max-time 5 https://1.1.1.1";
 
     let output = match workspace_exec
         .output(
@@ -4770,8 +4774,9 @@ async fn check_basic_internet_connectivity(
             .to_string());
     }
 
-    // Check for successful HTTP response
-    if stdout.starts_with("HTTP/") || combined.contains("HTTP/") {
+    // Check for successful HTTP response (any non-000 code means we got an HTTP response).
+    let code = stdout.trim();
+    if !code.is_empty() && code != "000" {
         tracing::debug!("Basic internet connectivity check passed");
         return Ok(());
     }
@@ -4780,12 +4785,18 @@ async fn check_basic_internet_connectivity(
     if !output.status.success() {
         return Err(format!(
             "No internet connectivity: Network check failed (exit code {}). \
-             The workspace may not have network access configured.",
-            output.status.code().unwrap_or(-1)
+             Output: {}",
+            output.status.code().unwrap_or(-1),
+            combined.trim()
         ));
     }
 
-    Ok(())
+    Err(format!(
+        "No internet connectivity: unexpected curl output (http_code={}). \
+         Output: {}",
+        if code.is_empty() { "<empty>" } else { code },
+        combined.trim()
+    ))
 }
 
 /// Check DNS resolution for a specific hostname.
@@ -4867,7 +4878,13 @@ async fn check_api_reachability(
     api_url: &str,
 ) -> Result<(), String> {
     // Use curl to test HTTPS connectivity to the API
-    let test_cmd = format!("curl -sI --max-time 10 {} 2>&1 | head -1", api_url);
+    //
+    // We intentionally avoid piping to `head` here for the same reason as the basic connectivity
+    // check: environments with `pipefail` can turn a harmless SIGPIPE into a non-success status.
+    let test_cmd = format!(
+        "curl -sS -o /dev/null -w '%{{http_code}}' --max-time 10 {}",
+        api_url
+    );
 
     let output = match workspace_exec
         .output(
@@ -4924,8 +4941,9 @@ async fn check_api_reachability(
         ));
     }
 
-    // Check for successful HTTP response (any HTTP response means connectivity works)
-    if stdout.starts_with("HTTP/") || combined.contains("HTTP/") {
+    // Check for successful HTTP response (any non-000 code means we got an HTTP response).
+    let code = stdout.trim();
+    if !code.is_empty() && code != "000" {
         tracing::debug!("{} API connectivity check passed", api_name);
         return Ok(());
     }
@@ -4941,7 +4959,13 @@ async fn check_api_reachability(
         ));
     }
 
-    Ok(())
+    Err(format!(
+        "Cannot connect to {} API: unexpected curl output (http_code={}). \
+         Output: {}",
+        api_name,
+        if code.is_empty() { "<empty>" } else { code },
+        combined.trim()
+    ))
 }
 
 /// API endpoint configurations for different providers
