@@ -2253,7 +2253,8 @@ pub fn run_claudecode_turn<'a>(
                     );
                     pty.kill();
                     reader_handle.abort();
-                    let mut msg = "Claude Code produced no stream events after startup timeout. This is typically caused by the Claude CLI hanging when run without a TTY.".to_string();
+                    let mut msg = "Claude Code produced no stream events after startup timeout. The Claude CLI started but did not emit any stream-json events.".to_string();
+                    msg.push_str("\n\nThis can happen when resuming an old/stuck Claude session or when the CLI hangs during initialization.");
                     if !non_json_output.is_empty() {
                         msg.push_str(&format!(
                             "\n\nNon-JSON output captured ({} lines):\n{}",

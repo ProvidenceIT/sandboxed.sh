@@ -5278,7 +5278,7 @@ async fn run_single_control_turn(
             // where the session exists but history may not have assistant messages yet).
             let is_continuation =
                 force_session_resume || history.iter().any(|(role, _)| role == "assistant");
-            super::mission_runner::run_claudecode_turn(
+            let mut result = super::mission_runner::run_claudecode_turn(
                 exec_workspace,
                 &ctx.working_dir,
                 &user_message,
@@ -5286,7 +5286,7 @@ async fn run_single_control_turn(
                 config.opencode_agent.as_deref(),
                 mid,
                 events_tx.clone(),
-                cancel,
+                cancel.clone(),
                 None, // secrets - not available in control context
                 &config.working_dir,
                 session_id.as_deref(),
@@ -5294,7 +5294,56 @@ async fn run_single_control_turn(
                 Some(tool_hub.clone()),
                 Some(status.clone()),
             )
-            .await
+            .await;
+
+            // Claude Code occasionally gets stuck when resuming an old session: the CLI emits only
+            // init JSON (or nothing) and then goes silent. When that happens, auto-reset the
+            // mission's session_id and retry once with a fresh session.
+            //
+            // This is intentionally conservative: only retry for the specific "no stream events"
+            // startup timeout failure, and only on continuation turns.
+            if is_continuation
+                && !result.success
+                && result.terminal_reason == Some(TerminalReason::LlmError)
+                && result
+                    .output
+                    .starts_with("Claude Code produced no stream events after startup timeout")
+            {
+                let new_session_id = Uuid::new_v4().to_string();
+                tracing::warn!(
+                    mission_id = %mid,
+                    old_session_id = ?session_id,
+                    new_session_id = %new_session_id,
+                    "Claude Code produced no stream events; resetting session and retrying once"
+                );
+
+                // Persist the new session ID via the existing event pipeline.
+                // The control actor listens for this event and updates the mission store.
+                let _ = events_tx.send(AgentEvent::SessionIdUpdate {
+                    mission_id: mid,
+                    session_id: new_session_id.clone(),
+                });
+
+                result = super::mission_runner::run_claudecode_turn(
+                    exec_workspace,
+                    &ctx.working_dir,
+                    &user_message,
+                    config.default_model.as_deref(),
+                    config.opencode_agent.as_deref(),
+                    mid,
+                    events_tx.clone(),
+                    cancel.clone(),
+                    None, // secrets - not available in control context
+                    &config.working_dir,
+                    Some(&new_session_id),
+                    is_continuation,
+                    Some(tool_hub.clone()),
+                    Some(status.clone()),
+                )
+                .await;
+            }
+
+            result
         }
         Some("amp") => {
             let mid = match mission_id {
