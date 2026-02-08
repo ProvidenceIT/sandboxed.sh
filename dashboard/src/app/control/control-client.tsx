@@ -2098,6 +2098,7 @@ export default function ControlClient() {
   const [hasDesktopSession, setHasDesktopSession] = useState(false);
   const [desktopSessions, setDesktopSessions] = useState<DesktopSessionDetail[]>([]);
   const desktopSessionsRef = useRef<DesktopSessionDetail[]>([]);
+  const hasDesktopSessionRef = useRef(false);
   const [isClosingDesktop, setIsClosingDesktop] = useState<string | null>(null);
   // Track when we're expecting a desktop session (from ToolCall before ToolResult arrives)
   const expectingDesktopSessionRef = useRef(false);
@@ -2261,6 +2262,10 @@ export default function ControlClient() {
   useEffect(() => {
     desktopSessionsRef.current = desktopSessions;
   }, [desktopSessions]);
+
+  useEffect(() => {
+    hasDesktopSessionRef.current = hasDesktopSession;
+  }, [hasDesktopSession]);
 
   useEffect(() => {
     // Only auto-show when transitioning from no active thinking to active thinking
@@ -2681,6 +2686,59 @@ export default function ControlClient() {
     return null;
   }, []);
 
+  const extractDesktopDisplay = useCallback((value: unknown): string | null => {
+    function parseDisplayFromString(text: string): string | null {
+      try {
+        const parsed = JSON.parse(text);
+        const nested = extractFromValue(parsed);
+        if (nested) return nested;
+      } catch {
+        // Ignore parse errors - fall back to regex
+      }
+      const match = text.match(/"display"\s*:\s*"([^"]+)"/i);
+      return match ? match[1] : null;
+    }
+
+    function extractFromValue(node: unknown): string | null {
+      if (!node) return null;
+      if (typeof node === "string") {
+        return parseDisplayFromString(node);
+      }
+      if (Array.isArray(node)) {
+        for (const item of node) {
+          const found = extractFromValue(item);
+          if (found) return found;
+        }
+        return null;
+      }
+      if (typeof node === "object") {
+        const record = node as Record<string, unknown>;
+        if (typeof record.display === "string") {
+          return record.display;
+        }
+        if (record.result) {
+          const fromResult = extractFromValue(record.result);
+          if (fromResult) return fromResult;
+        }
+        if (record.content) {
+          const fromContent = extractFromValue(record.content);
+          if (fromContent) return fromContent;
+        }
+        if (record.structured_content) {
+          const fromStructured = extractFromValue(record.structured_content);
+          if (fromStructured) return fromStructured;
+        }
+        if (typeof record.text === "string") {
+          const fromText = parseDisplayFromString(record.text);
+          if (fromText) return fromText;
+        }
+      }
+      return null;
+    }
+
+    return extractFromValue(value);
+  }, []);
+
   // Helper to check if mission history has an active desktop session
   // A session is active if there's a start without a subsequent close
   const missionHasDesktopSession = useCallback(
@@ -2722,7 +2780,12 @@ export default function ControlClient() {
         setShowDesktopStream(true);
         return;
       }
-      setHasDesktopSession(missionHasDesktopSession(mission));
+      if (missionHasDesktopSession(mission)) {
+        setHasDesktopSession(true);
+        setShowDesktopStream(true);
+      } else {
+        setHasDesktopSession(false);
+      }
     },
     [getActiveDesktopSession, missionHasDesktopSession]
   );
@@ -2754,16 +2817,8 @@ export default function ControlClient() {
         if (!isStart && !isClose) continue;
 
         // Parse result to get display
-        let result: unknown = event.content;
-        try {
-          result = event.content ? JSON.parse(event.content) : null;
-        } catch {
-          // Keep as string if not valid JSON
-        }
-
-        if (!result || typeof result !== "object") continue;
-        const display = (result as Record<string, unknown>)["display"];
-        if (typeof display !== "string") continue;
+        const display = extractDesktopDisplay(event.content);
+        if (!display) continue;
 
         if (isStart) {
           sessionsByDisplay.set(display, true);
@@ -2793,7 +2848,7 @@ export default function ControlClient() {
         }
       }
     },
-    []
+    [extractDesktopDisplay]
   );
 
   const hasRunningDesktopSessionForMission = useCallback(
@@ -4052,7 +4107,7 @@ export default function ControlClient() {
           });
           if (shouldApplyStatus) {
             // Auto-close desktop stream when agent finishes, unless a session is still running.
-            if (!hasRunningDesktopSessionForMission(effectiveMissionId)) {
+            if (!hasRunningDesktopSessionForMission(effectiveMissionId) && !hasDesktopSessionRef.current) {
               setShowDesktopStream(false);
             }
           }
@@ -4541,17 +4596,8 @@ export default function ControlClient() {
         // Check for desktop_start_session right away using event data
         // This handles the case where tool_call events might be filtered or missed
         if (eventToolName === "desktop_start_session" || eventToolName === "desktop_desktop_start_session" || eventToolName === "mcp__desktop__desktop_start_session") {
-          let result = data["result"];
-          // Handle case where result is a JSON string that needs parsing
-          if (typeof result === "string") {
-            try {
-              result = JSON.parse(result);
-            } catch {
-              // Not valid JSON, leave as-is
-            }
-          }
-          if (isRecord(result) && typeof result["display"] === "string") {
-            const display = result["display"];
+          const display = extractDesktopDisplay(data["result"] ?? data);
+          if (display) {
             setDesktopDisplayId(display);
             setHasDesktopSession(true);
             // Auto-open desktop stream when session starts
@@ -4574,17 +4620,8 @@ export default function ControlClient() {
             const toolName = toolItem.name;
             // Check for desktop_start_session (with or without desktop_ prefix from MCP)
             if (toolName === "desktop_start_session" || toolName === "desktop_desktop_start_session" || toolName === "mcp__desktop__desktop_start_session") {
-              let result = data["result"];
-              // Handle case where result is a JSON string that needs parsing
-              if (typeof result === "string") {
-                try {
-                  result = JSON.parse(result);
-                } catch {
-                  // Not valid JSON, leave as-is
-                }
-              }
-              if (isRecord(result) && typeof result["display"] === "string") {
-                const display = result["display"];
+              const display = extractDesktopDisplay(data["result"] ?? data);
+              if (display) {
                 setDesktopDisplayId(display);
                 setHasDesktopSession(true);
                 setShowDesktopStream(true);
