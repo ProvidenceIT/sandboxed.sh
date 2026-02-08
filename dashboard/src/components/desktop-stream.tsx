@@ -442,10 +442,12 @@ export function DesktopStream({
     (event: WheelEvent<HTMLCanvasElement>) => {
       if (connectionState !== "connected") return;
       const coords = getCanvasCoords(event);
+      const scale =
+        event.deltaMode === 1 ? 120 : event.deltaMode === 2 ? 360 : 1;
       sendCommand({
         t: "scroll",
-        delta_x: Math.round(event.deltaX),
-        delta_y: Math.round(event.deltaY),
+        delta_x: Math.round(event.deltaX * scale),
+        delta_y: Math.round(event.deltaY * scale),
         x: coords?.x ?? null,
         y: coords?.y ?? null,
       });
@@ -701,11 +703,11 @@ export function DesktopStream({
       {/* Header */}
       <div
         className={cn(
-          "absolute top-0 left-0 right-0 z-10 flex items-center justify-between px-4 py-2 bg-gradient-to-b from-black/80 to-transparent transition-opacity duration-200",
+          "pointer-events-none absolute top-0 left-0 right-0 z-10 flex items-center justify-between px-4 py-2 bg-gradient-to-b from-black/80 to-transparent transition-opacity duration-200",
           showControls ? "opacity-100" : "opacity-0"
         )}
       >
-        <div className="flex items-center gap-3">
+        <div className="pointer-events-auto flex items-center gap-3">
           <div
             className={cn(
               "flex items-center gap-2 text-xs",
@@ -738,7 +740,7 @@ export function DesktopStream({
           <span className="text-xs text-white/30">{frameCount} frames</span>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="pointer-events-auto flex items-center gap-2">
           {isPipSupported && (
             <button
               onClick={handlePip}
@@ -829,11 +831,11 @@ export function DesktopStream({
       {/* Controls */}
       <div
         className={cn(
-          "absolute bottom-0 left-0 right-0 z-10 p-4 bg-gradient-to-t from-black/80 to-transparent transition-opacity duration-200",
+          "pointer-events-none absolute bottom-0 left-0 right-0 z-10 p-4 bg-gradient-to-t from-black/80 to-transparent transition-opacity duration-200",
           showControls ? "opacity-100" : "opacity-0"
         )}
       >
-        <div className="flex items-center justify-between gap-4">
+        <div className="pointer-events-auto flex items-center justify-between gap-4">
           {/* Play/Pause */}
           <div className="flex items-center gap-2">
             <button
