@@ -199,6 +199,8 @@ async fn handle_desktop_stream(socket: WebSocket, params: StreamParams) {
 
     let input_display = x11_display.clone();
     let mut input_task = tokio::spawn(async move {
+        let mut scroll_acc_x: i32 = 0;
+        let mut scroll_acc_y: i32 = 0;
         while let Some(cmd) = input_rx.recv().await {
             let result = match cmd {
                 ClientCommand::MouseMove { x, y } => {
@@ -235,7 +237,15 @@ async fn handle_desktop_stream(socket: WebSocket, params: StreamParams) {
                         (None, None, Some(a)) => (0, a),
                         _ => (0, 0),
                     };
-                    run_xdotool_scroll(&input_display, dx, dy, x, y).await
+                    scroll_acc_x = scroll_acc_x.saturating_add(dx);
+                    scroll_acc_y = scroll_acc_y.saturating_add(dy);
+
+                    let steps_x = scroll_acc_x / 120;
+                    let steps_y = scroll_acc_y / 120;
+                    scroll_acc_x -= steps_x * 120;
+                    scroll_acc_y -= steps_y * 120;
+
+                    run_xdotool_scroll_steps(&input_display, steps_x, steps_y, x, y).await
                 }
                 ClientCommand::Type { text, delay_ms } => {
                     run_xdotool_type(&input_display, &text, delay_ms).await
@@ -434,13 +444,16 @@ async fn run_xdotool_click(
     }
 }
 
-async fn run_xdotool_scroll(
+async fn run_xdotool_scroll_steps(
     display: &str,
-    delta_x: i32,
-    delta_y: i32,
+    steps_x: i32,
+    steps_y: i32,
     x: Option<i32>,
     y: Option<i32>,
 ) -> anyhow::Result<()> {
+    if steps_x == 0 && steps_y == 0 {
+        return Ok(());
+    }
     if let (Some(x), Some(y)) = (x, y) {
         run_xdotool(
             display,
@@ -449,23 +462,20 @@ async fn run_xdotool_scroll(
         .await?;
     }
 
-    let steps_y = (delta_y.abs() / 120).max(1).min(10);
-    let steps_x = (delta_x.abs() / 120).max(1).min(10);
-
-    if delta_y != 0 {
-        let button = if delta_y > 0 { "5" } else { "4" };
+    if steps_y != 0 {
+        let button = if steps_y > 0 { "5" } else { "4" };
         run_xdotool(
             display,
-            &["click", "--repeat", &steps_y.to_string(), button],
+            &["click", "--repeat", &steps_y.abs().to_string(), button],
         )
         .await?;
     }
 
-    if delta_x != 0 {
-        let button = if delta_x > 0 { "7" } else { "6" };
+    if steps_x != 0 {
+        let button = if steps_x > 0 { "7" } else { "6" };
         run_xdotool(
             display,
-            &["click", "--repeat", &steps_x.to_string(), button],
+            &["click", "--repeat", &steps_x.abs().to_string(), button],
         )
         .await?;
     }
