@@ -626,47 +626,140 @@ function SharedFileCard({ file }: { file: SharedFile }) {
   // Format file size
   const sizeLabel = file.size_bytes ? formatBytes(file.size_bytes) : null;
 
+  const apiBase = getRuntimeApiBase();
+  const isApiRelativeUrl = file.url.startsWith("/");
+  const isApiUrl = isApiRelativeUrl || file.url.startsWith(apiBase);
+  const resolvedUrl = isApiRelativeUrl ? `${apiBase}${file.url}` : file.url;
+
+  const [blobUrl, setBlobUrl] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // If this is an API-protected image, fetch it with auth and render from an object URL.
+  useEffect(() => {
+    if (file.kind !== "image") return;
+    if (!isApiUrl) return; // External URLs can be loaded directly by the browser.
+
+    let cancelled = false;
+    let localUrl: string | null = null;
+
+    const run = async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const res = await fetch(resolvedUrl, { headers: { ...authHeader() } });
+        if (!res.ok) throw new Error(`Failed to load image (${res.status})`);
+        const blob = await res.blob();
+        localUrl = URL.createObjectURL(blob);
+        if (!cancelled) setBlobUrl(localUrl);
+      } catch (e) {
+        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+
+    void run();
+    return () => {
+      cancelled = true;
+      if (localUrl) URL.revokeObjectURL(localUrl);
+    };
+  }, [file.kind, isApiUrl, resolvedUrl]);
+
+  const handleDownload = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      // If URL is external, let the browser handle it.
+      if (!isApiUrl) {
+        window.open(resolvedUrl, "_blank", "noopener,noreferrer");
+        return;
+      }
+
+      const res = await fetch(resolvedUrl, { headers: { ...authHeader() } });
+      if (!res.ok) throw new Error(`Download failed (${res.status})`);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      try {
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = file.name || "download";
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+      } finally {
+        URL.revokeObjectURL(url);
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, [file.name, isApiUrl, resolvedUrl]);
+
+  const handleOpen = useCallback(() => {
+    if (file.kind === "image" && blobUrl) {
+      window.open(blobUrl, "_blank", "noopener,noreferrer");
+      return;
+    }
+    if (!isApiUrl) {
+      window.open(resolvedUrl, "_blank", "noopener,noreferrer");
+      return;
+    }
+    // For API URLs we can't open directly without headers; download instead.
+    void handleDownload();
+  }, [blobUrl, file.kind, handleDownload, isApiUrl, resolvedUrl]);
+
   if (file.kind === "image") {
-    // Render images inline with click to open
+    // Render images inline (supports auth-protected API URLs).
     return (
       <div className="mt-3 rounded-lg overflow-hidden border border-white/[0.06] bg-black/20">
-        <a
-          href={file.url}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="block"
-        >
-          <img
-            src={file.url}
-            alt={file.name}
-            className="max-w-full max-h-[400px] object-contain"
-            loading="lazy"
-          />
-        </a>
+        <button type="button" onClick={handleOpen} className="block w-full text-left">
+          {loading && !blobUrl ? (
+            <div className="h-[240px] w-full animate-pulse bg-white/[0.03]" />
+          ) : (
+            <img
+              src={blobUrl || resolvedUrl}
+              alt={file.name}
+              className="max-w-full max-h-[400px] object-contain"
+              loading="lazy"
+            />
+          )}
+        </button>
         <div className="flex items-center gap-2 px-3 py-2 text-xs text-white/40 border-t border-white/[0.06]">
           <Image className="h-3 w-3" />
           <span className="truncate flex-1">{file.name}</span>
           {sizeLabel && <span>{sizeLabel}</span>}
-          <a
-            href={file.url}
-            target="_blank"
-            rel="noopener noreferrer"
+          <button
+            type="button"
+            onClick={handleOpen}
             className="text-indigo-400 hover:text-indigo-300 flex items-center gap-1"
+            title="Open"
+            aria-label="Open"
           >
             <ExternalLink className="h-3 w-3" />
-          </a>
+          </button>
+          <button
+            type="button"
+            onClick={handleDownload}
+            className="text-indigo-400 hover:text-indigo-300 flex items-center gap-1"
+            title="Download"
+            aria-label="Download"
+            disabled={loading}
+          >
+            <Download className={cn("h-3 w-3", loading && "animate-pulse")} />
+          </button>
         </div>
+        {error && (
+          <div className="px-3 pb-2 text-xs text-red-400">{error}</div>
+        )}
       </div>
     );
   }
 
   // Render other files as download cards
   return (
-    <a
-      href={file.url}
-      target="_blank"
-      rel="noopener noreferrer"
-      download={file.name}
+    <div
       className="mt-3 flex items-center gap-3 px-4 py-3 rounded-lg border border-white/[0.06] bg-white/[0.02] hover:bg-white/[0.04] transition-colors group"
     >
       <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-indigo-500/10">
@@ -683,9 +776,19 @@ function SharedFileCard({ file }: { file: SharedFile }) {
             </>
           )}
         </div>
+        {error && <div className="mt-1 text-xs text-red-400">{error}</div>}
       </div>
-      <Download className="h-4 w-4 text-white/30 group-hover:text-indigo-400 transition-colors" />
-    </a>
+      <button
+        type="button"
+        onClick={handleDownload}
+        className="p-2 rounded-md text-white/30 group-hover:text-indigo-400 hover:bg-white/[0.06] transition-colors"
+        title="Download"
+        aria-label="Download"
+        disabled={loading}
+      >
+        <Download className={cn("h-4 w-4", loading && "animate-pulse")} />
+      </button>
+    </div>
   );
 }
 
