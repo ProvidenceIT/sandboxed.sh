@@ -452,8 +452,7 @@ export function DesktopStream({
     (event: WheelEvent<HTMLCanvasElement>) => {
       if (connectionState !== "connected") return;
       const coords = getCanvasCoords(event);
-      const scale =
-        event.deltaMode === 1 ? 120 : event.deltaMode === 2 ? 360 : 1;
+      const scale = event.deltaMode === 1 ? 40 : event.deltaMode === 2 ? 360 : 1;
       sendCommand({
         t: "scroll",
         delta_x: Math.round(event.deltaX * scale),
