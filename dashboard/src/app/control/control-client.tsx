@@ -2097,6 +2097,7 @@ export default function ControlClient() {
   const [showDisplaySelector, setShowDisplaySelector] = useState(false);
   const [hasDesktopSession, setHasDesktopSession] = useState(false);
   const [desktopSessions, setDesktopSessions] = useState<DesktopSessionDetail[]>([]);
+  const desktopSessionsRef = useRef<DesktopSessionDetail[]>([]);
   const [isClosingDesktop, setIsClosingDesktop] = useState<string | null>(null);
   // Track when we're expecting a desktop session (from ToolCall before ToolResult arrives)
   const expectingDesktopSessionRef = useRef(false);
@@ -2257,6 +2258,10 @@ export default function ControlClient() {
 
   // Auto-show thinking panel when thinking starts (only on transition to active)
   const prevHasActiveThinking = useRef(false);
+  useEffect(() => {
+    desktopSessionsRef.current = desktopSessions;
+  }, [desktopSessions]);
+
   useEffect(() => {
     // Only auto-show when transitioning from no active thinking to active thinking
     if (hasActiveThinking && !prevHasActiveThinking.current) {
@@ -2789,6 +2794,26 @@ export default function ControlClient() {
       }
     },
     []
+  );
+
+  const hasRunningDesktopSessionForMission = useCallback(
+    (missionId: string | null): boolean => {
+      if (!missionId) return false;
+      const activeMission =
+        viewingMissionRef.current ?? currentMissionRef.current;
+      if (activeMission?.id === missionId) {
+        if (getActiveDesktopSession(activeMission)) {
+          return true;
+        }
+      }
+      return desktopSessionsRef.current.some(
+        (session) =>
+          session.process_running &&
+          session.status !== "stopped" &&
+          session.mission_id === missionId
+      );
+    },
+    [getActiveDesktopSession]
   );
 
   const missionForDownloads = viewingMission ?? currentMission;
@@ -4026,8 +4051,10 @@ export default function ControlClient() {
             return rest;
           });
           if (shouldApplyStatus) {
-            // Auto-close desktop stream when agent finishes
-            setShowDesktopStream(false);
+            // Auto-close desktop stream when agent finishes, unless a session is still running.
+            if (!hasRunningDesktopSessionForMission(effectiveMissionId)) {
+              setShowDesktopStream(false);
+            }
           }
         }
 
