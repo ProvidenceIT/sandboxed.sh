@@ -60,6 +60,12 @@ export function DesktopStream({
   const mouseDownCoordsRef = useRef<{ x: number; y: number } | null>(null);
   const mouseDownButtonRef = useRef(1);
   const lastCoordsRef = useRef<{ x: number; y: number } | null>(null);
+  const mouseDownSentRef = useRef(false);
+  const holdTimeoutRef = useRef<number | null>(null);
+  const clickTimeoutRef = useRef<number | null>(null);
+  const pendingClickRef = useRef<{ x: number; y: number; time: number } | null>(
+    null
+  );
 
   // Refs to store current values without triggering reconnection on slider changes
   const fpsRef = useRef(initialFps);
@@ -230,6 +236,19 @@ export function DesktopStream({
           const dy = coords.y - start.y;
           if (Math.hypot(dx, dy) >= 3) {
             mouseDragActiveRef.current = true;
+            if (!mouseDownSentRef.current) {
+              sendCommand({
+                t: "mouse_down",
+                x: start.x,
+                y: start.y,
+                button: mouseDownButtonRef.current,
+              });
+              mouseDownSentRef.current = true;
+            }
+            if (holdTimeoutRef.current) {
+              clearTimeout(holdTimeoutRef.current);
+              holdTimeoutRef.current = null;
+            }
           }
         }
       }
@@ -257,12 +276,27 @@ export function DesktopStream({
       mouseDownCoordsRef.current = coords;
       mouseDownButtonRef.current = 1;
       lastCoordsRef.current = coords;
-      sendCommand({
-        t: "mouse_down",
-        x: coords.x,
-        y: coords.y,
-        button: mouseDownButtonRef.current,
-      });
+      mouseDownSentRef.current = false;
+      if (holdTimeoutRef.current) {
+        clearTimeout(holdTimeoutRef.current);
+        holdTimeoutRef.current = null;
+      }
+      holdTimeoutRef.current = window.setTimeout(() => {
+        if (
+          mouseDownRef.current &&
+          !mouseDragActiveRef.current &&
+          !mouseDownSentRef.current
+        ) {
+          sendCommand({
+            t: "mouse_down",
+            x: coords.x,
+            y: coords.y,
+            button: mouseDownButtonRef.current,
+          });
+          mouseDownSentRef.current = true;
+        }
+        holdTimeoutRef.current = null;
+      }, 150);
       event.preventDefault();
       event.stopPropagation();
       containerRef.current?.focus();
@@ -274,19 +308,66 @@ export function DesktopStream({
     (event: MouseEvent<HTMLCanvasElement>) => {
       if (!mouseDownRef.current) return;
       if (connectionState !== "connected") return;
+      if (event.button !== 0) return;
       const coords = getCanvasCoords(event) ?? lastCoordsRef.current;
+      if (holdTimeoutRef.current) {
+        clearTimeout(holdTimeoutRef.current);
+        holdTimeoutRef.current = null;
+      }
       mouseDownRef.current = false;
       mouseDownCoordsRef.current = null;
       if (!coords) return;
       if (mouseDragActiveRef.current) {
         mouseDragActiveRef.current = false;
       }
-      sendCommand({
-        t: "mouse_up",
-        x: coords.x,
-        y: coords.y,
-        button: mouseDownButtonRef.current,
-      });
+      if (mouseDownSentRef.current) {
+        sendCommand({
+          t: "mouse_up",
+          x: coords.x,
+          y: coords.y,
+          button: mouseDownButtonRef.current,
+        });
+        mouseDownSentRef.current = false;
+      } else {
+        const now = Date.now();
+        const pending = pendingClickRef.current;
+        const isDouble =
+          pending &&
+          now - pending.time <= 250 &&
+          Math.hypot(coords.x - pending.x, coords.y - pending.y) <= 4;
+        if (isDouble) {
+          if (clickTimeoutRef.current) {
+            clearTimeout(clickTimeoutRef.current);
+            clickTimeoutRef.current = null;
+          }
+          pendingClickRef.current = null;
+          sendCommand({
+            t: "click",
+            x: coords.x,
+            y: coords.y,
+            button: mouseDownButtonRef.current,
+            double: true,
+          });
+        } else {
+          pendingClickRef.current = { x: coords.x, y: coords.y, time: now };
+          if (clickTimeoutRef.current) {
+            clearTimeout(clickTimeoutRef.current);
+          }
+          clickTimeoutRef.current = window.setTimeout(() => {
+            const queued = pendingClickRef.current;
+            if (!queued) return;
+            sendCommand({
+              t: "click",
+              x: queued.x,
+              y: queued.y,
+              button: mouseDownButtonRef.current,
+              double: false,
+            });
+            pendingClickRef.current = null;
+            clickTimeoutRef.current = null;
+          }, 250);
+        }
+      }
       event.preventDefault();
       event.stopPropagation();
     },
@@ -297,18 +378,25 @@ export function DesktopStream({
     if (!mouseDownRef.current) return;
     if (connectionState !== "connected") return;
     const coords = lastCoordsRef.current;
+    if (holdTimeoutRef.current) {
+      clearTimeout(holdTimeoutRef.current);
+      holdTimeoutRef.current = null;
+    }
     mouseDownRef.current = false;
     mouseDownCoordsRef.current = null;
     if (!coords) return;
     if (mouseDragActiveRef.current) {
       mouseDragActiveRef.current = false;
     }
-    sendCommand({
-      t: "mouse_up",
-      x: coords.x,
-      y: coords.y,
-      button: mouseDownButtonRef.current,
-    });
+    if (mouseDownSentRef.current) {
+      sendCommand({
+        t: "mouse_up",
+        x: coords.x,
+        y: coords.y,
+        button: mouseDownButtonRef.current,
+      });
+      mouseDownSentRef.current = false;
+    }
   }, [connectionState, sendCommand]);
 
   const handleAuxClick = useCallback(
@@ -569,6 +657,17 @@ export function DesktopStream({
       wsRef.current?.close();
     };
   }, [connect]);
+
+  useEffect(() => {
+    return () => {
+      if (holdTimeoutRef.current) {
+        clearTimeout(holdTimeoutRef.current);
+      }
+      if (clickTimeoutRef.current) {
+        clearTimeout(clickTimeoutRef.current);
+      }
+    };
+  }, []);
 
   // Listen for fullscreen changes and errors
   useEffect(() => {
