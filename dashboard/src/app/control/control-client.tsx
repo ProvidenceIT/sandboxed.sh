@@ -2329,6 +2329,13 @@ export default function ControlClient() {
     return displayItems[displayItems.length - 1];
   }, [displayItems]);
 
+  // Queued messages should render only in the QueueStrip above the input.
+  // When a queued message is dequeued (queued=false), it will appear in chat normally.
+  const chatDisplayItems = useMemo(
+    () => displayItems.filter((it) => !(it.kind === "user" && it.queued === true)),
+    [displayItems]
+  );
+
   // Extract thinking + streaming items for the side panel.
   const thinkingItems = useMemo(
     () =>
@@ -2423,7 +2430,7 @@ export default function ControlClient() {
       currentThinkingGroup = [];
     };
 
-    for (const item of dedupedItems) {
+    for (const item of chatDisplayItems) {
       if (item.kind === "tool" && !item.isUiTool) {
         // Non-UI tool - flush thinking first, then add to tool group
         flushThinkingGroup();
@@ -2450,7 +2457,7 @@ export default function ControlClient() {
     flushThinkingGroup();
 
     return result;
-  }, [displayItems, showThinkingPanel]);
+  }, [chatDisplayItems, showThinkingPanel]);
 
   const runningMissionById = useMemo(() => {
     return new Map(runningMissions.map((m) => [m.mission_id, m]));
@@ -4656,18 +4663,30 @@ export default function ControlClient() {
           if (existingIdx !== -1) {
             return prev;
           }
-          return [
-            ...prev,
-            {
-              kind: "tool",
-              id: `tool-${toolCallId || Date.now()}`,
-              toolCallId,
-              name,
-              args: data["args"],
-              isUiTool,
-              startTime: Date.now(),
-            },
-          ];
+
+          const toolItem: ChatItem = {
+            kind: "tool",
+            id: `tool-${toolCallId || Date.now()}`,
+            toolCallId,
+            name,
+            args: data["args"],
+            isUiTool,
+            startTime: Date.now(),
+          };
+
+          // Important: keep queued user messages at the end of the timeline.
+          // If we append tool calls after a queued message, the UI can appear to "lose"
+          // the assistant reply (it may be inserted before the queued message and then
+          // scrolled out of view under a long tail of tools).
+          const firstQueuedIdx = prev.findIndex(
+            (item) => item.kind === "user" && item.queued === true
+          );
+          if (firstQueuedIdx === -1) {
+            return [...prev, toolItem];
+          }
+          const updated = [...prev];
+          updated.splice(firstQueuedIdx, 0, toolItem);
+          return updated;
         });
 
         // Detect desktop_start_session from ToolCall (Claude Code/Amp don't emit ToolResult for MCP tools)
