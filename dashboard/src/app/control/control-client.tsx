@@ -2884,7 +2884,15 @@ export default function ControlClient() {
     (mission: Mission) => {
       const activeSession = getActiveDesktopSession(mission);
       if (activeSession?.display) {
-        setDesktopDisplayId(activeSession.display);
+        // Only switch display if the current one is not running anymore.
+        // This prevents auto-switching away from a display the user is actively viewing
+        // (e.g. when a new session starts while the old one is still alive).
+        const currentIsRunning = desktopSessionsRef.current.some(
+          s => s.display === desktopDisplayId && s.process_running && s.status !== 'stopped'
+        );
+        if (!currentIsRunning) {
+          setDesktopDisplayId(activeSession.display);
+        }
         setHasDesktopSession(true);
         // Auto-open desktop panel when mission has an active session
         setShowDesktopStream(true);
@@ -2897,7 +2905,7 @@ export default function ControlClient() {
         setHasDesktopSession(false);
       }
     },
-    [getActiveDesktopSession, missionHasDesktopSession]
+    [getActiveDesktopSession, missionHasDesktopSession, desktopDisplayId]
   );
 
   // Detect desktop sessions from stored events (when loading from history)
@@ -3655,10 +3663,10 @@ export default function ControlClient() {
             : [];
         const hasCurrentMissionSession = currentMissionSessions.length > 0;
 
-        // Auto-select first active session from current mission if current display isn't running
+        // Auto-select first active session from current mission if current display isn't running anywhere
         if (hasCurrentMissionSession) {
-          const currentIsRunning = currentMissionSessions.some(s => s.display === desktopDisplayId);
-          if (!currentIsRunning) {
+          const currentIsRunningAnywhere = runningSessions.some(s => s.display === desktopDisplayId);
+          if (!currentIsRunningAnywhere) {
             setDesktopDisplayId(currentMissionSessions[0].display);
           }
           // Auto-open desktop panel only when there's an active session for the current mission
