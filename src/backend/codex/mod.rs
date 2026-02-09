@@ -262,6 +262,90 @@ fn convert_codex_event(
         }
     }
 
+    fn tool_name(data: &std::collections::HashMap<String, serde_json::Value>) -> Option<String> {
+        data.get("name")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .or_else(|| {
+                data.get("tool")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            })
+            .or_else(|| {
+                data.get("tool_name")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            })
+            .or_else(|| {
+                data.get("command")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            })
+    }
+
+    fn parse_json_str(value: &serde_json::Value) -> Option<serde_json::Value> {
+        let s = value.as_str()?;
+        if s.trim().is_empty() {
+            return None;
+        }
+        serde_json::from_str::<serde_json::Value>(s).ok()
+    }
+
+    fn tool_args(
+        data: &std::collections::HashMap<String, serde_json::Value>,
+    ) -> Option<serde_json::Value> {
+        if let Some(value) = data.get("args") {
+            return Some(value.clone());
+        }
+        if let Some(value) = data.get("arguments") {
+            return parse_json_str(value).or_else(|| Some(value.clone()));
+        }
+        if let Some(value) = data.get("input") {
+            return Some(value.clone());
+        }
+        if let Some(value) = data.get("params") {
+            return Some(value.clone());
+        }
+        if let Some(value) = data.get("payload") {
+            return Some(value.clone());
+        }
+        None
+    }
+
+    fn tool_result(
+        data: &std::collections::HashMap<String, serde_json::Value>,
+    ) -> Option<serde_json::Value> {
+        let result = data
+            .get("result")
+            .or_else(|| data.get("output"))
+            .or_else(|| data.get("response"))
+            .or_else(|| data.get("content"))
+            .or_else(|| data.get("data"))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let error = data.get("error").cloned();
+        let status = data.get("status").cloned();
+
+        let has_error = error
+            .as_ref()
+            .and_then(|v| v.as_str())
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| error.as_ref().is_some_and(|v| !v.is_null()));
+        let has_status = status.as_ref().is_some_and(|v| !v.is_null());
+
+        if has_error || has_status {
+            Some(serde_json::json!({
+                "result": result,
+                "error": error,
+                "status": status,
+            }))
+        } else if result.is_null() {
+            None
+        } else {
+            Some(result)
+        }
+    }
+
     match event {
         CodexEvent::ThreadStarted { thread_id } => {
             debug!("Codex thread started: thread_id={}", thread_id);
@@ -305,28 +389,28 @@ fn convert_codex_event(
                         emit_thinking_if_changed(&mut results, item_content_cache, &item.id, &text);
                     }
                 }
-                "command" | "tool" => {
+                "command" | "tool" | "tool_call" | "function_call" => {
                     // Extract tool/command execution
-                    if let Some(name) = item.data.get("name").and_then(|v| v.as_str()) {
-                        if let Some(args) = item.data.get("args") {
-                            results.push(ExecutionEvent::ToolCall {
-                                id: item.id.clone(),
-                                name: name.to_string(),
-                                args: args.clone(),
-                            });
-                        }
+                    if let Some(name) = tool_name(&item.data) {
+                        let args = tool_args(&item.data)
+                            .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+                        results.push(ExecutionEvent::ToolCall {
+                            id: item.id.clone(),
+                            name,
+                            args,
+                        });
                     }
                 }
                 "mcp_tool_call" => {
                     if let Some(name) = mcp_tool_name(&item.data) {
-                        if let Some(args) = mcp_tool_args(&item.data) {
-                            results.push(ExecutionEvent::ToolCall {
-                                id: item.id.clone(),
-                                name,
-                                args,
-                            });
-                            mark_tool_call_emitted(item_content_cache, &item.id);
-                        }
+                        let args = mcp_tool_args(&item.data)
+                            .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+                        results.push(ExecutionEvent::ToolCall {
+                            id: item.id.clone(),
+                            name,
+                            args,
+                        });
+                        mark_tool_call_emitted(item_content_cache, &item.id);
                     }
                 }
                 _ => {
@@ -337,28 +421,28 @@ fn convert_codex_event(
 
         CodexEvent::ItemCompleted { item } => {
             match item.item_type.as_str() {
-                "command" | "tool" => {
+                "command" | "tool" | "tool_call" | "tool_result" | "function_result" => {
                     // Extract tool result if available
-                    if let Some(result) = item.data.get("result") {
-                        if let Some(name) = item.data.get("name").and_then(|v| v.as_str()) {
+                    if let Some(name) = tool_name(&item.data) {
+                        if let Some(result) = tool_result(&item.data) {
                             results.push(ExecutionEvent::ToolResult {
                                 id: item.id.clone(),
-                                name: name.to_string(),
-                                result: result.clone(),
+                                name,
+                                result,
                             });
                         }
                     }
                 }
                 "mcp_tool_call" => {
                     if let Some(name) = mcp_tool_name(&item.data) {
-                        if let Some(args) = mcp_tool_args(&item.data) {
-                            if !mark_tool_call_emitted(item_content_cache, &item.id) {
-                                results.push(ExecutionEvent::ToolCall {
-                                    id: item.id.clone(),
-                                    name: name.clone(),
-                                    args,
-                                });
-                            }
+                        let args = mcp_tool_args(&item.data)
+                            .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+                        if !mark_tool_call_emitted(item_content_cache, &item.id) {
+                            results.push(ExecutionEvent::ToolCall {
+                                id: item.id.clone(),
+                                name: name.clone(),
+                                args,
+                            });
                         }
                         if let Some(result) = mcp_tool_result(&item.data) {
                             results.push(ExecutionEvent::ToolResult {
