@@ -18,6 +18,9 @@ import {
   ARCHIVE_EXTENSIONS,
   isMarkdownFile,
   isTextPreviewableFile,
+  isImageFile,
+  isCodeFile,
+  isArchiveFile,
 } from "@/lib/file-extensions";
 
 interface MarkdownContentProps {
@@ -65,18 +68,6 @@ function isFilePath(str: string): boolean {
   const looksLikePath = str.includes("/") || str.startsWith("./") || str.startsWith("../") || str.startsWith("~") || /^[a-zA-Z]:/.test(str);
   const isSimpleFilename = /^[\w\-_.]+\.[a-z0-9]+$/i.test(str);
   return looksLikePath || isSimpleFilename;
-}
-
-function isImageFile(path: string): boolean {
-  return IMAGE_EXTENSIONS.some(ext => path.toLowerCase().endsWith(ext));
-}
-
-function isCodeFile(path: string): boolean {
-  return CODE_EXTENSIONS.some(ext => path.toLowerCase().endsWith(ext));
-}
-
-function isArchiveFile(path: string): boolean {
-  return ARCHIVE_EXTENSIONS.some(ext => path.toLowerCase().endsWith(ext));
 }
 
 function getFileIcon(path: string) {
