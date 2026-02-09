@@ -306,18 +306,25 @@ export function MissionAutomationsDialog({
 
     setCreating(true);
     try {
-      let created = await createMissionAutomation(missionId, input);
+      const shouldStartImmediately = startImmediately;
+      const created = await createMissionAutomation(missionId, input);
+      let updated = created;
+      let pauseError: string | null = null;
 
       // Allow users to create an automation in a paused state.
       // The backend create endpoint does not currently accept `active`,
       // so we create then immediately update.
-      if (!startImmediately) {
-        created = await updateAutomation(created.id, { active: false });
+      if (!shouldStartImmediately) {
+        try {
+          updated = await updateAutomation(created.id, { active: false });
+        } catch (err) {
+          pauseError = err instanceof Error ? err.message : 'Failed to pause automation';
+        }
       }
 
       setAutomationsForMission(missionId, [
-        created,
-        ...automationsRef.current.filter((a) => a.id !== created.id),
+        updated,
+        ...automationsRef.current.filter((a) => a.id !== updated.id),
       ]);
       // Reset form
       setCommandName('');
@@ -325,7 +332,14 @@ export function MissionAutomationsDialog({
       setIntervalValue('5');
       setIntervalUnit('minutes');
       setVariables([]);
-      toast.success(startImmediately ? 'Automation created' : 'Automation created (paused)');
+      setStartImmediately(true);
+      if (pauseError) {
+        toast.error(
+          `Automation created but could not be paused. It is active and visible in the list. ${pauseError}`
+        );
+      } else {
+        toast.success(shouldStartImmediately ? 'Automation created' : 'Automation created (paused)');
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to create automation';
       toast.error(message);
