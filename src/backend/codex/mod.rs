@@ -232,16 +232,11 @@ fn convert_codex_event(
             .or_else(|| data.get("args").cloned())
     }
 
-    fn mcp_tool_result(
-        data: &std::collections::HashMap<String, serde_json::Value>,
+    fn normalize_tool_result(
+        result: serde_json::Value,
+        error: Option<serde_json::Value>,
+        status: Option<serde_json::Value>,
     ) -> Option<serde_json::Value> {
-        let result = data
-            .get("result")
-            .cloned()
-            .unwrap_or(serde_json::Value::Null);
-        let error = data.get("error").cloned();
-        let status = data.get("status").cloned();
-
         let has_error = error
             .as_ref()
             .and_then(|v| v.as_str())
@@ -260,6 +255,18 @@ fn convert_codex_event(
         } else {
             Some(result)
         }
+    }
+
+    fn mcp_tool_result(
+        data: &std::collections::HashMap<String, serde_json::Value>,
+    ) -> Option<serde_json::Value> {
+        let result = data
+            .get("result")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let error = data.get("error").cloned();
+        let status = data.get("status").cloned();
+        normalize_tool_result(result, error, status)
     }
 
     fn tool_name(data: &std::collections::HashMap<String, serde_json::Value>) -> Option<String> {
@@ -390,25 +397,7 @@ fn convert_codex_event(
             .unwrap_or(serde_json::Value::Null);
         let error = data.get("error").cloned();
         let status = data.get("status").cloned();
-
-        let has_error = error
-            .as_ref()
-            .and_then(|v| v.as_str())
-            .map(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| error.as_ref().is_some_and(|v| !v.is_null()));
-        let has_status = status.as_ref().is_some_and(|v| !v.is_null());
-
-        if has_error || has_status {
-            Some(serde_json::json!({
-                "result": result,
-                "error": error,
-                "status": status,
-            }))
-        } else if result.is_null() {
-            None
-        } else {
-            Some(result)
-        }
+        normalize_tool_result(result, error, status)
     }
 
     match event {
