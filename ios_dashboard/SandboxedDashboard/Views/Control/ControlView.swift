@@ -803,8 +803,19 @@ struct ControlView: View {
         // Clear messages and replay events to rebuild the full history
         messages.removeAll()
 
+        // Ensure deterministic replay order in case the backend returns unsorted results
+        let orderedEvents = events.sorted { lhs, rhs in
+            if lhs.sequence != rhs.sequence {
+                return lhs.sequence < rhs.sequence
+            }
+            if lhs.timestamp != rhs.timestamp {
+                return lhs.timestamp < rhs.timestamp
+            }
+            return lhs.id < rhs.id
+        }
+
         // Process events in order to reconstruct the message history
-        for event in events {
+        for event in orderedEvents {
             // Convert StoredEvent metadata to [String: Any] for handleStreamEvent
             // Start with metadata first, then add core fields to prevent overwrites
             var data: [String: Any] = [:]
@@ -2007,6 +2018,11 @@ private struct SharedFileCardView: View {
                     await MainActor.run {
                         self.imageLoadFailed = true
                     }
+                }
+            } else {
+                // Non-HTTP response (or failed cast) shouldn't leave the spinner running
+                await MainActor.run {
+                    self.imageLoadFailed = true
                 }
             }
         } catch {
