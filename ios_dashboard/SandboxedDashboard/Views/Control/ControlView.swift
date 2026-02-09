@@ -41,6 +41,13 @@ struct ControlView: View {
     // Thoughts panel state
     @State private var showThoughts = false
 
+    // Tool grouping state - track which groups are expanded
+    @State private var expandedToolGroups: Set<String> = []
+
+    // Mission switcher state
+    @State private var showMissionSwitcher = false
+    @State private var recentMissions: [Mission] = []
+
     // Desktop stream state
     @State private var showDesktopStream = false
     @State private var desktopDisplayId = ":101"
@@ -146,50 +153,7 @@ struct ControlView: View {
             }
             
             ToolbarItem(placement: .topBarLeading) {
-                // Workspace selector menu
-                Menu {
-                    // Workspace selection section
-                    Section("Workspace") {
-                        ForEach(workspaceState.workspaces) { workspace in
-                            Button {
-                                workspaceState.selectWorkspace(id: workspace.id)
-                                HapticService.selectionChanged()
-                            } label: {
-                                HStack {
-                                    Label(workspace.displayLabel, systemImage: workspace.workspaceType.icon)
-                                    if workspaceState.selectedWorkspace?.id == workspace.id {
-                                        Spacer()
-                                        Image(systemName: "checkmark")
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Running missions section
-                    if !runningMissions.isEmpty {
-                        Section("Running Missions (\(runningMissions.count))") {
-                            Button {
-                                withAnimation(.easeInOut(duration: 0.2)) {
-                                    showRunningMissions.toggle()
-                                }
-                            } label: {
-                                Label(
-                                    showRunningMissions ? "Hide Running Missions" : "Show Running Missions",
-                                    systemImage: "square.stack.3d.up"
-                                )
-                            }
-                        }
-                    }
-                } label: {
-                    Image(systemName: "square.stack.3d.up")
-                        .font(.system(size: 16))
-                        .foregroundStyle(Theme.textSecondary)
-                }
-            }
-
-            ToolbarItem(placement: .topBarTrailing) {
-                // Thoughts panel button
+                // Thoughts panel button (moved from trailing)
                 Button {
                     showThoughts = true
                     HapticService.lightTap()
@@ -203,6 +167,27 @@ struct ControlView: View {
             }
 
             ToolbarItem(placement: .topBarTrailing) {
+                // Mission switcher button
+                Button {
+                    Task {
+                        await loadRecentMissions()
+                    }
+                    showMissionSwitcher = true
+                    HapticService.lightTap()
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "square.stack.3d.up")
+                            .font(.system(size: 14))
+                        if runningMissions.count > 0 {
+                            Text("\(runningMissions.count)")
+                                .font(.caption2.weight(.medium))
+                        }
+                    }
+                    .foregroundStyle(runningMissions.isEmpty ? Theme.textSecondary : Theme.accent)
+                }
+            }
+
+            ToolbarItem(placement: .topBarTrailing) {
                 Menu {
                     Button {
                         Task {
@@ -211,12 +196,6 @@ struct ControlView: View {
                         }
                     } label: {
                         Label("New Mission", systemImage: "plus")
-                    }
-
-                    Button {
-                        showThoughts = true
-                    } label: {
-                        Label("View Thoughts", systemImage: "brain")
                     }
 
                     // Desktop stream option with display selector
@@ -368,6 +347,33 @@ struct ControlView: View {
         .sheet(isPresented: $showSettings) {
             SettingsView()
         }
+        .sheet(isPresented: $showMissionSwitcher) {
+            MissionSwitcherSheet(
+                runningMissions: runningMissions,
+                recentMissions: recentMissions,
+                currentMissionId: currentMission?.id,
+                viewingMissionId: viewingMissionId,
+                onSelectMission: { missionId in
+                    showMissionSwitcher = false
+                    Task { await switchToMission(id: missionId) }
+                },
+                onCancelMission: { missionId in
+                    Task { await cancelMission(id: missionId) }
+                },
+                onCreateNewMission: {
+                    showMissionSwitcher = false
+                    Task {
+                        await workspaceState.loadWorkspaces()
+                        showNewMissionSheet = true
+                    }
+                },
+                onDismiss: {
+                    showMissionSwitcher = false
+                }
+            )
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
+        }
         .sheet(isPresented: $showQueueSheet) {
             QueueSheet(
                 items: queuedItems,
@@ -454,13 +460,23 @@ struct ControlView: View {
                             LoadingView(message: "Loading conversation...")
                                 .frame(height: 200)
                         } else {
-                            ForEach(messages) { message in
-                                MessageBubble(
-                                    message: message,
-                                    isCopied: copiedMessageId == message.id,
-                                    onCopy: { copyMessage(message) }
-                                )
-                                .id(message.id)
+                            ForEach(groupedItems) { item in
+                                switch item {
+                                case .single(let message):
+                                    MessageBubble(
+                                        message: message,
+                                        isCopied: copiedMessageId == message.id,
+                                        onCopy: { copyMessage(message) }
+                                    )
+                                    .id(message.id)
+                                case .toolGroup(let groupId, let tools):
+                                    ToolGroupView(
+                                        groupId: groupId,
+                                        tools: tools,
+                                        expandedGroups: $expandedToolGroups
+                                    )
+                                    .id(item.id)
+                                }
                             }
 
                             // Show working indicator after messages when this mission is running but no active streaming item
@@ -537,6 +553,46 @@ struct ControlView: View {
         messages.contains { msg in
             (msg.isThinking && !msg.thinkingDone) || msg.isPhase || (msg.isToolCall && msg.isActiveToolCall)
         }
+    }
+
+    // MARK: - Message Grouping
+
+    /// Groups consecutive tool calls together for collapsed display (like dashboard)
+    private var groupedItems: [GroupedChatItem] {
+        var result: [GroupedChatItem] = []
+        var currentToolGroup: [ChatMessage] = []
+
+        func flushToolGroup() {
+            guard !currentToolGroup.isEmpty else { return }
+            if currentToolGroup.count == 1 {
+                result.append(.single(currentToolGroup[0]))
+            } else {
+                let groupId = currentToolGroup.first?.id ?? UUID().uuidString
+                result.append(.toolGroup(groupId: groupId, tools: currentToolGroup))
+            }
+            currentToolGroup = []
+        }
+
+        for message in messages {
+            // Skip thinking messages when thoughts panel is open (they're shown in the panel)
+            if message.isThinking && showThoughts {
+                flushToolGroup()
+                continue
+            }
+
+            if message.isToolCall && !message.isToolUI {
+                // Non-UI tool - add to current group
+                currentToolGroup.append(message)
+            } else {
+                // Other item - flush any pending group first
+                flushToolGroup()
+                result.append(.single(message))
+            }
+        }
+
+        // Flush any remaining group
+        flushToolGroup()
+        return result
     }
 
     /// Check if the currently viewed mission is running (not just any mission)
@@ -1073,7 +1129,17 @@ struct ControlView: View {
             print("Failed to refresh running missions: \(error)")
         }
     }
-    
+
+    private func loadRecentMissions() async {
+        do {
+            let allMissions = try await api.listMissions()
+            // Sort by most recent (updatedAt, ISO8601 strings sort correctly) and take first 20
+            recentMissions = Array(allMissions.sorted { $0.updatedAt > $1.updatedAt }.prefix(20))
+        } catch {
+            print("Failed to load recent missions: \(error)")
+        }
+    }
+
     private func startPollingRunningMissions() {
         pollingTask = Task {
             while !Task.isCancelled {
@@ -1306,10 +1372,13 @@ struct ControlView: View {
         case "thinking":
             if let content = data["content"] as? String {
                 let done = data["done"] as? Bool ?? false
-                
+
+                // Skip empty thinking content
+                guard !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { break }
+
                 // Remove phase items when thinking starts
                 messages.removeAll { $0.isPhase }
-                
+
                 // Find existing thinking message or create new
                 if let index = messages.lastIndex(where: { $0.isThinking && !$0.thinkingDone }) {
                     let existingStartTime = messages[index].thinkingStartTime ?? Date()
@@ -1321,10 +1390,13 @@ struct ControlView: View {
                             content: messages[index].content
                         )
                     }
-                } else if !done {
+                } else {
+                    // Create new thinking message - whether done or not
+                    // This handles the case where we receive a completed thought without seeing it active first
+                    // (e.g., when joining a mission mid-thought or reconnecting)
                     let message = ChatMessage(
                         id: "thinking-\(Date().timeIntervalSince1970)",
-                        type: .thinking(done: false, startTime: Date()),
+                        type: .thinking(done: done, startTime: Date()),
                         content: content
                     )
                     messages.append(message)
@@ -1906,7 +1978,7 @@ private struct PhaseBubble: View {
 
 // MARK: - Tool Call Bubble (Enhanced)
 
-private struct ToolCallBubble: View {
+struct ToolCallBubble: View {
     let message: ChatMessage
     @State private var isExpanded = false
     @State private var elapsedSeconds: Int = 0
@@ -2278,14 +2350,42 @@ private struct ThoughtsSheet: View {
     let messages: [ChatMessage]
     @Environment(\.dismiss) private var dismiss
 
+    /// All thinking messages
     private var thinkingMessages: [ChatMessage] {
         messages.filter { $0.isThinking }
+    }
+
+    /// Active (in-progress) thoughts
+    private var activeThoughts: [ChatMessage] {
+        thinkingMessages.filter { !$0.thinkingDone }
+    }
+
+    /// Completed thoughts, deduplicated by content
+    private var completedThoughts: [ChatMessage] {
+        var seen = Set<String>()
+        return thinkingMessages.filter { msg in
+            guard msg.thinkingDone else { return false }
+            let trimmed = msg.content.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return false }
+            guard !seen.contains(trimmed) else { return false }
+            seen.insert(trimmed)
+            return true
+        }
+    }
+
+    /// Combined display list (completed + active)
+    private var displayThoughts: [ChatMessage] {
+        completedThoughts + activeThoughts
+    }
+
+    private var hasActiveThinking: Bool {
+        !activeThoughts.isEmpty
     }
 
     var body: some View {
         NavigationStack {
             Group {
-                if thinkingMessages.isEmpty {
+                if displayThoughts.isEmpty {
                     ContentUnavailableView(
                         "No Thoughts Yet",
                         systemImage: "brain",
@@ -2295,7 +2395,7 @@ private struct ThoughtsSheet: View {
                     ScrollViewReader { proxy in
                         ScrollView {
                             LazyVStack(alignment: .leading, spacing: 12) {
-                                ForEach(thinkingMessages) { msg in
+                                ForEach(displayThoughts) { msg in
                                     ThoughtRow(message: msg)
                                         .id(msg.id)
                                 }
@@ -2303,12 +2403,12 @@ private struct ThoughtsSheet: View {
                             .padding()
                         }
                         .onAppear {
-                            if let last = thinkingMessages.last {
+                            if let last = displayThoughts.last {
                                 proxy.scrollTo(last.id, anchor: .bottom)
                             }
                         }
-                        .onChange(of: thinkingMessages.count) { _, _ in
-                            if let last = thinkingMessages.last {
+                        .onChange(of: displayThoughts.count) { _, _ in
+                            if let last = displayThoughts.last {
                                 withAnimation(.easeOut(duration: 0.2)) {
                                     proxy.scrollTo(last.id, anchor: .bottom)
                                 }
@@ -2317,13 +2417,21 @@ private struct ThoughtsSheet: View {
                     }
                 }
             }
-            .navigationTitle("Thoughts")
+            .navigationTitle(hasActiveThinking ? "Thinking" : "Thoughts")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Text("\(thinkingMessages.count)")
-                        .font(.subheadline.monospacedDigit())
-                        .foregroundStyle(Theme.textMuted)
+                    HStack(spacing: 4) {
+                        if hasActiveThinking {
+                            Image(systemName: "brain")
+                                .font(.caption)
+                                .foregroundStyle(Theme.accent)
+                                .symbolEffect(.pulse, options: .repeating)
+                        }
+                        Text("\(displayThoughts.count)")
+                            .font(.subheadline.monospacedDigit())
+                            .foregroundStyle(Theme.textMuted)
+                    }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Done") { dismiss() }
@@ -2465,6 +2573,299 @@ private struct FlowLayout: Layout {
             
             self.size.height = y + rowHeight
         }
+    }
+}
+
+// MARK: - Grouped Chat Item
+
+/// Represents either a single message or a group of consecutive tool calls
+enum GroupedChatItem: Identifiable {
+    case single(ChatMessage)
+    case toolGroup(groupId: String, tools: [ChatMessage])
+
+    var id: String {
+        switch self {
+        case .single(let message):
+            return message.id
+        case .toolGroup(let groupId, _):
+            return "group-\(groupId)"
+        }
+    }
+}
+
+// MARK: - Tool Group View
+
+/// Displays a group of tool calls with expand/collapse functionality
+private struct ToolGroupView: View {
+    let groupId: String
+    let tools: [ChatMessage]
+    @Binding var expandedGroups: Set<String>
+
+    private var isExpanded: Bool {
+        expandedGroups.contains(groupId)
+    }
+
+    private var hiddenCount: Int {
+        tools.count - 1
+    }
+
+    private var lastTool: ChatMessage? {
+        tools.last
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            // Expand/collapse button
+            if hiddenCount > 0 {
+                Button {
+                    withAnimation(.spring(duration: 0.25)) {
+                        if isExpanded {
+                            expandedGroups.remove(groupId)
+                        } else {
+                            expandedGroups.insert(groupId)
+                        }
+                    }
+                    HapticService.selectionChanged()
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(Theme.textMuted)
+
+                        Text(isExpanded ? "Hide \(hiddenCount) previous tool\(hiddenCount > 1 ? "s" : "")" : "Show \(hiddenCount) previous tool\(hiddenCount > 1 ? "s" : "")")
+                            .font(.caption2)
+                            .foregroundStyle(Theme.textMuted)
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(Theme.backgroundSecondary.opacity(0.5))
+                    .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+
+            // Show all tools if expanded, otherwise just the last one
+            if isExpanded {
+                ForEach(tools) { tool in
+                    ToolCallBubble(message: tool)
+                }
+            } else if let last = lastTool {
+                ToolCallBubble(message: last)
+            }
+        }
+    }
+}
+
+// MARK: - Mission Switcher Sheet
+
+/// Sheet for switching between missions (like dashboard's Cmd+K)
+private struct MissionSwitcherSheet: View {
+    let runningMissions: [RunningMissionInfo]
+    let recentMissions: [Mission]
+    let currentMissionId: String?
+    let viewingMissionId: String?
+    let onSelectMission: (String) -> Void
+    let onCancelMission: (String) -> Void
+    let onCreateNewMission: () -> Void
+    let onDismiss: () -> Void
+
+    @State private var searchText = ""
+
+    private var runningMissionIds: Set<String> {
+        Set(runningMissions.map { $0.missionId })
+    }
+
+    private var filteredRunning: [RunningMissionInfo] {
+        if searchText.isEmpty {
+            return runningMissions
+        }
+        return runningMissions.filter { info in
+            info.missionId.localizedCaseInsensitiveContains(searchText) ||
+            (info.title?.localizedCaseInsensitiveContains(searchText) ?? false)
+        }
+    }
+
+    private var filteredRecent: [Mission] {
+        let nonRunning = recentMissions.filter { !runningMissionIds.contains($0.id) }
+        if searchText.isEmpty {
+            return nonRunning
+        }
+        return nonRunning.filter { mission in
+            mission.id.localizedCaseInsensitiveContains(searchText) ||
+            mission.displayTitle.localizedCaseInsensitiveContains(searchText)
+        }
+    }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                // Create new mission button
+                Section {
+                    Button {
+                        onCreateNewMission()
+                    } label: {
+                        Label("Create New Mission", systemImage: "plus.circle.fill")
+                            .foregroundStyle(Theme.accent)
+                    }
+                }
+
+                // Running missions
+                if !filteredRunning.isEmpty {
+                    Section("Running") {
+                        ForEach(filteredRunning, id: \.missionId) { info in
+                            MissionRow(
+                                missionId: info.missionId,
+                                title: info.title,
+                                status: .active,
+                                isRunning: true,
+                                runningState: info.state,
+                                isViewing: viewingMissionId == info.missionId,
+                                onSelect: { onSelectMission(info.missionId) },
+                                onCancel: { onCancelMission(info.missionId) }
+                            )
+                        }
+                    }
+                }
+
+                // Recent missions
+                if !filteredRecent.isEmpty {
+                    Section("Recent") {
+                        ForEach(filteredRecent) { mission in
+                            MissionRow(
+                                missionId: mission.id,
+                                title: mission.displayTitle,
+                                status: mission.status,
+                                isRunning: false,
+                                runningState: nil,
+                                isViewing: viewingMissionId == mission.id,
+                                onSelect: { onSelectMission(mission.id) },
+                                onCancel: nil
+                            )
+                        }
+                    }
+                }
+
+                if filteredRunning.isEmpty && filteredRecent.isEmpty && !searchText.isEmpty {
+                    ContentUnavailableView(
+                        "No Missions Found",
+                        systemImage: "magnifyingglass",
+                        description: Text("No missions match '\(searchText)'")
+                    )
+                }
+            }
+            .searchable(text: $searchText, prompt: "Search missions...")
+            .navigationTitle("Switch Mission")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { onDismiss() }
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Mission Row
+
+private struct MissionRow: View {
+    let missionId: String
+    let title: String?
+    let status: MissionStatus
+    let isRunning: Bool
+    let runningState: String?
+    let isViewing: Bool
+    let onSelect: () -> Void
+    let onCancel: (() -> Void)?
+
+    private var shortId: String {
+        String(missionId.prefix(8))
+    }
+
+    private var statusColor: Color {
+        if isRunning {
+            return Theme.success
+        }
+        switch status {
+        case .active: return Theme.success
+        case .completed: return Theme.textMuted
+        case .failed: return Theme.error
+        case .interrupted, .blocked: return Theme.warning
+        case .notFeasible: return Theme.error
+        }
+    }
+
+    var body: some View {
+        Button {
+            onSelect()
+            HapticService.selectionChanged()
+        } label: {
+            HStack(spacing: 12) {
+                // Status indicator
+                Circle()
+                    .fill(statusColor)
+                    .frame(width: 8, height: 8)
+                    .overlay {
+                        if isRunning && runningState == "running" {
+                            Circle()
+                                .stroke(statusColor.opacity(0.5), lineWidth: 2)
+                                .scaleEffect(1.5)
+                        }
+                    }
+
+                // Mission info
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(shortId)
+                            .font(.subheadline.monospaced().weight(.medium))
+                            .foregroundStyle(Theme.textPrimary)
+
+                        if isViewing {
+                            Image(systemName: "checkmark.circle.fill")
+                                .font(.caption)
+                                .foregroundStyle(Theme.accent)
+                        }
+                    }
+
+                    if let title = title, !title.isEmpty {
+                        Text(title)
+                            .font(.caption)
+                            .foregroundStyle(Theme.textSecondary)
+                            .lineLimit(1)
+                    }
+                }
+
+                Spacer()
+
+                // Running state or status
+                if isRunning, let state = runningState {
+                    Text(state)
+                        .font(.caption2)
+                        .foregroundStyle(Theme.textMuted)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Theme.backgroundSecondary)
+                        .clipShape(Capsule())
+                } else {
+                    Text(status.rawValue)
+                        .font(.caption2)
+                        .foregroundStyle(Theme.textMuted)
+                }
+
+                // Cancel button for running missions
+                if let onCancel = onCancel {
+                    Button {
+                        onCancel()
+                        HapticService.lightTap()
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(Theme.textMuted)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 }
 
