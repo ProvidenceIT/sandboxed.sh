@@ -3142,7 +3142,7 @@ export default function ControlClient() {
         // but allows switching when changing to a different mission.
         const currentDisplayId = desktopDisplayIdRef.current;
         const currentBelongsToThisMission = mission.desktop_sessions?.some(
-          s => s.display === currentDisplayId && s.process_running && s.status !== 'stopped'
+          s => s.display === currentDisplayId && !s.stopped_at
         );
         if (!currentBelongsToThisMission) {
           setDesktopDisplayId(activeSession.display);
