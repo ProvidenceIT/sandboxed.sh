@@ -29,6 +29,29 @@ const FILE_EXTENSIONS = [
 ];
 const CODE_EXTENSIONS = [".sh", ".py", ".js", ".ts", ".rs", ".go", ".html", ".css", ".json", ".yaml", ".yml", ".xml"];
 const ARCHIVE_EXTENSIONS = [".zip", ".tar", ".gz"];
+const TEXT_PREVIEW_EXTENSIONS = [
+  ".txt",
+  ".md",
+  ".markdown",
+  ".log",
+  ".json",
+  ".yaml",
+  ".yml",
+  ".toml",
+  ".xml",
+  ".csv",
+  ".tsv",
+];
+
+function isMarkdownFile(path: string): boolean {
+  const lower = path.toLowerCase();
+  return lower.endsWith(".md") || lower.endsWith(".markdown");
+}
+
+function isTextPreviewableFile(path: string): boolean {
+  const lower = path.toLowerCase();
+  return TEXT_PREVIEW_EXTENSIONS.some((ext) => lower.endsWith(ext));
+}
 
 // Global cache for fetched image URLs with automatic cleanup
 // Uses a simple LRU-style eviction: when cache exceeds limit, oldest entries are revoked
@@ -162,6 +185,8 @@ function FilePreviewModalContent({
   onClose,
 }: FilePreviewModalContentProps) {
   const isImage = isImageFile(path);
+  const isMarkdown = isMarkdownFile(path);
+  const canTextPreview = !isImage && isTextPreviewableFile(path);
   const FileIcon = getFileIcon(path);
   const fileName = path.split("/").pop() || "file";
 
@@ -170,6 +195,10 @@ function FilePreviewModalContent({
   const [error, setError] = useState<string | null>(null);
   const [fileSize, setFileSize] = useState<number | null>(null);
   const [downloading, setDownloading] = useState(false);
+  const [textLoading, setTextLoading] = useState(canTextPreview);
+  const [textError, setTextError] = useState<string | null>(null);
+  const [textContent, setTextContent] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
 
   // Fetch image on mount
   useEffect(() => {
@@ -206,6 +235,50 @@ function FilePreviewModalContent({
     return () => { cancelled = true; };
   }, [isImage, imageUrl, resolvedPath]);
 
+  // Fetch text preview on mount
+  useEffect(() => {
+    if (!canTextPreview) return;
+
+    let cancelled = false;
+    const fetchText = async () => {
+      setTextLoading(true);
+      setTextError(null);
+      setTextContent(null);
+
+      const API_BASE = getRuntimeApiBase();
+      const params = new URLSearchParams({ path: resolvedPath });
+      if (workspaceId) params.set("workspace_id", workspaceId);
+      if (missionId) params.set("mission_id", missionId);
+
+      try {
+        const res = await fetch(`${API_BASE}/api/fs/download?${params.toString()}`, {
+          headers: { ...authHeader() },
+        });
+        if (!res.ok) {
+          if (!cancelled) setTextError(`Failed to load (${res.status})`);
+          return;
+        }
+        const blob = await res.blob();
+        const raw = await blob.text();
+        if (!cancelled) setFileSize(blob.size);
+
+        const limit = 500_000;
+        const finalText =
+          raw.length > limit
+            ? `${raw.slice(0, limit)}\n\n... (file truncated, too large to preview)`
+            : raw;
+        if (!cancelled) setTextContent(finalText);
+      } catch (err) {
+        if (!cancelled) setTextError(err instanceof Error ? err.message : "Failed to load");
+      } finally {
+        if (!cancelled) setTextLoading(false);
+      }
+    };
+
+    void fetchText();
+    return () => { cancelled = true; };
+  }, [canTextPreview, resolvedPath, workspaceId, missionId]);
+
   // Escape key handler
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -214,6 +287,17 @@ function FilePreviewModalContent({
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [onClose]);
+
+  const handleCopy = useCallback(async () => {
+    if (!textContent) return;
+    try {
+      await navigator.clipboard.writeText(textContent);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Ignore; clipboard may be unavailable in some contexts.
+    }
+  }, [textContent]);
 
   const handleDownload = async () => {
     setDownloading(true);
@@ -256,7 +340,7 @@ function FilePreviewModalContent({
         className={cn(
           "relative rounded-2xl bg-[#1a1a1a] border border-white/[0.06] shadow-xl",
           "animate-in fade-in zoom-in-95 duration-200",
-          isImage ? "max-w-3xl w-full" : "max-w-md w-full"
+          isImage || canTextPreview ? "max-w-4xl w-full" : "max-w-md w-full"
         )}
       >
         <div className="flex items-center justify-between px-5 py-4 border-b border-white/[0.06]">
@@ -269,12 +353,23 @@ function FilePreviewModalContent({
               <p className="text-xs text-white/40 truncate">{path}</p>
             </div>
           </div>
-          <button
-            onClick={onClose}
-            className="p-1.5 rounded-lg text-white/40 hover:text-white/70 hover:bg-white/[0.08] transition-colors shrink-0 ml-3"
-          >
-            <X className="h-4 w-4" />
-          </button>
+          <div className="flex items-center gap-2 shrink-0 ml-3">
+            {canTextPreview && textContent && (
+              <button
+                onClick={handleCopy}
+                className="p-1.5 rounded-lg text-white/40 hover:text-white/70 hover:bg-white/[0.08] transition-colors"
+                title={copied ? "Copied" : "Copy"}
+              >
+                {copied ? <Check className="h-4 w-4 text-emerald-400" /> : <Copy className="h-4 w-4" />}
+              </button>
+            )}
+            <button
+              onClick={onClose}
+              className="p-1.5 rounded-lg text-white/40 hover:text-white/70 hover:bg-white/[0.08] transition-colors"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
         </div>
 
         <div className="p-5">
@@ -302,6 +397,104 @@ function FilePreviewModalContent({
               </div>
               <div className="flex items-center justify-between pt-2 border-t border-white/[0.06]">
                 <div className="text-xs text-white/40">{fileSize ? formatFileSize(fileSize) : "Image file"}</div>
+                <button
+                  onClick={handleDownload}
+                  disabled={downloading}
+                  className={cn(
+                    "flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-colors",
+                    "bg-indigo-500 hover:bg-indigo-600 text-white",
+                    downloading && "opacity-50 cursor-not-allowed"
+                  )}
+                >
+                  <Download className={cn("h-4 w-4", downloading && "animate-pulse")} />
+                  {downloading ? "Downloading..." : "Download"}
+                </button>
+              </div>
+            </div>
+          ) : canTextPreview ? (
+            <div className="space-y-4">
+              <div className="relative rounded-xl overflow-hidden bg-black/20 border border-white/[0.06]">
+                {textLoading && (
+                  <div className="p-4">
+                    <div className="h-4 w-2/3 rounded bg-white/[0.04] animate-pulse mb-2" />
+                    <div className="h-4 w-1/2 rounded bg-white/[0.04] animate-pulse mb-2" />
+                    <div className="h-4 w-5/6 rounded bg-white/[0.04] animate-pulse" />
+                    <div className="mt-3 text-xs text-white/40">Loading preview...</div>
+                  </div>
+                )}
+                {textError && !textLoading && (
+                  <div className="flex flex-col items-center justify-center gap-3 py-8">
+                    <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-red-500/10">
+                      <FileText className="h-6 w-6 text-red-400" />
+                    </div>
+                    <span className="text-sm text-white/50">{textError}</span>
+                  </div>
+                )}
+                {textContent != null && !textLoading && (
+                  <div className="max-h-[60vh] overflow-auto p-4">
+                    {isMarkdown ? (
+                      <div className="prose-glass text-sm [&_p]:my-2">
+                        <Markdown
+                          remarkPlugins={[remarkGfm]}
+                          components={{
+                            code({ className: codeClassName, children }) {
+                              const match = /language-(\w+)/.exec(codeClassName || "");
+                              const codeString = String(children).replace(/\n$/, "");
+                              const inline = !match && !codeString.includes("\n");
+                              if (inline) {
+                                return (
+                                  <code className="px-1.5 py-0.5 rounded bg-white/[0.06] text-indigo-300 text-xs font-mono">
+                                    {children}
+                                  </code>
+                                );
+                              }
+                              return (
+                                <div className="relative group my-3 rounded-lg overflow-hidden">
+                                  <CopyCodeButton code={codeString} />
+                                  <SyntaxHighlighter
+                                    style={oneDark}
+                                    language={match ? match[1] : "markdown"}
+                                    PreTag="div"
+                                    customStyle={{
+                                      margin: 0,
+                                      padding: "1rem",
+                                      fontSize: "0.75rem",
+                                      borderRadius: "0.5rem",
+                                      background: "rgba(0, 0, 0, 0.3)",
+                                    }}
+                                    codeTagProps={{
+                                      style: {
+                                        fontFamily:
+                                          'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
+                                      },
+                                    }}
+                                  >
+                                    {codeString}
+                                  </SyntaxHighlighter>
+                                </div>
+                              );
+                            },
+                            pre({ children }) {
+                              return <>{children}</>;
+                            },
+                          }}
+                        >
+                          {textContent}
+                        </Markdown>
+                      </div>
+                    ) : (
+                      <pre className="whitespace-pre-wrap break-words text-xs font-mono text-white/80 leading-relaxed">
+                        {textContent}
+                      </pre>
+                    )}
+                  </div>
+                )}
+              </div>
+              <div className="flex items-center justify-between pt-2 border-t border-white/[0.06]">
+                <div className="text-xs text-white/40">
+                  {fileSize != null ? formatFileSize(fileSize) : "Text file"}
+                  {textContent ? <span className="ml-2">{textContent.split("\n").length} lines</span> : null}
+                </div>
                 <button
                   onClick={handleDownload}
                   disabled={downloading}
