@@ -27,46 +27,53 @@ export function QueueStrip({ items, onRemove, onClearAll, className }: QueueStri
     return text.slice(0, maxLen - 3) + '...';
   };
 
-  // Collapsed view: show first item preview
-  if (!expanded && items.length === 1) {
-    const item = items[0];
-    return (
-      <div className={cn(
-        "flex items-center gap-2 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/20 text-xs",
-        className
-      )}>
-        <span className="text-amber-400 font-medium shrink-0">Queue (1)</span>
-        <span className="text-white/60 truncate flex-1">
-          {item.agent && <span className="text-emerald-400">@{item.agent} </span>}
-          {truncate(item.content, 60)}
-        </span>
-        <button
-          onClick={() => onRemove(item.id)}
-          className="p-1 rounded hover:bg-white/10 text-white/40 hover:text-white/70 transition-colors shrink-0"
-          title="Remove from queue"
-        >
-          <X className="h-3.5 w-3.5" />
-        </button>
-      </div>
-    );
-  }
-
-  // Collapsed view with multiple items
   if (!expanded) {
     return (
-      <div className={cn(
-        "flex items-center gap-2 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/20 text-xs",
-        className
-      )}>
-        <span className="text-amber-400 font-medium shrink-0">Queue ({items.length})</span>
-        <span className="text-white/50 truncate flex-1">
-          {truncate(items[0].content, 40)}
+      <div
+        className={cn(
+          "flex items-center gap-2 px-3 py-2 rounded-lg text-xs cursor-pointer select-none",
+          "bg-indigo-500/20 border-2 border-dotted border-indigo-500/60",
+          "hover:bg-indigo-500/25 hover:border-indigo-500/70 transition-colors",
+          className
+        )}
+        onClick={() => setExpanded(true)}
+        role="button"
+        tabIndex={0}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            setExpanded(true);
+          }
+        }}
+        title="Click to expand queued message(s)"
+      >
+        <span className="text-indigo-300 font-medium shrink-0">
+          Queued ({items.length})
+        </span>
+        <span className="text-white/60 truncate flex-1">
+          {items[0].agent && <span className="text-emerald-400">@{items[0].agent} </span>}
+          {truncate(items[0].content, items.length === 1 ? 60 : 40)}
           {items.length > 1 && <span className="text-white/30"> +{items.length - 1} more</span>}
         </span>
+        {items.length === 1 ? (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onRemove(items[0].id);
+            }}
+            className="p-1 rounded hover:bg-white/10 text-white/40 hover:text-white/70 transition-colors shrink-0"
+            title="Remove from queue"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        ) : null}
         <button
-          onClick={() => setExpanded(true)}
+          onClick={(e) => {
+            e.stopPropagation();
+            setExpanded(true);
+          }}
           className="p-1 rounded hover:bg-white/10 text-white/40 hover:text-white/70 transition-colors shrink-0"
-          title="Expand queue"
+          title="Expand"
         >
           <ChevronDown className="h-3.5 w-3.5" />
         </button>
@@ -77,12 +84,12 @@ export function QueueStrip({ items, onRemove, onClearAll, className }: QueueStri
   // Expanded view
   return (
     <div className={cn(
-      "rounded-lg bg-amber-500/10 border border-amber-500/20 overflow-hidden",
+      "rounded-lg bg-indigo-500/20 border-2 border-dotted border-indigo-500/60 overflow-hidden",
       className
     )}>
       {/* Header */}
-      <div className="flex items-center justify-between px-3 py-2 border-b border-amber-500/20">
-        <span className="text-amber-400 font-medium text-xs">Queued Messages ({items.length})</span>
+      <div className="flex items-center justify-between px-3 py-2 border-b border-indigo-500/20">
+        <span className="text-indigo-300 font-medium text-xs">Queued Messages ({items.length})</span>
         <div className="flex items-center gap-1">
           {items.length > 1 && (
             <button
@@ -111,7 +118,7 @@ export function QueueStrip({ items, onRemove, onClearAll, className }: QueueStri
             key={item.id}
             className={cn(
               "flex items-start gap-2 px-3 py-2 text-xs",
-              index < items.length - 1 && "border-b border-amber-500/10"
+              index < items.length - 1 && "border-b border-indigo-500/10"
             )}
           >
             <span className="text-white/30 font-mono shrink-0 w-4">{index + 1}.</span>
@@ -122,7 +129,10 @@ export function QueueStrip({ items, onRemove, onClearAll, className }: QueueStri
               </p>
             </div>
             <button
-              onClick={() => onRemove(item.id)}
+              onClick={(e) => {
+                e.stopPropagation();
+                onRemove(item.id);
+              }}
               className="p-1 rounded hover:bg-white/10 text-white/40 hover:text-red-400 transition-colors shrink-0"
               title="Remove from queue"
             >
