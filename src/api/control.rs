@@ -5324,10 +5324,44 @@ async fn run_single_control_turn(
                     session_id: new_session_id.clone(),
                 });
 
+                // Delete the stale session marker so the retry creates it with the new
+                // session ID.  Without this, if the retry fails before writing the marker
+                // (e.g. connectivity check), the marker still holds the old session ID.
+                // A subsequent attempt would see a mismatch (DB has new ID, marker has
+                // old ID) and start a blank session — losing all conversation history.
+                let session_marker = ctx.working_dir.join(".claude-session-initiated");
+                if session_marker.exists() {
+                    let _ = std::fs::remove_file(&session_marker);
+                }
+
+                // The retry starts a fresh Claude Code session (no --resume), so Claude
+                // won't have any prior conversation.  Prepend recent history to the
+                // prompt so the agent retains context from earlier turns.
+                let history_for_retry = match history.last() {
+                    Some((role, content)) if role == "user" && content == &user_message => {
+                        &history[..history.len() - 1]
+                    }
+                    _ => history.as_slice(),
+                };
+                let retry_message = if history_for_retry.is_empty() {
+                    user_message.clone()
+                } else {
+                    let history_ctx = build_history_context(
+                        history_for_retry,
+                        config.context.max_history_total_chars,
+                    );
+                    format!(
+                        "## Prior conversation (session was reset due to a transient error)\n\n\
+                         {history_ctx}\
+                         ## Current message\n\n\
+                         {user_message}"
+                    )
+                };
+
                 result = super::mission_runner::run_claudecode_turn(
                     exec_workspace,
                     &ctx.working_dir,
-                    &user_message,
+                    &retry_message,
                     config.default_model.as_deref(),
                     config.opencode_agent.as_deref(),
                     mid,
