@@ -15,6 +15,7 @@
 
 <p align="center">
   <a href="https://sandboxed.sh">Website</a> ·
+  <a href="https://relens.ai/community">Discord</a> ·
   <a href="#vision">Vision</a> ·
   <a href="#features">Features</a> ·
   <a href="#ecosystem">Ecosystem</a> ·
