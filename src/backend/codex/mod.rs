@@ -263,6 +263,23 @@ fn convert_codex_event(
     }
 
     fn tool_name(data: &std::collections::HashMap<String, serde_json::Value>) -> Option<String> {
+        fn name_from_object(value: &serde_json::Value) -> Option<String> {
+            let obj = value.as_object()?;
+            obj.get("name")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .or_else(|| {
+                    obj.get("tool_name")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                })
+                .or_else(|| {
+                    obj.get("command")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                })
+        }
+
         data.get("name")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
@@ -281,6 +298,12 @@ fn convert_codex_event(
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string())
             })
+            .or_else(|| data.get("tool").and_then(name_from_object))
+            .or_else(|| data.get("function").and_then(name_from_object))
+            .or_else(|| data.get("call").and_then(name_from_object))
+            .or_else(|| data.get("tool_call").and_then(name_from_object))
+            .or_else(|| data.get("function_call").and_then(name_from_object))
+            .or_else(|| data.get("toolCall").and_then(name_from_object))
     }
 
     fn parse_json_str(value: &serde_json::Value) -> Option<serde_json::Value> {
@@ -294,6 +317,26 @@ fn convert_codex_event(
     fn tool_args(
         data: &std::collections::HashMap<String, serde_json::Value>,
     ) -> Option<serde_json::Value> {
+        fn args_from_object(value: &serde_json::Value) -> Option<serde_json::Value> {
+            let obj = value.as_object()?;
+            if let Some(value) = obj.get("args") {
+                return Some(value.clone());
+            }
+            if let Some(value) = obj.get("arguments") {
+                return parse_json_str(value).or_else(|| Some(value.clone()));
+            }
+            if let Some(value) = obj.get("input") {
+                return Some(value.clone());
+            }
+            if let Some(value) = obj.get("params") {
+                return Some(value.clone());
+            }
+            if let Some(value) = obj.get("payload") {
+                return Some(value.clone());
+            }
+            None
+        }
+
         if let Some(value) = data.get("args") {
             return Some(value.clone());
         }
@@ -309,12 +352,28 @@ fn convert_codex_event(
         if let Some(value) = data.get("payload") {
             return Some(value.clone());
         }
-        None
+        data.get("tool")
+            .and_then(args_from_object)
+            .or_else(|| data.get("function").and_then(args_from_object))
+            .or_else(|| data.get("call").and_then(args_from_object))
+            .or_else(|| data.get("tool_call").and_then(args_from_object))
+            .or_else(|| data.get("function_call").and_then(args_from_object))
+            .or_else(|| data.get("toolCall").and_then(args_from_object))
     }
 
     fn tool_result(
         data: &std::collections::HashMap<String, serde_json::Value>,
     ) -> Option<serde_json::Value> {
+        fn result_from_object(value: &serde_json::Value) -> Option<serde_json::Value> {
+            let obj = value.as_object()?;
+            obj.get("result")
+                .or_else(|| obj.get("output"))
+                .or_else(|| obj.get("response"))
+                .or_else(|| obj.get("content"))
+                .or_else(|| obj.get("data"))
+                .cloned()
+        }
+
         let result = data
             .get("result")
             .or_else(|| data.get("output"))
@@ -322,6 +381,12 @@ fn convert_codex_event(
             .or_else(|| data.get("content"))
             .or_else(|| data.get("data"))
             .cloned()
+            .or_else(|| data.get("tool").and_then(result_from_object))
+            .or_else(|| data.get("function").and_then(result_from_object))
+            .or_else(|| data.get("call").and_then(result_from_object))
+            .or_else(|| data.get("tool_call").and_then(result_from_object))
+            .or_else(|| data.get("function_call").and_then(result_from_object))
+            .or_else(|| data.get("toolCall").and_then(result_from_object))
             .unwrap_or(serde_json::Value::Null);
         let error = data.get("error").cloned();
         let status = data.get("status").cloned();
