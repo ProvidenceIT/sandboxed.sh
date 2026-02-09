@@ -74,11 +74,23 @@ The app connects to the Sandboxed.sh backend. Configure the server URL:
 
 In multi-user mode, the login screen also asks for a username.
 
+## Xcode Cloud
+
+The project uses XcodeGen to generate the Xcode project from `project.yml`. For Xcode Cloud builds:
+
+1. The `ci_scripts/ci_post_clone.sh` script automatically runs after cloning
+2. It installs XcodeGen via Homebrew and generates `SandboxedDashboard.xcodeproj`
+3. Configure your Xcode Cloud workflow to use:
+   - **Scheme**: `SandboxedDashboard`
+   - **Project**: `ios_dashboard/SandboxedDashboard.xcodeproj`
+
 ## Project Structure
 
 ```
 ios_dashboard/
 ├── project.yml                 # XcodeGen config
+├── ci_scripts/
+│   └── ci_post_clone.sh        # Xcode Cloud pre-build script
 ├── SandboxedDashboard/
 │   ├── SandboxedDashboardApp.swift
 │   ├── ContentView.swift       # Auth + Tab navigation
