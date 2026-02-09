@@ -162,6 +162,30 @@ final class APIService {
         return response.ok
     }
 
+    func getMissionEvents(id: String, types: [String]? = nil, limit: Int? = nil, offset: Int? = nil) async throws -> [StoredEvent] {
+        var queryItems: [URLQueryItem] = []
+        if let types = types {
+            queryItems.append(URLQueryItem(name: "types", value: types.joined(separator: ",")))
+        }
+        if let limit = limit {
+            queryItems.append(URLQueryItem(name: "limit", value: String(limit)))
+        }
+        if let offset = offset {
+            queryItems.append(URLQueryItem(name: "offset", value: String(offset)))
+        }
+
+        var urlString = "/api/control/missions/\(id)/events"
+        if !queryItems.isEmpty {
+            var components = URLComponents(string: urlString)
+            components?.queryItems = queryItems
+            if let fullPath = components?.string {
+                urlString = fullPath
+            }
+        }
+
+        return try await get(urlString)
+    }
+
     func cleanupEmptyMissions() async throws -> Int {
         struct CleanupResponse: Decodable {
             let ok: Bool

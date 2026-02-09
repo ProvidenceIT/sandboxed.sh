@@ -73,14 +73,9 @@ struct ControlView: View {
             backgroundGlows
             
             VStack(spacing: 0) {
-                // Running missions bar (when there are parallel missions)
-                if showRunningMissions && (!runningMissions.isEmpty || currentMission != nil) {
-                    runningMissionsBar
-                }
-                
                 // Messages
                 messagesView
-                
+
                 // Input area
                 inputView
             }
@@ -801,6 +796,48 @@ struct ControlView: View {
         }
     }
 
+    private func applyViewingMissionWithEvents(_ mission: Mission, events: [StoredEvent], scrollToBottom: Bool = true) {
+        viewingMission = mission
+        viewingMissionId = mission.id
+
+        // Clear messages and replay events to rebuild the full history
+        messages.removeAll()
+
+        // Process events in order to reconstruct the message history
+        for event in events {
+            // Convert StoredEvent metadata to [String: Any] for handleStreamEvent
+            var data: [String: Any] = [
+                "mission_id": event.missionId,
+                "content": event.content
+            ]
+
+            // Add optional fields
+            if let eventId = event.eventId {
+                data["id"] = eventId
+            }
+            if let toolCallId = event.toolCallId {
+                data["tool_call_id"] = toolCallId
+            }
+            if let toolName = event.toolName {
+                data["tool_name"] = toolName
+            }
+
+            // Convert metadata
+            for (key, value) in event.metadata {
+                data[key] = value.value
+            }
+
+            // Process the event using the existing stream event handler
+            handleStreamEvent(type: event.eventType, data: data)
+        }
+
+        if scrollToBottom {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                shouldScrollToBottom = true
+            }
+        }
+    }
+
     private func loadCurrentMission(updateViewing: Bool) async {
         isLoading = true
         defer { isLoading = false }
@@ -823,30 +860,37 @@ struct ControlView: View {
         let previousViewingMission = viewingMission
         let previousViewingId = viewingMissionId
         viewingMissionId = id
-        
+
         isLoading = true
 
         do {
-            let mission = try await api.getMission(id: id)
-            
+            // Fetch both mission metadata and full event history
+            async let missionTask = api.getMission(id: id)
+            async let eventsTask = api.getMissionEvents(id: id)
+
+            let mission = try await missionTask
+            let events = try await eventsTask
+
             // Race condition guard: only update if this is still the mission we want
             guard fetchingMissionId == id else {
                 return // Another mission was requested, discard this response
             }
-            
+
             if currentMission?.id == mission.id {
                 currentMission = mission
             }
-            applyViewingMission(mission)
+
+            // Apply mission with full event history
+            applyViewingMissionWithEvents(mission, events: events)
             isLoading = false
             HapticService.success()
         } catch {
             // Race condition guard
             guard fetchingMissionId == id else { return }
-            
+
             isLoading = false
             print("Failed to load mission: \(error)")
-            
+
             // Revert viewing state to avoid filtering out events
             if let fallback = previousViewingMission ?? currentMission {
                 applyViewingMission(fallback, scrollToBottom: false)
@@ -1758,6 +1802,18 @@ private struct MessageBubble: View {
 private struct SharedFileCardView: View {
     let file: SharedFile
     @Environment(\.openURL) private var openURL
+    @State private var imageData: Data?
+    @State private var isLoadingImage = false
+    @State private var imageLoadFailed = false
+
+    private var fullURL: URL? {
+        // If URL is relative, prepend the base URL
+        if file.url.hasPrefix("/") {
+            let baseURL = APIService.shared.baseURL
+            return URL(string: baseURL + file.url)
+        }
+        return URL(string: file.url)
+    }
 
     var body: some View {
         if file.isImage {
@@ -1769,8 +1825,33 @@ private struct SharedFileCardView: View {
 
     private var imageCard: some View {
         VStack(alignment: .leading, spacing: 0) {
-            // Image preview
-            AsyncImage(url: URL(string: file.url)) { phase in
+            // Image preview with authentication support
+            Group {
+                if isLoadingImage {
+                    ProgressView()
+                        .frame(maxWidth: .infinity, minHeight: 120)
+                        .background(Theme.backgroundSecondary)
+                } else if let data = imageData, let uiImage = UIImage(data: data) {
+                    Image(uiImage: uiImage)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(maxWidth: .infinity, maxHeight: 300)
+                } else if imageLoadFailed {
+                    Image(systemName: "photo")
+                        .font(.title)
+                        .foregroundStyle(Theme.textMuted)
+                        .frame(maxWidth: .infinity, minHeight: 80)
+                        .background(Theme.backgroundSecondary)
+                } else {
+                    ProgressView()
+                        .frame(maxWidth: .infinity, minHeight: 120)
+                        .background(Theme.backgroundSecondary)
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .task {
+                await loadImage()
+            }
                 switch phase {
                 case .empty:
                     ProgressView()
@@ -1813,7 +1894,7 @@ private struct SharedFileCardView: View {
                 }
 
                 Button {
-                    if let url = URL(string: file.url) {
+                    if let url = fullURL {
                         openURL(url)
                     }
                 } label: {
@@ -1835,7 +1916,7 @@ private struct SharedFileCardView: View {
 
     private var downloadCard: some View {
         Button {
-            if let url = URL(string: file.url) {
+            if let url = fullURL {
                 openURL(url)
             }
         } label: {
@@ -1887,6 +1968,46 @@ private struct SharedFileCardView: View {
             )
         }
         .buttonStyle(.plain)
+    }
+
+    private func loadImage() async {
+        guard let url = fullURL, !isLoadingImage else { return }
+
+        isLoadingImage = true
+        imageLoadFailed = false
+
+        do {
+            var request = URLRequest(url: url)
+
+            // Add authentication token if available
+            if let token = APIService.shared.authToken {
+                request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            }
+
+            let (data, response) = try await URLSession.shared.data(for: request)
+
+            // Check response status
+            if let httpResponse = response as? HTTPURLResponse {
+                if httpResponse.statusCode == 200 {
+                    await MainActor.run {
+                        self.imageData = data
+                    }
+                } else {
+                    await MainActor.run {
+                        self.imageLoadFailed = true
+                    }
+                }
+            }
+        } catch {
+            print("Failed to load image: \(error)")
+            await MainActor.run {
+                self.imageLoadFailed = true
+            }
+        }
+
+        await MainActor.run {
+            isLoadingImage = false
+        }
     }
 }
 

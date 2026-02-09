@@ -241,6 +241,103 @@ struct ParallelConfig: Codable {
     }
 }
 
+// MARK: - Events
+
+struct StoredEvent: Codable, Identifiable {
+    let id: Int64
+    let missionId: String
+    let sequence: Int64
+    let eventType: String
+    let timestamp: String
+    let eventId: String?
+    let toolCallId: String?
+    let toolName: String?
+    let content: String
+    let metadata: [String: AnyCodable]
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case missionId = "mission_id"
+        case sequence
+        case eventType = "event_type"
+        case timestamp
+        case eventId = "event_id"
+        case toolCallId = "tool_call_id"
+        case toolName = "tool_name"
+        case content
+        case metadata
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(Int64.self, forKey: .id)
+        missionId = try container.decode(String.self, forKey: .missionId)
+        sequence = try container.decode(Int64.self, forKey: .sequence)
+        eventType = try container.decode(String.self, forKey: .eventType)
+        timestamp = try container.decode(String.self, forKey: .timestamp)
+        eventId = try container.decodeIfPresent(String.self, forKey: .eventId)
+        toolCallId = try container.decodeIfPresent(String.self, forKey: .toolCallId)
+        toolName = try container.decodeIfPresent(String.self, forKey: .toolName)
+        content = try container.decode(String.self, forKey: .content)
+
+        // Decode metadata as generic JSON
+        if let metadataValue = try? container.decode([String: AnyCodable].self, forKey: .metadata) {
+            metadata = metadataValue
+        } else {
+            metadata = [:]
+        }
+    }
+}
+
+// Helper type for decoding arbitrary JSON values
+struct AnyCodable: Codable {
+    let value: Any
+
+    init(_ value: Any) {
+        self.value = value
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+
+        if let bool = try? container.decode(Bool.self) {
+            value = bool
+        } else if let int = try? container.decode(Int.self) {
+            value = int
+        } else if let double = try? container.decode(Double.self) {
+            value = double
+        } else if let string = try? container.decode(String.self) {
+            value = string
+        } else if let array = try? container.decode([AnyCodable].self) {
+            value = array.map { $0.value }
+        } else if let dict = try? container.decode([String: AnyCodable].self) {
+            value = dict.mapValues { $0.value }
+        } else {
+            value = NSNull()
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+
+        if let bool = value as? Bool {
+            try container.encode(bool)
+        } else if let int = value as? Int {
+            try container.encode(int)
+        } else if let double = value as? Double {
+            try container.encode(double)
+        } else if let string = value as? String {
+            try container.encode(string)
+        } else if let array = value as? [Any] {
+            try container.encode(array.map { AnyCodable($0) })
+        } else if let dict = value as? [String: Any] {
+            try container.encode(dict.mapValues { AnyCodable($0) })
+        } else {
+            try container.encodeNil()
+        }
+    }
+}
+
 // MARK: - Runs
 
 struct Run: Codable, Identifiable {
