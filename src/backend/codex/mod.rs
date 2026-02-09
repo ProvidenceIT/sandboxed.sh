@@ -475,7 +475,8 @@ fn convert_codex_event(
 
         CodexEvent::ItemCompleted { item } => {
             match item.item_type.as_str() {
-                "command" | "tool" | "tool_call" | "function_call" | "tool_result" | "function_result" => {
+                "command" | "tool" | "tool_call" | "function_call" | "tool_result"
+                | "function_result" => {
                     // Extract tool result if available
                     if let Some(name) = tool_name(&item.data) {
                         if let Some(result) = tool_result(&item.data) {
