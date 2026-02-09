@@ -106,6 +106,7 @@ import {
   ExternalLink,
   MessageSquare,
 } from "lucide-react";
+import { IMAGE_PATH_PATTERN } from "@/lib/file-extensions";
 
 type StreamDiagnosticsState = {
   phase: "idle" | "connecting" | "open" | "streaming" | "closed" | "error";
@@ -1853,10 +1854,10 @@ const SubagentToolItem = memo(function SubagentToolItem({
 // Matches patterns like "/path/to/image.png" or "screenshots/file.jpg"
 function extractImagePaths(text: string): string[] {
   const paths: string[] = [];
-  // Match absolute paths or relative paths that look like image files
-  // Pattern: word characters, slashes, dots, hyphens, underscores ending in image extension
-  const pathPattern = /(?:\/[\w\-._/]+|[\w\-._]+\/[\w\-._/]+)\.(?:png|jpg|jpeg|gif|webp|bmp|svg)\b/gi;
-  const matches = text.match(pathPattern);
+  // Use shared pattern from file-extensions.ts
+  // Reset regex state since it's global
+  IMAGE_PATH_PATTERN.lastIndex = 0;
+  const matches = text.match(IMAGE_PATH_PATTERN);
   if (matches) {
     for (const match of matches) {
       // Normalize and dedupe
@@ -2444,6 +2445,7 @@ export default function ControlClient() {
   // Desktop stream state
   const [showDesktopStream, setShowDesktopStream] = useState(false);
   const [desktopDisplayId, setDesktopDisplayId] = useState(":99");
+  const desktopDisplayIdRef = useRef(":99");
   const [showDisplaySelector, setShowDisplaySelector] = useState(false);
   const [hasDesktopSession, setHasDesktopSession] = useState(false);
   const [desktopSessions, setDesktopSessions] = useState<DesktopSessionDetail[]>([]);
@@ -2619,6 +2621,10 @@ export default function ControlClient() {
   useEffect(() => {
     desktopSessionsRef.current = desktopSessions;
   }, [desktopSessions]);
+
+  useEffect(() => {
+    desktopDisplayIdRef.current = desktopDisplayId;
+  }, [desktopDisplayId]);
 
   useEffect(() => {
     hasDesktopSessionRef.current = hasDesktopSession;
@@ -3131,13 +3137,14 @@ export default function ControlClient() {
     (mission: Mission) => {
       const activeSession = getActiveDesktopSession(mission);
       if (activeSession?.display) {
-        // Only switch display if the current one is not running anymore.
-        // This prevents auto-switching away from a display the user is actively viewing
-        // (e.g. when a new session starts while the old one is still alive).
-        const currentIsRunning = desktopSessionsRef.current.some(
-          s => s.display === desktopDisplayId && s.process_running && s.status !== 'stopped'
+        // Only switch display if the current one is not running for THIS mission.
+        // This prevents auto-switching away from a display the user is actively viewing,
+        // but allows switching when changing to a different mission.
+        const currentDisplayId = desktopDisplayIdRef.current;
+        const currentBelongsToThisMission = mission.desktop_sessions?.some(
+          s => s.display === currentDisplayId && s.process_running && s.status !== 'stopped'
         );
-        if (!currentIsRunning) {
+        if (!currentBelongsToThisMission) {
           setDesktopDisplayId(activeSession.display);
         }
         setHasDesktopSession(true);
@@ -3152,7 +3159,7 @@ export default function ControlClient() {
         setHasDesktopSession(false);
       }
     },
-    [getActiveDesktopSession, missionHasDesktopSession, desktopDisplayId]
+    [getActiveDesktopSession, missionHasDesktopSession]
   );
 
   // Detect desktop sessions from stored events (when loading from history)

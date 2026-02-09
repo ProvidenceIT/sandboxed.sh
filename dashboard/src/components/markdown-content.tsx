@@ -11,6 +11,14 @@ import { cn } from "@/lib/utils";
 import { getRuntimeApiBase } from "@/lib/settings";
 import { authHeader } from "@/lib/auth";
 import { transformRichTags } from "@/lib/rich-tags";
+import {
+  IMAGE_EXTENSIONS,
+  FILE_EXTENSIONS,
+  CODE_EXTENSIONS,
+  ARCHIVE_EXTENSIONS,
+  isMarkdownFile,
+  isTextPreviewableFile,
+} from "@/lib/file-extensions";
 
 interface MarkdownContentProps {
   content: string;
@@ -18,39 +26,6 @@ interface MarkdownContentProps {
   basePath?: string;
   workspaceId?: string;
   missionId?: string;
-}
-
-const IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"];
-const FILE_EXTENSIONS = [
-  ...IMAGE_EXTENSIONS,
-  ".pdf", ".txt", ".md", ".json", ".yaml", ".yml", ".xml", ".csv",
-  ".log", ".sh", ".py", ".js", ".ts", ".rs", ".go", ".html", ".css",
-  ".zip", ".tar", ".gz", ".mp4", ".mp3", ".wav", ".mov",
-];
-const CODE_EXTENSIONS = [".sh", ".py", ".js", ".ts", ".rs", ".go", ".html", ".css", ".json", ".yaml", ".yml", ".xml"];
-const ARCHIVE_EXTENSIONS = [".zip", ".tar", ".gz"];
-const TEXT_PREVIEW_EXTENSIONS = [
-  ".txt",
-  ".md",
-  ".markdown",
-  ".log",
-  ".json",
-  ".yaml",
-  ".yml",
-  ".toml",
-  ".xml",
-  ".csv",
-  ".tsv",
-];
-
-function isMarkdownFile(path: string): boolean {
-  const lower = path.toLowerCase();
-  return lower.endsWith(".md") || lower.endsWith(".markdown");
-}
-
-function isTextPreviewableFile(path: string): boolean {
-  const lower = path.toLowerCase();
-  return TEXT_PREVIEW_EXTENSIONS.some((ext) => lower.endsWith(ext));
 }
 
 // Global cache for fetched image URLs with automatic cleanup
