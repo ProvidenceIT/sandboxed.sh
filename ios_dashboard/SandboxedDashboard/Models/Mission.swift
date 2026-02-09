@@ -176,6 +176,8 @@ struct RunningMissionInfo: Codable, Identifiable {
     let historyLen: Int
     let secondsSinceActivity: Int
     let expectedDeliverables: Int
+    let currentActivity: String?
+    let title: String?
 
     var id: String { missionId }
 
@@ -186,16 +188,33 @@ struct RunningMissionInfo: Codable, Identifiable {
         case historyLen = "history_len"
         case secondsSinceActivity = "seconds_since_activity"
         case expectedDeliverables = "expected_deliverables"
+        case currentActivity = "current_activity"
+        case title
+    }
+
+    // Custom decoder to handle optional fields
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        missionId = try container.decode(String.self, forKey: .missionId)
+        state = try container.decode(String.self, forKey: .state)
+        queueLen = try container.decode(Int.self, forKey: .queueLen)
+        historyLen = try container.decode(Int.self, forKey: .historyLen)
+        secondsSinceActivity = try container.decode(Int.self, forKey: .secondsSinceActivity)
+        expectedDeliverables = try container.decode(Int.self, forKey: .expectedDeliverables)
+        currentActivity = try container.decodeIfPresent(String.self, forKey: .currentActivity)
+        title = try container.decodeIfPresent(String.self, forKey: .title)
     }
 
     // Memberwise initializer for previews and testing
-    init(missionId: String, state: String, queueLen: Int, historyLen: Int, secondsSinceActivity: Int, expectedDeliverables: Int) {
+    init(missionId: String, state: String, queueLen: Int, historyLen: Int, secondsSinceActivity: Int, expectedDeliverables: Int, currentActivity: String? = nil, title: String? = nil) {
         self.missionId = missionId
         self.state = state
         self.queueLen = queueLen
         self.historyLen = historyLen
         self.secondsSinceActivity = secondsSinceActivity
         self.expectedDeliverables = expectedDeliverables
+        self.currentActivity = currentActivity
+        self.title = title
     }
 
     var isRunning: Bool {
