@@ -1985,7 +1985,16 @@ private struct SharedFileCardView: View {
     }
 
     private func loadImage() async {
-        guard let url = fullURL, !isLoadingImage else { return }
+        guard let url = fullURL, !isLoadingImage else {
+            // If URL is nil (malformed), mark as failed to prevent infinite loading
+            if fullURL == nil {
+                await MainActor.run {
+                    self.imageLoadFailed = true
+                    self.isLoadingImage = false
+                }
+            }
+            return
+        }
 
         isLoadingImage = true
         imageLoadFailed = false
