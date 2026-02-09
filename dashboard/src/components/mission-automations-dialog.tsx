@@ -11,6 +11,7 @@ import {
   Copy,
   Globe,
   History,
+  Pencil,
   Plus,
   RefreshCw,
   Trash2,
@@ -111,6 +112,9 @@ export function MissionAutomationsDialog({
   const [togglingId, setTogglingId] = useState<string | null>(null);
   const [pendingDelete, setPendingDelete] = useState<Automation | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [editingAutomationId, setEditingAutomationId] = useState<string | null>(null);
+  const [editingPrompt, setEditingPrompt] = useState('');
+  const [savingEditId, setSavingEditId] = useState<string | null>(null);
 
   // -- Execution history --
   const [expandedAutomationId, setExpandedAutomationId] = useState<string | null>(null);
@@ -383,6 +387,44 @@ export function MissionAutomationsDialog({
     } finally {
       setDeleting(false);
       setPendingDelete(null);
+    }
+  };
+
+  const handleStartEdit = (automation: Automation) => {
+    if (automation.command_source?.type !== 'inline') return;
+    setEditingAutomationId(automation.id);
+    setEditingPrompt(automation.command_source.content ?? '');
+  };
+
+  const handleCancelEdit = () => {
+    setEditingAutomationId(null);
+    setEditingPrompt('');
+  };
+
+  const handleSaveEdit = async (automation: Automation) => {
+    if (!missionId) return;
+    if (automation.command_source?.type !== 'inline') return;
+    const content = editingPrompt.trim();
+    if (!content) {
+      toast.error('Enter a prompt for the automation');
+      return;
+    }
+    setSavingEditId(automation.id);
+    try {
+      const updated = await updateAutomation(automation.id, {
+        command_source: { type: 'inline', content },
+      });
+      const next = automationsRef.current.map((item) =>
+        item.id === automation.id ? updated : item
+      );
+      setAutomationsForMission(missionId, next);
+      toast.success('Automation updated');
+      handleCancelEdit();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to update automation';
+      toast.error(message);
+    } finally {
+      setSavingEditId(null);
     }
   };
 
@@ -781,6 +823,9 @@ export function MissionAutomationsDialog({
                     const isExpanded = expandedAutomationId === automation.id;
                     const hasVars =
                       automation.variables && Object.keys(automation.variables).length > 0;
+                    const isInline = automation.command_source?.type === 'inline';
+                    const isEditing = editingAutomationId === automation.id;
+                    const canSaveEdit = isEditing && editingPrompt.trim().length > 0;
 
                     return (
                       <div
@@ -858,6 +903,15 @@ export function MissionAutomationsDialog({
                               />
                               {automation.active ? 'Active' : 'Paused'}
                             </label>
+                            {isInline && (
+                              <button
+                                onClick={() => handleStartEdit(automation)}
+                                className="flex items-center gap-1 rounded-lg border border-white/[0.08] px-2.5 py-1.5 text-xs text-white/60 hover:text-white/80 hover:border-white/20 transition-colors"
+                                title="Edit inline prompt"
+                              >
+                                <Pencil className="h-3.5 w-3.5" />
+                              </button>
+                            )}
                             <button
                               onClick={() => setPendingDelete(automation)}
                               className="flex items-center gap-1 rounded-lg border border-white/[0.08] px-2.5 py-1.5 text-xs text-white/60 hover:text-red-300 hover:border-red-500/40 hover:bg-red-500/10 transition-colors"
@@ -866,6 +920,40 @@ export function MissionAutomationsDialog({
                             </button>
                           </div>
                         </div>
+
+                        {/* Inline prompt editor */}
+                        {isInline && isEditing && (
+                          <div className="border-t border-white/[0.04] px-4 py-3 space-y-2">
+                            <label className="block text-xs text-white/50">Edit prompt</label>
+                            <textarea
+                              value={editingPrompt}
+                              onChange={(e) => setEditingPrompt(e.target.value)}
+                              rows={3}
+                              className="w-full rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2.5 text-sm text-white placeholder:text-white/30 focus:outline-none focus:border-indigo-500/50 resize-y"
+                            />
+                            <div className="flex items-center justify-between gap-3">
+                              <div className="text-[11px] text-white/30">
+                                Use <code className="text-indigo-400/70">&lt;variable_name/&gt;</code>{' '}
+                                to insert variables.
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <button
+                                  onClick={handleCancelEdit}
+                                  className="rounded-lg border border-white/[0.08] px-3 py-1.5 text-xs text-white/60 hover:text-white/80 hover:border-white/20 transition-colors"
+                                >
+                                  Cancel
+                                </button>
+                                <button
+                                  onClick={() => handleSaveEdit(automation)}
+                                  disabled={!canSaveEdit || savingEditId === automation.id}
+                                  className="rounded-lg bg-indigo-500 hover:bg-indigo-600 px-3 py-1.5 text-xs font-medium text-white transition-colors disabled:opacity-50"
+                                >
+                                  {savingEditId === automation.id ? 'Saving...' : 'Save'}
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        )}
 
                         {/* Webhook URL row */}
                         {webhookUrl && (
