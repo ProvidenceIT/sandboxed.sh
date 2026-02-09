@@ -105,6 +105,7 @@ export function MissionAutomationsDialog({
   const [triggerKind, setTriggerKind] = useState<TriggerKind>('interval');
   const [intervalValue, setIntervalValue] = useState('5');
   const [intervalUnit, setIntervalUnit] = useState<IntervalUnit>('minutes');
+  const [startImmediately, setStartImmediately] = useState(true);
   const [variables, setVariables] = useState<Array<{ key: string; value: string }>>([]);
   const [creating, setCreating] = useState(false);
   const [togglingId, setTogglingId] = useState<string | null>(null);
@@ -305,7 +306,15 @@ export function MissionAutomationsDialog({
 
     setCreating(true);
     try {
-      const created = await createMissionAutomation(missionId, input);
+      let created = await createMissionAutomation(missionId, input);
+
+      // Allow users to create an automation in a paused state.
+      // The backend create endpoint does not currently accept `active`,
+      // so we create then immediately update.
+      if (!startImmediately) {
+        created = await updateAutomation(created.id, { active: false });
+      }
+
       setAutomationsForMission(missionId, [
         created,
         ...automationsRef.current.filter((a) => a.id !== created.id),
@@ -316,7 +325,7 @@ export function MissionAutomationsDialog({
       setIntervalValue('5');
       setIntervalUnit('minutes');
       setVariables([]);
-      toast.success('Automation created');
+      toast.success(startImmediately ? 'Automation created' : 'Automation created (paused)');
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to create automation';
       toast.error(message);
@@ -669,6 +678,27 @@ export function MissionAutomationsDialog({
                       </div>
                     </div>
                   )}
+                </div>
+
+                {/* Start behavior */}
+                <div className="flex items-center justify-between gap-3 rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2">
+                  <div className="min-w-0">
+                    <div className="text-xs font-medium text-white/70">Start immediately</div>
+                    <div className="text-[11px] text-white/35">
+                      If off, the automation is created paused and will not trigger until enabled.
+                    </div>
+                  </div>
+                  <label className="flex items-center gap-2 shrink-0 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={startImmediately}
+                      onChange={(e) => setStartImmediately(e.target.checked)}
+                      className="h-4 w-4 rounded border-white/20 bg-white/5 text-indigo-500 focus:ring-indigo-500/40"
+                    />
+                    <span className="text-xs text-white/50">
+                      {startImmediately ? 'On' : 'Off'}
+                    </span>
+                  </label>
                 </div>
 
                 {/* Create button */}
