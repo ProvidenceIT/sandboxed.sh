@@ -5507,6 +5507,17 @@ export default function ControlClient() {
     }
   }, []);
 
+  // Re-sync queue when the tab regains visibility (e.g. user navigated away and back)
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible" && viewingMissionId) {
+        syncQueueForMission(viewingMissionId);
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
+  }, [viewingMissionId, syncQueueForMission]);
+
   // Compute queued items for the queue strip
   const queuedItems: QueueItem[] = useMemo(() => {
     return items
