@@ -3632,16 +3632,23 @@ export default function ControlClient() {
         // Merge queued messages that belong to this mission
         const missionQueuedMessages = queuedMessages.filter((qm) => qm.mission_id === id);
         if (missionQueuedMessages.length > 0) {
-          const queuedChatItems: ChatItem[] = missionQueuedMessages.map((qm) => ({
-            kind: "user" as const,
-            id: qm.id,
-            content: qm.content,
-            timestamp: Date.now(),
-            agent: qm.agent ?? undefined,
-            queued: true,
-          }));
+          const queuedIds = new Set(missionQueuedMessages.map((qm) => qm.id));
+          // Mark existing items as queued
+          historyItems = historyItems.map((item) =>
+            item.kind === "user" && queuedIds.has(item.id) ? { ...item, queued: true } : item
+          );
+          // Add any queued messages not already in history
           const existingIds = new Set(historyItems.map((item) => item.id));
-          const newQueuedItems = queuedChatItems.filter((item) => !existingIds.has(item.id));
+          const newQueuedItems: ChatItem[] = missionQueuedMessages
+            .filter((qm) => !existingIds.has(qm.id))
+            .map((qm) => ({
+              kind: "user" as const,
+              id: qm.id,
+              content: qm.content,
+              timestamp: Date.now(),
+              agent: qm.agent ?? undefined,
+              queued: true,
+            }));
           historyItems = [...historyItems, ...newQueuedItems];
         }
         setItems(historyItems);
@@ -3711,16 +3718,21 @@ export default function ControlClient() {
               // Merge queued messages that belong to this mission
               const missionQueuedMessages = queuedMessages.filter((qm) => qm.mission_id === mission.id);
               if (missionQueuedMessages.length > 0) {
-                const queuedChatItems: ChatItem[] = missionQueuedMessages.map((qm) => ({
-                  kind: "user" as const,
-                  id: qm.id,
-                  content: qm.content,
-                  timestamp: Date.now(),
-                  agent: qm.agent ?? undefined,
-                  queued: true,
-                }));
+                const queuedIds = new Set(missionQueuedMessages.map((qm) => qm.id));
+                historyItems = historyItems.map((item) =>
+                  item.kind === "user" && queuedIds.has(item.id) ? { ...item, queued: true } : item
+                );
                 const existingIds = new Set(historyItems.map((item) => item.id));
-                const newQueuedItems = queuedChatItems.filter((item) => !existingIds.has(item.id));
+                const newQueuedItems: ChatItem[] = missionQueuedMessages
+                  .filter((qm) => !existingIds.has(qm.id))
+                  .map((qm) => ({
+                    kind: "user" as const,
+                    id: qm.id,
+                    content: qm.content,
+                    timestamp: Date.now(),
+                    agent: qm.agent ?? undefined,
+                    queued: true,
+                  }));
                 historyItems = [...historyItems, ...newQueuedItems];
               }
               setItems(historyItems);
@@ -4102,17 +4114,21 @@ export default function ControlClient() {
         // Merge queued messages that belong to this mission
         const missionQueuedMessages = queuedMessages.filter((qm) => qm.mission_id === missionId);
         if (missionQueuedMessages.length > 0) {
-          const queuedChatItems: ChatItem[] = missionQueuedMessages.map((qm) => ({
-            kind: "user" as const,
-            id: qm.id,
-            content: qm.content,
-            timestamp: Date.now(),
-            agent: qm.agent ?? undefined,
-            queued: true,
-          }));
-          // Filter out any queued messages that already exist in history (by ID)
+          const queuedIds = new Set(missionQueuedMessages.map((qm) => qm.id));
+          historyItems = historyItems.map((item) =>
+            item.kind === "user" && queuedIds.has(item.id) ? { ...item, queued: true } : item
+          );
           const existingIds = new Set(historyItems.map((item) => item.id));
-          const newQueuedItems = queuedChatItems.filter((item) => !existingIds.has(item.id));
+          const newQueuedItems: ChatItem[] = missionQueuedMessages
+            .filter((qm) => !existingIds.has(qm.id))
+            .map((qm) => ({
+              kind: "user" as const,
+              id: qm.id,
+              content: qm.content,
+              timestamp: Date.now(),
+              agent: qm.agent ?? undefined,
+              queued: true,
+            }));
           historyItems = [...historyItems, ...newQueuedItems];
         }
 
@@ -4426,16 +4442,21 @@ export default function ControlClient() {
               // Merge queued messages that belong to this mission
               const missionQueuedMessages = queuedMessages.filter((qm) => qm.mission_id === viewingId);
               if (missionQueuedMessages.length > 0) {
-                const queuedChatItems: ChatItem[] = missionQueuedMessages.map((qm) => ({
-                  kind: "user" as const,
-                  id: qm.id,
-                  content: qm.content,
-                  timestamp: Date.now(),
-                  agent: qm.agent ?? undefined,
-                  queued: true,
-                }));
+                const queuedIds = new Set(missionQueuedMessages.map((qm) => qm.id));
+                historyItems = historyItems.map((item) =>
+                  item.kind === "user" && queuedIds.has(item.id) ? { ...item, queued: true } : item
+                );
                 const existingIds = new Set(historyItems.map((item) => item.id));
-                const newQueuedItems = queuedChatItems.filter((item) => !existingIds.has(item.id));
+                const newQueuedItems: ChatItem[] = missionQueuedMessages
+                  .filter((qm) => !existingIds.has(qm.id))
+                  .map((qm) => ({
+                    kind: "user" as const,
+                    id: qm.id,
+                    content: qm.content,
+                    timestamp: Date.now(),
+                    agent: qm.agent ?? undefined,
+                    queued: true,
+                  }));
                 historyItems = [...historyItems, ...newQueuedItems];
               }
               setItems(historyItems);
