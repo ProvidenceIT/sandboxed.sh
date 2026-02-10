@@ -443,7 +443,7 @@ struct ControlView: View {
         ZStack(alignment: .bottom) {
             ScrollViewReader { proxy in
                 ScrollView {
-                    LazyVStack(spacing: 16) {
+                    LazyVStack(spacing: 20) {
                         if messages.isEmpty && !isLoading {
                             // Show working indicator when this specific mission is running but no messages yet
                             if viewingMissionIsRunning {
@@ -1721,8 +1721,8 @@ private struct MessageBubble: View {
                 toolUIBubble
                 Spacer(minLength: 40)
             } else {
+                // Assistant messages now use full width
                 assistantBubble
-                Spacer(minLength: 60)
             }
         }
     }
@@ -2092,7 +2092,7 @@ private struct PhaseBubble: View {
                         Text(agentPhase?.label ?? phase.replacingOccurrences(of: "_", with: " ").capitalized)
                             .font(.subheadline.weight(.medium))
                             .foregroundStyle(Theme.accent)
-                        
+
                         if let agent = agent {
                             Text(agent)
                                 .font(.caption2.monospaced())
@@ -2104,8 +2104,15 @@ private struct PhaseBubble: View {
                                 .background(Theme.backgroundTertiary)
                                 .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
                         }
+
+                        Text("•")
+                            .foregroundStyle(Theme.textMuted)
+                            .font(.caption2)
+                        Text(message.timestamp, style: .time)
+                            .font(.caption2)
+                            .foregroundStyle(Theme.textMuted)
                     }
-                    
+
                     if let detail = detail {
                         Text(detail)
                             .font(.caption)
@@ -2391,11 +2398,20 @@ private struct ThinkingBubble: View {
                         .font(.caption)
                         .foregroundStyle(Theme.accent)
                         .symbolEffect(.pulse, options: message.thinkingDone ? .nonRepeating : .repeating)
-                    
+
                     Text(message.thinkingDone ? "Thought for \(formattedDuration)" : "Thinking for \(formattedDuration)")
                         .font(.caption)
                         .foregroundStyle(Theme.textSecondary)
-                    
+
+                    Text("•")
+                        .foregroundStyle(Theme.textMuted)
+                        .font(.caption2)
+                    Text(message.timestamp, style: .time)
+                        .font(.caption2)
+                        .foregroundStyle(Theme.textMuted)
+
+                    Spacer()
+
                     Image(systemName: "chevron.right")
                         .font(.system(size: 10, weight: .medium))
                         .foregroundStyle(Theme.textMuted)
@@ -2951,23 +2967,32 @@ private struct MissionRow: View {
         }
     }
 
+    private var statusIcon: String {
+        if isRunning {
+            return "play.circle.fill"
+        }
+        switch status {
+        case .active: return "play.circle.fill"
+        case .completed: return "checkmark.circle.fill"
+        case .failed: return "xmark.circle.fill"
+        case .interrupted: return "pause.circle.fill"
+        case .blocked: return "exclamationmark.triangle.fill"
+        case .notFeasible: return "questionmark.circle.fill"
+        }
+    }
+
     var body: some View {
         Button {
             onSelect()
             HapticService.selectionChanged()
         } label: {
             HStack(spacing: 12) {
-                // Status indicator
-                Circle()
-                    .fill(statusColor)
-                    .frame(width: 8, height: 8)
-                    .overlay {
-                        if isRunning && runningState == "running" {
-                            Circle()
-                                .stroke(statusColor.opacity(0.5), lineWidth: 2)
-                                .scaleEffect(1.5)
-                        }
-                    }
+                // Status icon indicator
+                Image(systemName: statusIcon)
+                    .font(.system(size: 18))
+                    .foregroundStyle(statusColor)
+                    .symbolEffect(.pulse, options: (isRunning && runningState == "running") ? .repeating : .nonRepeating)
+                    .frame(width: 24, height: 24)
 
                 // Mission info
                 VStack(alignment: .leading, spacing: 2) {
@@ -3003,9 +3028,13 @@ private struct MissionRow: View {
                         .background(Theme.backgroundSecondary)
                         .clipShape(Capsule())
                 } else {
-                    Text(status.rawValue)
+                    Text(status.displayLabel)
                         .font(.caption2)
-                        .foregroundStyle(Theme.textMuted)
+                        .foregroundStyle(statusColor)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(statusColor.opacity(0.1))
+                        .clipShape(Capsule())
                 }
 
                 // Cancel button for running missions
