@@ -2821,6 +2821,46 @@ async fn automation_scheduler_loop(
     }
 }
 
+/// Resolve the command content for a single automation, applying variable
+/// substitution.  Returns `None` if the command cannot be resolved (e.g.
+/// library unavailable, file not found).
+async fn resolve_automation_command(
+    automation: &mission_store::Automation,
+    mission_id: Uuid,
+    state: &Arc<AppState>,
+    store: &Arc<dyn MissionStore>,
+) -> Option<String> {
+    use super::automation_variables::{substitute_variables, SubstitutionContext};
+    use super::mission_store::CommandSource;
+
+    let mission = store.get_mission(mission_id).await.ok()??;
+    let workspace = state.workspaces.get(mission.workspace_id).await;
+
+    let command_content = match &automation.command_source {
+        CommandSource::Library { name } => {
+            let lib = state.library.read().await;
+            let lib = lib.as_ref()?;
+            lib.get_command(name).await.ok().map(|c| c.content)?
+        }
+        CommandSource::LocalFile { path } => {
+            let ws = workspace.as_ref()?;
+            tokio::fs::read_to_string(ws.path.join(path)).await.ok()?
+        }
+        CommandSource::Inline { content } => content.clone(),
+    };
+
+    let mut context = SubstitutionContext::new(mission.id);
+    if let Some(ref title) = mission.title {
+        context = context.with_mission_name(title.clone());
+    }
+    if let Some(ws) = workspace.as_ref() {
+        context = context.with_working_directory(ws.path.to_string_lossy().to_string());
+    }
+    context = context.with_custom_variables(automation.variables.clone());
+
+    Some(substitute_variables(&command_content, &context))
+}
+
 async fn agent_finished_automation_messages(
     mission_store: &Arc<dyn MissionStore>,
     mission_id: Uuid,
@@ -5697,6 +5737,9 @@ pub struct CreateAutomationRequest {
     pub variables: HashMap<String, String>,
     #[serde(default)]
     pub retry_config: Option<mission_store::RetryConfig>,
+    /// When true, trigger the first execution immediately after creation.
+    #[serde(default)]
+    pub start_immediately: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -5791,6 +5834,8 @@ pub async fn create_automation(
         other => other,
     };
 
+    let start_immediately = req.start_immediately;
+
     // Build the complete Automation struct
     let automation = mission_store::Automation {
         id: Uuid::new_v4(),
@@ -5809,6 +5854,59 @@ pub async fn create_automation(
         .create_automation(automation)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    // If start_immediately is requested for agent_finished triggers, fire the
+    // first execution right away by resolving the command and sending it as a
+    // user message to the control actor.
+    if start_immediately
+        && matches!(
+            automation.trigger,
+            mission_store::TriggerType::AgentFinished
+        )
+    {
+        let cmd_content =
+            resolve_automation_command(&automation, mission_id, &state, &control.mission_store)
+                .await;
+
+        if let Some(content) = cmd_content {
+            // Record the execution
+            let execution_id = Uuid::new_v4();
+            let execution = mission_store::AutomationExecution {
+                id: execution_id,
+                automation_id: automation.id,
+                mission_id,
+                triggered_at: mission_store::now_string(),
+                trigger_source: "start_immediately".to_string(),
+                status: mission_store::ExecutionStatus::Success,
+                webhook_payload: None,
+                variables_used: automation.variables.clone(),
+                completed_at: Some(mission_store::now_string()),
+                error: None,
+                retry_count: 0,
+            };
+            let _ = control
+                .mission_store
+                .create_automation_execution(execution)
+                .await;
+            let _ = control
+                .mission_store
+                .update_automation_last_triggered(automation.id)
+                .await;
+
+            // Send as a user message to the mission
+            let (respond_tx, _respond_rx) = tokio::sync::oneshot::channel();
+            let _ = control
+                .cmd_tx
+                .send(ControlCommand::UserMessage {
+                    id: Uuid::new_v4(),
+                    content,
+                    agent: None,
+                    target_mission_id: Some(mission_id),
+                    respond: respond_tx,
+                })
+                .await;
+        }
+    }
 
     Ok(Json(automation))
 }

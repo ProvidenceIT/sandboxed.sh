@@ -311,6 +311,7 @@ export function MissionAutomationsDialog({
       command_source,
       trigger,
       ...(Object.keys(vars).length > 0 ? { variables: vars } : {}),
+      start_immediately: startImmediately,
     };
 
     setCreating(true);
@@ -791,7 +792,7 @@ export function MissionAutomationsDialog({
               </div>
 
               {/* ---- Current automations list ---- */}
-              <div className="space-y-3">
+              <div className="space-y-3 pb-2">
                 <div className="flex items-center justify-between">
                   <h4 className="text-sm font-medium text-white">Current Automations</h4>
                   {loading && <span className="text-xs text-white/40">Loading...</span>}

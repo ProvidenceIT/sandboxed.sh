@@ -66,6 +66,7 @@ export interface CreateAutomationInput {
   command_source: CommandSource;
   trigger: TriggerType;
   variables?: Record<string, string>;
+  start_immediately?: boolean;
 }
 
 function normalizeAutomation(raw: Automation): Automation {
