@@ -47,6 +47,8 @@ COPY dashboard/ .
 
 # Empty API URL — the Caddyfile proxies /api to the backend at runtime
 ENV NEXT_PUBLIC_API_URL=""
+# standalone output for Docker (not needed for Vercel)
+ENV STANDALONE=true
 RUN bun run build
 
 # ---------------------------------------------------------------------------
