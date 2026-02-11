@@ -4515,6 +4515,29 @@ async fn oauth_callback_inner(
                     // Don't fail the request, but log the error
                 }
 
+                // For Anthropic, also sync to Claude CLI credentials files so that
+                // find_host_claude_cli_credentials() picks up the fresh token instead
+                // of a stale one from a previous `claude /login`.
+                if matches!(provider_type, ProviderType::Anthropic) {
+                    for dir_path in &[
+                        std::path::PathBuf::from("/var/lib/opencode/.claude"),
+                        std::path::PathBuf::from("/root/.claude"),
+                    ] {
+                        if let Err(e) = write_claudecode_credentials_from_entry(
+                            dir_path,
+                            access_token,
+                            refresh_token,
+                            expires_at,
+                        ) {
+                            tracing::warn!(
+                                path = %dir_path.display(),
+                                error = %e,
+                                "Failed to sync OAuth token to Claude CLI credentials"
+                            );
+                        }
+                    }
+                }
+
                 let config_path = get_opencode_config_path(&state.config.working_dir);
                 let mut opencode_config = read_opencode_config(&config_path)
                     .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
