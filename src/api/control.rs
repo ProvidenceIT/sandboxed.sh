@@ -4742,12 +4742,14 @@ async fn control_actor_loop(
                         }
                     }
 
-                    // If the mission is idle now, enqueue any agent_finished automations to restart immediately.
+                    // If the mission is idle now, enqueue any agent_finished automations after a short delay.
                     if let Some(mission_id) = completed_mission_id {
                         let already_queued_for_mission = queue
                             .iter()
                             .any(|(_id, _msg, _agent, target_mid)| *target_mid == Some(mission_id));
                         if !already_queued_for_mission {
+                            // Small delay so the UI can display the completion before restarting.
+                            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
                             let messages = agent_finished_automation_messages(
                                 &mission_store,
                                 mission_id,
@@ -4946,8 +4948,10 @@ async fn control_actor_loop(
 
                             // If runner has no more queued messages, update status and mark for cleanup
                             if runner.queue.is_empty() && !runner.is_running() {
-                                // Enqueue agent_finished automations (if any) to restart immediately.
+                                // Enqueue agent_finished automations (if any) after a short delay.
                                 if runner.queue.is_empty() {
+                                    // Small delay so the UI can display the completion before restarting.
+                                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
                                     let messages = agent_finished_automation_messages(
                                         &mission_store,
                                         *mission_id,
