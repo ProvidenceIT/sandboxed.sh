@@ -5,7 +5,7 @@ import useSWR from 'swr';
 import { toast } from '@/components/toast';
 import { getHealth } from '@/lib/api';
 import { Save } from 'lucide-react';
-import { getRuntimeApiBase, writeSavedSettings } from '@/lib/settings';
+import { getRuntimeApiBase, readSavedSettings, writeSavedSettings } from '@/lib/settings';
 import { ServerConnectionCard } from '@/components/server-connection-card';
 
 export default function SystemSettingsPage() {
@@ -79,9 +79,15 @@ export default function SystemSettingsPage() {
   const handleSave = () => {
     if (!validateUrl(apiUrl)) return;
 
+    const previousUrl = readSavedSettings().apiUrl;
     writeSavedSettings({ apiUrl });
     setOriginalValues({ apiUrl });
     toast.success('Settings saved!');
+
+    // Notify other components that API URL has changed
+    if (previousUrl !== apiUrl) {
+      window.dispatchEvent(new CustomEvent('openagent:api:url-changed'));
+    }
   };
 
   // Keyboard shortcut to save (Ctrl/Cmd + S)

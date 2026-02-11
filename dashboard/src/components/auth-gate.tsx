@@ -57,6 +57,38 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
     return () => window.removeEventListener('openagent:auth:required', onAuthRequired);
   }, []);
 
+  // Re-validate authentication when API URL changes
+  useEffect(() => {
+    const onApiUrlChanged = async () => {
+      // Clear existing auth state
+      clearJwt();
+      setReady(false);
+      setError(null);
+
+      try {
+        const health = await getHealth();
+        setAuthRequired(Boolean(health.auth_required));
+        if (health.auth_mode) {
+          setAuthMode(health.auth_mode);
+        }
+        if (!health.auth_required) {
+          setIsAuthed(true);
+        } else {
+          setIsAuthed(false);
+        }
+      } catch {
+        // On error, assume auth is required
+        setAuthRequired(true);
+        setIsAuthed(false);
+      } finally {
+        setReady(true);
+      }
+    };
+
+    window.addEventListener('openagent:api:url-changed', onApiUrlChanged);
+    return () => window.removeEventListener('openagent:api:url-changed', onApiUrlChanged);
+  }, []);
+
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (authMode === 'multi_user' && !username.trim()) {
