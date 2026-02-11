@@ -5,7 +5,7 @@ import useSWR from 'swr';
 import { toast } from '@/components/toast';
 import { getHealth } from '@/lib/api';
 import { Save } from 'lucide-react';
-import { getRuntimeApiBase, writeSavedSettings } from '@/lib/settings';
+import { getRuntimeApiBase, readSavedSettings, writeSavedSettings } from '@/lib/settings';
 import { ServerConnectionCard } from '@/components/server-connection-card';
 
 export default function SystemSettingsPage() {
@@ -76,32 +76,38 @@ export default function SystemSettingsPage() {
   };
 
   // Save settings
-  const handleSave = () => {
+  const handleSave = useCallback(() => {
     if (!validateUrl(apiUrl)) return;
 
-    const previousUrl = originalValues.apiUrl;
+    const previousUrl = readSavedSettings().apiUrl;
     writeSavedSettings({ apiUrl });
     setOriginalValues({ apiUrl });
     toast.success('Settings saved!');
 
-    // Notify other components that API URL has changed (compare normalized values)
-    if (previousUrl !== apiUrl) {
+    // Notify other components that API URL has changed
+    // Normalize both URLs for comparison to avoid spurious events
+    const normalizedPrevious = previousUrl?.trim().replace(/\/$/, '');
+    const normalizedCurrent = apiUrl.trim().replace(/\/$/, '');
+    if (normalizedPrevious !== normalizedCurrent) {
       window.dispatchEvent(new CustomEvent('openagent:api:url-changed'));
     }
-  };
+  }, [apiUrl, validateUrl]);
 
   // Keyboard shortcut to save (Ctrl/Cmd + S)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === 's') {
         e.preventDefault();
-        handleSave();
+        // Only save if there are actual unsaved changes
+        if (hasUnsavedChanges) {
+          handleSave();
+        }
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [apiUrl]);
+  }, [handleSave, hasUnsavedChanges]);
 
   return (
     <div className="flex-1 overflow-auto">
@@ -122,23 +128,20 @@ export default function SystemSettingsPage() {
             setApiUrl={setApiUrl}
             urlError={urlError}
             validateUrl={validateUrl}
-            health={health ?? null}
-            healthLoading={healthLoading}
-            testingConnection={testingConnection}
             testApiConnection={testApiConnection}
+            testingConnection={testingConnection}
+            health={health}
+            healthLoading={healthLoading}
           />
 
-          {/* Save Button */}
+          {/* Action Bar */}
           <div className="flex items-center justify-end gap-3">
-            {hasUnsavedChanges && (
-              <span className="text-xs text-amber-400">Unsaved changes</span>
-            )}
             <button
               onClick={handleSave}
-              disabled={!hasUnsavedChanges || !!urlError}
-              className="flex items-center gap-2 rounded-lg bg-indigo-500 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              disabled={!hasUnsavedChanges}
+              className="inline-flex items-center gap-2 px-4 py-2 bg-white text-black rounded-lg font-medium transition-all disabled:opacity-50 disabled:cursor-not-allowed hover:bg-white/90"
             >
-              <Save className="h-4 w-4" />
+              <Save className="w-4 h-4" />
               Save Changes
             </button>
           </div>
