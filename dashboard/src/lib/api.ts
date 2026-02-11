@@ -116,6 +116,35 @@ export async function login(password: string, username?: string): Promise<LoginR
   return res.json();
 }
 
+// ==================== Auth Management ====================
+
+export interface AuthStatusResponse {
+  auth_mode: "disabled" | "single_tenant" | "multi_user";
+  password_source: "dashboard" | "environment" | "none";
+  password_changed_at: string | null;
+  dev_mode: boolean;
+}
+
+export async function getAuthStatus(): Promise<AuthStatusResponse> {
+  return apiGet("/api/auth/status", "Failed to fetch auth status");
+}
+
+export interface ChangePasswordRequest {
+  current_password?: string;
+  new_password: string;
+}
+
+export interface ChangePasswordResponse {
+  success: boolean;
+  password_changed_at: string;
+}
+
+export async function changePassword(
+  request: ChangePasswordRequest
+): Promise<ChangePasswordResponse> {
+  return apiPost("/api/auth/change-password", request, "Failed to change password");
+}
+
 // Get statistics
 export async function getStats(): Promise<StatsResponse> {
   return apiGet("/api/stats", "Failed to fetch stats");
