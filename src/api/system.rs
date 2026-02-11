@@ -446,15 +446,21 @@ async fn get_codex_info() -> ComponentInfo {
             }
             // Parse version from output like "codex-cli 0.94.0"
             let version = extract_version_token(&version_str);
+            let update_available = check_codex_update(version.as_deref()).await;
+            let status = if update_available.is_some() {
+                ComponentStatus::UpdateAvailable
+            } else {
+                ComponentStatus::Ok
+            };
 
             ComponentInfo {
                 name: "codex".to_string(),
                 version,
                 installed: true,
-                update_available: None,
+                update_available,
                 path: which_codex().await,
                 source_path: None,
-                status: ComponentStatus::Ok,
+                status,
             }
         }
         _ => ComponentInfo {
@@ -608,6 +614,34 @@ async fn check_claude_code_update(current_version: Option<&str>) -> Option<Strin
         .unwrap_or_else(|| latest_raw.trim_start_matches('v').to_string());
 
     if latest != current && version_is_newer(&latest, &current) {
+        Some(latest.to_string())
+    } else {
+        None
+    }
+}
+
+/// Check if there's a newer version of Codex available.
+async fn check_codex_update(current_version: Option<&str>) -> Option<String> {
+    let current_raw = current_version?;
+    let current = extract_version_token(current_raw)?;
+
+    // Check npm registry for @openai/codex
+    let client = reqwest::Client::new();
+    let resp = client
+        .get("https://registry.npmjs.org/@openai/codex/latest")
+        .header("User-Agent", "open-agent")
+        .send()
+        .await
+        .ok()?;
+
+    if !resp.status().is_success() {
+        return None;
+    }
+
+    let json: serde_json::Value = resp.json().await.ok()?;
+    let latest = json.get("version")?.as_str()?;
+
+    if version_is_newer(latest, &current) {
         Some(latest.to_string())
     } else {
         None
@@ -882,6 +916,7 @@ async fn update_component(
         "sandboxed_sh" => Ok(Sse::new(Box::pin(stream_sandboxed_update(state)))),
         "opencode" => Ok(Sse::new(Box::pin(stream_opencode_update()))),
         "claude_code" => Ok(Sse::new(Box::pin(stream_claude_code_update()))),
+        "codex" => Ok(Sse::new(Box::pin(stream_codex_update()))),
         "amp" => Ok(Sse::new(Box::pin(stream_amp_update()))),
         "oh_my_opencode" => Ok(Sse::new(Box::pin(stream_oh_my_opencode_update()))),
         _ => Err((
@@ -903,6 +938,7 @@ async fn uninstall_component(
         )),
         "opencode" => Ok(Sse::new(Box::pin(stream_opencode_uninstall()))),
         "claude_code" => Ok(Sse::new(Box::pin(stream_claude_code_uninstall()))),
+        "codex" => Ok(Sse::new(Box::pin(stream_codex_uninstall()))),
         "amp" => Ok(Sse::new(Box::pin(stream_amp_uninstall()))),
         "oh_my_opencode" => Ok(Sse::new(Box::pin(stream_oh_my_opencode_uninstall()))),
         _ => Err((
@@ -1260,6 +1296,63 @@ fn stream_amp_update() -> impl Stream<Item = Result<Event, std::convert::Infalli
             }
         }
     }
+}
+
+/// Stream the Codex install/update process.
+fn stream_codex_update() -> impl Stream<Item = Result<Event, std::convert::Infallible>> {
+    async_stream::stream! {
+        yield sse("log", "Starting Codex installation/update...", Some(0));
+
+        // Check if npm is available
+        let npm_check = Command::new("npm").arg("--version").output().await;
+        if npm_check.is_err() || !npm_check.unwrap().status.success() {
+            yield sse("error", "npm is required to install Codex. Please install Node.js first.", None);
+            return;
+        }
+
+        yield sse("log", "Installing @openai/codex@latest globally...", Some(20));
+
+        match Command::new("npm")
+            .args(["install", "-g", "@openai/codex@latest"])
+            .output()
+            .await
+        {
+            Ok(output) if output.status.success() => {
+                yield sse("log", "Installation complete, verifying...", Some(80));
+
+                let version = Command::new("codex").arg("--version").output().await
+                    .ok()
+                    .filter(|o| o.status.success())
+                    .and_then(|o| {
+                        let combined = format!(
+                            "{} {}",
+                            String::from_utf8_lossy(&o.stdout),
+                            String::from_utf8_lossy(&o.stderr)
+                        );
+                        extract_version_token(&combined)
+                    })
+                    .unwrap_or_else(|| "unknown".to_string());
+
+                if version != "unknown" {
+                    yield sse("complete", format!("Codex installed successfully! Version: {version}"), Some(100));
+                } else {
+                    yield sse("complete", "Codex installed, but version check failed. You may need to restart your shell.", Some(100));
+                }
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                yield sse("error", format!("Failed to install Codex: {}", stderr), None);
+            }
+            Err(e) => {
+                yield sse("error", format!("Failed to run npm install: {}", e), None);
+            }
+        }
+    }
+}
+
+/// Stream the Codex uninstall process.
+fn stream_codex_uninstall() -> impl Stream<Item = Result<Event, std::convert::Infallible>> {
+    stream_npm_package_uninstall("@openai/codex", ".codex", "Codex")
 }
 
 #[cfg(test)]
