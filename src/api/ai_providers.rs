@@ -21,10 +21,10 @@ use axum::{
     Json, Router,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
-use fs2::FileExt;
 
 use crate::ai_providers::{AuthMethod, PendingOAuth, ProviderType};
 
@@ -2002,6 +2002,12 @@ fn get_oauth_refresh_lock_path(provider_type: ProviderType) -> PathBuf {
         ProviderType::Anthropic => "anthropic",
         ProviderType::OpenAI => "openai",
         ProviderType::Google => "google",
+        other => {
+            // For providers without OAuth support, use debug name as fallback
+            return PathBuf::from(home)
+                .join(".sandboxed-sh")
+                .join(format!("{:?}_oauth_refresh.lock", other).to_lowercase());
+        }
     };
     PathBuf::from(home)
         .join(".sandboxed-sh")
@@ -2047,7 +2053,10 @@ pub async fn refresh_anthropic_oauth_token() -> Result<(), String> {
     let _lock = match acquire_oauth_refresh_lock(ProviderType::Anthropic) {
         Ok(lock) => lock,
         Err(e) => {
-            tracing::info!("Could not acquire refresh lock: {}. Waiting for other process to complete...", e);
+            tracing::info!(
+                "Could not acquire refresh lock: {}. Waiting for other process to complete...",
+                e
+            );
             // Another process is refreshing. Wait a bit and check if token is now fresh.
             tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
@@ -2108,7 +2117,9 @@ pub async fn refresh_anthropic_oauth_token() -> Result<(), String> {
             && lower.contains("invalid_grant")
         {
             // Before deleting credentials, check if another process just refreshed the token
-            tracing::warn!("Received invalid_grant error. Checking if token was recently refreshed...");
+            tracing::warn!(
+                "Received invalid_grant error. Checking if token was recently refreshed..."
+            );
 
             // Wait a moment and re-read credentials
             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
@@ -2219,7 +2230,10 @@ pub async fn refresh_openai_oauth_token() -> Result<(), String> {
     let _lock = match acquire_oauth_refresh_lock(ProviderType::OpenAI) {
         Ok(lock) => lock,
         Err(e) => {
-            tracing::info!("Could not acquire refresh lock: {}. Waiting for other process to complete...", e);
+            tracing::info!(
+                "Could not acquire refresh lock: {}. Waiting for other process to complete...",
+                e
+            );
             // Another process is refreshing. Wait a bit and check if token is now fresh.
             tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
@@ -2289,7 +2303,9 @@ pub async fn refresh_openai_oauth_token() -> Result<(), String> {
                 if let Some(updated_entry) = read_oauth_token_entry(ProviderType::OpenAI) {
                     // Check if the refresh token changed (indicating a recent refresh)
                     if updated_entry.refresh_token != refresh_token {
-                        tracing::info!("Token was refreshed by another process after invalid_grant");
+                        tracing::info!(
+                            "Token was refreshed by another process after invalid_grant"
+                        );
                         return Ok(());
                     }
 
@@ -2365,7 +2381,10 @@ pub async fn refresh_google_oauth_token() -> Result<(), String> {
     let _lock = match acquire_oauth_refresh_lock(ProviderType::Google) {
         Ok(lock) => lock,
         Err(e) => {
-            tracing::info!("Could not acquire refresh lock: {}. Waiting for other process to complete...", e);
+            tracing::info!(
+                "Could not acquire refresh lock: {}. Waiting for other process to complete...",
+                e
+            );
             // Another process is refreshing. Wait a bit and check if token is now fresh.
             tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
@@ -2428,7 +2447,9 @@ pub async fn refresh_google_oauth_token() -> Result<(), String> {
             && lower.contains("invalid_grant")
         {
             // Before deleting credentials, check if another process just refreshed the token
-            tracing::warn!("Received invalid_grant error. Checking if token was recently refreshed...");
+            tracing::warn!(
+                "Received invalid_grant error. Checking if token was recently refreshed..."
+            );
 
             // Wait a moment and re-read credentials
             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
