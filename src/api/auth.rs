@@ -422,8 +422,8 @@ pub async fn change_password(
         .unwrap_or(false);
     let has_existing_password = has_stored_hash || has_env_password;
 
-    // If a password exists, require the current password for verification
-    if has_existing_password {
+    // If a password exists and auth is not disabled (dev mode), require the current password
+    if has_existing_password && !state.config.dev_mode {
         let current = req.current_password.as_deref().unwrap_or("").trim();
         if current.is_empty() {
             return Err((

@@ -26,7 +26,6 @@ import {
   Key,
   Archive,
   Activity,
-  Shield,
   Cpu,
   Lock,
 } from 'lucide-react';
@@ -71,10 +70,9 @@ const navigation: NavItem[] = [
       { name: 'System', href: '/settings/system', icon: Server },
       { name: 'Backends', href: '/settings/backends', icon: Cpu },
       { name: 'Providers', href: '/settings/providers', icon: Key },
-      { name: 'Security', href: '/settings/security', icon: Lock },
+      { name: 'Security', href: '/settings/secrets', icon: Lock },
       { name: 'Data', href: '/settings/data', icon: Archive },
       { name: 'Monitoring', href: '/settings/monitoring', icon: Activity },
-      { name: 'Secrets', href: '/settings/secrets', icon: Shield },
     ],
   },
 ];
