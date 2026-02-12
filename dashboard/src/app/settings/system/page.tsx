@@ -76,13 +76,19 @@ export default function SystemSettingsPage() {
   };
 
   // Save settings
-  const handleSave = () => {
+  const handleSave = useCallback(() => {
     if (!validateUrl(apiUrl)) return;
 
+    const previousUrl = originalValues.apiUrl;
     writeSavedSettings({ apiUrl });
     setOriginalValues({ apiUrl });
     toast.success('Settings saved!');
-  };
+
+    // Notify other components that API URL has changed (compare normalized values)
+    if (previousUrl !== apiUrl) {
+      window.dispatchEvent(new CustomEvent('openagent:api:url-changed'));
+    }
+  }, [apiUrl, originalValues.apiUrl]);
 
   // Keyboard shortcut to save (Ctrl/Cmd + S)
   useEffect(() => {
@@ -95,7 +101,7 @@ export default function SystemSettingsPage() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [apiUrl]);
+  }, [handleSave]);
 
   return (
     <div className="flex-1 overflow-auto">

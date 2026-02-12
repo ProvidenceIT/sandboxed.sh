@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
-import { Plus, X, ExternalLink } from 'lucide-react';
+import { Plus, X, ExternalLink, RefreshCw } from 'lucide-react';
 import useSWR from 'swr';
 import { getVisibleAgents, getOpenAgentConfig, listBackends, listBackendAgents, getBackendConfig, getClaudeCodeConfig, getLibraryOpenCodeSettingsForProfile, type Backend, type BackendAgent } from '@/lib/api';
 import type { Workspace } from '@/lib/api';
@@ -154,35 +154,35 @@ export function NewMissionDialog({
   }, [backends, opencodeConfig, claudecodeConfig, ampConfig, codexConfig]);
 
   // SWR: fetch agents for each enabled backend
-  const { data: opencodeAgents } = useSWR<BackendAgent[]>(
+  const { data: opencodeAgents, mutate: mutateOpencodeAgents } = useSWR<BackendAgent[]>(
     enabledBackends.some(b => b.id === 'opencode') ? 'backend-opencode-agents' : null,
     () => listBackendAgents('opencode'),
-    { revalidateOnFocus: false, dedupingInterval: 30000 }
+    { revalidateOnFocus: true, dedupingInterval: 5000 }
   );
-  const { data: claudecodeAgents } = useSWR<BackendAgent[]>(
+  const { data: claudecodeAgents, mutate: mutateClaudecodeAgents } = useSWR<BackendAgent[]>(
     enabledBackends.some(b => b.id === 'claudecode') ? 'backend-claudecode-agents' : null,
     () => listBackendAgents('claudecode'),
-    { revalidateOnFocus: false, dedupingInterval: 30000 }
+    { revalidateOnFocus: true, dedupingInterval: 5000 }
   );
-  const { data: ampAgents } = useSWR<BackendAgent[]>(
+  const { data: ampAgents, mutate: mutateAmpAgents } = useSWR<BackendAgent[]>(
     enabledBackends.some(b => b.id === 'amp') ? 'backend-amp-agents' : null,
     () => listBackendAgents('amp'),
-    { revalidateOnFocus: false, dedupingInterval: 30000 }
+    { revalidateOnFocus: true, dedupingInterval: 5000 }
   );
-  const { data: codexAgents } = useSWR<BackendAgent[]>(
+  const { data: codexAgents, mutate: mutateCodexAgents } = useSWR<BackendAgent[]>(
     enabledBackends.some(b => b.id === 'codex') ? 'backend-codex-agents' : null,
     () => listBackendAgents('codex'),
-    { revalidateOnFocus: false, dedupingInterval: 30000 }
+    { revalidateOnFocus: true, dedupingInterval: 5000 }
   );
 
   // SWR: fallback for opencode agents
-  const { data: agentsPayload } = useSWR('opencode-agents', getVisibleAgents, {
-    revalidateOnFocus: false,
-    dedupingInterval: 30000,
+  const { data: agentsPayload, mutate: mutateAgentsPayload } = useSWR('opencode-agents', getVisibleAgents, {
+    revalidateOnFocus: true,
+    dedupingInterval: 5000,
   });
-  const { data: config } = useSWR('openagent-config', getOpenAgentConfig, {
-    revalidateOnFocus: false,
-    dedupingInterval: 30000,
+  const { data: config, mutate: mutateConfig } = useSWR('openagent-config', getOpenAgentConfig, {
+    revalidateOnFocus: true,
+    dedupingInterval: 5000,
   });
 
   // SWR: fetch Claude Code config for hidden agents
@@ -409,6 +409,18 @@ export function NewMissionDialog({
     onClose?.();
   };
 
+  const handleRefreshAgents = async () => {
+    // Revalidate all agent lists
+    await Promise.all([
+      mutateOpencodeAgents?.(),
+      mutateClaudecodeAgents?.(),
+      mutateAmpAgents?.(),
+      mutateCodexAgents?.(),
+      mutateAgentsPayload?.(),
+      mutateConfig?.(),
+    ]);
+  };
+
   const getCreateOptions = (): NewMissionDialogOptions => {
     const parsed = parseSelectedValue(selectedAgentValue);
     return {
@@ -458,16 +470,26 @@ export function NewMissionDialog({
       </button>
       {open && (
         <div className="absolute right-0 top-full mt-1 w-96 rounded-lg border border-white/[0.06] bg-[#1a1a1a] p-4 shadow-xl z-50">
-          {/* Header with close button */}
+          {/* Header with refresh and close buttons */}
           <div className="flex items-center justify-between mb-3">
             <h3 className="text-sm font-medium text-white">Create New Mission</h3>
-            <button
-              type="button"
-              onClick={handleClose}
-              className="p-1 rounded-md text-white/40 hover:text-white/70 hover:bg-white/[0.04] transition-colors"
-            >
-              <X className="h-4 w-4" />
-            </button>
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                onClick={handleRefreshAgents}
+                className="p-1 rounded-md text-white/40 hover:text-white/70 hover:bg-white/[0.04] transition-colors"
+                title="Refresh agent list"
+              >
+                <RefreshCw className="h-4 w-4" />
+              </button>
+              <button
+                type="button"
+                onClick={handleClose}
+                className="p-1 rounded-md text-white/40 hover:text-white/70 hover:bg-white/[0.04] transition-colors"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
           </div>
 
           <div className="space-y-3">

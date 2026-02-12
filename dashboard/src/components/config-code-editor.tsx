@@ -102,6 +102,7 @@ function editorTheme(padding: number | undefined): Extension {
           '"JetBrainsMono Nerd Font Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace',
         fontSize: '14px',
         lineHeight: '1.5',
+        overflow: 'auto',
       },
       '.cm-gutters': {
         backgroundColor: 'transparent',
@@ -182,7 +183,7 @@ export function ConfigCodeEditor({
   return (
     <div
       className={cn(
-        'rounded-lg bg-black/20 border border-white/[0.06] focus-within:border-indigo-500/50 transition-colors overflow-hidden relative',
+        'rounded-lg bg-black/20 border border-white/[0.06] focus-within:border-indigo-500/50 transition-colors relative',
         disabled && 'opacity-60',
         className
       )}
