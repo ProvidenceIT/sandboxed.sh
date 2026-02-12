@@ -477,15 +477,16 @@ fn convert_codex_event(
             match item.item_type.as_str() {
                 "command" | "tool" | "tool_call" | "function_call" | "tool_result"
                 | "function_result" => {
-                    // Extract tool result if available
+                    // Extract tool result - always emit event even for null results
+                    // to prevent pending_tools leak in mission_runner
                     if let Some(name) = tool_name(&item.data) {
-                        if let Some(result) = tool_result(&item.data) {
-                            results.push(ExecutionEvent::ToolResult {
-                                id: item.id.clone(),
-                                name,
-                                result,
-                            });
-                        }
+                        let result = tool_result(&item.data)
+                            .unwrap_or(serde_json::Value::Null);
+                        results.push(ExecutionEvent::ToolResult {
+                            id: item.id.clone(),
+                            name,
+                            result,
+                        });
                     }
                 }
                 "mcp_tool_call" => {

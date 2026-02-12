@@ -42,6 +42,7 @@ mkdir -p /var/lib/opencode/.config/i3
 # Write i3 config to both locations
 I3_CONFIG_FILE=/root/.config/i3/config
 cat > "$I3_CONFIG_FILE" << 'EOF'
+# i3 config file (v4)
 # Open Agent i3 Config - Optimized for LLM Vision & Control
 # Key principle: LLM needs to SEE state (URL bar, focus indicator, all windows)
 
