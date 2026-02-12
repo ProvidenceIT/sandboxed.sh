@@ -10,19 +10,14 @@ import {
   getConfigProfileFile,
   saveConfigProfileFile,
   deleteConfigProfileFile,
-  getHarnessDefaultFile,
-  saveHarnessDefaultFile,
   getOpenCodeSettings,
   updateOpenCodeSettings,
   getOpenCodeConfig,
   updateOpenCodeConfig,
-  getClaudeCodeConfig,
-  saveClaudeCodeConfig,
   getClaudeCodeHostConfig,
   updateClaudeCodeHostConfig,
   getAmpCodeHostConfig,
   updateAmpCodeHostConfig,
-  ConfigProfileSummary,
   ClaudeCodeConfig,
   DivergedHistoryError,
 } from '@/lib/api';
@@ -163,7 +158,7 @@ const HARNESS_CONFIG = {
   },
   openagent: {
     name: 'Sandboxed.sh',
-    dir: '.openagent',
+    dir: '.sandboxed-sh',
     libraryDir: 'sandboxed',
     files: [
       { name: 'config.json', description: 'Agent visibility and defaults for mission dialog', libraryName: 'config.json' },
@@ -384,32 +379,18 @@ export default function SettingsPage() {
       setError('Unknown harness for file path');
       return;
     }
-    const [harnessId, harnessConfig] = harness;
+    const [harnessId] = harness;
     const fileName = filePath.split('/').pop() || '';
-    const fileConfig = harnessConfig.files.find(f => f.name === fileName);
-    const libraryFileName = fileConfig?.libraryName || fileName;
 
-    // Helper to load from library harness defaults
-    const loadFromLibrary = async (): Promise<{ content: string; isDefault: true } | null> => {
+    // Helper to load from selected/default config profiles.
+    const loadFromProfile = async (
+      profile: string
+    ): Promise<{ content: string; isDefault: boolean } | null> => {
       try {
-        const content = await getHarnessDefaultFile(harnessConfig.libraryDir, libraryFileName);
-        return { content, isDefault: true };
+        const content = await getConfigProfileFile(profile, filePath);
+        return { content, isDefault: profile === DEFAULT_PROFILE };
       } catch (err) {
-        if (harnessId === 'claudecode' && libraryFileName === 'config.json') {
-          try {
-            const config = await getClaudeCodeConfig();
-            return { content: JSON.stringify(config, null, 2), isDefault: true };
-          } catch (fallbackErr) {
-            console.warn(
-              'Failed to load Claude Code library config fallback:',
-              fallbackErr instanceof Error ? fallbackErr.message : fallbackErr
-            );
-          }
-        }
-        console.warn(
-          `Failed to load library default for ${harnessConfig.libraryDir}/${libraryFileName}:`,
-          err instanceof Error ? err.message : err
-        );
+        console.warn(`Failed to load profile file ${profile}/${filePath}:`, err);
         return null;
       }
     };
@@ -418,54 +399,29 @@ export default function SettingsPage() {
       setLoading(true);
       setError(null);
 
-      // "default" profile = load directly from library harness defaults
-      // Other profiles = try profile file first, fall back to library defaults
-      if (selectedProfile === DEFAULT_PROFILE) {
-        // Load directly from library (e.g., library/opencode/oh-my-opencode.json)
-        const result = await loadFromLibrary();
+      // Load selected profile first; if missing, fall back to default profile.
+      const selectedResult = await loadFromProfile(selectedProfile);
+      if (isStale()) return;
+      if (selectedResult) {
+        setFileContent(selectedResult.content);
+        setOriginalFileContent(selectedResult.content);
+        setIsLibraryDefault(selectedResult.isDefault);
+        setSelectedFile(filePath);
+      } else {
+        const defaultResult = await loadFromProfile(DEFAULT_PROFILE);
         if (isStale()) return;
 
-        if (result) {
-          setFileContent(result.content);
-          setOriginalFileContent(result.content);
+        if (defaultResult) {
+          setFileContent(defaultResult.content);
+          setOriginalFileContent(defaultResult.content);
           setIsLibraryDefault(true);
         } else {
-          // Library file doesn't exist - use empty fallback
           const fallback = EMPTY_FALLBACKS[harnessId]?.[fileName] || '{}';
           setFileContent(fallback);
           setOriginalFileContent(fallback);
           setIsLibraryDefault(true);
         }
         setSelectedFile(filePath);
-      } else {
-        // Try to load from profile first
-        try {
-          const content = await getConfigProfileFile(selectedProfile, filePath);
-          if (isStale()) return;
-
-          setFileContent(content);
-          setOriginalFileContent(content);
-          setIsLibraryDefault(false);
-          setSelectedFile(filePath);
-        } catch {
-          // Profile file doesn't exist, fall back to library defaults
-          if (isStale()) return;
-
-          const result = await loadFromLibrary();
-          if (isStale()) return;
-
-          if (result) {
-            setFileContent(result.content);
-            setOriginalFileContent(result.content);
-            setIsLibraryDefault(true);
-          } else {
-            const fallback = EMPTY_FALLBACKS[harnessId]?.[fileName] || '{}';
-            setFileContent(fallback);
-            setOriginalFileContent(fallback);
-            setIsLibraryDefault(true);
-          }
-          setSelectedFile(filePath);
-        }
       }
     } finally {
       // Only clear loading if this is still the current request
@@ -614,41 +570,23 @@ export default function SettingsPage() {
       return;
     }
 
-    const [, harnessConfigEntry] = harnessEntry;
-    const fileName = selectedFile.split('/').pop() || '';
-    const fileConfig = harnessConfigEntry.files.find(f => f.name === fileName);
-    const libraryFileName = fileConfig?.libraryName || fileName;
     const content = JSON.stringify(hostFileJson, null, 2);
 
     try {
       setHostSyncing(true);
       setError(null);
-      if (selectedProfile === DEFAULT_PROFILE) {
-        if (harnessConfigEntry.libraryDir === 'claudecode' && libraryFileName === 'config.json') {
-          const sanitized = coerceClaudeCodeConfig(hostFileJson);
-          const sanitizedContent = JSON.stringify(sanitized, null, 2);
-          await saveClaudeCodeConfig(sanitized);
-          setFileContent(sanitizedContent);
-          setOriginalFileContent(sanitizedContent);
-        } else {
-          await saveHarnessDefaultFile(harnessConfigEntry.libraryDir, libraryFileName, content);
-          setFileContent(content);
-          setOriginalFileContent(content);
-        }
-        setIsLibraryDefault(true);
+      if (activeHarness === 'claudecode' && selectedFile.endsWith('/settings.json')) {
+        const sanitized = JSON.stringify(coerceClaudeCodeConfig(hostFileJson), null, 2);
+        await saveConfigProfileFile(selectedProfile, selectedFile, sanitized);
+        setFileContent(sanitized);
+        setOriginalFileContent(sanitized);
       } else {
-        // Pull into the currently selected profile file.
-        // This preserves the ability to diff/apply host config while working in non-default profiles.
-        const payload =
-          activeHarness === 'claudecode' && selectedFile.endsWith('/settings.json')
-            ? JSON.stringify(coerceClaudeCodeConfig(hostFileJson), null, 2)
-            : content;
-        await saveConfigProfileFile(selectedProfile, selectedFile, payload);
-        setFileContent(payload);
-        setOriginalFileContent(payload);
-        setIsLibraryDefault(false);
-        await loadProfileFiles();
+        await saveConfigProfileFile(selectedProfile, selectedFile, content);
+        setFileContent(content);
+        setOriginalFileContent(content);
       }
+      setIsLibraryDefault(selectedProfile === DEFAULT_PROFILE);
+      await loadProfileFiles();
       setParseError(null);
       setHostSyncSuccess('pull');
       await refreshStatus();
@@ -682,25 +620,22 @@ export default function SettingsPage() {
         if (!harnessEntry) {
           throw new Error('Unknown harness for file path');
         }
-        const [, harnessConfigEntry] = harnessEntry;
-        const fileName = selectedFile.split('/').pop() || '';
-        const fileConfig = harnessConfigEntry.files.find(f => f.name === fileName);
-        const libraryFileName = fileConfig?.libraryName || fileName;
-        const validHarnessDefaults = ['opencode', 'claudecode', 'ampcode', 'sandboxed'];
-        if (harnessConfigEntry.libraryDir === 'claudecode' && libraryFileName === 'config.json') {
+        if (activeHarness === 'claudecode' && selectedFile.endsWith('/settings.json')) {
           const parsed = parseJsonc(fileContent);
           if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
             throw new Error('Claude Code config must be a JSON object.');
           }
-          await saveClaudeCodeConfig(coerceClaudeCodeConfig(parsed as Record<string, unknown>));
-          setIsLibraryDefault(true);
-        } else if (validHarnessDefaults.includes(harnessConfigEntry.libraryDir)) {
-          await saveHarnessDefaultFile(harnessConfigEntry.libraryDir, libraryFileName, fileContent);
-          setIsLibraryDefault(true);
+          const sanitized = JSON.stringify(
+            coerceClaudeCodeConfig(parsed as Record<string, unknown>),
+            null,
+            2
+          );
+          await saveConfigProfileFile(selectedProfile, selectedFile, sanitized);
+          setFileContent(sanitized);
         } else {
           await saveConfigProfileFile(selectedProfile, selectedFile, fileContent);
-          setIsLibraryDefault(false);
         }
+        setIsLibraryDefault(true);
       } else {
         await saveConfigProfileFile(selectedProfile, selectedFile, fileContent);
         setIsLibraryDefault(false); // No longer showing library default after save
@@ -715,7 +650,7 @@ export default function SettingsPage() {
     } finally {
       setSaving(false);
     }
-  }, [parseError, selectedFile, selectedProfile, fileContent, refreshStatus, loadProfileFiles]);
+  }, [parseError, selectedFile, selectedProfile, fileContent, refreshStatus, loadProfileFiles, activeHarness]);
 
   const handleDelete = useCallback(async () => {
     if (!selectedFile) return;

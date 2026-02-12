@@ -116,6 +116,35 @@ export async function login(password: string, username?: string): Promise<LoginR
   return res.json();
 }
 
+// ==================== Auth Management ====================
+
+export interface AuthStatusResponse {
+  auth_mode: "disabled" | "single_tenant" | "multi_user";
+  password_source: "dashboard" | "environment" | "none";
+  password_changed_at: string | null;
+  dev_mode: boolean;
+}
+
+export async function getAuthStatus(): Promise<AuthStatusResponse> {
+  return apiGet("/api/auth/status", "Failed to fetch auth status");
+}
+
+export interface ChangePasswordRequest {
+  current_password?: string;
+  new_password: string;
+}
+
+export interface ChangePasswordResponse {
+  success: boolean;
+  password_changed_at: string;
+}
+
+export async function changePassword(
+  request: ChangePasswordRequest
+): Promise<ChangePasswordResponse> {
+  return apiPost("/api/auth/change-password", request, "Failed to change password");
+}
+
 // Get statistics
 export async function getStats(): Promise<StatsResponse> {
   return apiGet("/api/stats", "Failed to fetch stats");
@@ -1035,21 +1064,6 @@ export interface RegistrySkillListing {
   description: string | null;
 }
 
-// Plugin types
-export interface PluginUI {
-  icon: string | null;
-  label: string;
-  hint: string | null;
-  category: string | null;
-}
-
-export interface Plugin {
-  package: string;
-  description: string | null;
-  enabled: boolean;
-  ui: PluginUI;
-}
-
 // Library Agent types
 export interface LibraryAgentSummary {
   name: string;
@@ -1321,82 +1335,6 @@ export async function saveLibraryCommand(
 // Delete command
 export async function deleteLibraryCommand(name: string): Promise<void> {
   return libDel(`/api/library/commands/${encodeURIComponent(name)}`, "Failed to delete command");
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Plugins
-// ─────────────────────────────────────────────────────────────────────────────
-
-// Get all plugins
-export async function getLibraryPlugins(): Promise<Record<string, Plugin>> {
-  return libGet("/api/library/plugins", "Failed to fetch plugins");
-}
-
-// Save all plugins
-export async function saveLibraryPlugins(
-  plugins: Record<string, Plugin>
-): Promise<void> {
-  return libPut("/api/library/plugins", plugins, "Failed to save plugins");
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Installed OpenCode Plugins (discovered from OpenCode config)
-// ─────────────────────────────────────────────────────────────────────────────
-
-export interface InstalledPluginInfo {
-  package: string;
-  spec: string;
-  installed_version: string | null;
-  latest_version: string | null;
-  update_available: boolean;
-}
-
-export interface InstalledPluginsResponse {
-  plugins: InstalledPluginInfo[];
-}
-
-// Get installed plugins from OpenCode config with version info
-export async function getInstalledPlugins(): Promise<InstalledPluginsResponse> {
-  return apiGet("/api/system/plugins/installed", "Failed to fetch installed plugins");
-}
-
-// Update a plugin (returns SSE stream)
-export function updatePlugin(
-  packageName: string,
-  onEvent: (event: { event_type: string; message: string; progress?: number }) => void
-): () => void {
-  const url = apiUrl(`/api/system/plugins/${encodeURIComponent(packageName)}/update`);
-
-  const eventSource = new EventSource(url, { withCredentials: true });
-  let completed = false;
-
-  eventSource.onmessage = (event) => {
-    try {
-      const data = JSON.parse(event.data);
-      onEvent(data);
-      if (data.event_type === "complete" || data.event_type === "error") {
-        completed = true;
-        eventSource.close();
-      }
-    } catch (e) {
-      console.error("Failed to parse SSE event:", e);
-    }
-  };
-
-  eventSource.onerror = () => {
-    eventSource.close();
-    // Only report error if we didn't receive a complete/error event
-    // (server closing connection after complete triggers onerror)
-    if (!completed) {
-      onEvent({
-        event_type: "error",
-        message: "Connection error: failed to connect to server",
-        progress: undefined,
-      });
-    }
-  };
-
-  return () => eventSource.close();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

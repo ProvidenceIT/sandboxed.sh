@@ -5,7 +5,6 @@
 //! - MCP server CRUD
 //! - Skills CRUD
 //! - Commands CRUD
-//! - Plugins CRUD
 //! - Library Agents CRUD
 //! - OpenCode settings (oh-my-opencode.json)
 //! - Sandboxed config (agent visibility, defaults)
@@ -26,7 +25,7 @@ use crate::library::{
     rename::{ItemType, RenameResult},
     AmpCodeConfig, ClaudeCodeConfig, Command, CommandSummary, ConfigProfile, ConfigProfileSummary,
     GitAuthor, InitScript, InitScriptSummary, LibraryAgent, LibraryAgentSummary, LibraryStatus,
-    LibraryStore, McpServer, MigrationReport, Plugin, SandboxedConfig, Skill, SkillSummary,
+    LibraryStore, McpServer, MigrationReport, SandboxedConfig, Skill, SkillSummary,
     WorkspaceTemplate, WorkspaceTemplateSummary,
 };
 use crate::nspawn::NspawnDistro;
@@ -201,9 +200,6 @@ pub fn routes() -> Router<Arc<super::routes::AppState>> {
         .route("/commands/:name", delete(delete_command))
         // Builtin commands (runtime-specific slash commands)
         .route("/builtin-commands", get(get_builtin_commands))
-        // Plugins
-        .route("/plugins", get(get_plugins))
-        .route("/plugins", put(save_plugins))
         // Library Agents
         .route("/agent", get(list_library_agents))
         .route("/agent/:name", get(get_library_agent))
@@ -408,7 +404,7 @@ fn sanitize_skill_list(skills: Vec<String>) -> Vec<String> {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Sync all library configurations after a git sync/pull operation.
-/// This includes plugins, OpenCode settings, Sandboxed config, and workspaces.
+/// This includes OpenCode settings, Sandboxed config, and workspaces.
 async fn sync_library_configs(
     state: &Arc<super::routes::AppState>,
     library: &LibraryStore,
@@ -1117,42 +1113,6 @@ async fn get_builtin_commands() -> Json<BuiltinCommandsResponse> {
         opencode: opencode_commands,
         claudecode: claudecode_commands,
     })
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Plugins
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// GET /api/library/plugins - Get all plugins.
-async fn get_plugins(
-    State(state): State<Arc<super::routes::AppState>>,
-    headers: HeaderMap,
-) -> Result<Json<HashMap<String, Plugin>>, (StatusCode, String)> {
-    let library = ensure_library(&state, &headers).await?;
-    library
-        .get_plugins()
-        .await
-        .map(Json)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
-}
-
-/// PUT /api/library/plugins - Save all plugins.
-async fn save_plugins(
-    State(state): State<Arc<super::routes::AppState>>,
-    headers: HeaderMap,
-    Json(plugins): Json<HashMap<String, Plugin>>,
-) -> Result<(StatusCode, String), (StatusCode, String)> {
-    let library = ensure_library(&state, &headers).await?;
-    library
-        .save_plugins(&plugins)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    crate::opencode_config::sync_global_plugins(&plugins)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    Ok((StatusCode::OK, "Plugins saved successfully".to_string()))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

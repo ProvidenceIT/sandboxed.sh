@@ -584,6 +584,9 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         .nest("/api/desktop", desktop::routes())
         // System component management endpoints
         .nest("/api/system", system_api::routes())
+        // Auth management endpoints
+        .route("/api/auth/status", get(auth::auth_status))
+        .route("/api/auth/change-password", post(auth::change_password))
         // Backend management endpoints
         .route("/api/backends", get(backends_api::list_backends))
         .route("/api/backends/:id", get(backends_api::get_backend))

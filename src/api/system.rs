@@ -255,27 +255,6 @@ async fn ensure_repo_present(repo_path: &std::path::Path) -> Result<(), String> 
     ensure_origin_remote(repo_path).await
 }
 
-/// Information about an installed OpenCode plugin.
-#[derive(Debug, Clone, Serialize)]
-pub struct InstalledPluginInfo {
-    /// Plugin package name (e.g., "opencode-gemini-auth")
-    pub package: String,
-    /// Full spec from config (e.g., "opencode-gemini-auth@latest")
-    pub spec: String,
-    /// Currently installed version (if detectable)
-    pub installed_version: Option<String>,
-    /// Latest version available on npm
-    pub latest_version: Option<String>,
-    /// Whether an update is available
-    pub update_available: bool,
-}
-
-/// Response for installed plugins endpoint.
-#[derive(Debug, Clone, Serialize)]
-pub struct InstalledPluginsResponse {
-    pub plugins: Vec<InstalledPluginInfo>,
-}
-
 // Type alias for the boxed stream to avoid opaque type mismatch
 type UpdateStream = Pin<Box<dyn Stream<Item = Result<Event, std::convert::Infallible>> + Send>>;
 
@@ -285,8 +264,6 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/components", get(get_components))
         .route("/components/:name/update", post(update_component))
         .route("/components/:name/uninstall", post(uninstall_component))
-        .route("/plugins/installed", get(get_installed_plugins))
-        .route("/plugins/:package/update", get(update_plugin))
 }
 
 /// Get information about all system components.
@@ -446,15 +423,21 @@ async fn get_codex_info() -> ComponentInfo {
             }
             // Parse version from output like "codex-cli 0.94.0"
             let version = extract_version_token(&version_str);
+            let update_available = check_codex_update(version.as_deref()).await;
+            let status = if update_available.is_some() {
+                ComponentStatus::UpdateAvailable
+            } else {
+                ComponentStatus::Ok
+            };
 
             ComponentInfo {
                 name: "codex".to_string(),
                 version,
                 installed: true,
-                update_available: None,
+                update_available,
                 path: which_codex().await,
                 source_path: None,
-                status: ComponentStatus::Ok,
+                status,
             }
         }
         _ => ComponentInfo {
@@ -608,6 +591,34 @@ async fn check_claude_code_update(current_version: Option<&str>) -> Option<Strin
         .unwrap_or_else(|| latest_raw.trim_start_matches('v').to_string());
 
     if latest != current && version_is_newer(&latest, &current) {
+        Some(latest.to_string())
+    } else {
+        None
+    }
+}
+
+/// Check if there's a newer version of Codex available.
+async fn check_codex_update(current_version: Option<&str>) -> Option<String> {
+    let current_raw = current_version?;
+    let current = extract_version_token(current_raw)?;
+
+    // Check npm registry for @openai/codex
+    let client = reqwest::Client::new();
+    let resp = client
+        .get("https://registry.npmjs.org/@openai/codex/latest")
+        .header("User-Agent", "open-agent")
+        .send()
+        .await
+        .ok()?;
+
+    if !resp.status().is_success() {
+        return None;
+    }
+
+    let json: serde_json::Value = resp.json().await.ok()?;
+    let latest = json.get("version")?.as_str()?;
+
+    if version_is_newer(latest, &current) {
         Some(latest.to_string())
     } else {
         None
@@ -882,6 +893,7 @@ async fn update_component(
         "sandboxed_sh" => Ok(Sse::new(Box::pin(stream_sandboxed_update(state)))),
         "opencode" => Ok(Sse::new(Box::pin(stream_opencode_update()))),
         "claude_code" => Ok(Sse::new(Box::pin(stream_claude_code_update()))),
+        "codex" => Ok(Sse::new(Box::pin(stream_codex_update()))),
         "amp" => Ok(Sse::new(Box::pin(stream_amp_update()))),
         "oh_my_opencode" => Ok(Sse::new(Box::pin(stream_oh_my_opencode_update()))),
         _ => Err((
@@ -903,6 +915,7 @@ async fn uninstall_component(
         )),
         "opencode" => Ok(Sse::new(Box::pin(stream_opencode_uninstall()))),
         "claude_code" => Ok(Sse::new(Box::pin(stream_claude_code_uninstall()))),
+        "codex" => Ok(Sse::new(Box::pin(stream_codex_uninstall()))),
         "amp" => Ok(Sse::new(Box::pin(stream_amp_uninstall()))),
         "oh_my_opencode" => Ok(Sse::new(Box::pin(stream_oh_my_opencode_uninstall()))),
         _ => Err((
@@ -1262,6 +1275,63 @@ fn stream_amp_update() -> impl Stream<Item = Result<Event, std::convert::Infalli
     }
 }
 
+/// Stream the Codex install/update process.
+fn stream_codex_update() -> impl Stream<Item = Result<Event, std::convert::Infallible>> {
+    async_stream::stream! {
+        yield sse("log", "Starting Codex installation/update...", Some(0));
+
+        // Check if npm is available
+        let npm_check = Command::new("npm").arg("--version").output().await;
+        if npm_check.is_err() || !npm_check.unwrap().status.success() {
+            yield sse("error", "npm is required to install Codex. Please install Node.js first.", None);
+            return;
+        }
+
+        yield sse("log", "Installing @openai/codex@latest globally...", Some(20));
+
+        match Command::new("npm")
+            .args(["install", "-g", "@openai/codex@latest"])
+            .output()
+            .await
+        {
+            Ok(output) if output.status.success() => {
+                yield sse("log", "Installation complete, verifying...", Some(80));
+
+                let version = Command::new("codex").arg("--version").output().await
+                    .ok()
+                    .filter(|o| o.status.success())
+                    .and_then(|o| {
+                        let combined = format!(
+                            "{} {}",
+                            String::from_utf8_lossy(&o.stdout),
+                            String::from_utf8_lossy(&o.stderr)
+                        );
+                        extract_version_token(&combined)
+                    })
+                    .unwrap_or_else(|| "unknown".to_string());
+
+                if version != "unknown" {
+                    yield sse("complete", format!("Codex installed successfully! Version: {version}"), Some(100));
+                } else {
+                    yield sse("complete", "Codex installed, but version check failed. You may need to restart your shell.", Some(100));
+                }
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                yield sse("error", format!("Failed to install Codex: {}", stderr), None);
+            }
+            Err(e) => {
+                yield sse("error", format!("Failed to run npm install: {}", e), None);
+            }
+        }
+    }
+}
+
+/// Stream the Codex uninstall process.
+fn stream_codex_uninstall() -> impl Stream<Item = Result<Event, std::convert::Infallible>> {
+    stream_npm_package_uninstall("@openai/codex", ".codex", "Codex")
+}
+
 #[cfg(test)]
 mod tests {
     use super::{is_safe_repo_path, normalize_repo_path, select_repo_path};
@@ -1574,187 +1644,5 @@ fn stream_oh_my_opencode_uninstall() -> impl Stream<Item = Result<Event, std::co
         }
 
         yield sse("complete", "oh-my-opencode uninstalled successfully!", Some(100));
-    }
-}
-
-/// Get all installed OpenCode plugins with version information.
-async fn get_installed_plugins() -> Json<InstalledPluginsResponse> {
-    let plugin_specs = crate::opencode_config::get_installed_plugins().await;
-
-    let mut plugins = Vec::new();
-
-    for spec in plugin_specs {
-        let (package, _pinned_version) = split_package_spec(&spec);
-
-        // Get installed version from bun cache
-        let installed_version = get_plugin_installed_version(&package).await;
-
-        // Get latest version from npm
-        let latest_version = get_plugin_latest_version(&package).await;
-
-        // Determine if update is available
-        let update_available = match (&installed_version, &latest_version) {
-            (Some(installed), Some(latest)) => {
-                installed != latest && version_is_newer(latest, installed)
-            }
-            (None, Some(_)) => true, // Not installed locally but available
-            _ => false,
-        };
-
-        plugins.push(InstalledPluginInfo {
-            package: package.clone(),
-            spec: spec.clone(),
-            installed_version,
-            latest_version,
-            update_available,
-        });
-    }
-
-    Json(InstalledPluginsResponse { plugins })
-}
-
-/// Split a package spec into (name, version).
-/// E.g., "opencode-gemini-auth@1.2.3" -> ("opencode-gemini-auth", Some("1.2.3"))
-fn split_package_spec(spec: &str) -> (String, Option<String>) {
-    // Handle scoped packages like @scope/name@version
-    if spec.starts_with('@') {
-        if let Some(slash_idx) = spec.find('/') {
-            let after_scope = &spec[slash_idx + 1..];
-            if let Some(at_idx) = after_scope.find('@') {
-                let name = format!("{}/{}", &spec[..slash_idx], &after_scope[..at_idx]);
-                let version = &after_scope[at_idx + 1..];
-                if !version.is_empty() && version != "latest" {
-                    return (name, Some(version.to_string()));
-                }
-                return (name, None);
-            }
-        }
-        return (spec.to_string(), None);
-    }
-
-    // Non-scoped package
-    if let Some(at_idx) = spec.find('@') {
-        let name = &spec[..at_idx];
-        let version = &spec[at_idx + 1..];
-        if !version.is_empty() && version != "latest" {
-            return (name.to_string(), Some(version.to_string()));
-        }
-        return (name.to_string(), None);
-    }
-
-    (spec.to_string(), None)
-}
-
-/// Get the installed version of a plugin from bun cache.
-async fn get_plugin_installed_version(package: &str) -> Option<String> {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
-
-    // Search bun cache for the package
-    let output = Command::new("bash")
-        .args([
-            "-c",
-            &format!(
-                "find {}/.bun/install/cache -maxdepth 1 -name '{}@*' 2>/dev/null | sort -V | tail -1",
-                home,
-                package.replace('/', "-") // Handle scoped packages in filesystem
-            ),
-        ])
-        .output()
-        .await
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if path.is_empty() {
-        return None;
-    }
-
-    // Extract version from directory name (e.g., "opencode-gemini-auth@1.3.7@@@1" -> "1.3.7")
-    let dirname = std::path::Path::new(&path).file_name()?.to_str()?;
-
-    // Find the version part between first @ and second @
-    let after_name = dirname.strip_prefix(&format!("{}@", package.replace('/', "-")))?;
-    let version = after_name.split('@').next()?;
-
-    Some(version.to_string())
-}
-
-/// Get the latest version of a plugin from npm registry.
-async fn get_plugin_latest_version(package: &str) -> Option<String> {
-    let client = reqwest::Client::new();
-    let url = format!("https://registry.npmjs.org/{}/latest", package);
-
-    let resp = client.get(&url).send().await.ok()?;
-
-    if !resp.status().is_success() {
-        return None;
-    }
-
-    let json: serde_json::Value = resp.json().await.ok()?;
-    json.get("version")?.as_str().map(|s| s.to_string())
-}
-
-/// Update a plugin to the latest version.
-async fn update_plugin(
-    Path(package): Path<String>,
-) -> Result<Sse<UpdateStream>, (StatusCode, String)> {
-    Ok(Sse::new(Box::pin(stream_plugin_update(package))))
-}
-
-/// Stream the plugin update process.
-fn stream_plugin_update(
-    package: String,
-) -> impl Stream<Item = Result<Event, std::convert::Infallible>> {
-    async_stream::stream! {
-        yield sse("log", format!("Starting {} update...", package), Some(0));
-        yield sse("log", "Clearing package cache...", Some(10));
-
-        let _ = Command::new("bun")
-            .args(["pm", "cache", "rm"])
-            .output()
-            .await;
-
-        yield sse("log", format!("Installing {}@latest...", package), Some(30));
-
-        // Use bunx to trigger the plugin install (which will cache the latest version)
-        match Command::new("bunx")
-            .args([&format!("{}@latest", package), "--help"])
-            .output()
-            .await
-        {
-            Ok(_) => {
-                yield sse("log", "Package downloaded, updating config...", Some(70));
-
-                // Update the opencode config to use @latest
-                let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
-                let config_path = format!("{}/.config/opencode/opencode.json", home);
-
-                if let Ok(contents) = tokio::fs::read_to_string(&config_path).await {
-                    if let Ok(mut root) = serde_json::from_str::<serde_json::Value>(&contents) {
-                        if let Some(plugins) = root.get_mut("plugin").and_then(|v| v.as_array_mut()) {
-                            for p in plugins.iter_mut() {
-                                if let Some(s) = p.as_str() {
-                                    if s == package || s.starts_with(&format!("{}@", package)) {
-                                        *p = serde_json::json!(format!("{}@latest", package));
-                                    }
-                                }
-                            }
-
-                            if let Ok(payload) = serde_json::to_string_pretty(&root) {
-                                let _ = tokio::fs::write(&config_path, payload).await;
-                            }
-                        }
-                    }
-                }
-
-                yield sse("complete", format!("{} updated successfully!", package), Some(100));
-            }
-            Err(e) => {
-                yield sse("error", format!("Failed to update {}: {}", package, e), None);
-            }
-        }
     }
 }

@@ -222,6 +222,30 @@ test.describe('Automations API', () => {
     });
   });
 
+  test('should create an agent_finished automation', async () => {
+    const res = await fetch(
+      `${API_BASE}/api/control/missions/${missionId}/automations`,
+      {
+        method: 'POST',
+        headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          command_source: { type: 'inline', content: 'Restart loop at <timestamp/>' },
+          trigger: { type: 'agent_finished' },
+        }),
+      }
+    );
+
+    expect(res.status).toBe(200);
+    const automation = (await res.json()) as { id: string; trigger: { type: string } };
+    expect(automation.id).toBeTruthy();
+    expect(automation.trigger.type).toBe('agent_finished');
+
+    await fetch(`${API_BASE}/api/control/automations/${automation.id}`, {
+      method: 'DELETE',
+      headers,
+    });
+  });
+
   test('should list mission automations', async () => {
     const create = async (content: string) => {
       const res = await fetch(
@@ -497,14 +521,19 @@ test.describe('Automations UI', () => {
     await expect(dlg.locator('label:has-text("Command")')).toBeVisible();
   });
 
-  test('should switch between interval and webhook triggers', async ({ page }) => {
+  test('should switch between interval, agent_finished, and webhook triggers', async ({ page }) => {
     const dlg = await gotoAndOpenDialog(page, test);
 
     // Start with interval
     await expect(dlg.locator('label:has-text("Interval")')).toBeVisible();
 
-    // Switch to webhook
+    // Switch to agent_finished
     const triggerSelect = dlg.locator('select').nth(1);
+    await triggerSelect.selectOption('agent_finished');
+    await expect(dlg.locator('text=Runs immediately after the agent finishes')).toBeVisible();
+    await expect(dlg.locator('label:has-text("Interval")')).not.toBeVisible();
+
+    // Switch to webhook
     await triggerSelect.selectOption('webhook');
 
     // Should show webhook info text

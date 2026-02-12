@@ -11,6 +11,17 @@ use tokio::sync::RwLock;
 /// Default repo path for sandboxed.sh source (used for self-updates).
 pub const DEFAULT_SANDBOXED_REPO_PATH: &str = "/opt/sandboxed-sh/vaduz-v1";
 
+/// Authentication settings managed via the dashboard.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AuthSettings {
+    /// PBKDF2 password hash (format: `pbkdf2:iterations:hex_salt:hex_hash`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password_hash: Option<String>,
+    /// ISO 8601 timestamp of last password change.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password_changed_at: Option<String>,
+}
+
 /// Global application settings.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Settings {
@@ -20,6 +31,9 @@ pub struct Settings {
     /// Path to the sandboxed.sh source repo (used for self-updates).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandboxed_repo_path: Option<String>,
+    /// Dashboard-managed auth settings (password hash, etc.).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<AuthSettings>,
 }
 
 /// In-memory store for global settings with disk persistence.
@@ -76,6 +90,7 @@ impl SettingsStore {
                 .or_else(|_| std::env::var("SANDBOXED_REPO_PATH"))
                 .ok()
                 .or_else(|| Some(DEFAULT_SANDBOXED_REPO_PATH.to_string())),
+            auth: None,
         }
     }
 
@@ -136,6 +151,19 @@ impl SettingsStore {
         } else {
             Ok((false, previous))
         }
+    }
+
+    /// Get the auth settings.
+    pub async fn get_auth_settings(&self) -> Option<AuthSettings> {
+        self.settings.read().await.auth.clone()
+    }
+
+    /// Update auth settings and persist to disk.
+    pub async fn set_auth_settings(&self, auth: AuthSettings) -> Result<(), std::io::Error> {
+        let mut settings = self.settings.write().await;
+        settings.auth = Some(auth);
+        drop(settings);
+        self.save_to_disk().await
     }
 
     /// Update multiple settings at once.

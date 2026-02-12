@@ -1,6 +1,6 @@
 [package]
 name = "sandboxed_sh"
-version = "0.7.0"
+version = "0.7.5"
 edition = "2021"
 description = "Self-hosted orchestrator for AI coding agents (formerly Open Agent)"
 authors = ["sandboxed.sh Contributors"]
@@ -73,6 +73,9 @@ tokio-util = { version = "0.7", features = ["io"] }
 zip = "2"
 # Keep MSRV-compatible idna_adapter for the production builder (rustc 1.75).
 idna_adapter = "=1.1.0"
+
+# File locking for OAuth token refresh synchronization
+fs2 = "0.4"
 
 [[bin]]
 name = "sandboxed-sh"

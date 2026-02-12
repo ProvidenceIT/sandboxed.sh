@@ -45,7 +45,7 @@ export interface MissionAutomationsDialogProps {
 
 type IntervalUnit = 'seconds' | 'minutes' | 'hours' | 'days';
 type CommandSourceType = 'library' | 'inline';
-type TriggerKind = 'interval' | 'webhook';
+type TriggerKind = 'interval' | 'agent_finished' | 'webhook';
 
 const UNIT_TO_SECONDS: Record<IntervalUnit, number> = {
   seconds: 1,
@@ -158,6 +158,9 @@ export function MissionAutomationsDialog({
   const getAutomationScheduleLabel = useCallback((automation: Automation) => {
     if (automation.trigger?.type === 'interval') {
       return `Every ${formatInterval(automation.trigger.seconds)}`;
+    }
+    if (automation.trigger?.type === 'agent_finished') {
+      return 'After agent finishes';
     }
     if (automation.trigger?.type === 'webhook') {
       return 'Webhook';
@@ -288,6 +291,8 @@ export function MissionAutomationsDialog({
         return;
       }
       trigger = { type: 'interval', seconds: intervalSeconds };
+    } else if (triggerKind === 'agent_finished') {
+      trigger = { type: 'agent_finished' };
     } else {
       trigger = {
         type: 'webhook',
@@ -306,6 +311,7 @@ export function MissionAutomationsDialog({
       command_source,
       trigger,
       ...(Object.keys(vars).length > 0 ? { variables: vars } : {}),
+      start_immediately: startImmediately,
     };
 
     setCreating(true);
@@ -468,7 +474,8 @@ export function MissionAutomationsDialog({
   // -- Validation --
   const isCommandValid =
     commandSourceType === 'library' ? commandName.trim().length > 0 : inlinePrompt.trim().length > 0;
-  const isTriggerValid = triggerKind === 'webhook' || intervalSeconds > 0;
+  const isTriggerValid =
+    triggerKind === 'webhook' || triggerKind === 'agent_finished' || intervalSeconds > 0;
   const allowCreate = !!missionId && !creating && isCommandValid && isTriggerValid;
 
   const isMissionDataReady = !!missionId && loadedMissionId === missionId;
@@ -580,6 +587,9 @@ export function MissionAutomationsDialog({
                       <option value="interval" className="bg-[#1a1a1a]">
                         Interval (time-based)
                       </option>
+                      <option value="agent_finished" className="bg-[#1a1a1a]">
+                        After agent finishes (restart)
+                      </option>
                       <option value="webhook" className="bg-[#1a1a1a]">
                         Webhook (API call)
                       </option>
@@ -679,6 +689,13 @@ export function MissionAutomationsDialog({
                   </div>
                 )}
 
+                {triggerKind === 'agent_finished' && (
+                  <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-xs text-white/40">
+                    Runs immediately after the agent finishes a turn for this mission (useful for
+                    continuous loops).
+                  </div>
+                )}
+
                 {triggerKind === 'webhook' && (
                   <div className="rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-xs text-white/40">
                     The webhook URL will be generated after creation. You can then call it via HTTP
@@ -775,7 +792,7 @@ export function MissionAutomationsDialog({
               </div>
 
               {/* ---- Current automations list ---- */}
-              <div className="space-y-3">
+              <div className="space-y-3 pb-2">
                 <div className="flex items-center justify-between">
                   <h4 className="text-sm font-medium text-white">Current Automations</h4>
                   {loading && <span className="text-xs text-white/40">Loading...</span>}

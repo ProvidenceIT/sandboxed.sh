@@ -21,6 +21,7 @@ use axum::{
     Json, Router,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
@@ -1994,12 +1995,97 @@ fn is_anthropic_oauth_token_expired() -> bool {
     is_oauth_token_expired(ProviderType::Anthropic)
 }
 
+/// Get the path to the OAuth refresh lock file for a provider.
+fn get_oauth_refresh_lock_path(provider_type: ProviderType) -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+    let provider_name = match provider_type {
+        ProviderType::Anthropic => "anthropic",
+        ProviderType::OpenAI => "openai",
+        ProviderType::Google => "google",
+        other => {
+            // For providers without OAuth support, use debug name as fallback
+            return PathBuf::from(home)
+                .join(".sandboxed-sh")
+                .join(format!("{:?}_oauth_refresh.lock", other).to_lowercase());
+        }
+    };
+    PathBuf::from(home)
+        .join(".sandboxed-sh")
+        .join(format!("{}_oauth_refresh.lock", provider_name))
+}
+
+/// Acquire an exclusive lock for OAuth token refresh to prevent race conditions.
+/// Returns a File handle that should be dropped when the lock is no longer needed.
+fn acquire_oauth_refresh_lock(provider_type: ProviderType) -> Result<std::fs::File, String> {
+    let lock_path = get_oauth_refresh_lock_path(provider_type);
+
+    // Ensure parent directory exists
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create lock directory: {}", e))?;
+    }
+
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|e| format!("Failed to open lock file: {}", e))?;
+
+    // Try to acquire exclusive lock with timeout
+    lock_file
+        .try_lock_exclusive()
+        .map_err(|_| "Another process is currently refreshing the token".to_string())?;
+
+    tracing::debug!(
+        provider = ?provider_type,
+        lock_path = %lock_path.display(),
+        "Acquired OAuth refresh lock"
+    );
+
+    Ok(lock_file)
+}
+
 /// Refresh the Anthropic OAuth token using the refresh token.
 /// Updates auth.json with the new access token and expiry.
+/// Uses file-based locking to prevent concurrent refresh attempts.
 pub async fn refresh_anthropic_oauth_token() -> Result<(), String> {
+    // Acquire exclusive lock to prevent race conditions
+    let _lock = match acquire_oauth_refresh_lock(ProviderType::Anthropic) {
+        Ok(lock) => lock,
+        Err(e) => {
+            tracing::info!(
+                "Could not acquire refresh lock: {}. Waiting for other process to complete...",
+                e
+            );
+            // Another process is refreshing. Wait a bit and check if token is now fresh.
+            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+            // Re-check if token is still expired or missing
+            if let Some(entry) = read_oauth_token_entry(ProviderType::Anthropic) {
+                if !oauth_token_expired(entry.expires_at) {
+                    tracing::info!("Token was refreshed by another process");
+                    return Ok(());
+                }
+            } else {
+                // Token was deleted by another process after invalid_grant
+                return Err("No Anthropic OAuth entry after waiting for refresh".to_string());
+            }
+
+            // Try one more time to acquire the lock
+            acquire_oauth_refresh_lock(ProviderType::Anthropic)?
+        }
+    };
+
+    // Double-check token is still expired (another process might have refreshed it)
     let entry = read_oauth_token_entry(ProviderType::Anthropic)
-        .ok_or_else(|| "No Anthropic OAuth entry".to_string())?;
-    let refresh_token = entry.refresh_token;
+        .ok_or_else(|| "No Anthropic OAuth entry found".to_string())?;
+
+    if !oauth_token_expired(entry.expires_at) {
+        tracing::info!("Token is no longer expired, skipping refresh");
+        return Ok(());
+    }
+
+    let refresh_token = entry.refresh_token.clone();
 
     tracing::info!("Refreshing Anthropic OAuth token");
 
@@ -2030,6 +2116,31 @@ pub async fn refresh_anthropic_oauth_token() -> Result<(), String> {
             || status == reqwest::StatusCode::UNAUTHORIZED)
             && lower.contains("invalid_grant")
         {
+            // Before deleting credentials, check if another process just refreshed the token
+            tracing::warn!(
+                "Received invalid_grant error. Checking if token was recently refreshed..."
+            );
+
+            // Wait a moment and re-read credentials
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+            // Re-read token entry to see if it was updated
+            if let Some(updated_entry) = read_oauth_token_entry(ProviderType::Anthropic) {
+                // Check if the refresh token changed (indicating a recent refresh)
+                if updated_entry.refresh_token != refresh_token {
+                    tracing::info!("Token was refreshed by another process after invalid_grant");
+                    return Ok(());
+                }
+
+                // Check if access token is now valid
+                if !oauth_token_expired(updated_entry.expires_at) {
+                    tracing::info!("Token is now valid after invalid_grant");
+                    return Ok(());
+                }
+            }
+
+            // Token is genuinely invalid - delete it
+            tracing::error!("Refresh token is genuinely invalid. Removing credentials.");
             if let Err(e) = remove_opencode_auth_entry(ProviderType::Anthropic) {
                 tracing::warn!(
                     "Failed to clear Anthropic auth entry after invalid_grant: {}",
@@ -2113,10 +2224,45 @@ pub async fn ensure_anthropic_oauth_token_valid() -> Result<(), String> {
 
 /// Refresh the OpenAI OAuth token using the refresh token.
 /// Updates auth.json with the new access token and expiry.
+/// Uses file-based locking to prevent concurrent refresh attempts.
 pub async fn refresh_openai_oauth_token() -> Result<(), String> {
+    // Acquire exclusive lock to prevent race conditions
+    let _lock = match acquire_oauth_refresh_lock(ProviderType::OpenAI) {
+        Ok(lock) => lock,
+        Err(e) => {
+            tracing::info!(
+                "Could not acquire refresh lock: {}. Waiting for other process to complete...",
+                e
+            );
+            // Another process is refreshing. Wait a bit and check if token is now fresh.
+            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+            // Re-check if token is still expired or missing
+            if let Some(entry) = read_oauth_token_entry(ProviderType::OpenAI) {
+                if !oauth_token_expired(entry.expires_at) {
+                    tracing::info!("Token was refreshed by another process");
+                    return Ok(());
+                }
+            } else {
+                // Token was deleted by another process after invalid_grant
+                return Err("No OpenAI OAuth entry after waiting for refresh".to_string());
+            }
+
+            // Try one more time to acquire the lock
+            acquire_oauth_refresh_lock(ProviderType::OpenAI)?
+        }
+    };
+
+    // Double-check token is still expired (another process might have refreshed it)
     let entry = read_oauth_token_entry(ProviderType::OpenAI)
-        .ok_or_else(|| "No OpenAI OAuth entry".to_string())?;
-    let refresh_token = entry.refresh_token;
+        .ok_or_else(|| "No OpenAI OAuth entry found".to_string())?;
+
+    if !oauth_token_expired(entry.expires_at) {
+        tracing::info!("Token is no longer expired, skipping refresh");
+        return Ok(());
+    }
+
+    let refresh_token = entry.refresh_token.clone();
 
     tracing::info!("Refreshing OpenAI OAuth token");
 
@@ -2147,6 +2293,31 @@ pub async fn refresh_openai_oauth_token() -> Result<(), String> {
         if status == reqwest::StatusCode::BAD_REQUEST || status == reqwest::StatusCode::UNAUTHORIZED
         {
             if lower.contains("invalid_grant") || lower.contains("refresh_token_reused") {
+                // Before deleting credentials, check if another process just refreshed the token
+                tracing::warn!("Received invalid_grant/refresh_token_reused error. Checking if token was recently refreshed...");
+
+                // Wait a moment and re-read credentials
+                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+                // Re-read token entry to see if it was updated
+                if let Some(updated_entry) = read_oauth_token_entry(ProviderType::OpenAI) {
+                    // Check if the refresh token changed (indicating a recent refresh)
+                    if updated_entry.refresh_token != refresh_token {
+                        tracing::info!(
+                            "Token was refreshed by another process after invalid_grant"
+                        );
+                        return Ok(());
+                    }
+
+                    // Check if access token is now valid
+                    if !oauth_token_expired(updated_entry.expires_at) {
+                        tracing::info!("Token is now valid after invalid_grant");
+                        return Ok(());
+                    }
+                }
+
+                // Token is genuinely invalid - delete it
+                tracing::error!("Refresh token is genuinely invalid. Removing credentials.");
                 if let Err(e) = remove_opencode_auth_entry(ProviderType::OpenAI) {
                     tracing::warn!(
                         "Failed to clear OpenAI auth entry after refresh failure: {}",
@@ -2204,10 +2375,45 @@ pub async fn ensure_openai_oauth_token_valid() -> Result<(), String> {
 
 /// Refresh the Google OAuth token using the refresh token.
 /// Updates auth.json with the new access token and expiry.
+/// Uses file-based locking to prevent concurrent refresh attempts.
 pub async fn refresh_google_oauth_token() -> Result<(), String> {
+    // Acquire exclusive lock to prevent race conditions
+    let _lock = match acquire_oauth_refresh_lock(ProviderType::Google) {
+        Ok(lock) => lock,
+        Err(e) => {
+            tracing::info!(
+                "Could not acquire refresh lock: {}. Waiting for other process to complete...",
+                e
+            );
+            // Another process is refreshing. Wait a bit and check if token is now fresh.
+            tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+            // Re-check if token is still expired or missing
+            if let Some(entry) = read_oauth_token_entry(ProviderType::Google) {
+                if !oauth_token_expired(entry.expires_at) {
+                    tracing::info!("Token was refreshed by another process");
+                    return Ok(());
+                }
+            } else {
+                // Token was deleted by another process after invalid_grant
+                return Err("No Google OAuth entry after waiting for refresh".to_string());
+            }
+
+            // Try one more time to acquire the lock
+            acquire_oauth_refresh_lock(ProviderType::Google)?
+        }
+    };
+
+    // Double-check token is still expired (another process might have refreshed it)
     let entry = read_oauth_token_entry(ProviderType::Google)
-        .ok_or_else(|| "No Google OAuth entry".to_string())?;
-    let refresh_token = entry.refresh_token;
+        .ok_or_else(|| "No Google OAuth entry found".to_string())?;
+
+    if !oauth_token_expired(entry.expires_at) {
+        tracing::info!("Token is no longer expired, skipping refresh");
+        return Ok(());
+    }
+
+    let refresh_token = entry.refresh_token.clone();
 
     tracing::info!("Refreshing Google OAuth token");
 
@@ -2240,6 +2446,31 @@ pub async fn refresh_google_oauth_token() -> Result<(), String> {
             || status == reqwest::StatusCode::UNAUTHORIZED)
             && lower.contains("invalid_grant")
         {
+            // Before deleting credentials, check if another process just refreshed the token
+            tracing::warn!(
+                "Received invalid_grant error. Checking if token was recently refreshed..."
+            );
+
+            // Wait a moment and re-read credentials
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+            // Re-read token entry to see if it was updated
+            if let Some(updated_entry) = read_oauth_token_entry(ProviderType::Google) {
+                // Check if the refresh token changed (indicating a recent refresh)
+                if updated_entry.refresh_token != refresh_token {
+                    tracing::info!("Token was refreshed by another process after invalid_grant");
+                    return Ok(());
+                }
+
+                // Check if access token is now valid
+                if !oauth_token_expired(updated_entry.expires_at) {
+                    tracing::info!("Token is now valid after invalid_grant");
+                    return Ok(());
+                }
+            }
+
+            // Token is genuinely invalid - delete it
+            tracing::error!("Refresh token is genuinely invalid. Removing credentials.");
             if let Err(e) = remove_opencode_auth_entry(ProviderType::Google) {
                 tracing::warn!(
                     "Failed to clear Google auth entry after invalid_grant: {}",
@@ -4282,6 +4513,29 @@ async fn oauth_callback_inner(
                 {
                     tracing::error!("Failed to sync credentials to OpenCode: {}", e);
                     // Don't fail the request, but log the error
+                }
+
+                // For Anthropic, also sync to Claude CLI credentials files so that
+                // find_host_claude_cli_credentials() picks up the fresh token instead
+                // of a stale one from a previous `claude /login`.
+                if matches!(provider_type, ProviderType::Anthropic) {
+                    for dir_path in &[
+                        std::path::PathBuf::from("/var/lib/opencode/.claude"),
+                        std::path::PathBuf::from("/root/.claude"),
+                    ] {
+                        if let Err(e) = write_claudecode_credentials_from_entry(
+                            dir_path,
+                            access_token,
+                            refresh_token,
+                            expires_at,
+                        ) {
+                            tracing::warn!(
+                                path = %dir_path.display(),
+                                error = %e,
+                                "Failed to sync OAuth token to Claude CLI credentials"
+                            );
+                        }
+                    }
                 }
 
                 let config_path = get_opencode_config_path(&state.config.working_dir);

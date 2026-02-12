@@ -487,7 +487,7 @@ export function SystemMonitor({ className, intervalMs = 1000 }: SystemMonitorPro
     const jwt = getValidJwt();
     const token = jwt?.token ?? null;
 
-    const protocols = token ? ["openagent", `jwt.${token}`] : ["openagent"];
+    const protocols = token ? ["sandboxed", `jwt.${token}`] : ["sandboxed"];
     const ws = new WebSocket(url, protocols);
 
     ws.onopen = () => {

@@ -115,7 +115,7 @@ export function DesktopStream({
     const token = jwt?.token ?? null;
 
     // Create WebSocket with subprotocol auth
-    const protocols = token ? ["openagent", `jwt.${token}`] : ["openagent"];
+    const protocols = token ? ["sandboxed", `jwt.${token}`] : ["sandboxed"];
     const ws = new WebSocket(url, protocols);
 
     ws.binaryType = "arraybuffer";

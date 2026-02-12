@@ -133,6 +133,8 @@ pub enum TriggerType {
     Interval { seconds: u64 },
     /// Webhook trigger
     Webhook { config: WebhookConfig },
+    /// Trigger immediately after an agent turn finishes for the mission
+    AgentFinished,
 }
 
 /// Retry configuration for automation execution.

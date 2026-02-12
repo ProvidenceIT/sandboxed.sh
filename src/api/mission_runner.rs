@@ -1216,7 +1216,7 @@ async fn run_mission_turn(
     let is_continuation = history.iter().any(|(role, _)| role == "assistant");
     let result = match backend_id.as_str() {
         "claudecode" => {
-            run_claudecode_turn(
+            let mut result = run_claudecode_turn(
                 &workspace,
                 &mission_work_dir,
                 &user_message,
@@ -1224,15 +1224,90 @@ async fn run_mission_turn(
                 effective_agent.as_deref(),
                 mission_id,
                 events_tx.clone(),
-                cancel,
-                secrets,
+                cancel.clone(),
+                secrets.clone(),
                 &config.working_dir,
                 session_id.as_deref(),
                 is_continuation,
                 Some(Arc::clone(&tool_hub)),
                 Some(Arc::clone(&status)),
             )
-            .await
+            .await;
+
+            // Claude Code occasionally gets stuck when resuming an old session: the CLI
+            // emits only ANSI init output (or nothing parseable) and then goes silent.
+            // When that happens, auto-reset the session_id and retry once with a fresh
+            // session.  This applies to both main-session and parallel-runner paths.
+            if is_continuation
+                && !result.success
+                && result.terminal_reason == Some(TerminalReason::LlmError)
+                && result
+                    .output
+                    .starts_with("Claude Code produced no stream events after startup timeout")
+            {
+                let new_session_id = Uuid::new_v4().to_string();
+                tracing::warn!(
+                    mission_id = %mission_id,
+                    old_session_id = ?session_id,
+                    new_session_id = %new_session_id,
+                    "Claude Code produced no stream events; resetting session and retrying once"
+                );
+
+                // Persist the new session ID via the event pipeline.
+                let _ = events_tx.send(AgentEvent::SessionIdUpdate {
+                    mission_id,
+                    session_id: new_session_id.clone(),
+                });
+
+                // Delete the stale session marker so the retry creates a fresh one.
+                let session_marker = mission_work_dir.join(".claude-session-initiated");
+                if session_marker.exists() {
+                    let _ = std::fs::remove_file(&session_marker);
+                }
+
+                // Build retry message with history context so the agent retains
+                // context from earlier turns (the fresh session has no memory).
+                let history_for_retry = match history.last() {
+                    Some((role, content)) if role == "user" && content == &user_message => {
+                        &history[..history.len() - 1]
+                    }
+                    _ => history.as_slice(),
+                };
+                let retry_message = if history_for_retry.is_empty() {
+                    user_message.clone()
+                } else {
+                    let history_ctx = build_history_context(
+                        history_for_retry,
+                        config.context.max_history_total_chars,
+                    );
+                    format!(
+                        "## Prior conversation (session was reset due to a transient error)\n\n\
+                         {history_ctx}\
+                         ## Current message\n\n\
+                         {user_message}"
+                    )
+                };
+
+                result = run_claudecode_turn(
+                    &workspace,
+                    &mission_work_dir,
+                    &retry_message,
+                    config.default_model.as_deref(),
+                    effective_agent.as_deref(),
+                    mission_id,
+                    events_tx.clone(),
+                    cancel,
+                    secrets,
+                    &config.working_dir,
+                    Some(&new_session_id),
+                    is_continuation,
+                    Some(Arc::clone(&tool_hub)),
+                    Some(Arc::clone(&status)),
+                )
+                .await;
+            }
+
+            result
         }
         "opencode" => {
             // Use per-workspace CLI execution for all workspace types to ensure

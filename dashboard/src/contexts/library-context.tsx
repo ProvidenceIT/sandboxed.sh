@@ -25,8 +25,6 @@ import {
   deleteLibrarySkill,
   saveLibraryCommand,
   deleteLibraryCommand,
-  getLibraryPlugins,
-  saveLibraryPlugins,
   listLibraryAgents,
   getLibraryAgent as apiGetLibraryAgent,
   saveLibraryAgent as apiSaveLibraryAgent,
@@ -37,7 +35,6 @@ import {
   type McpServerDef,
   type SkillSummary,
   type CommandSummary,
-  type Plugin,
   type LibraryAgentSummary,
   type LibraryAgent,
 } from '@/lib/api';
@@ -51,7 +48,6 @@ interface LibraryContextValue {
   mcps: Record<string, McpServerDef>;
   skills: SkillSummary[];
   commands: CommandSummary[];
-  plugins: Record<string, Plugin>;
   libraryAgents: LibraryAgentSummary[];
   loading: boolean;
   libraryUnavailable: boolean;
@@ -81,10 +77,6 @@ interface LibraryContextValue {
   // Command operations
   saveCommand: (name: string, content: string) => Promise<void>;
   removeCommand: (name: string) => Promise<void>;
-
-  // Plugin operations
-  savePlugins: (plugins: Record<string, Plugin>) => Promise<void>;
-  refreshPlugins: () => Promise<void>;
 
   // Library Agent operations
   getLibraryAgent: (name: string) => Promise<LibraryAgent>;
@@ -118,7 +110,6 @@ export function LibraryProvider({ children }: LibraryProviderProps) {
   const [mcps, setMcps] = useState<Record<string, McpServerDef>>({});
   const [skills, setSkills] = useState<SkillSummary[]>([]);
   const [commands, setCommands] = useState<CommandSummary[]>([]);
-  const [plugins, setPlugins] = useState<Record<string, Plugin>>({});
   const [libraryAgents, setLibraryAgents] = useState<LibraryAgentSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [libraryUnavailable, setLibraryUnavailable] = useState(false);
@@ -140,7 +131,6 @@ export function LibraryProvider({ children }: LibraryProviderProps) {
       getLibraryMcps(),
       listLibrarySkills(),
       listLibraryCommands(),
-      getLibraryPlugins().catch(() => ({})),
       listLibraryAgents().catch(() => []),
     ]);
 
@@ -153,7 +143,6 @@ export function LibraryProvider({ children }: LibraryProviderProps) {
         setMcps({});
         setSkills([]);
         setCommands([]);
-        setPlugins({});
         setLibraryAgents([]);
         return true;
       }
@@ -161,7 +150,7 @@ export function LibraryProvider({ children }: LibraryProviderProps) {
       return false;
     };
 
-    const [statusRes, mcpsRes, skillsRes, commandsRes, pluginsRes, agentsRes] = results;
+    const [statusRes, mcpsRes, skillsRes, commandsRes, agentsRes] = results;
 
     if (statusRes.status === 'fulfilled') {
       setStatus(statusRes.value);
@@ -187,13 +176,6 @@ export function LibraryProvider({ children }: LibraryProviderProps) {
     if (commandsRes.status === 'fulfilled') {
       setCommands(commandsRes.value);
     } else if (handleRejection('Commands', commandsRes.reason)) {
-      setLoading(false);
-      return;
-    }
-
-    if (pluginsRes.status === 'fulfilled') {
-      setPlugins(pluginsRes.value);
-    } else if (handleRejection('Plugins', pluginsRes.reason)) {
       setLoading(false);
       return;
     }
@@ -339,22 +321,6 @@ export function LibraryProvider({ children }: LibraryProviderProps) {
     await refreshStatus();
   }, [refreshStatus]);
 
-  // Plugin operations
-  const _savePlugins = useCallback(async (newPlugins: Record<string, Plugin>) => {
-    await saveLibraryPlugins(newPlugins);
-    setPlugins(newPlugins);
-    await refreshStatus();
-  }, [refreshStatus]);
-
-  const refreshPlugins = useCallback(async () => {
-    try {
-      const pluginsData = await getLibraryPlugins();
-      setPlugins(pluginsData);
-    } catch {
-      // Silently fail - plugins may not exist yet
-    }
-  }, []);
-
   // Library Agent operations
   const getLibraryAgent = useCallback(async (name: string): Promise<LibraryAgent> => {
     return apiGetLibraryAgent(name);
@@ -398,7 +364,6 @@ export function LibraryProvider({ children }: LibraryProviderProps) {
       mcps,
       skills,
       commands,
-      plugins,
       libraryAgents,
       loading,
       libraryUnavailable,
@@ -417,8 +382,6 @@ export function LibraryProvider({ children }: LibraryProviderProps) {
       removeSkill,
       saveCommand,
       removeCommand,
-      savePlugins: _savePlugins,
-      refreshPlugins,
       getLibraryAgent,
       saveLibraryAgent: saveLibraryAgentFn,
       removeLibraryAgent,
@@ -432,7 +395,6 @@ export function LibraryProvider({ children }: LibraryProviderProps) {
       mcps,
       skills,
       commands,
-      plugins,
       libraryAgents,
       loading,
       libraryUnavailable,
@@ -451,8 +413,6 @@ export function LibraryProvider({ children }: LibraryProviderProps) {
       removeSkill,
       saveCommand,
       removeCommand,
-      _savePlugins,
-      refreshPlugins,
       getLibraryAgent,
       saveLibraryAgentFn,
       removeLibraryAgent,

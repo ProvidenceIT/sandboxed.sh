@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use sandboxed_sh::api::mission_store::{
-    Automation, AutomationExecution, CommandSource, RetryConfig, TriggerType, WebhookConfig,
+    Automation, AutomationExecution, CommandSource, RetryConfig, TriggerType,
 };
 
 // =============================================================================
@@ -223,6 +223,13 @@ impl AutomationManagerMcp {
                                         "seconds": {"type": "number", "description": "Interval in seconds"}
                                     },
                                     "required": ["type", "seconds"]
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "type": {"const": "agent_finished"}
+                                    },
+                                    "required": ["type"]
                                 },
                                 {
                                     "type": "object",

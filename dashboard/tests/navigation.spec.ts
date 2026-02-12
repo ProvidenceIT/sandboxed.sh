@@ -69,7 +69,6 @@ test.describe('Navigation', () => {
 
     // Should show submenu items
     await expect(page.getByRole('link', { name: /MCP Servers/i })).toBeVisible();
-    await expect(page.getByRole('link', { name: /Plugins/i })).toBeVisible();
     await expect(page.getByRole('link', { name: /Tools/i })).toBeVisible();
   });
 

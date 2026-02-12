@@ -2528,6 +2528,10 @@ async fn automation_scheduler_loop(
                     // Skip webhook automations - they're triggered via HTTP
                     continue;
                 }
+                TriggerType::AgentFinished => {
+                    // Skip agent_finished automations - they're triggered when a turn completes.
+                    continue;
+                }
             };
 
             let mission = match mission_store.get_mission(automation.mission_id).await {
@@ -2815,6 +2819,208 @@ async fn automation_scheduler_loop(
             }
         }
     }
+}
+
+/// Resolve the command content for a single automation, applying variable
+/// substitution.  Returns `None` if the command cannot be resolved (e.g.
+/// library unavailable, file not found).
+async fn resolve_automation_command(
+    automation: &mission_store::Automation,
+    mission_id: Uuid,
+    state: &Arc<AppState>,
+    store: &Arc<dyn MissionStore>,
+) -> Option<String> {
+    use super::automation_variables::{substitute_variables, SubstitutionContext};
+    use super::mission_store::CommandSource;
+
+    let mission = store.get_mission(mission_id).await.ok()??;
+    let workspace = state.workspaces.get(mission.workspace_id).await;
+
+    let command_content = match &automation.command_source {
+        CommandSource::Library { name } => {
+            let lib = state.library.read().await;
+            let lib = lib.as_ref()?;
+            lib.get_command(name).await.ok().map(|c| c.content)?
+        }
+        CommandSource::LocalFile { path } => {
+            let ws = workspace.as_ref()?;
+            tokio::fs::read_to_string(ws.path.join(path)).await.ok()?
+        }
+        CommandSource::Inline { content } => content.clone(),
+    };
+
+    let mut context = SubstitutionContext::new(mission.id);
+    if let Some(ref title) = mission.title {
+        context = context.with_mission_name(title.clone());
+    }
+    if let Some(ws) = workspace.as_ref() {
+        context = context.with_working_directory(ws.path.to_string_lossy().to_string());
+    }
+    context = context.with_custom_variables(automation.variables.clone());
+
+    Some(substitute_variables(&command_content, &context))
+}
+
+async fn agent_finished_automation_messages(
+    mission_store: &Arc<dyn MissionStore>,
+    mission_id: Uuid,
+    library: &SharedLibrary,
+    workspaces: &workspace::SharedWorkspaceStore,
+) -> Vec<String> {
+    use super::automation_variables::{substitute_variables, SubstitutionContext};
+    use super::mission_store::{AutomationExecution, CommandSource, ExecutionStatus, TriggerType};
+
+    let automations = match mission_store.get_mission_automations(mission_id).await {
+        Ok(list) => list,
+        Err(e) => {
+            tracing::warn!(
+                "Failed to load automations for mission {} (agent_finished hook): {}",
+                mission_id,
+                e
+            );
+            return Vec::new();
+        }
+    };
+
+    let mut active: Vec<super::mission_store::Automation> = automations
+        .into_iter()
+        .filter(|a| a.active && matches!(a.trigger, TriggerType::AgentFinished))
+        .collect();
+
+    if active.is_empty() {
+        return Vec::new();
+    }
+
+    let mission = match mission_store.get_mission(mission_id).await {
+        Ok(Some(m)) => m,
+        Ok(None) => return Vec::new(),
+        Err(e) => {
+            tracing::warn!(
+                "Failed to load mission {} for agent_finished automations: {}",
+                mission_id,
+                e
+            );
+            return Vec::new();
+        }
+    };
+
+    // Stable ordering to avoid surprising changes in multi-automation setups.
+    active.sort_by_key(|a| a.created_at.clone());
+
+    let workspace = workspaces.get(mission.workspace_id).await;
+
+    let mut out = Vec::with_capacity(active.len());
+
+    for automation in active {
+        // Fetch the command content based on the command source
+        let command_content = match &automation.command_source {
+            CommandSource::Library { name } => {
+                if let Some(lib) = library.read().await.as_ref() {
+                    match lib.get_command(name).await {
+                        Ok(command) => command.content,
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to fetch command '{}' for automation {}: {}",
+                                name,
+                                automation.id,
+                                e
+                            );
+                            continue;
+                        }
+                    }
+                } else {
+                    tracing::debug!(
+                        "Library not initialized, skipping agent_finished automation trigger"
+                    );
+                    continue;
+                }
+            }
+            CommandSource::LocalFile { path } => {
+                let file_path = if let Some(ws) = workspace.as_ref() {
+                    ws.path.join(path)
+                } else {
+                    tracing::warn!(
+                        "Workspace {} not found for automation {}",
+                        mission.workspace_id,
+                        automation.id
+                    );
+                    continue;
+                };
+                match tokio::fs::read_to_string(&file_path).await {
+                    Ok(content) => content,
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to read file '{}' for automation {}: {}",
+                            file_path.display(),
+                            automation.id,
+                            e
+                        );
+                        continue;
+                    }
+                }
+            }
+            CommandSource::Inline { content } => content.clone(),
+        };
+
+        // Build substitution context for variable replacement
+        let mut context = SubstitutionContext::new(mission.id);
+        if let Some(ref title) = mission.title {
+            context = context.with_mission_name(title.clone());
+        }
+        if let Some(ws) = workspace.as_ref() {
+            context = context.with_working_directory(ws.path.to_string_lossy().to_string());
+        }
+        context = context.with_custom_variables(automation.variables.clone());
+
+        let substituted_content = substitute_variables(&command_content, &context);
+
+        // Create an execution record (treat "queued" as success)
+        let execution_id = Uuid::new_v4();
+        let execution = AutomationExecution {
+            id: execution_id,
+            automation_id: automation.id,
+            mission_id: mission.id,
+            triggered_at: mission_store::now_string(),
+            trigger_source: "agent_finished".to_string(),
+            status: ExecutionStatus::Success,
+            webhook_payload: None,
+            variables_used: automation.variables.clone(),
+            completed_at: Some(mission_store::now_string()),
+            error: None,
+            retry_count: 0,
+        };
+
+        if mission_store
+            .create_automation_execution(execution)
+            .await
+            .is_ok()
+        {
+            // Best-effort: update last_triggered_at for visibility in UI.
+            if let Err(e) = mission_store
+                .update_automation_last_triggered(automation.id)
+                .await
+            {
+                tracing::warn!("Failed to update automation last triggered time: {}", e);
+            }
+        } else {
+            // If we can't record execution, still trigger the message.
+            tracing::warn!(
+                "Failed to create execution record for agent_finished automation {}",
+                automation.id
+            );
+        }
+
+        tracing::info!(
+            "Triggering agent_finished automation {} (execution {}) for mission {}",
+            automation.id,
+            execution_id,
+            mission.id
+        );
+
+        out.push(substituted_content);
+    }
+
+    out
 }
 
 async fn control_actor_loop(
@@ -4535,6 +4741,28 @@ async fn control_actor_loop(
                             }
                         }
                     }
+
+                    // If the mission is idle now, enqueue any agent_finished automations after a short delay.
+                    if let Some(mission_id) = completed_mission_id {
+                        let already_queued_for_mission = queue
+                            .iter()
+                            .any(|(_id, _msg, _agent, target_mid)| *target_mid == Some(mission_id));
+                        if !already_queued_for_mission {
+                            // Small delay so the UI can display the completion before restarting.
+                            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                            let messages = agent_finished_automation_messages(
+                                &mission_store,
+                                mission_id,
+                                &library,
+                                &workspaces,
+                            )
+                            .await;
+                            for content in messages.into_iter().rev() {
+                                // Push to front so it runs before unrelated queued items, but preserve order.
+                                queue.push_front((Uuid::new_v4(), content, None, Some(mission_id)));
+                            }
+                        }
+                    }
                 }
 
                 // Start next queued message, if any.
@@ -4720,6 +4948,37 @@ async fn control_actor_loop(
 
                             // If runner has no more queued messages, update status and mark for cleanup
                             if runner.queue.is_empty() && !runner.is_running() {
+                                // Enqueue agent_finished automations (if any) after a short delay.
+                                if runner.queue.is_empty() {
+                                    // Small delay so the UI can display the completion before restarting.
+                                    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                                    let messages = agent_finished_automation_messages(
+                                        &mission_store,
+                                        *mission_id,
+                                        &library,
+                                        &workspaces,
+                                    )
+                                    .await;
+                                    for content in messages {
+                                        runner.queue_message(Uuid::new_v4(), content, None);
+                                    }
+                                    if !runner.is_running() {
+                                        runner.start_next(
+                                            config.clone(),
+                                            Arc::clone(&root_agent),
+                                            Arc::clone(&mcp),
+                                            Arc::clone(&workspaces),
+                                            library.clone(),
+                                            events_tx.clone(),
+                                            Arc::clone(&tool_hub),
+                                            Arc::clone(&status),
+                                            mission_cmd_tx.clone(),
+                                            Arc::new(RwLock::new(Some(*mission_id))),
+                                            secrets.clone(),
+                                        );
+                                    }
+                                }
+
                                 // Only update status if agent hasn't already set a terminal status
                                 if let Ok(Some(mission)) = mission_store.get_mission(*mission_id).await {
                                     let should_update = matches!(
@@ -5482,6 +5741,9 @@ pub struct CreateAutomationRequest {
     pub variables: HashMap<String, String>,
     #[serde(default)]
     pub retry_config: Option<mission_store::RetryConfig>,
+    /// When true, trigger the first execution immediately after creation.
+    #[serde(default)]
+    pub start_immediately: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -5576,6 +5838,8 @@ pub async fn create_automation(
         other => other,
     };
 
+    let start_immediately = req.start_immediately;
+
     // Build the complete Automation struct
     let automation = mission_store::Automation {
         id: Uuid::new_v4(),
@@ -5594,6 +5858,59 @@ pub async fn create_automation(
         .create_automation(automation)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    // If start_immediately is requested for agent_finished triggers, fire the
+    // first execution right away by resolving the command and sending it as a
+    // user message to the control actor.
+    if start_immediately
+        && matches!(
+            automation.trigger,
+            mission_store::TriggerType::AgentFinished
+        )
+    {
+        let cmd_content =
+            resolve_automation_command(&automation, mission_id, &state, &control.mission_store)
+                .await;
+
+        if let Some(content) = cmd_content {
+            // Record the execution
+            let execution_id = Uuid::new_v4();
+            let execution = mission_store::AutomationExecution {
+                id: execution_id,
+                automation_id: automation.id,
+                mission_id,
+                triggered_at: mission_store::now_string(),
+                trigger_source: "start_immediately".to_string(),
+                status: mission_store::ExecutionStatus::Success,
+                webhook_payload: None,
+                variables_used: automation.variables.clone(),
+                completed_at: Some(mission_store::now_string()),
+                error: None,
+                retry_count: 0,
+            };
+            let _ = control
+                .mission_store
+                .create_automation_execution(execution)
+                .await;
+            let _ = control
+                .mission_store
+                .update_automation_last_triggered(automation.id)
+                .await;
+
+            // Send as a user message to the mission
+            let (respond_tx, _respond_rx) = tokio::sync::oneshot::channel();
+            let _ = control
+                .cmd_tx
+                .send(ControlCommand::UserMessage {
+                    id: Uuid::new_v4(),
+                    content,
+                    agent: None,
+                    target_mission_id: Some(mission_id),
+                    respond: respond_tx,
+                })
+                .await;
+        }
+    }
 
     Ok(Json(automation))
 }

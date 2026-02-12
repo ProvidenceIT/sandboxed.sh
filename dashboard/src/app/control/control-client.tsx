@@ -86,6 +86,7 @@ import {
   Wrench,
   Terminal,
   FileText,
+  Eye,
   Search,
   Globe,
   Code,
@@ -105,6 +106,7 @@ import {
   ExternalLink,
   MessageSquare,
 } from "lucide-react";
+import { IMAGE_PATH_PATTERN } from "@/lib/file-extensions";
 
 type StreamDiagnosticsState = {
   phase: "idle" | "connecting" | "open" | "streaming" | "closed" | "error";
@@ -612,6 +614,201 @@ function Shimmer({ className }: { className?: string }) {
   );
 }
 
+function isTextPreviewableSharedFile(file: SharedFile): boolean {
+  const name = (file.name || "").toLowerCase();
+  if (file.content_type.startsWith("text/")) return true;
+  if (file.content_type.includes("json") || file.content_type.includes("yaml") || file.content_type.includes("xml")) {
+    return true;
+  }
+  return (
+    name.endsWith(".txt") ||
+    name.endsWith(".md") ||
+    name.endsWith(".markdown") ||
+    name.endsWith(".log") ||
+    name.endsWith(".json") ||
+    name.endsWith(".yaml") ||
+    name.endsWith(".yml") ||
+    name.endsWith(".toml") ||
+    name.endsWith(".xml") ||
+    name.endsWith(".csv") ||
+    name.endsWith(".tsv")
+  );
+}
+
+function getLanguageFromSharedFile(file: SharedFile): string {
+  const name = (file.name || "").toLowerCase();
+  if (name.endsWith(".md") || name.endsWith(".markdown") || file.content_type.includes("markdown")) return "markdown";
+  if (name.endsWith(".json") || file.content_type.includes("json")) return "json";
+  if (name.endsWith(".yaml") || name.endsWith(".yml") || file.content_type.includes("yaml")) return "yaml";
+  if (name.endsWith(".xml") || file.content_type.includes("xml")) return "xml";
+  if (name.endsWith(".csv")) return "csv";
+  if (name.endsWith(".tsv")) return "tsv";
+  return "text";
+}
+
+function SharedFilePreviewModal({
+  file,
+  resolvedUrl,
+  isApiUrl,
+  onClose,
+  onDownload,
+}: {
+  file: SharedFile;
+  resolvedUrl: string;
+  isApiUrl: boolean;
+  onClose: () => void;
+  onDownload: () => void;
+}) {
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [text, setText] = useState<string>("");
+  const [copied, setCopied] = useState(false);
+  const [sizeBytes, setSizeBytes] = useState<number | null>(null);
+
+  const language = useMemo(() => getLanguageFromSharedFile(file), [file]);
+  const isMarkdown = language === "markdown";
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const run = async () => {
+      setLoading(true);
+      setError(null);
+      setText("");
+      setSizeBytes(null);
+      try {
+        const res = await fetch(resolvedUrl, {
+          headers: isApiUrl ? { ...authHeader() } : undefined,
+        });
+        if (!res.ok) throw new Error(`Failed to load (${res.status})`);
+        const blob = await res.blob();
+        const raw = await blob.text();
+        const limit = 500_000;
+        const finalText =
+          raw.length > limit ? `${raw.slice(0, limit)}\n\n... (file truncated, too large to preview)` : raw;
+        if (!cancelled) {
+          setSizeBytes(blob.size);
+          setText(finalText);
+        }
+      } catch (e) {
+        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+    void run();
+    return () => {
+      cancelled = true;
+    };
+  }, [isApiUrl, resolvedUrl]);
+
+  const handleCopy = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Ignore.
+    }
+  }, [text]);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm pointer-events-none" />
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className={cn(
+          "relative rounded-2xl bg-[#1a1a1a] border border-white/[0.06] shadow-xl w-full max-w-4xl",
+          "animate-in fade-in zoom-in-95 duration-200"
+        )}
+      >
+        <div className="flex items-center justify-between px-5 py-4 border-b border-white/[0.06]">
+          <div className="min-w-0">
+            <h3 className="text-sm font-semibold text-white truncate">{file.name}</h3>
+            <p className="text-xs text-white/40 truncate">
+              {file.content_type}
+              {sizeBytes != null && <span className="ml-2">• {formatBytes(sizeBytes)}</span>}
+            </p>
+          </div>
+          <div className="flex items-center gap-2 shrink-0 ml-3">
+            {!loading && !error && text && (
+              <button
+                onClick={handleCopy}
+                className="p-1.5 rounded-lg text-white/40 hover:text-white/70 hover:bg-white/[0.08] transition-colors"
+                title={copied ? "Copied" : "Copy"}
+              >
+                {copied ? <Check className="h-4 w-4 text-emerald-400" /> : <Copy className="h-4 w-4" />}
+              </button>
+            )}
+            <button
+              onClick={onDownload}
+              className="p-1.5 rounded-lg text-white/40 hover:text-white/70 hover:bg-white/[0.08] transition-colors"
+              title="Download"
+            >
+              <Download className="h-4 w-4" />
+            </button>
+            <button
+              onClick={onClose}
+              className="p-1.5 rounded-lg text-white/40 hover:text-white/70 hover:bg-white/[0.08] transition-colors"
+              title="Close"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+        </div>
+
+        <div className="max-h-[70vh] overflow-auto">
+          {loading ? (
+            <div className="p-5">
+              <Shimmer />
+            </div>
+          ) : error ? (
+            <div className="p-5 text-sm text-red-400">{error}</div>
+          ) : isMarkdown ? (
+            <div className="p-5">
+              <MarkdownContent content={text} />
+            </div>
+          ) : (
+            <div className="text-sm">
+              <SyntaxHighlighter
+                language={language}
+                style={oneDark}
+                showLineNumbers
+                customStyle={{
+                  margin: 0,
+                  padding: "1rem",
+                  background: "transparent",
+                  fontSize: "0.8125rem",
+                }}
+                codeTagProps={{
+                  style: {
+                    fontFamily:
+                      'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
+                  },
+                }}
+              >
+                {text}
+              </SyntaxHighlighter>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // Shared file card component - renders images inline and other files as download cards
 function SharedFileCard({ file }: { file: SharedFile }) {
   const iconMap: Record<SharedFile["kind"], typeof File> = {
@@ -630,10 +827,12 @@ function SharedFileCard({ file }: { file: SharedFile }) {
   const isApiRelativeUrl = file.url.startsWith("/");
   const isApiUrl = isApiRelativeUrl || file.url.startsWith(apiBase);
   const resolvedUrl = isApiRelativeUrl ? `${apiBase}${file.url}` : file.url;
+  const canPreview = isTextPreviewableSharedFile(file);
 
   const [blobUrl, setBlobUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [previewOpen, setPreviewOpen] = useState(false);
 
   // If this is an API-protected image, fetch it with auth and render from an object URL.
   useEffect(() => {
@@ -757,38 +956,85 @@ function SharedFileCard({ file }: { file: SharedFile }) {
     );
   }
 
-  // Render other files as download cards
+  // Render other files as cards (download always, preview for text/markdown)
   return (
-    <div
-      className="mt-3 flex items-center gap-3 px-4 py-3 rounded-lg border border-white/[0.06] bg-white/[0.02] hover:bg-white/[0.04] transition-colors group"
-    >
-      <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-indigo-500/10">
-        <FileIcon className="h-5 w-5 text-indigo-400" />
-      </div>
-      <div className="flex-1 min-w-0">
-        <div className="font-medium text-sm text-white/80 truncate">{file.name}</div>
-        <div className="text-xs text-white/40 flex items-center gap-2">
-          <span className="truncate">{file.content_type}</span>
-          {sizeLabel && (
-            <>
-              <span>•</span>
-              <span>{sizeLabel}</span>
-            </>
-          )}
-        </div>
-        {error && <div className="mt-1 text-xs text-red-400">{error}</div>}
-      </div>
-      <button
-        type="button"
-        onClick={handleDownload}
-        className="p-2 rounded-md text-white/30 group-hover:text-indigo-400 hover:bg-white/[0.06] transition-colors"
-        title="Download"
-        aria-label="Download"
-        disabled={loading}
+    <>
+      <div
+        className={cn(
+          "mt-3 flex items-center gap-3 px-4 py-3 rounded-lg border border-white/[0.06] bg-white/[0.02] hover:bg-white/[0.04] transition-colors group",
+          canPreview && "cursor-pointer"
+        )}
+        onClick={() => {
+          if (canPreview) setPreviewOpen(true);
+        }}
+        role={canPreview ? "button" : undefined}
+        tabIndex={canPreview ? 0 : undefined}
+        onKeyDown={(e) => {
+          if (!canPreview) return;
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            setPreviewOpen(true);
+          }
+        }}
       >
-        <Download className={cn("h-4 w-4", loading && "animate-pulse")} />
-      </button>
-    </div>
+        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-indigo-500/10">
+          <FileIcon className="h-5 w-5 text-indigo-400" />
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="font-medium text-sm text-white/80 truncate">{file.name}</div>
+          <div className="text-xs text-white/40 flex items-center gap-2">
+            <span className="truncate">{file.content_type}</span>
+            {sizeLabel && (
+              <>
+                <span>•</span>
+                <span>{sizeLabel}</span>
+              </>
+            )}
+          </div>
+          {error && <div className="mt-1 text-xs text-red-400">{error}</div>}
+        </div>
+
+        {canPreview && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              setPreviewOpen(true);
+            }}
+            className="p-2 rounded-md text-white/30 group-hover:text-indigo-400 hover:bg-white/[0.06] transition-colors"
+            title="Preview"
+            aria-label="Preview"
+            disabled={loading}
+          >
+            <Eye className={cn("h-4 w-4", loading && "animate-pulse")} />
+          </button>
+        )}
+
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            void handleDownload();
+          }}
+          className="p-2 rounded-md text-white/30 group-hover:text-indigo-400 hover:bg-white/[0.06] transition-colors"
+          title="Download"
+          aria-label="Download"
+          disabled={loading}
+        >
+          <Download className={cn("h-4 w-4", loading && "animate-pulse")} />
+        </button>
+      </div>
+
+      {previewOpen && canPreview && (
+        <SharedFilePreviewModal
+          file={file}
+          resolvedUrl={resolvedUrl}
+          isApiUrl={isApiUrl}
+          onClose={() => setPreviewOpen(false)}
+          onDownload={() => void handleDownload()}
+        />
+      )}
+    </>
   );
 }
 
@@ -1608,10 +1854,10 @@ const SubagentToolItem = memo(function SubagentToolItem({
 // Matches patterns like "/path/to/image.png" or "screenshots/file.jpg"
 function extractImagePaths(text: string): string[] {
   const paths: string[] = [];
-  // Match absolute paths or relative paths that look like image files
-  // Pattern: word characters, slashes, dots, hyphens, underscores ending in image extension
-  const pathPattern = /(?:\/[\w\-._/]+|[\w\-._]+\/[\w\-._/]+)\.(?:png|jpg|jpeg|gif|webp|bmp|svg)\b/gi;
-  const matches = text.match(pathPattern);
+  // Use shared pattern from file-extensions.ts
+  // Reset regex state since it's global
+  IMAGE_PATH_PATTERN.lastIndex = 0;
+  const matches = text.match(IMAGE_PATH_PATTERN);
   if (matches) {
     for (const match of matches) {
       // Normalize and dedupe
@@ -2199,6 +2445,7 @@ export default function ControlClient() {
   // Desktop stream state
   const [showDesktopStream, setShowDesktopStream] = useState(false);
   const [desktopDisplayId, setDesktopDisplayId] = useState(":99");
+  const desktopDisplayIdRef = useRef(":99");
   const [showDisplaySelector, setShowDisplaySelector] = useState(false);
   const [hasDesktopSession, setHasDesktopSession] = useState(false);
   const [desktopSessions, setDesktopSessions] = useState<DesktopSessionDetail[]>([]);
@@ -2374,6 +2621,10 @@ export default function ControlClient() {
   useEffect(() => {
     desktopSessionsRef.current = desktopSessions;
   }, [desktopSessions]);
+
+  useEffect(() => {
+    desktopDisplayIdRef.current = desktopDisplayId;
+  }, [desktopDisplayId]);
 
   useEffect(() => {
     hasDesktopSessionRef.current = hasDesktopSession;
@@ -2886,13 +3137,14 @@ export default function ControlClient() {
     (mission: Mission) => {
       const activeSession = getActiveDesktopSession(mission);
       if (activeSession?.display) {
-        // Only switch display if the current one is not running anymore.
-        // This prevents auto-switching away from a display the user is actively viewing
-        // (e.g. when a new session starts while the old one is still alive).
-        const currentIsRunning = desktopSessionsRef.current.some(
-          s => s.display === desktopDisplayId && s.process_running && s.status !== 'stopped'
+        // Only switch display if the current one is not running for THIS mission.
+        // This prevents auto-switching away from a display the user is actively viewing,
+        // but allows switching when changing to a different mission.
+        const currentDisplayId = desktopDisplayIdRef.current;
+        const currentBelongsToThisMission = mission.desktop_sessions?.some(
+          s => s.display === currentDisplayId && !s.stopped_at
         );
-        if (!currentIsRunning) {
+        if (!currentBelongsToThisMission) {
           setDesktopDisplayId(activeSession.display);
         }
         setHasDesktopSession(true);
@@ -2907,7 +3159,7 @@ export default function ControlClient() {
         setHasDesktopSession(false);
       }
     },
-    [getActiveDesktopSession, missionHasDesktopSession, desktopDisplayId]
+    [getActiveDesktopSession, missionHasDesktopSession]
   );
 
   // Detect desktop sessions from stored events (when loading from history)
@@ -3341,6 +3593,10 @@ export default function ControlClient() {
           setViewingMissionId(id);
           return;
         }
+        // Skip if handleViewMission is already loading this mission (prevents double-load race)
+        if (handleViewMissionLoadingRef.current === id) {
+          return;
+        }
       const previousViewingMission = viewingMissionRef.current;
       setMissionLoading(true);
       setViewingMissionId(id); // Set viewing ID immediately to prevent "Agent is working..." flash
@@ -3380,16 +3636,23 @@ export default function ControlClient() {
         // Merge queued messages that belong to this mission
         const missionQueuedMessages = queuedMessages.filter((qm) => qm.mission_id === id);
         if (missionQueuedMessages.length > 0) {
-          const queuedChatItems: ChatItem[] = missionQueuedMessages.map((qm) => ({
-            kind: "user" as const,
-            id: qm.id,
-            content: qm.content,
-            timestamp: Date.now(),
-            agent: qm.agent ?? undefined,
-            queued: true,
-          }));
+          const queuedIds = new Set(missionQueuedMessages.map((qm) => qm.id));
+          // Mark existing items as queued
+          historyItems = historyItems.map((item) =>
+            item.kind === "user" && queuedIds.has(item.id) ? { ...item, queued: true } : item
+          );
+          // Add any queued messages not already in history
           const existingIds = new Set(historyItems.map((item) => item.id));
-          const newQueuedItems = queuedChatItems.filter((item) => !existingIds.has(item.id));
+          const newQueuedItems: ChatItem[] = missionQueuedMessages
+            .filter((qm) => !existingIds.has(qm.id))
+            .map((qm) => ({
+              kind: "user" as const,
+              id: qm.id,
+              content: qm.content,
+              timestamp: Date.now(),
+              agent: qm.agent ?? undefined,
+              queued: true,
+            }));
           historyItems = [...historyItems, ...newQueuedItems];
         }
         setItems(historyItems);
@@ -3459,16 +3722,21 @@ export default function ControlClient() {
               // Merge queued messages that belong to this mission
               const missionQueuedMessages = queuedMessages.filter((qm) => qm.mission_id === mission.id);
               if (missionQueuedMessages.length > 0) {
-                const queuedChatItems: ChatItem[] = missionQueuedMessages.map((qm) => ({
-                  kind: "user" as const,
-                  id: qm.id,
-                  content: qm.content,
-                  timestamp: Date.now(),
-                  agent: qm.agent ?? undefined,
-                  queued: true,
-                }));
+                const queuedIds = new Set(missionQueuedMessages.map((qm) => qm.id));
+                historyItems = historyItems.map((item) =>
+                  item.kind === "user" && queuedIds.has(item.id) ? { ...item, queued: true } : item
+                );
                 const existingIds = new Set(historyItems.map((item) => item.id));
-                const newQueuedItems = queuedChatItems.filter((item) => !existingIds.has(item.id));
+                const newQueuedItems: ChatItem[] = missionQueuedMessages
+                  .filter((qm) => !existingIds.has(qm.id))
+                  .map((qm) => ({
+                    kind: "user" as const,
+                    id: qm.id,
+                    content: qm.content,
+                    timestamp: Date.now(),
+                    agent: qm.agent ?? undefined,
+                    queued: true,
+                  }));
                 historyItems = [...historyItems, ...newQueuedItems];
               }
               setItems(historyItems);
@@ -3796,6 +4064,7 @@ export default function ControlClient() {
   // Track the mission ID being fetched to prevent race conditions
   const fetchingMissionIdRef = useRef<string | null>(null);
   const pendingMissionNavRef = useRef<string | null>(null);
+  const handleViewMissionLoadingRef = useRef<string | null>(null);
 
   // Handle switching which mission we're viewing
   const handleViewMission = useCallback(
@@ -3817,6 +4086,7 @@ export default function ControlClient() {
 
       setViewingMissionId(missionId);
       fetchingMissionIdRef.current = missionId;
+      handleViewMissionLoadingRef.current = missionId;
 
       // Update URL immediately so it's shareable/bookmarkable
       router.replace(`/control?mission=${missionId}`, { scroll: false });
@@ -3850,17 +4120,21 @@ export default function ControlClient() {
         // Merge queued messages that belong to this mission
         const missionQueuedMessages = queuedMessages.filter((qm) => qm.mission_id === missionId);
         if (missionQueuedMessages.length > 0) {
-          const queuedChatItems: ChatItem[] = missionQueuedMessages.map((qm) => ({
-            kind: "user" as const,
-            id: qm.id,
-            content: qm.content,
-            timestamp: Date.now(),
-            agent: qm.agent ?? undefined,
-            queued: true,
-          }));
-          // Filter out any queued messages that already exist in history (by ID)
+          const queuedIds = new Set(missionQueuedMessages.map((qm) => qm.id));
+          historyItems = historyItems.map((item) =>
+            item.kind === "user" && queuedIds.has(item.id) ? { ...item, queued: true } : item
+          );
           const existingIds = new Set(historyItems.map((item) => item.id));
-          const newQueuedItems = queuedChatItems.filter((item) => !existingIds.has(item.id));
+          const newQueuedItems: ChatItem[] = missionQueuedMessages
+            .filter((qm) => !existingIds.has(qm.id))
+            .map((qm) => ({
+              kind: "user" as const,
+              id: qm.id,
+              content: qm.content,
+              timestamp: Date.now(),
+              agent: qm.agent ?? undefined,
+              queued: true,
+            }));
           historyItems = [...historyItems, ...newQueuedItems];
         }
 
@@ -3878,8 +4152,10 @@ export default function ControlClient() {
         if (currentMissionRef.current?.id === mission.id) {
           setCurrentMission(mission);
         }
+        handleViewMissionLoadingRef.current = null;
       } catch (err) {
         console.error("Failed to load mission:", err);
+        handleViewMissionLoadingRef.current = null;
 
         // Race condition guard: only update if this is still the mission we want
         if (fetchingMissionIdRef.current !== missionId) {
@@ -4159,50 +4435,7 @@ export default function ControlClient() {
 
         // If we just reconnected, refresh the viewed mission's history to catch missed events
         if (wasReconnecting && viewingId) {
-          Promise.all([getMission(viewingId), loadHistoryEvents(viewingId), getQueue().catch(() => [])])
-            .then(([mission, events, queuedMessages]) => {
-              if (!mounted) return;
-              let historyItems = eventsToItems(events, mission);
-              if (!historyItems.some((item) => item.kind === "assistant")) {
-                const historyHasAssistant = mission.history.some(
-                  (entry) => entry.role === "assistant"
-                );
-                if (historyHasAssistant) {
-                  historyItems = missionHistoryToItems(mission);
-                }
-              }
-              // Merge queued messages that belong to this mission
-              const missionQueuedMessages = queuedMessages.filter((qm) => qm.mission_id === viewingId);
-              if (missionQueuedMessages.length > 0) {
-                const queuedChatItems: ChatItem[] = missionQueuedMessages.map((qm) => ({
-                  kind: "user" as const,
-                  id: qm.id,
-                  content: qm.content,
-                  timestamp: Date.now(),
-                  agent: qm.agent ?? undefined,
-                  queued: true,
-                }));
-                const existingIds = new Set(historyItems.map((item) => item.id));
-                const newQueuedItems = queuedChatItems.filter((item) => !existingIds.has(item.id));
-                historyItems = [...historyItems, ...newQueuedItems];
-              }
-              setItems(historyItems);
-              adjustVisibleItemsLimit(historyItems);
-              updateMissionItems(viewingId, historyItems);
-              // Also check events for desktop sessions
-              applyDesktopSessionFromEvents(events);
-            })
-            .catch(() => {
-              // Fall back to basic history if events fail
-              getMission(viewingId)
-                .then((mission) => {
-                  if (!mounted) return;
-                  const historyItems = missionHistoryToItems(mission);
-                  setItems(historyItems);
-                  updateMissionItems(viewingId, historyItems);
-                })
-                .catch(() => {}); // Ignore errors - we'll get updates via stream
-            });
+          reloadMissionHistory(viewingId);
         }
 
         const st = data["state"];
@@ -5254,6 +5487,98 @@ export default function ControlClient() {
       syncingQueueRef.current = false;
     }
   }, []);
+
+  // Reload full mission history from API (events + queue). Used for visibility
+  // change, periodic sync, and SSE reconnect catch-up.
+  const reloadMissionHistory = useCallback(
+    async (missionId: string) => {
+      try {
+        const [mission, events, queuedMessages] = await Promise.all([
+          getMission(missionId),
+          loadHistoryEvents(missionId).catch(() => null),
+          getQueue().catch(() => []),
+        ]);
+        // Race guard: only apply if we're still viewing this mission
+        if (viewingMissionIdRef.current !== missionId) return;
+
+        let historyItems = events
+          ? eventsToItems(events, mission)
+          : missionHistoryToItems(mission);
+        if (events && !historyItems.some((item) => item.kind === "assistant")) {
+          const historyHasAssistant = mission.history.some(
+            (entry) => entry.role === "assistant"
+          );
+          if (historyHasAssistant) {
+            historyItems = missionHistoryToItems(mission);
+          }
+        }
+
+        // Merge queued messages that belong to this mission
+        const missionQueuedMessages = queuedMessages.filter(
+          (qm) => qm.mission_id === missionId
+        );
+        if (missionQueuedMessages.length > 0) {
+          const queuedIds = new Set(missionQueuedMessages.map((qm) => qm.id));
+          historyItems = historyItems.map((item) =>
+            item.kind === "user" && queuedIds.has(item.id)
+              ? { ...item, queued: true }
+              : item
+          );
+          const existingIds = new Set(historyItems.map((item) => item.id));
+          const newQueuedItems: ChatItem[] = missionQueuedMessages
+            .filter((qm) => !existingIds.has(qm.id))
+            .map((qm) => ({
+              kind: "user" as const,
+              id: qm.id,
+              content: qm.content,
+              timestamp: Date.now(),
+              agent: qm.agent ?? undefined,
+              queued: true,
+            }));
+          historyItems = [...historyItems, ...newQueuedItems];
+        }
+
+        setItems(historyItems);
+        adjustVisibleItemsLimit(historyItems);
+        updateMissionItems(missionId, historyItems);
+        if (events) {
+          applyDesktopSessionFromEvents(events);
+        }
+      } catch (err) {
+        console.warn("[control] reloadMissionHistory failed", err);
+      }
+    },
+    [
+      loadHistoryEvents,
+      eventsToItems,
+      missionHistoryToItems,
+      adjustVisibleItemsLimit,
+      updateMissionItems,
+      applyDesktopSessionFromEvents,
+    ]
+  );
+
+  // Reload full history when the tab regains visibility to catch missed SSE events
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible" && viewingMissionId) {
+        reloadMissionHistory(viewingMissionId);
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
+  }, [viewingMissionId, reloadMissionHistory]);
+
+  // Periodically sync history for running missions to catch missed SSE events
+  useEffect(() => {
+    if (!viewingMissionId || !viewingMissionIsRunning) return;
+    const interval = setInterval(() => {
+      if (document.visibilityState === "visible") {
+        reloadMissionHistory(viewingMissionId);
+      }
+    }, 15_000);
+    return () => clearInterval(interval);
+  }, [viewingMissionId, viewingMissionIsRunning, reloadMissionHistory]);
 
   // Compute queued items for the queue strip
   const queuedItems: QueueItem[] = useMemo(() => {

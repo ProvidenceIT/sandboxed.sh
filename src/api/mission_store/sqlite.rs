@@ -190,6 +190,7 @@ impl SqliteMissionStore {
                     .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
                 TriggerType::Webhook { config }
             }
+            "agent_finished" => TriggerType::AgentFinished,
             _ => {
                 return Err(rusqlite::Error::ToSqlConversionFailure(
                     format!("Unknown trigger type: {}", trigger_type).into(),
@@ -1568,6 +1569,7 @@ impl MissionStore for SqliteMissionStore {
                 "webhook",
                 serde_json::to_string(config).map_err(|e| e.to_string())?,
             ),
+            TriggerType::AgentFinished => ("agent_finished", "{}".to_string()),
         };
 
         // Serialize variables
@@ -1764,6 +1766,7 @@ impl MissionStore for SqliteMissionStore {
                 "webhook",
                 serde_json::to_string(config).map_err(|e| e.to_string())?,
             ),
+            TriggerType::AgentFinished => ("agent_finished", "{}".to_string()),
         };
 
         // Serialize variables

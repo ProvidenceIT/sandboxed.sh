@@ -47,6 +47,8 @@ COPY dashboard/ .
 
 # Empty API URL — the Caddyfile proxies /api to the backend at runtime
 ENV NEXT_PUBLIC_API_URL=""
+# standalone output for Docker (not needed for Vercel)
+ENV STANDALONE=true
 RUN bun run build
 
 # ---------------------------------------------------------------------------
@@ -121,7 +123,7 @@ COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 # -- Working directories ------------------------------------------------------
-RUN mkdir -p /root/.openagent /root/.claude /root/work/screenshots
+RUN mkdir -p /root/.sandboxed-sh /root/.claude /root/work/screenshots
 
 # -- Environment defaults -----------------------------------------------------
 ENV HOST=127.0.0.1 \
@@ -133,6 +135,6 @@ ENV HOST=127.0.0.1 \
     GIT_TERMINAL_PROMPT=0
 
 EXPOSE 80
-VOLUME ["/root/.openagent", "/root/.claude"]
+VOLUME ["/root/.sandboxed-sh", "/root/.claude"]
 
 ENTRYPOINT ["/entrypoint.sh"]

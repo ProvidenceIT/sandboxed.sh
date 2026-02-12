@@ -26,8 +26,8 @@ import {
   Key,
   Archive,
   Activity,
-  Shield,
   Cpu,
+  Lock,
 } from 'lucide-react';
 
 type NavItem = {
@@ -59,7 +59,6 @@ const navigation: NavItem[] = [
     icon: Puzzle,
     children: [
       { name: 'MCP Servers', href: '/extensions/mcps', icon: Plug },
-      { name: 'Plugins', href: '/extensions/plugins', icon: Puzzle },
       { name: 'Tools', href: '/extensions/tools', icon: Wrench },
     ],
   },
@@ -71,9 +70,9 @@ const navigation: NavItem[] = [
       { name: 'System', href: '/settings/system', icon: Server },
       { name: 'Backends', href: '/settings/backends', icon: Cpu },
       { name: 'Providers', href: '/settings/providers', icon: Key },
+      { name: 'Security', href: '/settings/secrets', icon: Lock },
       { name: 'Data', href: '/settings/data', icon: Archive },
       { name: 'Monitoring', href: '/settings/monitoring', icon: Activity },
-      { name: 'Secrets', href: '/settings/secrets', icon: Shield },
     ],
   },
 ];
@@ -153,7 +152,7 @@ export function Sidebar() {
         <BrainLogo size={32} />
         <div className="flex flex-col">
           <span className="text-sm font-medium text-white">Sandboxed.sh</span>
-          <span className="tag">v0.6.0</span>
+          <span className="tag">v{process.env.NEXT_PUBLIC_APP_VERSION}</span>
         </div>
       </div>
 
