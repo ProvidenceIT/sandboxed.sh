@@ -1474,6 +1474,23 @@ pub async fn create_mission(
         backend = Some(registry.default_id().to_string());
     }
 
+    // Normalize model override based on backend expectations.
+    // OpenCode expects provider/model; Claude Code and Codex expect raw model IDs.
+    if let Some(ref raw_model) = model_override {
+        let trimmed = raw_model.trim();
+        if trimmed.is_empty() {
+            model_override = None;
+        } else if backend.as_deref() != Some("opencode") {
+            if let Some((_, model_id)) = trimmed.split_once('/') {
+                model_override = Some(model_id.to_string());
+            } else {
+                model_override = Some(trimmed.to_string());
+            }
+        } else {
+            model_override = Some(trimmed.to_string());
+        }
+    }
+
     // Resolve the effective config profile:
     // 1. Use explicit config_profile from request if provided
     // 2. Otherwise use workspace's config_profile
@@ -5411,8 +5428,9 @@ async fn run_single_control_turn(
         None
     };
     let effective_config_profile = mission_config_profile.or(workspace_config_profile);
-    if let Some(model) = model_override {
-        config.default_model = Some(model);
+    let requested_model = model_override;
+    if let Some(ref model) = requested_model {
+        config.default_model = Some(model.clone());
     } else if is_claudecode && config.default_model.is_none() {
         if let Some(default_model) =
             resolve_claudecode_default_model(&library, effective_config_profile.as_deref()).await
@@ -5696,7 +5714,9 @@ async fn run_single_control_turn(
                 exec_workspace,
                 &ctx.working_dir,
                 &convo,
-                config.default_model.as_deref(),
+                requested_model
+                    .as_deref()
+                    .or_else(|| config.default_model.as_deref()),
                 config.opencode_agent.as_deref(),
                 mid,
                 events_tx.clone(),

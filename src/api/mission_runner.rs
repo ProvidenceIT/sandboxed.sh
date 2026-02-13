@@ -2776,13 +2776,17 @@ pub fn run_claudecode_turn<'a>(
             final_result = format!("Claude Code error: {}", non_json_output.join(" | "));
         }
 
-        if had_error {
+        let mut result = if had_error {
             AgentResult::failure(final_result, cost_cents)
                 .with_terminal_reason(TerminalReason::LlmError)
         } else {
             AgentResult::success(final_result, cost_cents)
                 .with_terminal_reason(TerminalReason::Completed)
+        };
+        if let Some(model) = model {
+            result = result.with_model(model.to_string());
         }
+        result
     }) // end Box::pin(async move { ... })
 }
 
@@ -3916,6 +3920,90 @@ fn sync_opencode_agent_config(
                 "Failed to update opencode.json agent config at {}: {}",
                 opencode_path.display(),
                 err
+            );
+        }
+    }
+}
+
+fn apply_model_override_to_oh_my_opencode(
+    opencode_config_dir: &std::path::Path,
+    model_override: &str,
+) {
+    let model_override = model_override.trim();
+    if model_override.is_empty() {
+        return;
+    }
+
+    let (omo_path, omo_path_jsonc) = workspace_oh_my_opencode_config_paths(opencode_config_dir);
+    let target_path = if omo_path.exists() {
+        omo_path
+    } else if omo_path_jsonc.exists() {
+        omo_path_jsonc
+    } else {
+        return;
+    };
+
+    let contents = match std::fs::read_to_string(&target_path) {
+        Ok(contents) => contents,
+        Err(err) => {
+            tracing::warn!(
+                "Failed to read oh-my-opencode config at {}: {}",
+                target_path.display(),
+                err
+            );
+            return;
+        }
+    };
+
+    let json = if target_path.extension().and_then(|s| s.to_str()) == Some("jsonc") {
+        serde_json::from_str::<serde_json::Value>(&strip_jsonc_comments(&contents))
+    } else {
+        serde_json::from_str::<serde_json::Value>(&contents)
+    };
+
+    let mut json = match json {
+        Ok(value) => value,
+        Err(err) => {
+            tracing::warn!(
+                "Failed to parse oh-my-opencode config at {}: {}",
+                target_path.display(),
+                err
+            );
+            return;
+        }
+    };
+
+    if let Some(obj) = json.as_object_mut() {
+        obj.insert(
+            "model".to_string(),
+            serde_json::Value::String(model_override.to_string()),
+        );
+    }
+
+    if let Some(agents) = json.get_mut("agents").and_then(|v| v.as_object_mut()) {
+        for agent in agents.values_mut() {
+            if let Some(agent_obj) = agent.as_object_mut() {
+                agent_obj.insert(
+                    "model".to_string(),
+                    serde_json::Value::String(model_override.to_string()),
+                );
+                agent_obj.remove("variant");
+            }
+        }
+    }
+
+    if let Ok(updated) = serde_json::to_string_pretty(&json) {
+        if let Err(err) = std::fs::write(&target_path, updated) {
+            tracing::warn!(
+                "Failed to write oh-my-opencode config at {}: {}",
+                target_path.display(),
+                err
+            );
+        } else {
+            tracing::info!(
+                "Applied OpenCode model override {} to {}",
+                model_override,
+                target_path.display()
             );
         }
     }
@@ -5930,6 +6018,11 @@ pub async fn run_opencode_turn(
         needs_google,
     )
     .await;
+    if model.is_some() {
+        if let Some(model_override) = resolved_model.as_deref() {
+            apply_model_override_to_oh_my_opencode(&opencode_config_dir_host, model_override);
+        }
+    }
     sync_opencode_agent_config(
         &opencode_config_dir_host,
         default_model_override.as_deref(),

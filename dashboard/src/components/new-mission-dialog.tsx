@@ -4,7 +4,7 @@ import { useEffect, useRef, useState, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import { Plus, X, ExternalLink, RefreshCw } from 'lucide-react';
 import useSWR from 'swr';
-import { getVisibleAgents, getOpenAgentConfig, listBackends, listBackendAgents, getBackendConfig, getClaudeCodeConfig, getLibraryOpenCodeSettingsForProfile, type Backend, type BackendAgent } from '@/lib/api';
+import { getVisibleAgents, getOpenAgentConfig, listBackends, listBackendAgents, getBackendConfig, getClaudeCodeConfig, getLibraryOpenCodeSettingsForProfile, listProviders, type Backend, type BackendAgent, type Provider } from '@/lib/api';
 import type { Workspace } from '@/lib/api';
 
 /** Options returned by the dialog's getCreateOptions() method */
@@ -105,6 +105,7 @@ export function NewMissionDialog({
   const [newMissionWorkspace, setNewMissionWorkspace] = useState('');
   // Combined value: "backend:agent" or empty for default
   const [selectedAgentValue, setSelectedAgentValue] = useState('');
+  const [modelOverride, setModelOverride] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [defaultSet, setDefaultSet] = useState(false);
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -133,6 +134,12 @@ export function NewMissionDialog({
     revalidateOnFocus: false,
     dedupingInterval: 30000,
   });
+
+  const { data: providersResponse } = useSWR(
+    'model-providers',
+    () => listProviders({ includeAll: true }),
+    { revalidateOnFocus: false, dedupingInterval: 60000 }
+  );
 
   // Filter to only enabled backends with CLI available
   const enabledBackends = useMemo(() => {
@@ -293,6 +300,36 @@ export function NewMissionDialog({
     return backend && agent ? { backend, agent } : null;
   };
 
+  const selectedBackend = useMemo(() => {
+    return parseSelectedValue(selectedAgentValue)?.backend || 'claudecode';
+  }, [selectedAgentValue]);
+
+  const providerAllowlist = useMemo(() => {
+    if (selectedBackend === 'claudecode') return new Set(['anthropic']);
+    if (selectedBackend === 'codex') return new Set(['openai']);
+    return null;
+  }, [selectedBackend]);
+
+  const modelOptions = useMemo(() => {
+    const providers = (providersResponse?.providers || []) as Provider[];
+    const options: Array<{ value: string; label: string; description?: string }> = [];
+    for (const provider of providers) {
+      if (providerAllowlist && !providerAllowlist.has(provider.id)) continue;
+      for (const model of provider.models) {
+        const value =
+          selectedBackend === 'opencode'
+            ? `${provider.id}/${model.id}`
+            : model.id;
+        options.push({
+          value,
+          label: `${provider.name} — ${model.name}`,
+          description: model.description,
+        });
+      }
+    }
+    return options;
+  }, [providersResponse, providerAllowlist, selectedBackend]);
+
   const formatWorkspaceType = (type: Workspace['workspace_type']) =>
     type === 'host' ? 'host' : 'isolated';
 
@@ -397,9 +434,16 @@ export function NewMissionDialog({
     setDefaultSet(true);
   }, [open, defaultSet, allAgents, config, initialValues]);
 
+  useEffect(() => {
+    if (selectedBackend === 'amp' && modelOverride) {
+      setModelOverride('');
+    }
+  }, [selectedBackend, modelOverride]);
+
   const resetForm = () => {
     setNewMissionWorkspace('');
     setSelectedAgentValue('');
+    setModelOverride('');
     setDefaultSet(false);
   };
 
@@ -423,10 +467,20 @@ export function NewMissionDialog({
 
   const getCreateOptions = (): NewMissionDialogOptions => {
     const parsed = parseSelectedValue(selectedAgentValue);
+    const trimmedModel = modelOverride.trim();
+    const normalizedModel =
+      selectedBackend === 'opencode'
+        ? trimmedModel
+        : trimmedModel.includes('/')
+          ? trimmedModel.split('/').pop() || ''
+          : trimmedModel;
+    const modelOverrideValue =
+      selectedBackend === 'amp' || !normalizedModel ? undefined : normalizedModel;
     return {
       workspaceId: newMissionWorkspace || undefined,
       agent: parsed?.agent || undefined,
       backend: parsed?.backend || 'claudecode',
+      modelOverride: modelOverrideValue,
       configProfile: workspaceProfile || undefined,
     };
   };
@@ -564,6 +618,41 @@ export function NewMissionDialog({
               </select>
               <p className="text-xs text-white/30 mt-1.5">
                 Select an agent and backend to power this mission
+              </p>
+            </div>
+
+            {/* Model override */}
+            <div>
+              <label className="block text-xs text-white/50 mb-1.5">Model override (optional)</label>
+              <input
+                list="model-override-options"
+                value={modelOverride}
+                onChange={(e) => setModelOverride(e.target.value)}
+                disabled={selectedBackend === 'amp'}
+                placeholder={
+                  selectedBackend === 'opencode'
+                    ? 'openai/gpt-5.3-codex'
+                    : selectedBackend === 'codex'
+                      ? 'gpt-5.3-codex'
+                      : selectedBackend === 'claudecode'
+                        ? 'claude-opus-4-6'
+                        : 'model-id'
+                }
+                className="w-full rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2.5 text-sm text-white focus:border-indigo-500/50 focus:outline-none disabled:opacity-60"
+              />
+              <datalist id="model-override-options">
+                {modelOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </datalist>
+              <p className="text-xs text-white/30 mt-1.5">
+                {selectedBackend === 'amp'
+                  ? 'Amp ignores model overrides.'
+                  : selectedBackend === 'opencode'
+                    ? 'Use provider/model (e.g., openai/gpt-5.3-codex).'
+                    : 'Use the raw model ID (e.g., gpt-5.3-codex or claude-opus-4-6).'}
               </p>
             </div>
 
