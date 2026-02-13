@@ -50,7 +50,7 @@ fn strip_jsonc_comments(input: &str) -> String {
             match chars.peek() {
                 Some('/') => {
                     chars.next();
-                    while let Some(n) = chars.next() {
+                    for n in chars.by_ref() {
                         if n == '\n' {
                             out.push('\n');
                             break;
@@ -61,7 +61,7 @@ fn strip_jsonc_comments(input: &str) -> String {
                 Some('*') => {
                     chars.next();
                     let mut prev = '\0';
-                    while let Some(n) = chars.next() {
+                    for n in chars.by_ref() {
                         if prev == '*' && n == '/' {
                             break;
                         }

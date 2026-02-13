@@ -231,10 +231,11 @@ pub struct SkillFile {
 }
 
 /// Source/provenance of a skill - local or from skills.sh registry.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(tag = "type")]
 pub enum SkillSource {
     /// Locally created skill
+    #[default]
     Local,
     /// Skill installed from skills.sh registry
     SkillsRegistry {
@@ -253,12 +254,6 @@ pub enum SkillSource {
         #[serde(skip_serializing_if = "Option::is_none")]
         updated_at: Option<String>,
     },
-}
-
-impl Default for SkillSource {
-    fn default() -> Self {
-        SkillSource::Local
-    }
 }
 
 /// Skill summary for listing (without full content).

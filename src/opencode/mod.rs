@@ -1075,10 +1075,7 @@ fn parse_sse_event(
         }
     };
 
-    let event_type = match json.get("type").and_then(|v| v.as_str()).or(event_name) {
-        Some(event_type) => event_type,
-        None => return None,
-    };
+    let event_type = json.get("type").and_then(|v| v.as_str()).or(event_name)?;
     let props = json
         .get("properties")
         .cloned()
@@ -1319,7 +1316,7 @@ pub struct OpenCodeMessageResponse {
     pub parts: Vec<serde_json::Value>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default)]
 pub struct OpenCodeAssistantInfo {
     #[serde(default)]
     #[serde(rename = "providerID")]
@@ -1329,16 +1326,6 @@ pub struct OpenCodeAssistantInfo {
     pub model_id: Option<String>,
     #[serde(default)]
     pub error: Option<serde_json::Value>,
-}
-
-impl Default for OpenCodeAssistantInfo {
-    fn default() -> Self {
-        Self {
-            provider_id: None,
-            model_id: None,
-            error: None,
-        }
-    }
 }
 
 pub fn extract_text(parts: &[serde_json::Value]) -> String {

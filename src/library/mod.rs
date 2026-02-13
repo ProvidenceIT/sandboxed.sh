@@ -1500,7 +1500,7 @@ impl LibraryStore {
             };
 
             assembled.push_str(&content);
-            assembled.push_str("\n");
+            assembled.push('\n');
         }
 
         // Add skill setup commands if provided
@@ -1516,7 +1516,7 @@ impl LibraryStore {
                             // Auto-substitute npm with bun for faster installs
                             let cmd = Self::substitute_npm_with_bun(cmd);
                             assembled.push_str(&cmd);
-                            assembled.push_str("\n");
+                            assembled.push('\n');
                         }
                     }
                 }
@@ -1537,7 +1537,7 @@ impl LibraryStore {
                 };
 
                 assembled.push_str(&content);
-                assembled.push_str("\n");
+                assembled.push('\n');
             }
         }
 

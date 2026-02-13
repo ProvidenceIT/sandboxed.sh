@@ -471,6 +471,7 @@ pub enum MissionStoreType {
 
 impl MissionStoreType {
     /// Parse from environment variable value.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "memory" => Self::Memory,
@@ -478,6 +479,14 @@ impl MissionStoreType {
             "sqlite" | "db" => Self::Sqlite,
             _ => Self::default(),
         }
+    }
+}
+
+impl std::str::FromStr for MissionStoreType {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self::from_str(s))
     }
 }
 

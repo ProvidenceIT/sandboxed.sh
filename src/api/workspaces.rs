@@ -236,18 +236,14 @@ fn path_within(base: &Path, target: &Path) -> bool {
     } else {
         // For non-existent paths, find the nearest existing parent and verify it's within base
         let mut current = target.to_path_buf();
-        loop {
-            if let Some(parent) = current.parent() {
-                if parent.exists() {
-                    return match parent.canonicalize() {
-                        Ok(parent_canonical) => parent_canonical.starts_with(&base_canonical),
-                        Err(_) => false,
-                    };
-                }
-                current = parent.to_path_buf();
-            } else {
-                break;
+        while let Some(parent) = current.parent() {
+            if parent.exists() {
+                return match parent.canonicalize() {
+                    Ok(parent_canonical) => parent_canonical.starts_with(&base_canonical),
+                    Err(_) => false,
+                };
             }
+            current = parent.to_path_buf();
         }
         false
     }
@@ -1007,16 +1003,16 @@ async fn exec_workspace_command(
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Workspace {} not found", id)))?;
 
     // For container workspaces, ensure container is ready
-    if workspace.workspace_type == WorkspaceType::Container {
-        if workspace.status != WorkspaceStatus::Ready {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                format!(
-                    "Container workspace is not ready (status: {:?}). Build it first.",
-                    workspace.status
-                ),
-            ));
-        }
+    if workspace.workspace_type == WorkspaceType::Container
+        && workspace.status != WorkspaceStatus::Ready
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "Container workspace is not ready (status: {:?}). Build it first.",
+                workspace.status
+            ),
+        ));
     }
 
     let timeout = Duration::from_secs(req.timeout_secs.unwrap_or(300).min(600));
@@ -1321,7 +1317,7 @@ async fn get_workspace_debug(
     Ok(Json(WorkspaceDebugInfo {
         id: workspace.id,
         name: workspace.name.clone(),
-        status: workspace.status.clone(),
+        status: workspace.status,
         path: path.to_string_lossy().to_string(),
         path_exists,
         size_bytes,
@@ -1477,8 +1473,10 @@ async fn rerun_init_script(
         "/bin/sh"
     };
 
-    let mut config = crate::nspawn::NspawnConfig::default();
-    config.env = workspace.env_vars.clone();
+    let config = crate::nspawn::NspawnConfig {
+        env: workspace.env_vars.clone(),
+        ..Default::default()
+    };
 
     let command = vec![shell.to_string(), "/sandboxed-init.sh".to_string()];
     let output_result =

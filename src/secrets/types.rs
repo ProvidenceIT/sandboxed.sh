@@ -44,18 +44,13 @@ pub struct PublicKeyInfo {
 }
 
 /// Supported key algorithms.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum KeyAlgorithm {
     /// AES-256-GCM with key derived from passphrase (PBKDF2)
     /// Simple and portable - no RSA key management needed
+    #[default]
     Aes256Gcm,
-}
-
-impl Default for KeyAlgorithm {
-    fn default() -> Self {
-        Self::Aes256Gcm
-    }
 }
 
 /// A registry of encrypted secrets.
@@ -102,7 +97,7 @@ pub struct EncryptedSecret {
 }
 
 /// Metadata about a secret (not encrypted).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SecretMetadata {
     /// What type of secret this is
     #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
@@ -113,16 +108,6 @@ pub struct SecretMetadata {
     /// Additional non-sensitive info
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub labels: HashMap<String, String>,
-}
-
-impl Default for SecretMetadata {
-    fn default() -> Self {
-        Self {
-            secret_type: None,
-            expires_at: None,
-            labels: HashMap::new(),
-        }
-    }
 }
 
 /// Types of secrets that can be stored.

@@ -205,7 +205,7 @@ impl SecretsStore {
                 let mut crypto = self.crypto.write().await;
                 crypto.set_passphrase(passphrase.to_string());
 
-                if let Err(_) = crypto.decrypt(secret) {
+                if crypto.decrypt(secret).is_err() {
                     crypto.clear_passphrase();
                     anyhow::bail!("Invalid passphrase");
                 }

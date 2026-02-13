@@ -81,8 +81,8 @@ fn extract_thought_line(text: &str) -> Option<(String, String)> {
             || lower.starts_with("thinking:");
         if thought.is_none() && is_thought {
             let content = trimmed
-                .splitn(2, ':')
-                .nth(1)
+                .split_once(':')
+                .map(|(_, rest)| rest)
                 .unwrap_or("")
                 .trim()
                 .to_string();
@@ -348,10 +348,7 @@ fn parse_opencode_sse_event(
         Err(_) => return None,
     };
 
-    let event_type = match json.get("type").and_then(|v| v.as_str()).or(event_name) {
-        Some(event_type) => event_type,
-        None => return None,
-    };
+    let event_type = json.get("type").and_then(|v| v.as_str()).or(event_name)?;
     let props = json
         .get("properties")
         .cloned()
@@ -836,6 +833,7 @@ impl MissionRunner {
 
     /// Start executing the next queued message (if any and not already running).
     /// Returns true if execution was started.
+    #[allow(clippy::too_many_arguments)]
     pub fn start_next(
         &mut self,
         config: Config,
@@ -1056,6 +1054,7 @@ async fn resolve_library_command(library: &SharedLibrary, message: &str) -> Stri
 }
 
 /// Execute a single turn for a mission.
+#[allow(clippy::too_many_arguments)]
 async fn run_mission_turn(
     config: Config,
     _root_agent: AgentRef,
@@ -1167,7 +1166,7 @@ async fn run_mission_turn(
     convo.push_str(&deliverable_reminder);
     convo.push_str("\n\nInstructions:\n- Continue the conversation helpfully.\n- Use available tools to gather information or make changes.\n- For large data processing tasks (>10KB), prefer executing scripts rather than inline processing.\n- USE information already provided in the message - do not ask for URLs, paths, or details that were already given.\n- When you have fully completed the user's goal or determined it cannot be completed, state that clearly in your final response.");
     convo.push_str(multi_step_instructions);
-    convo.push_str("\n");
+    convo.push('\n');
 
     // Ensure mission workspace exists and is configured for OpenCode.
     let workspace = workspace::resolve_workspace(&workspaces, &config, workspace_id).await;
@@ -1181,7 +1180,7 @@ async fn run_mission_turn(
         );
     }
     let workspace_root = workspace.path.clone();
-    let mission_work_dir = match {
+    let mission_work_dir_result = {
         let lib_guard = library.read().await;
         let lib_ref = lib_guard.as_ref().map(|l| l.as_ref());
         workspace::prepare_mission_workspace_with_skills_backend(
@@ -1194,7 +1193,8 @@ async fn run_mission_turn(
             effective_config_profile.as_deref(),
         )
         .await
-    } {
+    };
+    let mission_work_dir = match mission_work_dir_result {
         Ok(dir) => {
             tracing::info!(
                 "Mission {} workspace directory: {}",
@@ -1519,6 +1519,7 @@ fn get_amp_url_from_settings() -> Option<String> {
 ///
 /// For Host workspaces: spawns the CLI directly on the host.
 /// For Container workspaces: spawns the CLI inside the container using systemd-nspawn.
+#[allow(clippy::too_many_arguments)]
 pub fn run_claudecode_turn<'a>(
     workspace: &'a Workspace,
     work_dir: &'a std::path::Path,
@@ -2105,12 +2106,10 @@ pub fn run_claudecode_turn<'a>(
                     tracing::debug!("Using API key for Claude CLI authentication");
                 }
             }
+        } else if has_cli_creds {
+            tracing::debug!("Using Claude CLI credentials from mission directory");
         } else {
-            if has_cli_creds {
-                tracing::debug!("Using Claude CLI credentials from mission directory");
-            } else {
-                tracing::warn!("No authentication available for Claude Code!");
-            }
+            tracing::warn!("No authentication available for Claude Code!");
         }
 
         // Handle case where cli_path might be a wrapper command like "bun /path/to/claude"
@@ -2146,17 +2145,17 @@ pub fn run_claudecode_turn<'a>(
                     resolve_command_path_in_workspace(&workspace_exec, work_dir, &program).await
                 {
                     let force_bun = env_var_bool("SANDBOXED_SH_CLAUDECODE_FORCE_BUN", false);
-                    let prefers_bun = if force_bun {
-                        true
-                    } else if claude_path.contains("/.bun/")
+                    let prefers_bun = force_bun
+                        || claude_path.contains("/.bun/")
                         || claude_path.contains("/.cache/.bun/")
-                    {
-                        true
-                    } else {
-                        claude_cli_shebang_contains(&workspace_exec, work_dir, &claude_path, "bun")
-                            .await
-                            .unwrap_or(false)
-                    };
+                        || claude_cli_shebang_contains(
+                            &workspace_exec,
+                            work_dir,
+                            &claude_path,
+                            "bun",
+                        )
+                        .await
+                        .unwrap_or(false);
                     let shebang_is_node = claude_cli_shebang_contains(
                         &workspace_exec,
                         work_dir,
@@ -2765,15 +2764,16 @@ pub fn run_claudecode_turn<'a>(
         }
 
         // If Claude reported an error but didn't provide a useful message, fall back to raw output.
-        if had_error && (final_result.trim().is_empty() || final_result.trim() == "Unknown error") {
-            if !non_json_output.is_empty() {
-                tracing::warn!(
-                    mission_id = %mission_id,
-                    exit_status = ?exit_status,
-                    "Claude Code failed with empty/generic error; using raw output excerpt"
-                );
-                final_result = format!("Claude Code error: {}", non_json_output.join(" | "));
-            }
+        if had_error
+            && (final_result.trim().is_empty() || final_result.trim() == "Unknown error")
+            && !non_json_output.is_empty()
+        {
+            tracing::warn!(
+                mission_id = %mission_id,
+                exit_status = ?exit_status,
+                "Claude Code failed with empty/generic error; using raw output excerpt"
+            );
+            final_result = format!("Claude Code error: {}", non_json_output.join(" | "));
         }
 
         if had_error {
@@ -2846,7 +2846,7 @@ fn strip_ansi_codes(input: &str) -> String {
             // Skip ANSI escape sequences like "\x1b[31m"
             if let Some('[') = chars.peek() {
                 let _ = chars.next();
-                while let Some(c) = chars.next() {
+                for c in chars.by_ref() {
                     if c == 'm' {
                         break;
                     }
@@ -3094,7 +3094,7 @@ fn strip_jsonc_comments(input: &str) -> String {
             match chars.peek() {
                 Some('/') => {
                     chars.next();
-                    while let Some(n) = chars.next() {
+                    for n in chars.by_ref() {
                         if n == '\n' {
                             out.push('\n');
                             break;
@@ -3105,7 +3105,7 @@ fn strip_jsonc_comments(input: &str) -> String {
                 Some('*') => {
                     chars.next();
                     let mut prev = '\0';
-                    while let Some(n) = chars.next() {
+                    for n in chars.by_ref() {
                         if prev == '*' && n == '/' {
                             break;
                         }
@@ -3360,6 +3360,7 @@ fn try_copy_host_oh_my_opencode_config(opencode_config_dir: &std::path::Path) ->
     false
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn ensure_oh_my_opencode_config(
     workspace_exec: &WorkspaceExec,
     work_dir: &std::path::Path,
@@ -3381,10 +3382,8 @@ async fn ensure_oh_my_opencode_config(
     let host_fallback = host_oh_my_opencode_config_is_fallback();
     let should_regen = matches!(host_fallback, Some(true)) && has_any_provider;
 
-    if !should_regen {
-        if try_copy_host_oh_my_opencode_config(opencode_config_dir_host) {
-            return;
-        }
+    if !should_regen && try_copy_host_oh_my_opencode_config(opencode_config_dir_host) {
+        return;
     }
 
     // No config found; run oh-my-opencode install in non-interactive mode to generate defaults.
@@ -5117,14 +5116,10 @@ async fn check_claudecode_connectivity(
     cwd: &std::path::Path,
 ) -> Result<(), String> {
     // First check basic internet connectivity
-    if let Err(e) = check_basic_internet_connectivity(workspace_exec, cwd).await {
-        return Err(e);
-    }
+    check_basic_internet_connectivity(workspace_exec, cwd).await?;
 
     // Then check DNS for Anthropic
-    if let Err(e) = check_dns_resolution(workspace_exec, cwd, ANTHROPIC_API.hostname).await {
-        return Err(e);
-    }
+    check_dns_resolution(workspace_exec, cwd, ANTHROPIC_API.hostname).await?;
 
     // Finally check Anthropic API reachability
     check_api_reachability(workspace_exec, cwd, ANTHROPIC_API.name, ANTHROPIC_API.url).await
@@ -5140,9 +5135,7 @@ async fn check_opencode_connectivity(
     has_google: bool,
 ) -> Result<(), String> {
     // First check basic internet connectivity
-    if let Err(e) = check_basic_internet_connectivity(workspace_exec, cwd).await {
-        return Err(e);
-    }
+    check_basic_internet_connectivity(workspace_exec, cwd).await?;
 
     // Determine which API to check based on configured providers
     // Priority: OpenAI > Anthropic > Google (most common first)
@@ -5161,9 +5154,7 @@ async fn check_opencode_connectivity(
 
     if let Some(api) = api {
         // Check DNS for the selected API
-        if let Err(e) = check_dns_resolution(workspace_exec, cwd, api.hostname).await {
-            return Err(e);
-        }
+        check_dns_resolution(workspace_exec, cwd, api.hostname).await?;
 
         // Check API reachability
         check_api_reachability(workspace_exec, cwd, api.name, api.url).await
@@ -5274,9 +5265,7 @@ async fn ensure_claudecode_cli_available(
         "npm install -g @anthropic-ai/claude-code@latest"
     };
 
-    let mut args = Vec::new();
-    args.push("-lc".to_string());
-    args.push(install_cmd.to_string());
+    let args = vec!["-lc".to_string(), install_cmd.to_string()];
     let output = workspace_exec
         .output(cwd, "/bin/sh", &args, HashMap::new())
         .await
@@ -5330,7 +5319,7 @@ async fn ensure_codex_cli_available(
     cwd: &std::path::Path,
     cli_path: &str,
 ) -> Result<String, String> {
-    let program = cli_path.splitn(2, ' ').next().unwrap_or(cli_path);
+    let program = cli_path.split(' ').next().unwrap_or(cli_path);
 
     // For container workspaces, the Codex npm package ships a Node.js ESM wrapper
     // that requires Node 20+. Containers often only have Node 18, which fails with
@@ -5352,7 +5341,11 @@ async fn ensure_codex_cli_available(
             if let Ok(dest_in_container) =
                 copy_host_executable_into_container(&workspace_exec.workspace, &to_copy)
             {
-                let rest = cli_path.splitn(2, ' ').nth(1).unwrap_or("").trim();
+                let rest = cli_path
+                    .split_once(' ')
+                    .map(|(_, rest)| rest)
+                    .unwrap_or("")
+                    .trim();
                 let container_cli = if rest.is_empty() {
                     dest_in_container.clone()
                 } else {
@@ -5360,7 +5353,7 @@ async fn ensure_codex_cli_available(
                 };
 
                 let dest_program = container_cli
-                    .splitn(2, ' ')
+                    .split(' ')
                     .next()
                     .unwrap_or(&dest_in_container);
                 if command_available(workspace_exec, cwd, dest_program).await {
@@ -5745,6 +5738,7 @@ async fn ensure_opencode_cli_available(
 ///
 /// This uses the `oh-my-opencode run` CLI which creates an embedded OpenCode server,
 /// enabling per-workspace isolation without network issues.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_opencode_turn(
     workspace: &Workspace,
     work_dir: &std::path::Path,
@@ -6183,7 +6177,6 @@ pub async fn run_opencode_turn(
         let sse_cancel = sse_cancel.clone();
         let events_tx = events_tx.clone();
         let opencode_port = opencode_port.clone();
-        let mission_id = mission_id;
         let sse_host = std::env::var("SANDBOXED_SH_OPENCODE_SERVER_HOSTNAME")
             .ok()
             .filter(|v| !v.trim().is_empty())
@@ -6350,8 +6343,8 @@ pub async fn run_opencode_turn(
     // Spawn a task to read stderr (just log in JSON mode, events come on stdout)
     let mission_id_clone = mission_id;
     let stderr_error_capture = sse_error_message.clone();
-    let stderr_handle = if let Some(stderr) = stderr {
-        Some(tokio::spawn(async move {
+    let stderr_handle = stderr.map(|stderr| {
+        tokio::spawn(async move {
             let stderr_reader = BufReader::new(stderr);
             let mut stderr_lines = stderr_reader.lines();
             while let Ok(Some(line)) = stderr_lines.next_line().await {
@@ -6375,10 +6368,8 @@ pub async fn run_opencode_turn(
                     }
                 }
             }
-        }))
-    } else {
-        None
-    };
+        })
+    });
 
     // Process stdout output from oh-my-opencode
     // Events come via SSE (when curl is available), stdout contains the assistant's text response.
@@ -6630,13 +6621,8 @@ pub async fn run_opencode_turn(
         }
     }
 
-    if emitted_thinking {
-        let _ = events_tx.send(AgentEvent::Thinking {
-            content: String::new(),
-            done: true,
-            mission_id: Some(mission_id),
-        });
-    } else if sse_emitted && !sse_done_sent.load(std::sync::atomic::Ordering::SeqCst) {
+    if emitted_thinking || (sse_emitted && !sse_done_sent.load(std::sync::atomic::Ordering::SeqCst))
+    {
         let _ = events_tx.send(AgentEvent::Thinking {
             content: String::new(),
             done: true,
@@ -6681,6 +6667,7 @@ pub async fn run_opencode_turn(
 ///
 /// For Host workspaces: spawns the CLI directly on the host.
 /// For Container workspaces: spawns the CLI inside the container using systemd-nspawn.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_amp_turn(
     workspace: &Workspace,
     work_dir: &std::path::Path,
@@ -6943,8 +6930,8 @@ pub async fn run_amp_turn(
     let stderr_capture = std::sync::Arc::new(tokio::sync::Mutex::new(String::new()));
     let stderr_capture_clone = stderr_capture.clone();
     let mission_id_for_stderr = mission_id;
-    let stderr_handle = if let Some(stderr) = stderr {
-        Some(tokio::spawn(async move {
+    let stderr_handle = stderr.map(|stderr| {
+        tokio::spawn(async move {
             let stderr_reader = BufReader::new(stderr);
             let mut stderr_lines = stderr_reader.lines();
             while let Ok(Some(line)) = stderr_lines.next_line().await {
@@ -6958,10 +6945,8 @@ pub async fn run_amp_turn(
                     captured.push_str(trimmed);
                 }
             }
-        }))
-    } else {
-        None
-    };
+        })
+    });
 
     // Track tool calls for result mapping
     let mut pending_tools: HashMap<String, String> = HashMap::new();
@@ -7220,10 +7205,8 @@ pub async fn run_amp_turn(
                                     // with success=false which the UI displays as a failure message.
                                     // Sending Error here would cause duplicate messages.
                                     final_result = err_msg;
-                                } else {
-                                    if let Some(result) = res.result {
-                                        final_result = result;
-                                    }
+                                } else if let Some(result) = res.result {
+                                    final_result = result;
                                 }
 
                                 tracing::debug!(
@@ -7426,6 +7409,7 @@ impl From<&MissionRunner> for RunningMissionInfo {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run_codex_turn(
     workspace: &Workspace,
     mission_work_dir: &std::path::Path,
@@ -7493,8 +7477,10 @@ pub async fn run_codex_turn(
         "Starting Codex execution via WorkspaceExec"
     );
 
-    let mut codex_config = crate::backend::codex::client::CodexConfig::default();
-    codex_config.cli_path = cli_path;
+    let codex_config = crate::backend::codex::client::CodexConfig {
+        cli_path,
+        ..Default::default()
+    };
 
     // Create Codex backend
     let backend = CodexBackend::with_config_and_workspace(codex_config, workspace_exec);

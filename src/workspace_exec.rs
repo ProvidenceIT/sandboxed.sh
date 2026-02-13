@@ -434,6 +434,7 @@ impl WorkspaceExec {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build_nsenter_command(
         &self,
         leader: &str,
@@ -484,6 +485,7 @@ impl WorkspaceExec {
         Ok(cmd)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn build_command(
         &self,
         cwd: &Path,

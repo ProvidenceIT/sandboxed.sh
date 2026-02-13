@@ -283,7 +283,7 @@ fn google_authorize_url(challenge: &str, state: &str) -> Result<String, String> 
     let client_id = google_client_id();
 
     url.query_pairs_mut()
-        .append_pair("client_id", &client_id)
+        .append_pair("client_id", client_id)
         .append_pair("response_type", "code")
         .append_pair("redirect_uri", GOOGLE_REDIRECT_URI)
         .append_pair("scope", GOOGLE_SCOPES)
@@ -899,6 +899,7 @@ fn looks_like_json_file(path: &std::path::Path) -> bool {
     matches!(first, Some('{') | Some('['))
 }
 
+/// Get OpenAI auth from OpenCode auth.json (shared with OpenCode).
 fn get_openai_api_key_from_opencode_auth() -> Option<String> {
     let auth = read_opencode_auth().ok()?;
 
@@ -1012,11 +1013,6 @@ fn get_openai_api_key_for_codex(working_dir: &Path) -> Option<String> {
 /// - OpenAI provider is not configured for codex
 /// - No credentials are available (neither API key nor OAuth)
 /// - Any error occurs reading the config
-
-/// Get OpenAI auth from OpenCode auth.json (shared with OpenCode).
-
-/// Write Codex config.toml from explicit OAuth values.
-/// Find the host's existing Codex auth.json file.
 ///
 /// The Codex CLI stores its auth in `~/.codex/auth.json`, which contains
 /// fields (id_token, account_id) that are only obtained during the interactive
@@ -1406,13 +1402,7 @@ fn build_provider_response(
         .unwrap_or(false);
     let status = match auth {
         Some(AuthKind::ApiKey) | Some(AuthKind::OAuth) => ProviderStatusResponse::Connected,
-        None => {
-            if provider_type.uses_oauth() {
-                ProviderStatusResponse::NeedsAuth { auth_url: None }
-            } else {
-                ProviderStatusResponse::NeedsAuth { auth_url: None }
-            }
-        }
+        None => ProviderStatusResponse::NeedsAuth { auth_url: None },
     };
 
     // Most providers are only usable via OpenCode, but we still store and render
@@ -2027,6 +2017,7 @@ fn acquire_oauth_refresh_lock(provider_type: ProviderType) -> Result<std::fs::Fi
 
     let lock_file = std::fs::OpenOptions::new()
         .create(true)
+        .truncate(true)
         .write(true)
         .open(&lock_path)
         .map_err(|e| format!("Failed to open lock file: {}", e))?;
@@ -2319,40 +2310,38 @@ pub async fn refresh_openai_oauth_token() -> Result<(), String> {
             error_text
         );
         let lower = error_text.to_lowercase();
-        if status == reqwest::StatusCode::BAD_REQUEST || status == reqwest::StatusCode::UNAUTHORIZED
+        if (status == reqwest::StatusCode::BAD_REQUEST
+            || status == reqwest::StatusCode::UNAUTHORIZED)
+            && (lower.contains("invalid_grant") || lower.contains("refresh_token_reused"))
         {
-            if lower.contains("invalid_grant") || lower.contains("refresh_token_reused") {
-                // Before deleting credentials, check if another process just refreshed the token
-                tracing::warn!("Received invalid_grant/refresh_token_reused error. Checking if token was recently refreshed...");
+            // Before deleting credentials, check if another process just refreshed the token
+            tracing::warn!("Received invalid_grant/refresh_token_reused error. Checking if token was recently refreshed...");
 
-                // Wait a moment and re-read credentials
-                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            // Wait a moment and re-read credentials
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
-                // Re-read token entry to see if it was updated
-                if let Some(updated_entry) = read_oauth_token_entry(ProviderType::OpenAI) {
-                    // Check if the refresh token changed (indicating a recent refresh)
-                    if updated_entry.refresh_token != refresh_token {
-                        tracing::info!(
-                            "Token was refreshed by another process after invalid_grant"
-                        );
-                        return Ok(());
-                    }
-
-                    // Check if access token is now valid
-                    if !oauth_token_expired(updated_entry.expires_at) {
-                        tracing::info!("Token is now valid after invalid_grant");
-                        return Ok(());
-                    }
+            // Re-read token entry to see if it was updated
+            if let Some(updated_entry) = read_oauth_token_entry(ProviderType::OpenAI) {
+                // Check if the refresh token changed (indicating a recent refresh)
+                if updated_entry.refresh_token != refresh_token {
+                    tracing::info!("Token was refreshed by another process after invalid_grant");
+                    return Ok(());
                 }
 
-                // Token is genuinely invalid - delete it
-                tracing::error!("Refresh token is genuinely invalid. Removing credentials.");
-                if let Err(e) = remove_opencode_auth_entry(ProviderType::OpenAI) {
-                    tracing::warn!(
-                        "Failed to clear OpenAI auth entry after refresh failure: {}",
-                        e
-                    );
+                // Check if access token is now valid
+                if !oauth_token_expired(updated_entry.expires_at) {
+                    tracing::info!("Token is now valid after invalid_grant");
+                    return Ok(());
                 }
+            }
+
+            // Token is genuinely invalid - delete it
+            tracing::error!("Refresh token is genuinely invalid. Removing credentials.");
+            if let Err(e) = remove_opencode_auth_entry(ProviderType::OpenAI) {
+                tracing::warn!(
+                    "Failed to clear OpenAI auth entry after refresh failure: {}",
+                    e
+                );
             }
         }
         return Err(format!(
@@ -2936,7 +2925,7 @@ fn strip_jsonc_comments(input: &str) -> String {
             match chars.peek() {
                 Some('/') => {
                     chars.next();
-                    while let Some(n) = chars.next() {
+                    for n in chars.by_ref() {
                         if n == '\n' {
                             out.push('\n');
                             break;
@@ -2947,7 +2936,7 @@ fn strip_jsonc_comments(input: &str) -> String {
                 Some('*') => {
                     chars.next();
                     let mut prev = '\0';
-                    while let Some(n) = chars.next() {
+                    for n in chars.by_ref() {
                         if prev == '*' && n == '/' {
                             break;
                         }
@@ -3137,7 +3126,7 @@ fn remove_provider_config_entry(config: &mut serde_json::Value, provider: Provid
 
 fn get_default_provider(config: &serde_json::Value) -> Option<ProviderType> {
     let model = config.get("model").and_then(|v| v.as_str())?;
-    let provider = model.splitn(2, '/').next()?.trim();
+    let provider = model.split('/').next()?.trim();
     ProviderType::from_id(provider)
 }
 
@@ -3301,9 +3290,9 @@ fn read_opencode_auth_map() -> Result<HashMap<ProviderType, AuthKind>, String> {
         }
     }
 
-    if !out.contains_key(&ProviderType::OpenAI) {
+    if let std::collections::hash_map::Entry::Vacant(entry) = out.entry(ProviderType::OpenAI) {
         if let Ok(Some(kind)) = read_opencode_provider_auth(ProviderType::OpenAI) {
-            out.insert(ProviderType::OpenAI, kind);
+            entry.insert(kind);
         }
     }
 
@@ -3874,11 +3863,9 @@ async fn update_provider(
         }
     }
 
-    if let Some(base_url) = req.base_url.as_ref() {
-        if let Some(ref url) = base_url {
-            if url::Url::parse(url).is_err() {
-                return Err((StatusCode::BAD_REQUEST, "Invalid URL format".to_string()));
-            }
+    if let Some(Some(base_url)) = req.base_url.as_ref() {
+        if url::Url::parse(base_url).is_err() {
+            return Err((StatusCode::BAD_REQUEST, "Invalid URL format".to_string()));
         }
     }
 
@@ -4186,13 +4173,13 @@ async fn oauth_authorize(
 
             url.query_pairs_mut()
                 .append_pair("code", "true")
-                .append_pair("client_id", &client_id)
+                .append_pair("client_id", client_id.as_str())
                 .append_pair("response_type", "code")
-                .append_pair("redirect_uri", &redirect_uri)
+                .append_pair("redirect_uri", redirect_uri.as_str())
                 .append_pair("scope", scope)
-                .append_pair("code_challenge", &challenge)
+                .append_pair("code_challenge", challenge.as_str())
                 .append_pair("code_challenge_method", "S256")
-                .append_pair("state", &verifier);
+                .append_pair("state", verifier.as_str());
 
             // Store pending OAuth
             {
@@ -4780,8 +4767,8 @@ async fn oauth_callback_inner(
             let client_id = google_client_id();
             let client_secret = google_client_secret();
             let token_body = url::form_urlencoded::Serializer::new(String::new())
-                .append_pair("client_id", &client_id)
-                .append_pair("client_secret", &client_secret)
+                .append_pair("client_id", client_id)
+                .append_pair("client_secret", client_secret)
                 .append_pair("code", &code)
                 .append_pair("grant_type", "authorization_code")
                 .append_pair("redirect_uri", GOOGLE_REDIRECT_URI)

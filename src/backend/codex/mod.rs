@@ -206,11 +206,11 @@ fn convert_codex_event(
         item_id: &str,
     ) -> bool {
         let key = format!("tool_call:{}", item_id);
-        if item_content_cache.contains_key(&key) {
-            true
-        } else {
-            item_content_cache.insert(key, "1".to_string());
+        if let std::collections::hash_map::Entry::Vacant(entry) = item_content_cache.entry(key) {
+            entry.insert("1".to_string());
             false
+        } else {
+            true
         }
     }
 

@@ -84,9 +84,10 @@ pub fn allow_container_fallback() -> bool {
 }
 
 /// Supported Linux distributions for container environments.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum NspawnDistro {
     /// Ubuntu Noble (24.04 LTS)
+    #[default]
     UbuntuNoble,
     /// Ubuntu Jammy (22.04 LTS)
     UbuntuJammy,
@@ -142,12 +143,6 @@ impl NspawnDistro {
             Self::DebianBookworm => "http://deb.debian.org/debian",
             Self::ArchLinux => "https://geo.mirror.pkgbuild.com/",
         }
-    }
-}
-
-impl Default for NspawnDistro {
-    fn default() -> Self {
-        Self::UbuntuNoble
     }
 }
 

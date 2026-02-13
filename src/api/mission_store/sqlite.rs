@@ -15,6 +15,8 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+type LegacyAutomationRow = (String, String, String, i64, i64, String, Option<String>);
+
 const SCHEMA: &str = r#"
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
@@ -438,8 +440,8 @@ impl SqliteMissionStore {
                 .prepare("SELECT id, mission_id, command_name, interval_seconds, active, created_at, last_triggered_at FROM automations")
                 .map_err(|e| format!("Failed to read old automations: {}", e))?;
 
-            let old_automations: Vec<(String, String, String, i64, i64, String, Option<String>)> =
-                stmt.query_map([], |row| {
+            let old_automations: Vec<LegacyAutomationRow> = stmt
+                .query_map([], |row| {
                     Ok((
                         row.get(0)?,
                         row.get(1)?,
@@ -1677,7 +1679,7 @@ impl MissionStore for SqliteMissionStore {
                             retry_max_retries, retry_delay_seconds, retry_backoff_multiplier
                      FROM automations WHERE id = ?",
                     [id_str],
-                    |row| Self::parse_automation_row(row),
+                    Self::parse_automation_row,
                 )
                 .optional()
                 .map_err(|e| e.to_string())?;
@@ -1819,7 +1821,7 @@ impl MissionStore for SqliteMissionStore {
                      FROM automations
                      WHERE trigger_type = 'webhook' AND json_extract(trigger_data, '$.webhook_id') = ?",
                     [webhook_id],
-                    |row| Self::parse_automation_row(row),
+                    Self::parse_automation_row,
                 )
                 .optional()
                 .map_err(|e| e.to_string())?;

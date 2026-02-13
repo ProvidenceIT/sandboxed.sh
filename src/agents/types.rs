@@ -14,8 +14,17 @@ impl AgentId {
     }
 
     /// Create an agent ID from a string (for testing).
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         Self(Uuid::parse_str(s).unwrap_or_else(|_| Uuid::new_v4()))
+    }
+}
+
+impl std::str::FromStr for AgentId {
+    type Err = uuid::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Uuid::parse_str(s).map(Self)
     }
 }
 

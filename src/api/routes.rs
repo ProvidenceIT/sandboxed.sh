@@ -905,6 +905,7 @@ async fn create_task(
 }
 
 /// Run the agent for a task (background).
+#[allow(clippy::too_many_arguments)]
 async fn run_agent_task(
     state: Arc<AppState>,
     user_id: String,

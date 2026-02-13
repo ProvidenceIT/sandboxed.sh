@@ -185,8 +185,8 @@ fn validate_command(cmd: &str) -> Result<(), String> {
             safe = true;
         } else {
             for prefix in prefixes {
-                if cmd_trimmed.starts_with(prefix) {
-                    let after_prefix = cmd_trimmed[prefix.len()..].trim_start();
+                if let Some(after_prefix) = cmd_trimmed.strip_prefix(prefix) {
+                    let after_prefix = after_prefix.trim_start();
                     if after_prefix.starts_with("find /root") {
                         safe = true;
                         break;
@@ -204,8 +204,8 @@ fn validate_command(cmd: &str) -> Result<(), String> {
             safe = true;
         } else {
             for prefix in prefixes {
-                if cmd_trimmed.starts_with(prefix) {
-                    let after_prefix = cmd_trimmed[prefix.len()..].trim_start();
+                if let Some(after_prefix) = cmd_trimmed.strip_prefix(prefix) {
+                    let after_prefix = after_prefix.trim_start();
                     if grep_prefixes.iter().any(|p| after_prefix.starts_with(p)) {
                         safe = true;
                         break;
@@ -234,8 +234,7 @@ fn validate_command(cmd: &str) -> Result<(), String> {
         }
         // Also check for the pattern after common prefixes (sudo, time, etc.)
         for prefix in prefixes {
-            if cmd_trimmed.starts_with(prefix) {
-                let after_prefix = &cmd_trimmed[prefix.len()..];
+            if let Some(after_prefix) = cmd_trimmed.strip_prefix(prefix) {
                 if after_prefix.starts_with(pattern) {
                     if (pattern == &"find /" || pattern == &"find / ") && is_safe_root_find {
                         continue;
