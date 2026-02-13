@@ -2458,6 +2458,19 @@ export default function ControlClient() {
 
   // Thinking panel state
   const [showThinkingPanel, setShowThinkingPanel] = useState(false);
+  const [thinkingPanelManuallyHidden, setThinkingPanelManuallyHidden] = useState(false);
+  const handleToggleThinkingPanel = useCallback(() => {
+    setShowThinkingPanel((prev) => {
+      const next = !prev;
+      setThinkingPanelManuallyHidden(!next);
+      return next;
+    });
+  }, []);
+
+  const handleCloseThinkingPanel = useCallback(() => {
+    setShowThinkingPanel(false);
+    setThinkingPanelManuallyHidden(true);
+  }, []);
 
   const adjustVisibleItemsLimit = useCallback((historyItems: ChatItem[]) => {
     let lastAssistantIdx = -1;
@@ -2632,11 +2645,15 @@ export default function ControlClient() {
 
   useEffect(() => {
     // Only auto-show when transitioning from no active thinking to active thinking
-    if (hasActiveThinking && !prevHasActiveThinking.current) {
+    if (hasActiveThinking && !prevHasActiveThinking.current && !thinkingPanelManuallyHidden) {
       setShowThinkingPanel(true);
     }
     prevHasActiveThinking.current = hasActiveThinking;
-  }, [hasActiveThinking]);
+  }, [hasActiveThinking, thinkingPanelManuallyHidden]);
+
+  useEffect(() => {
+    setThinkingPanelManuallyHidden(false);
+  }, [missionId]);
 
   // Group consecutive tool items and thinking items for collapsed display
   // Returns array of: original items OR { kind: "tool_group", tools: [...] } OR { kind: "thinking_group", thoughts: [...] }
@@ -5762,7 +5779,7 @@ export default function ControlClient() {
 
           {/* Thinking panel toggle */}
           <button
-            onClick={() => setShowThinkingPanel(!showThinkingPanel)}
+            onClick={handleToggleThinkingPanel}
             className={cn(
               "flex items-center gap-2 rounded-lg border px-3 py-2 text-sm transition-colors",
               showThinkingPanel
@@ -6985,7 +7002,7 @@ export default function ControlClient() {
             {showThinkingPanel && (
               <ThinkingPanel
                 items={thinkingItems}
-                onClose={() => setShowThinkingPanel(false)}
+                onClose={handleCloseThinkingPanel}
                 className={showDesktopStream ? "flex-shrink-0 max-h-[40%]" : "flex-1"}
                 basePath={missionWorkingDirectory}
                 missionId={viewingMissionId}
