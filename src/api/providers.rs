@@ -453,33 +453,34 @@ pub async fn list_backend_model_options(
     let mut backends: std::collections::HashMap<String, Vec<BackendModelOption>> =
         std::collections::HashMap::new();
 
-    let mut push_options = |backend: &str, allowlist: Option<&[&str]>, use_provider_prefix: bool| {
-        let mut options = Vec::new();
-        for provider in &providers {
-            if let Some(allowed) = allowlist {
-                if !allowed.iter().any(|id| *id == provider.id) {
-                    continue;
+    let mut push_options =
+        |backend: &str, allowlist: Option<&[&str]>, use_provider_prefix: bool| {
+            let mut options = Vec::new();
+            for provider in &providers {
+                if let Some(allowed) = allowlist {
+                    if !allowed.iter().any(|id| *id == provider.id) {
+                        continue;
+                    }
+                }
+                // Determine if this is a custom provider (billing type "custom")
+                let is_custom = provider.billing == "custom";
+                for model in &provider.models {
+                    let value = if use_provider_prefix {
+                        format!("{}/{}", provider.id, model.id)
+                    } else {
+                        model.id.clone()
+                    };
+                    options.push(BackendModelOption {
+                        value,
+                        label: format!("{} — {}", provider.name, model.name),
+                        description: model.description.clone(),
+                        // Include provider_id for custom providers to show the resolved ID
+                        provider_id: if is_custom { Some(provider.id.clone()) } else { None },
+                    });
                 }
             }
-            // Determine if this is a custom provider (billing type "custom")
-            let is_custom = provider.billing == "custom";
-            for model in &provider.models {
-                let value = if use_provider_prefix {
-                    format!("{}/{}", provider.id, model.id)
-                } else {
-                    model.id.clone()
-                };
-                options.push(BackendModelOption {
-                    value,
-                    label: format!("{} — {}", provider.name, model.name),
-                    description: model.description.clone(),
-                    // Include provider_id for custom providers to show the resolved ID
-                    provider_id: if is_custom { Some(provider.id.clone()) } else { None },
-                });
-            }
-        }
-        backends.insert(backend.to_string(), options);
-    };
+            backends.insert(backend.to_string(), options);
+        };
 
     push_options("claudecode", Some(&["anthropic"]), false);
     push_options("codex", Some(&["openai"]), false);
@@ -545,7 +546,13 @@ pub async fn validate_model_override(
                             "Model '{}' not found for provider '{}'. Available models: {}",
                             model_id,
                             provider_id,
-                            provider.models.iter().map(|m| &m.id).cloned().collect::<Vec<_>>().join(", ")
+                            provider
+                                .models
+                                .iter()
+                                .map(|m| &m.id)
+                                .cloned()
+                                .collect::<Vec<_>>()
+                                .join(", ")
                         ));
                     }
                 }
@@ -571,7 +578,13 @@ pub async fn validate_model_override(
                         return Err(format!(
                             "Model '{}' not found in Anthropic catalog. Available models: {}. For custom Claude models, use format 'claude-*'",
                             model_override,
-                            provider.models.iter().map(|m| &m.id).cloned().collect::<Vec<_>>().join(", ")
+                            provider
+                                .models
+                                .iter()
+                                .map(|m| &m.id)
+                                .cloned()
+                                .collect::<Vec<_>>()
+                                .join(", ")
                         ));
                     }
                 } else {
@@ -602,7 +615,13 @@ pub async fn validate_model_override(
                         return Err(format!(
                             "Model '{}' not found in OpenAI catalog. Available models: {}. For custom OpenAI models, use format 'gpt-*' or 'o1-*'",
                             model_override,
-                            provider.models.iter().map(|m| &m.id).cloned().collect::<Vec<_>>().join(", ")
+                            provider
+                                .models
+                                .iter()
+                                .map(|m| &m.id)
+                                .cloned()
+                                .collect::<Vec<_>>()
+                                .join(", ")
                         ));
                     }
                 } else {
