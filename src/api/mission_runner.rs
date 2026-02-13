@@ -6723,24 +6723,25 @@ pub async fn run_opencode_turn(
     }
 
     // Wait for child process to finish and clean up (with timeout to avoid hangs)
-    let exit_status = match tokio::time::timeout(std::time::Duration::from_secs(10), child.wait()).await {
-        Ok(status) => status,
-        Err(_) => {
-            tracing::warn!(
-                mission_id = %mission_id,
-                "OpenCode CLI wait timed out; forcing shutdown"
-            );
-            let _ = child.kill().await;
-            had_error = true;
-            if final_result.is_empty() {
-                final_result = "OpenCode CLI did not exit after completion".to_string();
+    let exit_status =
+        match tokio::time::timeout(std::time::Duration::from_secs(10), child.wait()).await {
+            Ok(status) => status,
+            Err(_) => {
+                tracing::warn!(
+                    mission_id = %mission_id,
+                    "OpenCode CLI wait timed out; forcing shutdown"
+                );
+                let _ = child.kill().await;
+                had_error = true;
+                if final_result.is_empty() {
+                    final_result = "OpenCode CLI did not exit after completion".to_string();
+                }
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "OpenCode CLI wait timed out",
+                ))
             }
-            Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "OpenCode CLI wait timed out",
-            ))
-        }
-    };
+        };
 
     sse_cancel.cancel();
     if let Some(handle) = sse_handle {
@@ -6819,10 +6820,7 @@ pub async fn run_opencode_turn(
         had_error = false;
     }
 
-    if had_error
-        && !final_result.trim().is_empty()
-        && sse_error_message.lock().unwrap().is_none()
-    {
+    if had_error && !final_result.trim().is_empty() && sse_error_message.lock().unwrap().is_none() {
         had_error = false;
     }
 

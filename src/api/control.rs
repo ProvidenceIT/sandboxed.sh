@@ -1539,8 +1539,7 @@ pub async fn create_mission(
     // Validate model override if provided
     if let Some(ref model) = model_override {
         let backend_id = backend.as_deref().unwrap_or("claudecode");
-        if let Err(e) = super::providers::validate_model_override(&state, backend_id, model).await
-        {
+        if let Err(e) = super::providers::validate_model_override(&state, backend_id, model).await {
             return Err((StatusCode::BAD_REQUEST, e));
         }
     }
@@ -5875,13 +5874,12 @@ pub async fn create_automation(
 
     // For interval-based triggers, if start_immediately is false, set last_triggered_at
     // to now so the scheduler waits for the full interval before the first trigger.
-    let last_triggered_at = if !start_immediately
-        && matches!(trigger, mission_store::TriggerType::Interval { .. })
-    {
-        Some(mission_store::now_string())
-    } else {
-        None
-    };
+    let last_triggered_at =
+        if !start_immediately && matches!(trigger, mission_store::TriggerType::Interval { .. }) {
+            Some(mission_store::now_string())
+        } else {
+            None
+        };
 
     // Build the complete Automation struct
     let automation = mission_store::Automation {
