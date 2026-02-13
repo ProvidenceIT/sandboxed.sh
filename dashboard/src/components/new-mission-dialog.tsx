@@ -633,34 +633,62 @@ export function NewMissionDialog({
             {/* Model override */}
             <div>
               <label className="block text-xs text-white/50 mb-1.5">Model override (optional)</label>
-              <input
-                list="model-override-options"
+              <select
                 value={modelOverride}
                 onChange={(e) => setModelOverride(e.target.value)}
                 disabled={selectedBackend === 'amp'}
-                placeholder={
-                  selectedBackend === 'opencode'
-                    ? 'openai/gpt-5.3-codex'
-                    : selectedBackend === 'codex'
-                      ? 'gpt-5.3-codex'
-                      : selectedBackend === 'claudecode'
-                        ? 'claude-opus-4-6'
-                        : 'model-id'
-                }
-                className="w-full rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2.5 text-sm text-white focus:border-indigo-500/50 focus:outline-none disabled:opacity-60"
-              />
-              <datalist id="model-override-options">
-                {modelOptions.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </datalist>
+                className="w-full rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2.5 text-sm text-white focus:border-indigo-500/50 focus:outline-none disabled:opacity-60 [&>option]:bg-slate-800 [&>option]:text-white [&>optgroup]:bg-slate-900 [&>optgroup]:text-white/70"
+              >
+                <option value="">
+                  {selectedBackend === 'amp'
+                    ? 'No override (Amp ignores model overrides)'
+                    : 'No override (use default)'}
+                </option>
+                {(() => {
+                  // Group options by provider
+                  const providers = (providersResponse?.providers || []) as Provider[];
+                  const groupedOptions = new Map<string, Array<{ value: string; label: string; description?: string; provider_id?: string }>>();
+
+                  for (const option of modelOptions) {
+                    // Extract provider from the label (format: "Provider Name — Model Name")
+                    const providerName = option.label.split(' — ')[0] || 'Other';
+                    if (!groupedOptions.has(providerName)) {
+                      groupedOptions.set(providerName, []);
+                    }
+                    groupedOptions.get(providerName)!.push(option);
+                  }
+
+                  return Array.from(groupedOptions.entries()).map(([providerName, options]) => {
+                    // For custom providers, include the provider ID in the label
+                    const firstOption = options[0];
+                    const groupLabel = firstOption?.provider_id
+                      ? `${providerName} (ID: ${firstOption.provider_id})`
+                      : providerName;
+
+                    return (
+                      <optgroup key={providerName} label={groupLabel}>
+                        {options.map((option) => {
+                          // Extract just the model name from the label
+                          const modelName = option.label.split(' — ')[1] || option.label;
+                          const displayText = option.description
+                            ? `${modelName} - ${option.description}`
+                            : modelName;
+                          return (
+                            <option key={option.value} value={option.value}>
+                              {displayText}
+                            </option>
+                          );
+                        })}
+                      </optgroup>
+                    );
+                  });
+                })()}
+              </select>
               <p className="text-xs text-white/30 mt-1.5">
                 {selectedBackend === 'amp'
                   ? 'Amp ignores model overrides.'
                   : selectedBackend === 'opencode'
-                    ? 'Use provider/model (e.g., openai/gpt-5.3-codex).'
+                    ? 'Use provider/model format (e.g., openai/gpt-5.3-codex).'
                     : 'Use the raw model ID (e.g., gpt-5.3-codex or claude-opus-4-6).'}
               </p>
             </div>

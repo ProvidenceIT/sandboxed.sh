@@ -1536,6 +1536,15 @@ pub async fn create_mission(
         }
     }
 
+    // Validate model override if provided
+    if let Some(ref model) = model_override {
+        let backend_id = backend.as_deref().unwrap_or("claudecode");
+        if let Err(e) = super::providers::validate_model_override(&state, backend_id, model).await
+        {
+            return Err((StatusCode::BAD_REQUEST, e));
+        }
+    }
+
     // If no model_override specified, resolve from config profile for Claude Code
     if backend.as_deref() == Some("claudecode") && model_override.is_none() {
         if let Some(default_model) =

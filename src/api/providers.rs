@@ -66,6 +66,9 @@ pub struct BackendModelOption {
     /// Optional description
     #[serde(default)]
     pub description: Option<String>,
+    /// Provider ID (for custom providers, shows the sanitized ID used in config)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_id: Option<String>,
 }
 
 /// Response for backend model options.
@@ -458,6 +461,8 @@ pub async fn list_backend_model_options(
                     continue;
                 }
             }
+            // Determine if this is a custom provider (billing type "custom")
+            let is_custom = provider.billing == "custom";
             for model in &provider.models {
                 let value = if use_provider_prefix {
                     format!("{}/{}", provider.id, model.id)
@@ -468,6 +473,8 @@ pub async fn list_backend_model_options(
                     value,
                     label: format!("{} — {}", provider.name, model.name),
                     description: model.description.clone(),
+                    // Include provider_id for custom providers to show the resolved ID
+                    provider_id: if is_custom { Some(provider.id.clone()) } else { None },
                 });
             }
         }
@@ -480,4 +487,143 @@ pub async fn list_backend_model_options(
     backends.entry("amp".to_string()).or_default();
 
     Json(BackendModelOptionsResponse { backends })
+}
+
+/// Validate a model override for a specific backend.
+/// Returns Ok(()) if valid, Err with user-friendly error message if invalid.
+/// Allows custom/unknown models (escape hatch) but validates known providers.
+pub async fn validate_model_override(
+    state: &AppState,
+    backend: &str,
+    model_override: &str,
+) -> Result<(), String> {
+    // Amp ignores model overrides, so no validation needed
+    if backend == "amp" {
+        return Ok(());
+    }
+
+    let working_dir = state.config.working_dir.to_string_lossy().to_string();
+    let config = load_providers_config(&working_dir);
+    let configured = get_configured_provider_ids(state.config.working_dir.as_path());
+
+    // Load all providers (including configured and custom)
+    let mut providers = config.providers;
+    let custom_providers = state.ai_providers.list().await;
+    for provider in custom_providers {
+        if provider.provider_type != ProviderType::Custom || !provider.enabled {
+            continue;
+        }
+        let id = sanitize_custom_provider_id(&provider.name);
+        let models = provider
+            .custom_models
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|model| ProviderModel {
+                id: model.id,
+                name: model.name.unwrap_or_else(|| "Custom model".to_string()),
+                description: None,
+            })
+            .collect();
+        providers.push(Provider {
+            id,
+            name: provider.name.clone(),
+            billing: "custom".to_string(),
+            description: "Custom provider".to_string(),
+            models,
+        });
+    }
+
+    match backend {
+        "opencode" => {
+            // OpenCode expects "provider/model" format
+            if let Some((provider_id, model_id)) = model_override.split_once('/') {
+                // Check if this is a known provider
+                if let Some(provider) = providers.iter().find(|p| p.id == provider_id) {
+                    // Known provider - validate model exists
+                    if !provider.models.iter().any(|m| m.id == model_id) {
+                        return Err(format!(
+                            "Model '{}' not found for provider '{}'. Available models: {}",
+                            model_id,
+                            provider_id,
+                            provider.models.iter().map(|m| &m.id).cloned().collect::<Vec<_>>().join(", ")
+                        ));
+                    }
+                }
+                // Unknown provider - allow as custom (escape hatch)
+                Ok(())
+            } else {
+                Err(format!(
+                    "Invalid format for OpenCode model override. Expected 'provider/model' (e.g., 'openai/gpt-4'), got '{}'",
+                    model_override
+                ))
+            }
+        }
+        "claudecode" => {
+            // Claude Code expects raw model IDs from Anthropic
+            let anthropic = providers.iter().find(|p| p.id == "anthropic");
+            if let Some(provider) = anthropic {
+                if !provider.models.iter().any(|m| m.id == model_override) {
+                    // Check if it looks like a Claude model (starts with "claude-")
+                    if model_override.starts_with("claude-") {
+                        // Allow unknown Claude models (escape hatch for new models)
+                        Ok(())
+                    } else {
+                        return Err(format!(
+                            "Model '{}' not found in Anthropic catalog. Available models: {}. For custom Claude models, use format 'claude-*'",
+                            model_override,
+                            provider.models.iter().map(|m| &m.id).cloned().collect::<Vec<_>>().join(", ")
+                        ));
+                    }
+                } else {
+                    Ok(())
+                }
+            } else {
+                // Anthropic not configured, but allow if it looks like a Claude model
+                if model_override.starts_with("claude-") {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "Anthropic provider not configured. Expected a Claude model ID (e.g., 'claude-opus-4-6'), got '{}'",
+                        model_override
+                    ))
+                }
+            }
+        }
+        "codex" => {
+            // Codex expects raw model IDs from OpenAI
+            let openai = providers.iter().find(|p| p.id == "openai");
+            if let Some(provider) = openai {
+                if !provider.models.iter().any(|m| m.id == model_override) {
+                    // Check if it looks like an OpenAI model (common prefixes)
+                    if model_override.starts_with("gpt-") || model_override.starts_with("o1-") {
+                        // Allow unknown OpenAI models (escape hatch for new models)
+                        Ok(())
+                    } else {
+                        return Err(format!(
+                            "Model '{}' not found in OpenAI catalog. Available models: {}. For custom OpenAI models, use format 'gpt-*' or 'o1-*'",
+                            model_override,
+                            provider.models.iter().map(|m| &m.id).cloned().collect::<Vec<_>>().join(", ")
+                        ));
+                    }
+                } else {
+                    Ok(())
+                }
+            } else {
+                // OpenAI not configured, but allow if it looks like an OpenAI model
+                if model_override.starts_with("gpt-") || model_override.starts_with("o1-") {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "OpenAI provider not configured. Expected an OpenAI model ID (e.g., 'gpt-4'), got '{}'",
+                        model_override
+                    ))
+                }
+            }
+        }
+        _ => {
+            // Unknown backend - skip validation
+            Ok(())
+        }
+    }
 }

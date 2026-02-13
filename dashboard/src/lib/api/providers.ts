@@ -130,6 +130,7 @@ export interface BackendModelOption {
   value: string;
   label: string;
   description?: string;
+  provider_id?: string;
 }
 
 export interface BackendModelOptionsResponse {
