@@ -5762,7 +5762,7 @@ pub async fn run_opencode_turn(
     };
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
-    use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+    use tokio::io::{AsyncBufReadExt, BufReader};
 
     // Determine CLI runner: prefer backend config, then env var, then try bunx/npx
     // We use 'bunx oh-my-opencode run' or 'npx oh-my-opencode run' for per-workspace execution.
@@ -6689,7 +6689,7 @@ pub async fn run_amp_turn(
     mission_id: Uuid,
     events_tx: broadcast::Sender<AgentEvent>,
     cancel: CancellationToken,
-    app_working_dir: &std::path::Path,
+    _app_working_dir: &std::path::Path,
     session_id: Option<&str>,
     is_continuation: bool,
     api_key: Option<&str>,

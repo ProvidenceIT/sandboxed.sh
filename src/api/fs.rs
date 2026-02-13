@@ -23,7 +23,6 @@ struct RuntimeWorkspace {
     working_dir: Option<String>,
     mission_context: Option<String>,
     context_root: Option<String>,
-    context_dir_name: Option<String>,
     workspace_root: Option<String>,
     workspace_type: Option<String>,
 }
@@ -745,6 +744,7 @@ pub async fn upload_chunk(
     Query(q): Query<ChunkUploadQuery>,
     mut multipart: Multipart,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let _ = q.workspace_id;
     if q.path.trim().is_empty() {
         return Err((StatusCode::BAD_REQUEST, "Invalid path".to_string()));
     }

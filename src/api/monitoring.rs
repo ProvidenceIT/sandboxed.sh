@@ -243,9 +243,10 @@ fn extract_jwt_from_protocols(headers: &HeaderMap) -> Option<String> {
 pub async fn monitoring_ws(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
-    Query(_params): Query<MonitoringParams>,
+    Query(params): Query<MonitoringParams>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
+    let _ = params.interval_ms;
     // Enforce auth in non-dev mode
     if state.config.auth.auth_required(state.config.dev_mode) {
         let token = match extract_jwt_from_protocols(&headers) {

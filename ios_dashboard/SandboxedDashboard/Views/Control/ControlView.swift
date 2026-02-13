@@ -1208,8 +1208,8 @@ struct ControlView: View {
     private func loadRecentMissions() async {
         do {
             let allMissions = try await api.listMissions()
-            // Sort by most recent (updatedAt, ISO8601 strings sort correctly) and take first 20
-            recentMissions = Array(allMissions.sorted { $0.updatedAt > $1.updatedAt }.prefix(20))
+            // Sort by most recent (updatedAt, ISO8601 strings sort correctly)
+            recentMissions = allMissions.sorted { $0.updatedAt > $1.updatedAt }
         } catch {
             print("Failed to load recent missions: \(error)")
         }
@@ -1798,6 +1798,7 @@ private struct MessageBubble: View {
                 }
 
                 MarkdownView(message.content)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 16)
                     .padding(.vertical, 12)
                     .background(.ultraThinMaterial)
@@ -1823,12 +1824,14 @@ private struct MessageBubble: View {
                     }
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
 
             // Copy button
             if !message.content.isEmpty {
                 CopyButton(isCopied: isCopied, onCopy: onCopy)
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

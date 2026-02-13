@@ -4875,7 +4875,7 @@ async fn control_actor_loop(
 
                 for (mission_id, runner) in parallel_runners.iter_mut() {
                     if runner.check_finished() {
-                        if let Some((msg_id, _user_msg, result)) = runner.poll_completion().await {
+                        if let Some((_msg_id, _user_msg, result)) = runner.poll_completion().await {
                             tracing::info!(
                                 "Parallel mission {} completed (success: {}, cost: {} cents)",
                                 mission_id, result.success, result.cost_cents
@@ -5380,7 +5380,7 @@ async fn control_actor_loop(
 
 async fn run_single_control_turn(
     mut config: Config,
-    root_agent: AgentRef,
+    _root_agent: AgentRef,
     mcp: Arc<McpRegistry>,
     workspaces: workspace::SharedWorkspaceStore,
     library: SharedLibrary,
@@ -5492,7 +5492,7 @@ async fn run_single_control_turn(
     convo.push_str("User:\n");
     convo.push_str(&user_message);
     convo.push_str("\n\nInstructions:\n- Continue the conversation helpfully.\n- Use available tools as needed.\n- For large data processing tasks (>10KB), prefer executing scripts rather than inline processing.\n");
-    let mut task = match crate::task::Task::new(convo.clone(), Some(1000)) {
+    let _task = match crate::task::Task::new(convo.clone(), Some(1000)) {
         Ok(t) => t,
         Err(e) => {
             let r = crate::agents::AgentResult::failure(format!("Failed to create task: {}", e), 0);

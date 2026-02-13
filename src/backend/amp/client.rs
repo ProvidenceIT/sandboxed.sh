@@ -55,7 +55,7 @@ impl AmpClient {
         &self,
         working_dir: &str,
         message: &str,
-        model: Option<&str>,
+        _model: Option<&str>,
         mode: Option<&str>,
         session_id: Option<&str>,
     ) -> Result<(mpsc::Receiver<AmpEvent>, AmpProcessHandle)> {

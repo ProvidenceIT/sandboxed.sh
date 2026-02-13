@@ -95,7 +95,7 @@ impl CodexClient {
             directory, effective_model
         );
 
-        let (program, mut full_args) = if self.config.cli_path.contains(' ') {
+        let (program, full_args) = if self.config.cli_path.contains(' ') {
             let parts: Vec<&str> = self.config.cli_path.splitn(2, ' ').collect();
             let program = parts[0].to_string();
             let mut full_args = if parts.len() > 1 {

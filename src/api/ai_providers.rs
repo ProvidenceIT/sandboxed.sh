@@ -2838,7 +2838,7 @@ fn get_opencode_auth_path() -> PathBuf {
 
 fn get_opencode_provider_auth_path(provider_type: ProviderType) -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
-    let mut candidates = vec![
+    let candidates = vec![
         PathBuf::from(&home)
             .join(".opencode")
             .join("auth")
