@@ -480,8 +480,7 @@ fn convert_codex_event(
                     // Extract tool result - always emit event even for null results
                     // to prevent pending_tools leak in mission_runner
                     if let Some(name) = tool_name(&item.data) {
-                        let result = tool_result(&item.data)
-                            .unwrap_or(serde_json::Value::Null);
+                        let result = tool_result(&item.data).unwrap_or(serde_json::Value::Null);
                         results.push(ExecutionEvent::ToolResult {
                             id: item.id.clone(),
                             name,

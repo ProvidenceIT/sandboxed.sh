@@ -2176,15 +2176,13 @@ pub async fn refresh_anthropic_oauth_token() -> Result<(), String> {
 
     // Anthropic uses rotating refresh tokens - each refresh returns a NEW refresh token
     // and invalidates the old one. If no refresh_token is returned, this is an error.
-    let new_refresh_token = token_data["refresh_token"]
-        .as_str()
-        .ok_or_else(|| {
-            tracing::error!(
-                "Anthropic token refresh response missing refresh_token. Response: {:?}",
-                token_data
-            );
-            "No refresh_token in Anthropic OAuth response - tokens may be rotating".to_string()
-        })?;
+    let new_refresh_token = token_data["refresh_token"].as_str().ok_or_else(|| {
+        tracing::error!(
+            "Anthropic token refresh response missing refresh_token. Response: {:?}",
+            token_data
+        );
+        "No refresh_token in Anthropic OAuth response - tokens may be rotating".to_string()
+    })?;
 
     let expires_in = token_data["expires_in"].as_i64().unwrap_or(3600);
     let expires_at = chrono::Utc::now().timestamp_millis() + (expires_in * 1000);
