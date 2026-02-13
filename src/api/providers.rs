@@ -504,7 +504,6 @@ pub async fn validate_model_override(
 
     let working_dir = state.config.working_dir.to_string_lossy().to_string();
     let config = load_providers_config(&working_dir);
-    let configured = get_configured_provider_ids(state.config.working_dir.as_path());
 
     // Load all providers (including configured and custom)
     let mut providers = config.providers;
