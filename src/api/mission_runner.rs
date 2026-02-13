@@ -344,10 +344,12 @@ fn parse_opencode_stderr_text_part(line: &str) -> Option<String> {
         text = stripped.to_string();
     }
     if text.contains('\\') {
+        // Use a placeholder to avoid double-processing: \\n in source should stay as literal \n
         text = text
+            .replace("\\\\", "\x00BACKSLASH\x00") // Temporarily replace \\
             .replace("\\n", "\n")
             .replace("\\\"", "\"")
-            .replace("\\\\", "\\");
+            .replace("\x00BACKSLASH\x00", "\\"); // Restore single backslash
     }
     if text.trim().is_empty() {
         None

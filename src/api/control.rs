@@ -5873,6 +5873,16 @@ pub async fn create_automation(
 
     let start_immediately = req.start_immediately;
 
+    // For interval-based triggers, if start_immediately is false, set last_triggered_at
+    // to now so the scheduler waits for the full interval before the first trigger.
+    let last_triggered_at = if !start_immediately
+        && matches!(trigger, mission_store::TriggerType::Interval { .. })
+    {
+        Some(mission_store::now_string())
+    } else {
+        None
+    };
+
     // Build the complete Automation struct
     let automation = mission_store::Automation {
         id: Uuid::new_v4(),
@@ -5882,7 +5892,7 @@ pub async fn create_automation(
         variables: req.variables,
         active: true,
         created_at: mission_store::now_string(),
-        last_triggered_at: None,
+        last_triggered_at,
         retry_config: req.retry_config.unwrap_or_default(),
     };
 

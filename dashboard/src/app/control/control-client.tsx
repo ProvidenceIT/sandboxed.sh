@@ -2653,7 +2653,7 @@ export default function ControlClient() {
 
   useEffect(() => {
     setThinkingPanelManuallyHidden(false);
-  }, [missionId]);
+  }, [viewingMissionId]);
 
   // Group consecutive tool items and thinking items for collapsed display
   // Returns array of: original items OR { kind: "tool_group", tools: [...] } OR { kind: "thinking_group", thoughts: [...] }
