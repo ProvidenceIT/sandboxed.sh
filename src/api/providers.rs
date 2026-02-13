@@ -475,7 +475,11 @@ pub async fn list_backend_model_options(
                         label: format!("{} — {}", provider.name, model.name),
                         description: model.description.clone(),
                         // Include provider_id for custom providers to show the resolved ID
-                        provider_id: if is_custom { Some(provider.id.clone()) } else { None },
+                        provider_id: if is_custom {
+                            Some(provider.id.clone())
+                        } else {
+                            None
+                        },
                     });
                 }
             }
