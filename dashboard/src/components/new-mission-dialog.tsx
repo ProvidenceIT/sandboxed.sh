@@ -4,7 +4,7 @@ import { useEffect, useRef, useState, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import { Plus, X, ExternalLink, RefreshCw } from 'lucide-react';
 import useSWR from 'swr';
-import { getVisibleAgents, getOpenAgentConfig, listBackends, listBackendAgents, getBackendConfig, getClaudeCodeConfig, getLibraryOpenCodeSettingsForProfile, listProviders, type Backend, type BackendAgent, type Provider } from '@/lib/api';
+import { getVisibleAgents, getOpenAgentConfig, listBackends, listBackendAgents, getBackendConfig, getClaudeCodeConfig, getLibraryOpenCodeSettingsForProfile, listBackendModelOptions, listProviders, type Backend, type BackendAgent, type BackendModelOption, type Provider } from '@/lib/api';
 import type { Workspace } from '@/lib/api';
 
 /** Options returned by the dialog's getCreateOptions() method */
@@ -138,6 +138,11 @@ export function NewMissionDialog({
   const { data: providersResponse } = useSWR(
     'model-providers',
     () => listProviders({ includeAll: true }),
+    { revalidateOnFocus: false, dedupingInterval: 60000 }
+  );
+  const { data: backendModelOptions } = useSWR(
+    'backend-model-options',
+    () => listBackendModelOptions({ includeAll: true }),
     { revalidateOnFocus: false, dedupingInterval: 60000 }
   );
 
@@ -311,6 +316,10 @@ export function NewMissionDialog({
   }, [selectedBackend]);
 
   const modelOptions = useMemo(() => {
+    const backendOptions = backendModelOptions?.backends?.[selectedBackend];
+    if (backendOptions && backendOptions.length > 0) {
+      return backendOptions as BackendModelOption[];
+    }
     const providers = (providersResponse?.providers || []) as Provider[];
     const options: Array<{ value: string; label: string; description?: string }> = [];
     for (const provider of providers) {
@@ -328,7 +337,7 @@ export function NewMissionDialog({
       }
     }
     return options;
-  }, [providersResponse, providerAllowlist, selectedBackend]);
+  }, [backendModelOptions, providersResponse, providerAllowlist, selectedBackend]);
 
   const formatWorkspaceType = (type: Workspace['workspace_type']) =>
     type === 'host' ? 'host' : 'isolated';

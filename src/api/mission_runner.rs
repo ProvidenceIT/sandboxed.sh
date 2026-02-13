@@ -336,6 +336,26 @@ fn handle_part_update(
     })
 }
 
+fn parse_opencode_stderr_text_part(line: &str) -> Option<String> {
+    let marker = "message.part (text):";
+    let idx = line.find(marker)?;
+    let mut text = line[idx + marker.len()..].trim().to_string();
+    if let Some(stripped) = text.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
+        text = stripped.to_string();
+    }
+    if text.contains('\\') {
+        text = text
+            .replace("\\n", "\n")
+            .replace("\\\"", "\"")
+            .replace("\\\\", "\\");
+    }
+    if text.trim().is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
 fn parse_opencode_sse_event(
     data_str: &str,
     event_name: Option<&str>,
@@ -3037,6 +3057,8 @@ fn opencode_output_needs_fallback(output: &str) -> bool {
         let lower = line.to_lowercase();
         let is_banner = lower.contains("starting opencode server")
             || lower.contains("opencode server started")
+            || lower.contains("auto-selected port")
+            || lower.contains("server listening")
             || lower.contains("sending prompt")
             || lower.contains("waiting for completion")
             || lower.contains("all tasks completed")
@@ -6248,11 +6270,15 @@ pub async fn run_opencode_turn(
     let mut final_result = String::new();
     let mut had_error = false;
     let session_id_capture: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let stderr_text_buffer: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
     let sse_emitted_thinking = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let sse_emitted_text = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let sse_done_sent = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let sse_error_message: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let sse_cancel = CancellationToken::new();
+    let (sse_complete_tx, mut sse_complete_rx) = tokio::sync::watch::channel(false);
+    let last_activity = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
+    let (text_output_tx, mut text_output_rx) = tokio::sync::watch::channel(false);
 
     // oh-my-opencode doesn't support --format json, so use SSE curl for events.
     let use_json_stdout = false;
@@ -6268,6 +6294,9 @@ pub async fn run_opencode_turn(
         let sse_done_sent = sse_done_sent.clone();
         let sse_error_message = sse_error_message.clone();
         let sse_cancel = sse_cancel.clone();
+        let sse_complete_tx = sse_complete_tx.clone();
+        let last_activity = last_activity.clone();
+        let text_output_tx = text_output_tx.clone();
         let events_tx = events_tx.clone();
         let opencode_port = opencode_port.clone();
         let sse_host = std::env::var("SANDBOXED_SH_OPENCODE_SERVER_HOSTNAME")
@@ -6360,6 +6389,9 @@ pub async fn run_opencode_turn(
                                             }
                                         }
                                         if let Some(event) = parsed.event {
+                                            if let Ok(mut guard) = last_activity.lock() {
+                                                *guard = std::time::Instant::now();
+                                            }
                                             if let AgentEvent::Error { ref message, .. } = event {
                                                 let mut guard = sse_error_message.lock().unwrap();
                                                 if guard.is_none() {
@@ -6373,6 +6405,7 @@ pub async fn run_opencode_turn(
                                                 );
                                             }
                                             if matches!(event, AgentEvent::TextDelta { .. }) {
+                                                let _ = text_output_tx.send(true);
                                                 sse_emitted_text.store(
                                                     true,
                                                     std::sync::atomic::Ordering::SeqCst,
@@ -6382,6 +6415,7 @@ pub async fn run_opencode_turn(
                                         }
                                         if parsed.message_complete {
                                             saw_complete = true;
+                                            let _ = sse_complete_tx.send(true);
                                             if sse_emitted_thinking
                                                 .load(std::sync::atomic::Ordering::SeqCst)
                                                 && !sse_done_sent
@@ -6436,6 +6470,8 @@ pub async fn run_opencode_turn(
     // Spawn a task to read stderr (just log in JSON mode, events come on stdout)
     let mission_id_clone = mission_id;
     let stderr_error_capture = sse_error_message.clone();
+    let stderr_text_capture = stderr_text_buffer.clone();
+    let stderr_text_output_tx = text_output_tx.clone();
     let stderr_handle = stderr.map(|stderr| {
         tokio::spawn(async move {
             let stderr_reader = BufReader::new(stderr);
@@ -6444,6 +6480,15 @@ pub async fn run_opencode_turn(
                 let clean = line.trim().to_string();
                 if !clean.is_empty() {
                     tracing::debug!(mission_id = %mission_id_clone, line = %clean, "OpenCode CLI stderr");
+
+                    if let Some(text_part) = parse_opencode_stderr_text_part(&clean) {
+                        if let Ok(mut buffer) = stderr_text_capture.lock() {
+                            if !buffer.ends_with(&text_part) {
+                                buffer.push_str(&text_part);
+                            }
+                        }
+                        let _ = stderr_text_output_tx.send(true);
+                    }
 
                     // Detect session errors from stderr
                     let lower = clean.to_lowercase();
@@ -6470,6 +6515,10 @@ pub async fn run_opencode_turn(
     let mut stdout_lines = stdout_reader.lines();
     let mut state = OpencodeSseState::default();
 
+    let mut sse_complete_seen = false;
+    let mut sse_complete_at: Option<std::time::Instant> = None;
+    let mut text_output_at: Option<std::time::Instant> = None;
+
     loop {
         tokio::select! {
             _ = cancel.cancelled() => {
@@ -6485,6 +6534,43 @@ pub async fn run_opencode_turn(
                 return AgentResult::failure("Cancelled".to_string(), 0)
                     .with_terminal_reason(TerminalReason::Cancelled);
             }
+            changed = sse_complete_rx.changed() => {
+                if changed.is_ok() && *sse_complete_rx.borrow() {
+                    if !sse_complete_seen {
+                        sse_complete_seen = true;
+                        sse_complete_at = Some(std::time::Instant::now());
+                    }
+                }
+            }
+            changed = text_output_rx.changed() => {
+                if changed.is_ok() && *text_output_rx.borrow() {
+                    text_output_at = Some(std::time::Instant::now());
+                }
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_millis(200)), if sse_complete_seen => {
+                if let Some(started) = sse_complete_at {
+                    if started.elapsed() >= std::time::Duration::from_secs(2) {
+                        tracing::info!(
+                            mission_id = %mission_id,
+                            "OpenCode completion observed; terminating lingering CLI process"
+                        );
+                        let _ = child.kill().await;
+                        break;
+                    }
+                }
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {
+                if let Some(last_text) = text_output_at {
+                    if last_text.elapsed() >= std::time::Duration::from_secs(30) {
+                        tracing::info!(
+                            mission_id = %mission_id,
+                            "OpenCode output idle timeout reached; terminating CLI process"
+                        );
+                        let _ = child.kill().await;
+                        break;
+                    }
+                }
+            }
             line_result = stdout_lines.next_line() => {
                 match line_result {
                     Ok(None) => {
@@ -6495,6 +6581,9 @@ pub async fn run_opencode_turn(
                         let trimmed = line.trim();
                         if trimmed.is_empty() {
                             continue;
+                        }
+                        if let Ok(mut guard) = last_activity.lock() {
+                            *guard = std::time::Instant::now();
                         }
 
                         // Try to parse as JSON event
@@ -6514,6 +6603,7 @@ pub async fn run_opencode_turn(
                                         if part_type == "text" {
                                             if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
                                                 final_result = text.to_string();
+                                                let _ = text_output_tx.send(true);
                                             }
                                         }
                                     }
@@ -6523,6 +6613,7 @@ pub async fn run_opencode_turn(
                             // Handle completion and error events from oh-my-opencode
                             if event_type == "completion" {
                                 tracing::info!(mission_id = %mission_id, "OpenCode JSON completion event");
+                                let _ = sse_complete_tx.send(true);
                             } else if event_type == "error" {
                                 had_error = true;
                                 if let Some(props) = json.get("properties") {
@@ -6551,6 +6642,9 @@ pub async fn run_opencode_turn(
                                     }
                                 }
                                 if let Some(event) = parsed.event {
+                                    if let Ok(mut guard) = last_activity.lock() {
+                                        *guard = std::time::Instant::now();
+                                    }
                                     if let AgentEvent::Error { ref message, .. } = event {
                                         let mut guard = sse_error_message.lock().unwrap();
                                         if guard.is_none() {
@@ -6561,11 +6655,13 @@ pub async fn run_opencode_turn(
                                         sse_emitted_thinking.store(true, std::sync::atomic::Ordering::SeqCst);
                                     }
                                     if matches!(event, AgentEvent::TextDelta { .. }) {
+                                        let _ = text_output_tx.send(true);
                                         sse_emitted_text.store(true, std::sync::atomic::Ordering::SeqCst);
                                     }
                                     let _ = events_tx.send(event);
                                 }
                                 if parsed.message_complete {
+                                    let _ = sse_complete_tx.send(true);
                                     // Send thinking done signal if needed
                                     if sse_emitted_thinking.load(std::sync::atomic::Ordering::SeqCst)
                                         && !sse_done_sent.load(std::sync::atomic::Ordering::SeqCst)
@@ -6602,6 +6698,7 @@ pub async fn run_opencode_turn(
 
                             final_result.push_str(trimmed);
                             final_result.push('\n');
+                            let _ = text_output_tx.send(true);
                         }
                     }
                     Err(e) => {
@@ -6613,13 +6710,35 @@ pub async fn run_opencode_turn(
         }
     }
 
-    // Wait for stderr task to complete
-    if let Some(handle) = stderr_handle {
-        let _ = handle.await;
+    // Wait for stderr task to complete (avoid hangs if the process won't exit)
+    if let Some(mut handle) = stderr_handle {
+        tokio::select! {
+            _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {
+                handle.abort();
+            }
+            _ = &mut handle => {}
+        }
     }
 
-    // Wait for child process to finish and clean up
-    let exit_status = child.wait().await;
+    // Wait for child process to finish and clean up (with timeout to avoid hangs)
+    let exit_status = match tokio::time::timeout(std::time::Duration::from_secs(10), child.wait()).await {
+        Ok(status) => status,
+        Err(_) => {
+            tracing::warn!(
+                mission_id = %mission_id,
+                "OpenCode CLI wait timed out; forcing shutdown"
+            );
+            let _ = child.kill().await;
+            had_error = true;
+            if final_result.is_empty() {
+                final_result = "OpenCode CLI did not exit after completion".to_string();
+            }
+            Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "OpenCode CLI wait timed out",
+            ))
+        }
+    };
 
     sse_cancel.cancel();
     if let Some(handle) = sse_handle {
@@ -6650,6 +6769,7 @@ pub async fn run_opencode_turn(
         .as_deref()
         .and_then(|id| load_latest_opencode_assistant_message(workspace, id));
 
+    let mut recovered_from_stderr = false;
     if opencode_output_needs_fallback(&final_result) {
         if let Some(session_id) = session_id.as_deref() {
             if let Some(message) = stored_message.as_ref() {
@@ -6682,6 +6802,26 @@ pub async fn run_opencode_turn(
                 "OpenCode output was empty/banner-only and no session id was detected"
             );
         }
+    }
+
+    if opencode_output_needs_fallback(&final_result) {
+        if let Ok(buffer) = stderr_text_buffer.lock() {
+            if !buffer.trim().is_empty() {
+                final_result = buffer.clone();
+                recovered_from_stderr = true;
+            }
+        }
+    }
+
+    if recovered_from_stderr {
+        had_error = false;
+    }
+
+    if had_error
+        && !final_result.trim().is_empty()
+        && sse_error_message.lock().unwrap().is_none()
+    {
+        had_error = false;
     }
 
     let mut emitted_thinking = false;

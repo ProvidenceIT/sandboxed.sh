@@ -56,6 +56,32 @@ pub struct ProvidersResponse {
     pub providers: Vec<Provider>,
 }
 
+/// Model option for a specific backend.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackendModelOption {
+    /// Model value to submit (raw model id or provider/model)
+    pub value: String,
+    /// UI label
+    pub label: String,
+    /// Optional description
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+/// Response for backend model options.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackendModelOptionsResponse {
+    pub backends: std::collections::HashMap<String, Vec<BackendModelOption>>,
+}
+
+/// Query parameters for backend models endpoint.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct BackendModelsQuery {
+    /// Include providers even if they are not configured/authenticated.
+    #[serde(default)]
+    pub include_all: bool,
+}
+
 /// Configuration file structure for providers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProvidersConfig {
@@ -84,6 +110,14 @@ fn load_providers_config(working_dir: &str) -> ProvidersConfig {
     }
 }
 
+fn sanitize_custom_provider_id(name: &str) -> String {
+    name.chars()
+        .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+        .collect::<String>()
+        .to_lowercase()
+        .replace('-', "_")
+}
+
 /// Default provider configuration.
 fn default_providers_config() -> ProvidersConfig {
     ProvidersConfig {
@@ -100,6 +134,11 @@ fn default_providers_config() -> ProvidersConfig {
                         description: Some(
                             "Most capable, recommended for complex tasks".to_string(),
                         ),
+                    },
+                    ProviderModel {
+                        id: "claude-sonnet-4-6".to_string(),
+                        name: "Claude Sonnet 4.6".to_string(),
+                        description: Some("Balanced speed and capability".to_string()),
                     },
                     ProviderModel {
                         id: "claude-opus-4-5-20251101".to_string(),
@@ -131,6 +170,16 @@ fn default_providers_config() -> ProvidersConfig {
                 billing: "subscription".to_string(),
                 description: "ChatGPT Plus/Pro via OAuth".to_string(),
                 models: vec![
+                    ProviderModel {
+                        id: "gpt-5.3-spark".to_string(),
+                        name: "GPT-5.3 Spark".to_string(),
+                        description: Some("Fast, lightweight GPT-5.3 variant".to_string()),
+                    },
+                    ProviderModel {
+                        id: "gpt-5.3-extra-high".to_string(),
+                        name: "GPT-5.3 Extra High".to_string(),
+                        description: Some("Highest quality GPT-5.3 tier".to_string()),
+                    },
                     ProviderModel {
                         id: "gpt-5.3-codex".to_string(),
                         name: "GPT-5.3 Codex".to_string(),
@@ -345,4 +394,90 @@ pub async fn list_providers(
     };
 
     Json(ProvidersResponse { providers })
+}
+
+/// List model options grouped by backend (claudecode, codex, opencode).
+///
+/// This is used by the frontend to power per-harness model override pickers.
+pub async fn list_backend_model_options(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<BackendModelsQuery>,
+) -> Json<BackendModelOptionsResponse> {
+    let working_dir = state.config.working_dir.to_string_lossy().to_string();
+    let config = load_providers_config(&working_dir);
+
+    let configured = get_configured_provider_ids(state.config.working_dir.as_path());
+    let mut providers = if query.include_all {
+        config.providers
+    } else {
+        config
+            .providers
+            .into_iter()
+            .filter(|p| configured.contains(&p.id))
+            .collect()
+    };
+
+    // Add custom providers from AIProviderStore (for OpenCode)
+    let custom_providers = state.ai_providers.list().await;
+    for provider in custom_providers {
+        if provider.provider_type != ProviderType::Custom || !provider.enabled {
+            continue;
+        }
+        if !query.include_all && !provider.has_credentials() {
+            continue;
+        }
+        let id = sanitize_custom_provider_id(&provider.name);
+        let models = provider
+            .custom_models
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|model| ProviderModel {
+                id: model.id,
+                name: model.name.unwrap_or_else(|| "Custom model".to_string()),
+                description: None,
+            })
+            .collect();
+        providers.push(Provider {
+            id,
+            name: provider.name.clone(),
+            billing: "custom".to_string(),
+            description: "Custom provider".to_string(),
+            models,
+        });
+    }
+
+    let mut backends: std::collections::HashMap<String, Vec<BackendModelOption>> =
+        std::collections::HashMap::new();
+
+    let mut push_options = |backend: &str, allowlist: Option<&[&str]>, use_provider_prefix: bool| {
+        let mut options = Vec::new();
+        for provider in &providers {
+            if let Some(allowed) = allowlist {
+                if !allowed.iter().any(|id| *id == provider.id) {
+                    continue;
+                }
+            }
+            for model in &provider.models {
+                let value = if use_provider_prefix {
+                    format!("{}/{}", provider.id, model.id)
+                } else {
+                    model.id.clone()
+                };
+                options.push(BackendModelOption {
+                    value,
+                    label: format!("{} — {}", provider.name, model.name),
+                    description: model.description.clone(),
+                });
+            }
+        }
+        backends.insert(backend.to_string(), options);
+    };
+
+    push_options("claudecode", Some(&["anthropic"]), false);
+    push_options("codex", Some(&["openai"]), false);
+    push_options("opencode", None, true);
+    backends.entry("amp".to_string()).or_default();
+
+    Json(BackendModelOptionsResponse { backends })
 }

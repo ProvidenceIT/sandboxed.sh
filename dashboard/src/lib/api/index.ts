@@ -87,6 +87,8 @@ export {
   type ProviderModel,
   type Provider,
   type ProvidersResponse,
+  type BackendModelOption,
+  type BackendModelOptionsResponse,
   listAIProviders,
   listAIProviderTypes,
   getAIProvider,
@@ -100,6 +102,7 @@ export {
   oauthAuthorize,
   oauthCallback,
   listProviders,
+  listBackendModelOptions,
 } from "./providers";
 
 // Automations

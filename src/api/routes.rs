@@ -533,6 +533,10 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         .route("/api/tools/:name/toggle", post(mcp_api::toggle_tool))
         // Provider management endpoints
         .route("/api/providers", get(super::providers::list_providers))
+        .route(
+            "/api/providers/backend-models",
+            get(super::providers::list_backend_model_options),
+        )
         // Library management endpoints
         .nest("/api/library", library_api::routes())
         // Workspace management endpoints
