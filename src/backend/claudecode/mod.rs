@@ -161,14 +161,14 @@ impl Backend for ClaudeCodeBackend {
                         ),
                     })
                     .await;
+            } else {
+                // No pending tools - safe to send MessageComplete
+                let _ = tx
+                    .send(ExecutionEvent::MessageComplete {
+                        session_id: session_id.clone(),
+                    })
+                    .await;
             }
-
-            // Send MessageComplete
-            let _ = tx
-                .send(ExecutionEvent::MessageComplete {
-                    session_id: session_id.clone(),
-                })
-                .await;
 
             // Note: claude_handle is dropped here, but the process is managed
             // by the ProcessHandle which will clean up when dropped
