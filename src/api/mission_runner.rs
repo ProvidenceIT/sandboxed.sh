@@ -6537,12 +6537,11 @@ pub async fn run_opencode_turn(
                     .with_terminal_reason(TerminalReason::Cancelled);
             }
             changed = sse_complete_rx.changed() => {
-                if changed.is_ok() && *sse_complete_rx.borrow() {
-                    if !sse_complete_seen {
+                if changed.is_ok() && *sse_complete_rx.borrow()
+                    && !sse_complete_seen {
                         sse_complete_seen = true;
                         sse_complete_at = Some(std::time::Instant::now());
                     }
-                }
             }
             changed = text_output_rx.changed() => {
                 if changed.is_ok() && *text_output_rx.borrow() {

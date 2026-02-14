@@ -5724,7 +5724,7 @@ async fn run_single_control_turn(
                 &convo,
                 requested_model
                     .as_deref()
-                    .or_else(|| config.default_model.as_deref()),
+                    .or(config.default_model.as_deref()),
                 config.opencode_agent.as_deref(),
                 mid,
                 events_tx.clone(),

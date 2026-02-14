@@ -1194,8 +1194,6 @@ async fn search_memory(Query(params): Query<SearchMemoryQuery>) -> Json<serde_js
 /// 3. Syncing refreshed tokens to all storage tiers (sandboxed-sh, OpenCode, Claude CLI)
 /// 4. Handling refresh token rotation (updating stored refresh token if changed)
 async fn oauth_token_refresher_loop(ai_providers: Arc<crate::ai_providers::AIProviderStore>) {
-    use crate::ai_providers::ProviderType;
-
     // Check every 15 minutes
     let check_interval = std::time::Duration::from_secs(15 * 60);
     // Refresh tokens that will expire within 1 hour
@@ -1261,12 +1259,11 @@ async fn oauth_token_refresher_loop(ai_providers: Arc<crate::ai_providers::AIPro
                         expires_at,
                     });
 
-                    if let Err(e) = ai_providers.update(provider.id, updated_provider).await {
+                    if ai_providers.update(provider.id, updated_provider).await.is_none() {
                         tracing::error!(
                             provider_id = %provider.id,
                             provider_name = %provider.name,
-                            error = %e,
-                            "Failed to update provider with refreshed OAuth token"
+                            "Failed to update provider with refreshed OAuth token (provider not found)"
                         );
                         continue;
                     }
