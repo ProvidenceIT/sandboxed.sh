@@ -2351,13 +2351,67 @@ fn spawn_control_session(
         let store = Arc::clone(&state.mission_store);
         let mut event_rx = events_tx.subscribe();
         tokio::spawn(async move {
+            // Per-mission sequence counters to maintain chronological ordering
+            let mut sequence_counters: std::collections::HashMap<Uuid, i64> = std::collections::HashMap::new();
+            let mut counter_cleanup_count = 0;
+
             loop {
                 match event_rx.recv().await {
                     Ok(event) => {
                         // Extract mission_id from event
                         if let Some(mid) = event.mission_id() {
-                            if let Err(e) = store.log_event(mid, &event).await {
+                            // Get or initialize counter for this mission
+                            let sequence = sequence_counters.entry(mid)
+                                .or_insert_with(|| {
+                                    // On first event for this mission, recover from DB
+                                    match tokio::runtime::Handle::current().block_on(store.get_max_sequence(mid)) {
+                                        Ok(max_seq) => {
+                                            tracing::debug!(
+                                                mission_id = %mid,
+                                                recovered_sequence = max_seq,
+                                                "Recovered sequence counter from database"
+                                            );
+                                            max_seq
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                mission_id = %mid,
+                                                error = %e,
+                                                "Failed to recover sequence, starting from 0"
+                                            );
+                                            0
+                                        }
+                                    }
+                                });
+
+                            *sequence += 1;
+
+                            // Log event with explicit sequence number
+                            if let Err(e) = store.log_event_with_sequence(mid, &event, *sequence).await {
                                 tracing::warn!("Failed to log event: {}", e);
+                            }
+
+                            // Periodically clean up counters for completed missions to prevent unbounded growth
+                            counter_cleanup_count += 1;
+                            if counter_cleanup_count >= 1000 && sequence_counters.len() > 50 {
+                                counter_cleanup_count = 0;
+                                // Keep only the most recently active missions (simple heuristic)
+                                if sequence_counters.len() > 100 {
+                                    // Remove the oldest half
+                                    let mut entries: Vec<_> = sequence_counters.iter().collect();
+                                    entries.sort_by_key(|(_, seq)| *seq);
+                                    let to_remove: Vec<_> = entries.iter()
+                                        .take(sequence_counters.len() / 2)
+                                        .map(|(mid, _)| **mid)
+                                        .collect();
+                                    for mid in to_remove {
+                                        sequence_counters.remove(&mid);
+                                    }
+                                    tracing::debug!(
+                                        remaining_counters = sequence_counters.len(),
+                                        "Cleaned up stale sequence counters"
+                                    );
+                                }
                             }
                         }
                     }

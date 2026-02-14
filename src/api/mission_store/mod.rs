@@ -343,6 +343,26 @@ pub trait MissionStore: Send + Sync {
         Ok(())
     }
 
+    /// Log a streaming event with explicit sequence number.
+    /// This is the preferred method for maintaining chronological order.
+    async fn log_event_with_sequence(
+        &self,
+        mission_id: Uuid,
+        event: &AgentEvent,
+        sequence: i64,
+    ) -> Result<(), String> {
+        let _ = (mission_id, event, sequence);
+        Ok(())
+    }
+
+    /// Get the maximum sequence number for a mission.
+    /// Returns 0 if no events exist for this mission.
+    /// Used by the event logger to recover sequence counters after restart.
+    async fn get_max_sequence(&self, mission_id: Uuid) -> Result<i64, String> {
+        let _ = mission_id;
+        Ok(0)
+    }
+
     /// Get all events for a mission (for replay/debugging).
     async fn get_events(
         &self,

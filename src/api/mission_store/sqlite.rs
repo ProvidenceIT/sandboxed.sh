@@ -1395,7 +1395,9 @@ impl MissionStore for SqliteMissionStore {
                 }
             }
 
-            // Get next sequence
+            // DEPRECATED: This path should rarely be used.
+            // The event logger task uses log_event_with_sequence() which provides atomic sequencing.
+            // This fallback path exists for backward compatibility only.
             let sequence: i64 = conn
                 .query_row(
                     "SELECT COALESCE(MAX(sequence), 0) + 1 FROM mission_events WHERE mission_id = ?1",
@@ -1403,6 +1405,13 @@ impl MissionStore for SqliteMissionStore {
                     |row| row.get(0),
                 )
                 .unwrap_or(1);
+
+            tracing::warn!(
+                mission_id = %mid,
+                event_type = %event_type,
+                sequence = sequence,
+                "Event logged via deprecated log_event() path - consider using log_event_with_sequence()"
+            );
 
             // Store content
             let (content_inline, content_file) = SqliteMissionStore::store_content(
@@ -1433,6 +1442,182 @@ impl MissionStore for SqliteMissionStore {
             .map_err(|e| e.to_string())?;
 
             Ok(())
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+
+    async fn log_event_with_sequence(
+        &self,
+        mission_id: Uuid,
+        event: &AgentEvent,
+        sequence: i64,
+    ) -> Result<(), String> {
+        let conn = self.conn.clone();
+        let content_dir = self.content_dir.clone();
+        let mid = mission_id.to_string();
+        let now = now_string();
+
+        let (event_type, event_id, tool_call_id, tool_name, content, metadata) = match event {
+            AgentEvent::UserMessage { id, content, queued, .. } => (
+                "user_message",
+                Some(id.to_string()),
+                None,
+                None,
+                content.clone(),
+                serde_json::json!({ "queued": queued }),
+            ),
+            AgentEvent::AssistantMessage { id, content, cost_cents, resumable, .. } => (
+                "assistant_message",
+                Some(id.to_string()),
+                None,
+                None,
+                content.clone(),
+                serde_json::json!({ "cost_cents": cost_cents, "resumable": resumable }),
+            ),
+            AgentEvent::Thinking { content, done, .. } => (
+                "thinking",
+                None,
+                None,
+                None,
+                content.clone(),
+                serde_json::json!({ "done": done }),
+            ),
+            AgentEvent::TextDelta { content, .. } => (
+                "text_delta",
+                None,
+                None,
+                None,
+                content.clone(),
+                serde_json::json!({}),
+            ),
+            AgentEvent::ToolCall { name, args, tool_call_id, .. } => (
+                "tool_call",
+                None,
+                Some(tool_call_id.clone()),
+                Some(name.clone()),
+                args.to_string(),
+                serde_json::json!({}),
+            ),
+            AgentEvent::ToolResult { tool_call_id, name, result, .. } => (
+                "tool_result",
+                None,
+                Some(tool_call_id.clone()),
+                Some(name.clone()),
+                serde_json::to_string(&result).unwrap_or_default(),
+                serde_json::json!({}),
+            ),
+            AgentEvent::Error { message, resumable, .. } => (
+                "error",
+                None,
+                None,
+                None,
+                message.clone(),
+                serde_json::json!({ "resumable": resumable }),
+            ),
+            AgentEvent::MissionStatusChanged { status, summary, .. } => (
+                "mission_status_changed",
+                None,
+                None,
+                None,
+                summary.clone().unwrap_or_default(),
+                serde_json::json!({ "status": format!("{:?}", status) }),
+            ),
+            // Skip events that are less important for debugging
+            AgentEvent::Status { .. }
+            | AgentEvent::AgentPhase { .. }
+            | AgentEvent::AgentTree { .. }
+            | AgentEvent::Progress { .. }
+            | AgentEvent::SessionIdUpdate { .. }
+            | AgentEvent::MissionActivity { .. } => return Ok(()),
+        };
+
+        let event_type = event_type.to_string();
+        let metadata_str = metadata.to_string();
+
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.blocking_lock();
+
+            // If this event has an event_id that already exists for this mission,
+            // update the existing row's metadata instead of inserting a duplicate.
+            // This happens when a queued UserMessage is re-emitted with queued: false.
+            if let Some(ref eid) = event_id {
+                let existing: Option<i64> = conn
+                    .query_row(
+                        "SELECT id FROM mission_events WHERE mission_id = ?1 AND event_id = ?2",
+                        params![&mid, eid],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .unwrap_or(None);
+
+                if let Some(row_id) = existing {
+                    let (content_inline, content_file) = SqliteMissionStore::store_content(
+                        &content_dir,
+                        mission_id,
+                        row_id,
+                        &event_type,
+                        &content,
+                    );
+                    conn.execute(
+                        "UPDATE mission_events
+                         SET metadata = ?1, timestamp = ?2, content = ?3, content_file = ?4
+                         WHERE id = ?5",
+                        params![metadata_str, now, content_inline, content_file, row_id],
+                    )
+                    .map_err(|e| e.to_string())?;
+                    return Ok(());
+                }
+            }
+
+            // Use provided sequence number (no MAX query!)
+            let (content_inline, content_file) = SqliteMissionStore::store_content(
+                &content_dir,
+                mission_id,
+                sequence,
+                &event_type,
+                &content,
+            );
+
+            conn.execute(
+                "INSERT INTO mission_events
+                 (mission_id, sequence, event_type, timestamp, event_id, tool_call_id, tool_name, content, content_file, metadata)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    mid,
+                    sequence,
+                    event_type,
+                    now,
+                    event_id,
+                    tool_call_id,
+                    tool_name,
+                    content_inline,
+                    content_file,
+                    metadata_str,
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+
+            Ok(())
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+
+    async fn get_max_sequence(&self, mission_id: Uuid) -> Result<i64, String> {
+        let conn = self.conn.clone();
+        let mid = mission_id.to_string();
+
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.blocking_lock();
+            let sequence: i64 = conn
+                .query_row(
+                    "SELECT COALESCE(MAX(sequence), 0) FROM mission_events WHERE mission_id = ?1",
+                    params![&mid],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0);
+            Ok(sequence)
         })
         .await
         .map_err(|e| e.to_string())?
