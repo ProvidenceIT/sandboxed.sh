@@ -60,7 +60,8 @@ struct ControlView: View {
     @State private var showSettings = false
 
     @FocusState private var isInputFocused: Bool
-    
+    @Environment(\.scenePhase) private var scenePhase
+
     private let api = APIService.shared
     private let nav = NavigationState.shared
     private let bottomAnchorId = "bottom-anchor"
@@ -296,6 +297,18 @@ struct ControlView: View {
             // Sync viewing mission with current mission if nothing is being viewed yet
             if viewingMissionId == nil, let id = newId, let mission = currentMission, mission.id == id {
                 applyViewingMission(mission)
+            }
+        }
+        .onChange(of: scenePhase) { oldPhase, newPhase in
+            // Reload mission history when app becomes active (similar to web's visibility change handler)
+            // This ensures we catch any missed SSE events while the app was in background
+            if oldPhase != .active && newPhase == .active {
+                Task {
+                    if let missionId = viewingMissionId {
+                        await reloadMissionFromServer(id: missionId)
+                    }
+                    await refreshRunningMissions()
+                }
             }
         }
         .onDisappear {
@@ -884,6 +897,13 @@ struct ControlView: View {
     }
 
     private func loadCurrentMission(updateViewing: Bool) async {
+        // Try to load cached version first for immediate display
+        if updateViewing, let currentId = currentMission?.id ?? viewingMissionId,
+           let cachedMission = loadCachedMissionHistory(currentId) {
+            currentMission = cachedMission
+            applyViewingMission(cachedMission)
+        }
+
         isLoading = true
         defer { isLoading = false }
 
@@ -968,7 +988,30 @@ struct ControlView: View {
             }
         }
     }
-    
+
+    // Reload mission from server without showing loading state or cache
+    // Used when app becomes active to catch missed SSE events (like web's visibility change handler)
+    private func reloadMissionFromServer(id: String) async {
+        do {
+            let mission = try await api.getMission(id: id)
+
+            // Update current mission if it matches
+            if currentMission?.id == mission.id {
+                currentMission = mission
+            }
+
+            // Fetch events to get the complete updated history
+            let eventTypes = ["user_message", "assistant_message", "tool_call", "tool_result", "text_delta", "thinking"]
+            if let events = try? await api.getMissionEvents(id: id, types: eventTypes), !events.isEmpty {
+                applyViewingMissionWithEvents(mission, events: events, scrollToBottom: false)
+            } else {
+                applyViewingMission(mission, scrollToBottom: false)
+            }
+        } catch {
+            print("Failed to reload mission from server: \(error)")
+        }
+    }
+
     private func createNewMission(options: NewMissionOptions? = nil) async {
         do {
             let mission = try await api.createMission(
