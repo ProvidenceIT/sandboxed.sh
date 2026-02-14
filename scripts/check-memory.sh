@@ -13,6 +13,13 @@ NC='\033[0m' # No Color
 # Function to convert bytes to human-readable format
 bytes_to_human() {
     local bytes=$1
+
+    # Handle non-numeric or empty input
+    if [ -z "$bytes" ] || ! [[ "$bytes" =~ ^[0-9]+$ ]]; then
+        echo "N/A"
+        return
+    fi
+
     if [ "$bytes" -eq 0 ]; then
         echo "0 B"
     elif [ "$bytes" -lt 1024 ]; then
