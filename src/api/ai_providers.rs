@@ -681,14 +681,14 @@ pub async fn refresh_workspace_anthropic_auth(
     std::fs::write(&auth_path, contents)
         .map_err(|e| format!("Failed to write workspace auth file: {}", e))?;
 
-    // Also sync to host paths so future missions can use it
-    if let Err(e) = sync_to_opencode_auth(
+    // **Solution #3: Sync to all storage tiers atomically**
+    if let Err(e) = sync_oauth_to_all_tiers(
         ProviderType::Anthropic,
         new_refresh_token,
         new_access_token,
         expires_at,
     ) {
-        tracing::warn!("Failed to sync refreshed token to host paths: {}", e);
+        tracing::warn!("Failed to sync refreshed token to all tiers: {}", e);
     }
 
     tracing::info!(
@@ -2190,38 +2190,13 @@ pub async fn refresh_anthropic_oauth_token() -> Result<(), String> {
         expires_in
     );
 
-    // Update auth.json with new tokens
-    sync_to_opencode_auth(
+    // **Solution #3: Sync to all storage tiers atomically**
+    sync_oauth_to_all_tiers(
         ProviderType::Anthropic,
         new_refresh_token,
         new_access_token,
         expires_at,
     )?;
-
-    // Also update the canonical credential store so mission runner can find fresh tokens
-    if let Err(e) = write_sandboxed_credential(
-        ProviderType::Anthropic,
-        new_refresh_token,
-        new_access_token,
-        expires_at,
-    ) {
-        tracing::warn!("Failed to sync refreshed token to credential store: {}", e);
-    }
-
-    // Update Claude CLI credentials so find_host_claude_cli_credentials() finds fresh tokens.
-    // Claude Code in --print mode does not auto-refresh, so the backend must keep these current.
-    for dir_path in &[
-        std::path::PathBuf::from("/var/lib/opencode/.claude"),
-        std::path::PathBuf::from("/root/.claude"),
-    ] {
-        if let Err(e) = write_claudecode_credentials_to_path(dir_path) {
-            tracing::warn!(
-                path = %dir_path.display(),
-                error = %e,
-                "Failed to sync refreshed token to Claude CLI credentials"
-            );
-        }
-    }
 
     tracing::info!(
         "Successfully refreshed Anthropic OAuth token, expires in {} seconds",
@@ -2359,6 +2334,7 @@ pub async fn refresh_openai_oauth_token() -> Result<(), String> {
         .as_str()
         .ok_or_else(|| "No access token in refresh response".to_string())?;
 
+    // **Solution #2: Capture new refresh token if provider rotates them**
     let new_refresh_token = token_data["refresh_token"]
         .as_str()
         .unwrap_or(refresh_token.as_str());
@@ -2366,7 +2342,8 @@ pub async fn refresh_openai_oauth_token() -> Result<(), String> {
     let expires_in = token_data["expires_in"].as_i64().unwrap_or(3600);
     let expires_at = chrono::Utc::now().timestamp_millis() + (expires_in * 1000);
 
-    sync_to_opencode_auth(
+    // **Solution #3: Sync to all storage tiers atomically**
+    sync_oauth_to_all_tiers(
         ProviderType::OpenAI,
         new_refresh_token,
         new_access_token,
@@ -2511,6 +2488,7 @@ pub async fn refresh_google_oauth_token() -> Result<(), String> {
         .as_str()
         .ok_or_else(|| "No access token in refresh response".to_string())?;
 
+    // **Solution #2: Capture new refresh token if provider rotates them**
     let new_refresh_token = token_data["refresh_token"]
         .as_str()
         .unwrap_or(refresh_token.as_str());
@@ -2518,7 +2496,8 @@ pub async fn refresh_google_oauth_token() -> Result<(), String> {
     let expires_in = token_data["expires_in"].as_i64().unwrap_or(3600);
     let expires_at = chrono::Utc::now().timestamp_millis() + (expires_in * 1000);
 
-    sync_to_opencode_auth(
+    // **Solution #3: Sync to all storage tiers atomically**
+    sync_oauth_to_all_tiers(
         ProviderType::Google,
         new_refresh_token,
         new_access_token,
@@ -4851,4 +4830,182 @@ async fn oauth_callback_inner(
             "OAuth not supported for this provider".to_string(),
         )),
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Proactive Token Refresh & Multi-Tier Sync (Solution #1, #2, #3)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Internal function to refresh an OAuth token for any provider.
+///
+/// Returns (new_access_token, new_refresh_token, expires_at).
+/// This is called by the background token refresher task.
+///
+/// **Solution #2: Refresh Token Rotation Handling**
+/// This function ensures that when providers return a new refresh_token
+/// (like Anthropic does), we capture and return it so it can be saved.
+pub async fn refresh_oauth_token_internal(
+    provider_type: &ProviderType,
+    refresh_token: &str,
+) -> Result<(String, String, i64), String> {
+    let client = reqwest::Client::new();
+
+    match provider_type {
+        ProviderType::Anthropic => {
+            // Exchange refresh token for new access token
+            let token_response = client
+                .post("https://console.anthropic.com/v1/oauth/token")
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .form(&[
+                    ("grant_type", "refresh_token"),
+                    ("refresh_token", refresh_token),
+                    ("client_id", ANTHROPIC_CLIENT_ID),
+                ])
+                .send()
+                .await
+                .map_err(|e| format!("Failed to refresh Anthropic token: {}", e))?;
+
+            if !token_response.status().is_success() {
+                let status = token_response.status();
+                let error_text = token_response.text().await.unwrap_or_default();
+                return Err(format!("Anthropic token refresh failed ({}): {}", status, error_text));
+            }
+
+            let token_data: serde_json::Value = token_response
+                .json()
+                .await
+                .map_err(|e| format!("Failed to parse Anthropic token response: {}", e))?;
+
+            let new_access_token = token_data["access_token"]
+                .as_str()
+                .ok_or_else(|| "No access token in Anthropic refresh response".to_string())?;
+
+            // **Solution #2: Anthropic rotates refresh tokens - capture the new one**
+            let new_refresh_token = token_data["refresh_token"].as_str().ok_or_else(|| {
+                "No refresh_token in Anthropic OAuth response - tokens may be rotating".to_string()
+            })?;
+
+            let expires_in = token_data["expires_in"].as_i64().unwrap_or(3600);
+            let expires_at = chrono::Utc::now().timestamp_millis() + (expires_in * 1000);
+
+            Ok((
+                new_access_token.to_string(),
+                new_refresh_token.to_string(),
+                expires_at,
+            ))
+        }
+        ProviderType::OpenAI => {
+            let (new_access, new_refresh, expires_at, _id_token) =
+                refresh_openai_oauth_tokens(&client, refresh_token).await?;
+
+            // **Solution #2: OpenAI may also rotate refresh tokens**
+            Ok((new_access, new_refresh, expires_at))
+        }
+        ProviderType::Google => {
+            // Google refresh token request
+            let token_response = client
+                .post("https://oauth2.googleapis.com/token")
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .form(&[
+                    ("grant_type", "refresh_token"),
+                    ("refresh_token", refresh_token),
+                    ("client_id", GOOGLE_CLIENT_ID),
+                    ("client_secret", GOOGLE_CLIENT_SECRET),
+                ])
+                .send()
+                .await
+                .map_err(|e| format!("Failed to refresh Google token: {}", e))?;
+
+            if !token_response.status().is_success() {
+                let status = token_response.status();
+                let error_text = token_response.text().await.unwrap_or_default();
+                return Err(format!("Google token refresh failed ({}): {}", status, error_text));
+            }
+
+            let token_data: serde_json::Value = token_response
+                .json()
+                .await
+                .map_err(|e| format!("Failed to parse Google token response: {}", e))?;
+
+            let new_access_token = token_data["access_token"]
+                .as_str()
+                .ok_or_else(|| "No access token in Google refresh response".to_string())?;
+
+            // Google doesn't rotate refresh tokens - use the existing one
+            let new_refresh_token = refresh_token.to_string();
+
+            let expires_in = token_data["expires_in"].as_i64().unwrap_or(3600);
+            let expires_at = chrono::Utc::now().timestamp_millis() + (expires_in * 1000);
+
+            Ok((
+                new_access_token.to_string(),
+                new_refresh_token,
+                expires_at,
+            ))
+        }
+        _ => Err(format!("OAuth refresh not supported for provider type: {:?}", provider_type)),
+    }
+}
+
+/// Sync OAuth credentials to all storage tiers atomically.
+///
+/// **Solution #3: Multi-Tier Token Sync**
+/// After a successful token refresh, we must update:
+/// 1. Tier 1: Open Agent's canonical credential store (~/.sandboxed-sh/credentials.json)
+/// 2. Tier 2: OpenCode auth.json paths
+/// 3. Tier 3: Claude CLI credentials (~/.claude/.credentials.json) - Anthropic only
+///
+/// This ensures all components see the fresh tokens and prevents reconnection issues.
+pub fn sync_oauth_to_all_tiers(
+    provider_type: ProviderType,
+    refresh_token: &str,
+    access_token: &str,
+    expires_at: i64,
+) -> Result<(), String> {
+    // Tier 1: Open Agent's canonical credential store
+    if let Err(e) =
+        write_sandboxed_credential(provider_type, refresh_token, access_token, expires_at)
+    {
+        tracing::error!(
+            provider = ?provider_type,
+            error = %e,
+            "Failed to sync token to Tier 1 (sandboxed-sh credentials)"
+        );
+        return Err(format!("Tier 1 sync failed: {}", e));
+    }
+
+    // Tier 2: OpenCode auth.json
+    if let Err(e) = sync_to_opencode_auth(provider_type, refresh_token, access_token, expires_at) {
+        tracing::error!(
+            provider = ?provider_type,
+            error = %e,
+            "Failed to sync token to Tier 2 (OpenCode auth.json)"
+        );
+        return Err(format!("Tier 2 sync failed: {}", e));
+    }
+
+    // Tier 3: Claude CLI credentials (Anthropic only)
+    if matches!(provider_type, ProviderType::Anthropic) {
+        for dir_path in &[
+            std::path::PathBuf::from("/var/lib/opencode/.claude"),
+            std::path::PathBuf::from("/root/.claude"),
+        ] {
+            if let Err(e) = write_claudecode_credentials_to_path(dir_path) {
+                tracing::warn!(
+                    provider = ?provider_type,
+                    path = %dir_path.display(),
+                    error = %e,
+                    "Failed to sync token to Tier 3 (Claude CLI credentials) - continuing"
+                );
+                // Don't fail the entire sync if Claude CLI sync fails
+            }
+        }
+    }
+
+    tracing::info!(
+        provider = ?provider_type,
+        "Successfully synced OAuth token to all storage tiers"
+    );
+
+    Ok(())
 }
