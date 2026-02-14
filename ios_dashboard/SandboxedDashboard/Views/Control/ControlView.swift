@@ -24,6 +24,7 @@ struct ControlView: View {
     @State private var progress: ExecutionProgress?
     @State private var isAtBottom = true
     @State private var copiedMessageId: String?
+    @State private var shouldScrollImmediately = false
 
     // Connection state for SSE stream - starts as disconnected until first event received
     @State private var connectionState: ConnectionState = .disconnected
@@ -511,8 +512,9 @@ struct ControlView: View {
                 }
                 .onChange(of: shouldScrollToBottom) { _, shouldScroll in
                     if shouldScroll {
-                        scrollToBottom(proxy: proxy)
+                        scrollToBottom(proxy: proxy, immediate: shouldScrollImmediately)
                         shouldScrollToBottom = false
+                        shouldScrollImmediately = false
                     }
                 }
                 .overlay(alignment: .bottom) {
@@ -627,9 +629,15 @@ struct ControlView: View {
         .transition(.opacity.combined(with: .scale(scale: 0.95)))
     }
     
-    private func scrollToBottom(proxy: ScrollViewProxy) {
-        withAnimation {
+    private func scrollToBottom(proxy: ScrollViewProxy, immediate: Bool = false) {
+        if immediate {
+            // Immediate scroll without animation for loading historical conversations
             proxy.scrollTo(bottomAnchorId, anchor: .bottom)
+        } else {
+            // Animated scroll for new messages during active conversation
+            withAnimation {
+                proxy.scrollTo(bottomAnchorId, anchor: .bottom)
+            }
         }
     }
     
@@ -777,7 +785,24 @@ struct ControlView: View {
     }
     
     // MARK: - Actions
-    
+
+    // Cache mission history for faster loading on reopen
+    private func cacheMissionHistory(_ mission: Mission) {
+        let key = "cached_mission_\(mission.id)"
+        if let encoded = try? JSONEncoder().encode(mission) {
+            UserDefaults.standard.set(encoded, forKey: key)
+        }
+    }
+
+    private func loadCachedMissionHistory(_ missionId: String) -> Mission? {
+        let key = "cached_mission_\(missionId)"
+        guard let data = UserDefaults.standard.data(forKey: key),
+              let mission = try? JSONDecoder().decode(Mission.self, from: data) else {
+            return nil
+        }
+        return mission
+    }
+
     private func applyViewingMission(_ mission: Mission, scrollToBottom: Bool = true) {
         viewingMission = mission
         viewingMissionId = mission.id
@@ -789,10 +814,13 @@ struct ControlView: View {
             )
         }
 
+        // Cache the mission history for faster loading next time
+        cacheMissionHistory(mission)
+
         if scrollToBottom {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                shouldScrollToBottom = true
-            }
+            // Use immediate synchronous scroll to prevent visible scrolling from top
+            shouldScrollImmediately = true
+            shouldScrollToBottom = true
         }
     }
 
@@ -845,10 +873,13 @@ struct ControlView: View {
             handleStreamEvent(type: event.eventType, data: data, isHistoricalReplay: true)
         }
 
+        // Cache the mission history for faster loading next time
+        cacheMissionHistory(mission)
+
         if scrollToBottom {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                shouldScrollToBottom = true
-            }
+            // Use immediate synchronous scroll to prevent visible scrolling from top
+            shouldScrollImmediately = true
+            shouldScrollToBottom = true
         }
     }
 
@@ -875,6 +906,11 @@ struct ControlView: View {
         let previousViewingId = viewingMissionId
         viewingMissionId = id
 
+        // Try to load cached version first for immediate display
+        if let cachedMission = loadCachedMissionHistory(id) {
+            applyViewingMission(cachedMission)
+        }
+
         isLoading = true
 
         do {
@@ -892,7 +928,9 @@ struct ControlView: View {
 
             // Try to fetch full event history (optional - fall back to basic history if it fails)
             do {
-                let events = try await api.getMissionEvents(id: id)
+                // Fetch all relevant event types including thinking events (matching web dashboard behavior)
+                let eventTypes = ["user_message", "assistant_message", "tool_call", "tool_result", "text_delta", "thinking"]
+                let events = try await api.getMissionEvents(id: id, types: eventTypes)
 
                 // Race condition guard after the second await
                 guard fetchingMissionId == id else {
