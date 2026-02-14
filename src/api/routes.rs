@@ -1243,6 +1243,35 @@ async fn oauth_token_refresher_loop(ai_providers: Arc<crate::ai_providers::AIPro
                 "OAuth token will expire soon, refreshing proactively"
             );
 
+            // Acquire refresh lock to prevent concurrent refreshes
+            // (critical for providers like Anthropic that rotate refresh tokens)
+            let _lock = match tokio::task::spawn_blocking({
+                let provider_type = provider.provider_type;
+                move || ai_providers_api::acquire_oauth_refresh_lock(provider_type)
+            })
+            .await
+            {
+                Ok(Ok(lock)) => Some(lock),
+                Ok(Err(e)) => {
+                    tracing::info!(
+                        provider_id = %provider.id,
+                        provider_name = %provider.name,
+                        error = %e,
+                        "Could not acquire refresh lock, skipping (another process may be refreshing)"
+                    );
+                    continue;
+                }
+                Err(e) => {
+                    tracing::error!(
+                        provider_id = %provider.id,
+                        provider_name = %provider.name,
+                        error = %e,
+                        "Failed to spawn blocking task for lock acquisition"
+                    );
+                    continue;
+                }
+            };
+
             // Attempt to refresh the token
             match ai_providers_api::refresh_oauth_token_internal(
                 &provider.provider_type,

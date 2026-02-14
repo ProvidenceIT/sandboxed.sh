@@ -2006,7 +2006,7 @@ fn get_oauth_refresh_lock_path(provider_type: ProviderType) -> PathBuf {
 
 /// Acquire an exclusive lock for OAuth token refresh to prevent race conditions.
 /// Returns a File handle that should be dropped when the lock is no longer needed.
-fn acquire_oauth_refresh_lock(provider_type: ProviderType) -> Result<std::fs::File, String> {
+pub fn acquire_oauth_refresh_lock(provider_type: ProviderType) -> Result<std::fs::File, String> {
     let lock_path = get_oauth_refresh_lock_path(provider_type);
 
     // Ensure parent directory exists
