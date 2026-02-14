@@ -228,11 +228,16 @@ Configure your mission:
    - **Rush Mode** - Faster responses
    - **Custom agents** - Your configured agents (Sisyphus, Prometheus, etc.)
 
-3. **Config Profile** - Override settings (optional):
+3. **Model Override (optional)** - Force a specific model for this mission:
+   - **Claude Code**: use a raw model ID (e.g., `claude-opus-4-6`)
+   - **Codex**: use a raw model ID (e.g., `gpt-5.3-codex`)
+   - **OpenCode**: use `provider/model` (e.g., `openai/gpt-5.3-codex`)
+
+4. **Config Profile** - Override settings (optional):
    - **Default** - Use workspace configuration
    - **Custom profiles** - Specific model/mode overrides
 
-4. Click **Create here** to start the mission in the current tab, or **New Tab** to open in a new window
+5. Click **Create here** to start the mission in the current tab, or **New Tab** to open in a new window
 
 ### 6.3 Interact with Your Agent
 

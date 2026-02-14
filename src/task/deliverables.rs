@@ -198,13 +198,12 @@ pub fn extract_deliverables(message: &str) -> DeliverableSet {
     for cap in dir_pattern.captures_iter(message) {
         let path = PathBuf::from(&cap[1]);
         // If it doesn't have an extension, treat as directory
-        if path.extension().is_none() {
-            if !deliverables
+        if path.extension().is_none()
+            && !deliverables
                 .iter()
                 .any(|d: &Deliverable| d.path() == Some(&path))
-            {
-                deliverables.push(Deliverable::Directory { path });
-            }
+        {
+            deliverables.push(Deliverable::Directory { path });
         }
     }
 

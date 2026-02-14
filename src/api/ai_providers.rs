@@ -283,7 +283,7 @@ fn google_authorize_url(challenge: &str, state: &str) -> Result<String, String> 
     let client_id = google_client_id();
 
     url.query_pairs_mut()
-        .append_pair("client_id", &client_id)
+        .append_pair("client_id", client_id)
         .append_pair("response_type", "code")
         .append_pair("redirect_uri", GOOGLE_REDIRECT_URI)
         .append_pair("scope", GOOGLE_SCOPES)
@@ -681,14 +681,14 @@ pub async fn refresh_workspace_anthropic_auth(
     std::fs::write(&auth_path, contents)
         .map_err(|e| format!("Failed to write workspace auth file: {}", e))?;
 
-    // Also sync to host paths so future missions can use it
-    if let Err(e) = sync_to_opencode_auth(
+    // **Solution #3: Sync to all storage tiers atomically**
+    if let Err(e) = sync_oauth_to_all_tiers(
         ProviderType::Anthropic,
         new_refresh_token,
         new_access_token,
         expires_at,
     ) {
-        tracing::warn!("Failed to sync refreshed token to host paths: {}", e);
+        tracing::warn!("Failed to sync refreshed token to all tiers: {}", e);
     }
 
     tracing::info!(
@@ -899,6 +899,7 @@ fn looks_like_json_file(path: &std::path::Path) -> bool {
     matches!(first, Some('{') | Some('['))
 }
 
+/// Get OpenAI auth from OpenCode auth.json (shared with OpenCode).
 fn get_openai_api_key_from_opencode_auth() -> Option<String> {
     let auth = read_opencode_auth().ok()?;
 
@@ -1012,11 +1013,6 @@ fn get_openai_api_key_for_codex(working_dir: &Path) -> Option<String> {
 /// - OpenAI provider is not configured for codex
 /// - No credentials are available (neither API key nor OAuth)
 /// - Any error occurs reading the config
-
-/// Get OpenAI auth from OpenCode auth.json (shared with OpenCode).
-
-/// Write Codex config.toml from explicit OAuth values.
-/// Find the host's existing Codex auth.json file.
 ///
 /// The Codex CLI stores its auth in `~/.codex/auth.json`, which contains
 /// fields (id_token, account_id) that are only obtained during the interactive
@@ -1406,13 +1402,7 @@ fn build_provider_response(
         .unwrap_or(false);
     let status = match auth {
         Some(AuthKind::ApiKey) | Some(AuthKind::OAuth) => ProviderStatusResponse::Connected,
-        None => {
-            if provider_type.uses_oauth() {
-                ProviderStatusResponse::NeedsAuth { auth_url: None }
-            } else {
-                ProviderStatusResponse::NeedsAuth { auth_url: None }
-            }
-        }
+        None => ProviderStatusResponse::NeedsAuth { auth_url: None },
     };
 
     // Most providers are only usable via OpenCode, but we still store and render
@@ -2027,6 +2017,7 @@ fn acquire_oauth_refresh_lock(provider_type: ProviderType) -> Result<std::fs::Fi
 
     let lock_file = std::fs::OpenOptions::new()
         .create(true)
+        .truncate(true)
         .write(true)
         .open(&lock_path)
         .map_err(|e| format!("Failed to open lock file: {}", e))?;
@@ -2176,15 +2167,13 @@ pub async fn refresh_anthropic_oauth_token() -> Result<(), String> {
 
     // Anthropic uses rotating refresh tokens - each refresh returns a NEW refresh token
     // and invalidates the old one. If no refresh_token is returned, this is an error.
-    let new_refresh_token = token_data["refresh_token"]
-        .as_str()
-        .ok_or_else(|| {
-            tracing::error!(
-                "Anthropic token refresh response missing refresh_token. Response: {:?}",
-                token_data
-            );
-            "No refresh_token in Anthropic OAuth response - tokens may be rotating".to_string()
-        })?;
+    let new_refresh_token = token_data["refresh_token"].as_str().ok_or_else(|| {
+        tracing::error!(
+            "Anthropic token refresh response missing refresh_token. Response: {:?}",
+            token_data
+        );
+        "No refresh_token in Anthropic OAuth response - tokens may be rotating".to_string()
+    })?;
 
     let expires_in = token_data["expires_in"].as_i64().unwrap_or(3600);
     let expires_at = chrono::Utc::now().timestamp_millis() + (expires_in * 1000);
@@ -2201,38 +2190,13 @@ pub async fn refresh_anthropic_oauth_token() -> Result<(), String> {
         expires_in
     );
 
-    // Update auth.json with new tokens
-    sync_to_opencode_auth(
+    // **Solution #3: Sync to all storage tiers atomically**
+    sync_oauth_to_all_tiers(
         ProviderType::Anthropic,
         new_refresh_token,
         new_access_token,
         expires_at,
     )?;
-
-    // Also update the canonical credential store so mission runner can find fresh tokens
-    if let Err(e) = write_sandboxed_credential(
-        ProviderType::Anthropic,
-        new_refresh_token,
-        new_access_token,
-        expires_at,
-    ) {
-        tracing::warn!("Failed to sync refreshed token to credential store: {}", e);
-    }
-
-    // Update Claude CLI credentials so find_host_claude_cli_credentials() finds fresh tokens.
-    // Claude Code in --print mode does not auto-refresh, so the backend must keep these current.
-    for dir_path in &[
-        std::path::PathBuf::from("/var/lib/opencode/.claude"),
-        std::path::PathBuf::from("/root/.claude"),
-    ] {
-        if let Err(e) = write_claudecode_credentials_to_path(dir_path) {
-            tracing::warn!(
-                path = %dir_path.display(),
-                error = %e,
-                "Failed to sync refreshed token to Claude CLI credentials"
-            );
-        }
-    }
 
     tracing::info!(
         "Successfully refreshed Anthropic OAuth token, expires in {} seconds",
@@ -2321,40 +2285,38 @@ pub async fn refresh_openai_oauth_token() -> Result<(), String> {
             error_text
         );
         let lower = error_text.to_lowercase();
-        if status == reqwest::StatusCode::BAD_REQUEST || status == reqwest::StatusCode::UNAUTHORIZED
+        if (status == reqwest::StatusCode::BAD_REQUEST
+            || status == reqwest::StatusCode::UNAUTHORIZED)
+            && (lower.contains("invalid_grant") || lower.contains("refresh_token_reused"))
         {
-            if lower.contains("invalid_grant") || lower.contains("refresh_token_reused") {
-                // Before deleting credentials, check if another process just refreshed the token
-                tracing::warn!("Received invalid_grant/refresh_token_reused error. Checking if token was recently refreshed...");
+            // Before deleting credentials, check if another process just refreshed the token
+            tracing::warn!("Received invalid_grant/refresh_token_reused error. Checking if token was recently refreshed...");
 
-                // Wait a moment and re-read credentials
-                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            // Wait a moment and re-read credentials
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
-                // Re-read token entry to see if it was updated
-                if let Some(updated_entry) = read_oauth_token_entry(ProviderType::OpenAI) {
-                    // Check if the refresh token changed (indicating a recent refresh)
-                    if updated_entry.refresh_token != refresh_token {
-                        tracing::info!(
-                            "Token was refreshed by another process after invalid_grant"
-                        );
-                        return Ok(());
-                    }
-
-                    // Check if access token is now valid
-                    if !oauth_token_expired(updated_entry.expires_at) {
-                        tracing::info!("Token is now valid after invalid_grant");
-                        return Ok(());
-                    }
+            // Re-read token entry to see if it was updated
+            if let Some(updated_entry) = read_oauth_token_entry(ProviderType::OpenAI) {
+                // Check if the refresh token changed (indicating a recent refresh)
+                if updated_entry.refresh_token != refresh_token {
+                    tracing::info!("Token was refreshed by another process after invalid_grant");
+                    return Ok(());
                 }
 
-                // Token is genuinely invalid - delete it
-                tracing::error!("Refresh token is genuinely invalid. Removing credentials.");
-                if let Err(e) = remove_opencode_auth_entry(ProviderType::OpenAI) {
-                    tracing::warn!(
-                        "Failed to clear OpenAI auth entry after refresh failure: {}",
-                        e
-                    );
+                // Check if access token is now valid
+                if !oauth_token_expired(updated_entry.expires_at) {
+                    tracing::info!("Token is now valid after invalid_grant");
+                    return Ok(());
                 }
+            }
+
+            // Token is genuinely invalid - delete it
+            tracing::error!("Refresh token is genuinely invalid. Removing credentials.");
+            if let Err(e) = remove_opencode_auth_entry(ProviderType::OpenAI) {
+                tracing::warn!(
+                    "Failed to clear OpenAI auth entry after refresh failure: {}",
+                    e
+                );
             }
         }
         return Err(format!(
@@ -2372,6 +2334,7 @@ pub async fn refresh_openai_oauth_token() -> Result<(), String> {
         .as_str()
         .ok_or_else(|| "No access token in refresh response".to_string())?;
 
+    // **Solution #2: Capture new refresh token if provider rotates them**
     let new_refresh_token = token_data["refresh_token"]
         .as_str()
         .unwrap_or(refresh_token.as_str());
@@ -2379,7 +2342,8 @@ pub async fn refresh_openai_oauth_token() -> Result<(), String> {
     let expires_in = token_data["expires_in"].as_i64().unwrap_or(3600);
     let expires_at = chrono::Utc::now().timestamp_millis() + (expires_in * 1000);
 
-    sync_to_opencode_auth(
+    // **Solution #3: Sync to all storage tiers atomically**
+    sync_oauth_to_all_tiers(
         ProviderType::OpenAI,
         new_refresh_token,
         new_access_token,
@@ -2524,6 +2488,7 @@ pub async fn refresh_google_oauth_token() -> Result<(), String> {
         .as_str()
         .ok_or_else(|| "No access token in refresh response".to_string())?;
 
+    // **Solution #2: Capture new refresh token if provider rotates them**
     let new_refresh_token = token_data["refresh_token"]
         .as_str()
         .unwrap_or(refresh_token.as_str());
@@ -2531,7 +2496,8 @@ pub async fn refresh_google_oauth_token() -> Result<(), String> {
     let expires_in = token_data["expires_in"].as_i64().unwrap_or(3600);
     let expires_at = chrono::Utc::now().timestamp_millis() + (expires_in * 1000);
 
-    sync_to_opencode_auth(
+    // **Solution #3: Sync to all storage tiers atomically**
+    sync_oauth_to_all_tiers(
         ProviderType::Google,
         new_refresh_token,
         new_access_token,
@@ -2838,7 +2804,7 @@ fn get_opencode_auth_path() -> PathBuf {
 
 fn get_opencode_provider_auth_path(provider_type: ProviderType) -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
-    let mut candidates = vec![
+    let candidates = vec![
         PathBuf::from(&home)
             .join(".opencode")
             .join("auth")
@@ -2938,7 +2904,7 @@ fn strip_jsonc_comments(input: &str) -> String {
             match chars.peek() {
                 Some('/') => {
                     chars.next();
-                    while let Some(n) = chars.next() {
+                    for n in chars.by_ref() {
                         if n == '\n' {
                             out.push('\n');
                             break;
@@ -2949,7 +2915,7 @@ fn strip_jsonc_comments(input: &str) -> String {
                 Some('*') => {
                     chars.next();
                     let mut prev = '\0';
-                    while let Some(n) = chars.next() {
+                    for n in chars.by_ref() {
                         if prev == '*' && n == '/' {
                             break;
                         }
@@ -3139,7 +3105,7 @@ fn remove_provider_config_entry(config: &mut serde_json::Value, provider: Provid
 
 fn get_default_provider(config: &serde_json::Value) -> Option<ProviderType> {
     let model = config.get("model").and_then(|v| v.as_str())?;
-    let provider = model.splitn(2, '/').next()?.trim();
+    let provider = model.split('/').next()?.trim();
     ProviderType::from_id(provider)
 }
 
@@ -3303,9 +3269,9 @@ fn read_opencode_auth_map() -> Result<HashMap<ProviderType, AuthKind>, String> {
         }
     }
 
-    if !out.contains_key(&ProviderType::OpenAI) {
+    if let std::collections::hash_map::Entry::Vacant(entry) = out.entry(ProviderType::OpenAI) {
         if let Ok(Some(kind)) = read_opencode_provider_auth(ProviderType::OpenAI) {
-            out.insert(ProviderType::OpenAI, kind);
+            entry.insert(kind);
         }
     }
 
@@ -3876,11 +3842,9 @@ async fn update_provider(
         }
     }
 
-    if let Some(base_url) = req.base_url.as_ref() {
-        if let Some(ref url) = base_url {
-            if url::Url::parse(url).is_err() {
-                return Err((StatusCode::BAD_REQUEST, "Invalid URL format".to_string()));
-            }
+    if let Some(Some(base_url)) = req.base_url.as_ref() {
+        if url::Url::parse(base_url).is_err() {
+            return Err((StatusCode::BAD_REQUEST, "Invalid URL format".to_string()));
         }
     }
 
@@ -4188,13 +4152,13 @@ async fn oauth_authorize(
 
             url.query_pairs_mut()
                 .append_pair("code", "true")
-                .append_pair("client_id", &client_id)
+                .append_pair("client_id", client_id.as_str())
                 .append_pair("response_type", "code")
-                .append_pair("redirect_uri", &redirect_uri)
+                .append_pair("redirect_uri", redirect_uri.as_str())
                 .append_pair("scope", scope)
-                .append_pair("code_challenge", &challenge)
+                .append_pair("code_challenge", challenge.as_str())
                 .append_pair("code_challenge_method", "S256")
-                .append_pair("state", &verifier);
+                .append_pair("state", verifier.as_str());
 
             // Store pending OAuth
             {
@@ -4782,8 +4746,8 @@ async fn oauth_callback_inner(
             let client_id = google_client_id();
             let client_secret = google_client_secret();
             let token_body = url::form_urlencoded::Serializer::new(String::new())
-                .append_pair("client_id", &client_id)
-                .append_pair("client_secret", &client_secret)
+                .append_pair("client_id", client_id)
+                .append_pair("client_secret", client_secret)
                 .append_pair("code", &code)
                 .append_pair("grant_type", "authorization_code")
                 .append_pair("redirect_uri", GOOGLE_REDIRECT_URI)
@@ -4866,4 +4830,187 @@ async fn oauth_callback_inner(
             "OAuth not supported for this provider".to_string(),
         )),
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Proactive Token Refresh & Multi-Tier Sync (Solution #1, #2, #3)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Internal function to refresh an OAuth token for any provider.
+///
+/// Returns (new_access_token, new_refresh_token, expires_at).
+/// This is called by the background token refresher task.
+///
+/// **Solution #2: Refresh Token Rotation Handling**
+/// This function ensures that when providers return a new refresh_token
+/// (like Anthropic does), we capture and return it so it can be saved.
+pub async fn refresh_oauth_token_internal(
+    provider_type: &ProviderType,
+    refresh_token: &str,
+) -> Result<(String, String, i64), String> {
+    let client = reqwest::Client::new();
+
+    match provider_type {
+        ProviderType::Anthropic => {
+            // Exchange refresh token for new access token
+            let token_response = client
+                .post("https://console.anthropic.com/v1/oauth/token")
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .form(&[
+                    ("grant_type", "refresh_token"),
+                    ("refresh_token", refresh_token),
+                    ("client_id", ANTHROPIC_CLIENT_ID),
+                ])
+                .send()
+                .await
+                .map_err(|e| format!("Failed to refresh Anthropic token: {}", e))?;
+
+            if !token_response.status().is_success() {
+                let status = token_response.status();
+                let error_text = token_response.text().await.unwrap_or_default();
+                return Err(format!(
+                    "Anthropic token refresh failed ({}): {}",
+                    status, error_text
+                ));
+            }
+
+            let token_data: serde_json::Value = token_response
+                .json()
+                .await
+                .map_err(|e| format!("Failed to parse Anthropic token response: {}", e))?;
+
+            let new_access_token = token_data["access_token"]
+                .as_str()
+                .ok_or_else(|| "No access token in Anthropic refresh response".to_string())?;
+
+            // **Solution #2: Anthropic rotates refresh tokens - capture the new one**
+            let new_refresh_token = token_data["refresh_token"].as_str().ok_or_else(|| {
+                "No refresh_token in Anthropic OAuth response - tokens may be rotating".to_string()
+            })?;
+
+            let expires_in = token_data["expires_in"].as_i64().unwrap_or(3600);
+            let expires_at = chrono::Utc::now().timestamp_millis() + (expires_in * 1000);
+
+            Ok((
+                new_access_token.to_string(),
+                new_refresh_token.to_string(),
+                expires_at,
+            ))
+        }
+        ProviderType::OpenAI => {
+            let (new_access, new_refresh, expires_at, _id_token) =
+                refresh_openai_oauth_tokens(&client, refresh_token).await?;
+
+            // **Solution #2: OpenAI may also rotate refresh tokens**
+            Ok((new_access, new_refresh, expires_at))
+        }
+        ProviderType::Google => {
+            // Google refresh token request
+            let token_response = client
+                .post("https://oauth2.googleapis.com/token")
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .form(&[
+                    ("grant_type", "refresh_token"),
+                    ("refresh_token", refresh_token),
+                    ("client_id", GOOGLE_CLIENT_ID),
+                    ("client_secret", GOOGLE_CLIENT_SECRET),
+                ])
+                .send()
+                .await
+                .map_err(|e| format!("Failed to refresh Google token: {}", e))?;
+
+            if !token_response.status().is_success() {
+                let status = token_response.status();
+                let error_text = token_response.text().await.unwrap_or_default();
+                return Err(format!(
+                    "Google token refresh failed ({}): {}",
+                    status, error_text
+                ));
+            }
+
+            let token_data: serde_json::Value = token_response
+                .json()
+                .await
+                .map_err(|e| format!("Failed to parse Google token response: {}", e))?;
+
+            let new_access_token = token_data["access_token"]
+                .as_str()
+                .ok_or_else(|| "No access token in Google refresh response".to_string())?;
+
+            // Google doesn't rotate refresh tokens - use the existing one
+            let new_refresh_token = refresh_token.to_string();
+
+            let expires_in = token_data["expires_in"].as_i64().unwrap_or(3600);
+            let expires_at = chrono::Utc::now().timestamp_millis() + (expires_in * 1000);
+
+            Ok((new_access_token.to_string(), new_refresh_token, expires_at))
+        }
+        _ => Err(format!(
+            "OAuth refresh not supported for provider type: {:?}",
+            provider_type
+        )),
+    }
+}
+
+/// Sync OAuth credentials to all storage tiers atomically.
+///
+/// **Solution #3: Multi-Tier Token Sync**
+/// After a successful token refresh, we must update:
+/// 1. Tier 1: Open Agent's canonical credential store (~/.sandboxed-sh/credentials.json)
+/// 2. Tier 2: OpenCode auth.json paths
+/// 3. Tier 3: Claude CLI credentials (~/.claude/.credentials.json) - Anthropic only
+///
+/// This ensures all components see the fresh tokens and prevents reconnection issues.
+pub fn sync_oauth_to_all_tiers(
+    provider_type: ProviderType,
+    refresh_token: &str,
+    access_token: &str,
+    expires_at: i64,
+) -> Result<(), String> {
+    // Tier 1: Open Agent's canonical credential store
+    if let Err(e) =
+        write_sandboxed_credential(provider_type, refresh_token, access_token, expires_at)
+    {
+        tracing::error!(
+            provider = ?provider_type,
+            error = %e,
+            "Failed to sync token to Tier 1 (sandboxed-sh credentials)"
+        );
+        return Err(format!("Tier 1 sync failed: {}", e));
+    }
+
+    // Tier 2: OpenCode auth.json
+    if let Err(e) = sync_to_opencode_auth(provider_type, refresh_token, access_token, expires_at) {
+        tracing::error!(
+            provider = ?provider_type,
+            error = %e,
+            "Failed to sync token to Tier 2 (OpenCode auth.json)"
+        );
+        return Err(format!("Tier 2 sync failed: {}", e));
+    }
+
+    // Tier 3: Claude CLI credentials (Anthropic only)
+    if matches!(provider_type, ProviderType::Anthropic) {
+        for dir_path in &[
+            std::path::PathBuf::from("/var/lib/opencode/.claude"),
+            std::path::PathBuf::from("/root/.claude"),
+        ] {
+            if let Err(e) = write_claudecode_credentials_to_path(dir_path) {
+                tracing::warn!(
+                    provider = ?provider_type,
+                    path = %dir_path.display(),
+                    error = %e,
+                    "Failed to sync token to Tier 3 (Claude CLI credentials) - continuing"
+                );
+                // Don't fail the entire sync if Claude CLI sync fails
+            }
+        }
+    }
+
+    tracing::info!(
+        provider = ?provider_type,
+        "Successfully synced OAuth token to all storage tiers"
+    );
+
+    Ok(())
 }

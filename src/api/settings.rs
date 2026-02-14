@@ -345,7 +345,7 @@ fn add_directory_to_zip<W: IoWrite + std::io::Seek>(
             file.read_to_end(&mut contents)?;
 
             zip.start_file(&archive_path, options)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                .map_err(std::io::Error::other)?;
             zip.write_all(&contents)?;
         }
     }

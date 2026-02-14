@@ -23,7 +23,6 @@ struct RuntimeWorkspace {
     working_dir: Option<String>,
     mission_context: Option<String>,
     context_root: Option<String>,
-    context_dir_name: Option<String>,
     workspace_root: Option<String>,
     workspace_type: Option<String>,
 }
@@ -356,7 +355,7 @@ fn resolve_upload_base(path: &str) -> Result<PathBuf, (StatusCode, String)> {
 /// Removes directory separators and path traversal sequences.
 fn sanitize_path_component(s: &str) -> String {
     // Take only the filename portion (after any path separator)
-    let filename = s.rsplit(|c| c == '/' || c == '\\').next().unwrap_or(s);
+    let filename = s.rsplit(['/', '\\']).next().unwrap_or(s);
 
     // Remove any remaining path traversal patterns and null bytes
     filename
@@ -621,7 +620,7 @@ pub async fn download(
     let filename = q
         .path
         .split('/')
-        .last()
+        .next_back()
         .filter(|name| !name.is_empty())
         .unwrap_or("download");
     let mut headers = HeaderMap::new();
@@ -688,11 +687,7 @@ pub async fn upload(
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-        let remote_path = if q.path.ends_with('/') {
-            base.join(&file_name)
-        } else {
-            base.join(&file_name)
-        };
+        let remote_path = base.join(&file_name);
 
         // Ensure the target directory exists
         let target_dir = remote_path
@@ -745,6 +740,7 @@ pub async fn upload_chunk(
     Query(q): Query<ChunkUploadQuery>,
     mut multipart: Multipart,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let _ = q.workspace_id;
     if q.path.trim().is_empty() {
         return Err((StatusCode::BAD_REQUEST, "Invalid path".to_string()));
     }
@@ -996,7 +992,7 @@ pub async fn download_from_url(
             .unwrap_or_else(|| {
                 req.url
                     .split('/')
-                    .last()
+                    .next_back()
                     .and_then(|s| s.split('?').next())
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| format!("download_{}", uuid::Uuid::new_v4()))

@@ -67,6 +67,12 @@ impl CompleteMission {
     }
 }
 
+impl Default for CompleteMission {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct CompleteMissionArgs {
     /// Status: "completed", "failed", "blocked", or "not_feasible"
@@ -145,7 +151,7 @@ IMPORTANT: Use 'blocked' or 'not_feasible' instead of producing fake/placeholder
         };
 
         // Check if there's a current mission
-        let mission_id = control.current_mission_id.read().await.clone();
+        let mission_id = *control.current_mission_id.read().await;
         if mission_id.is_none() {
             return Ok("No active mission to complete. Start a mission first.".to_string());
         }

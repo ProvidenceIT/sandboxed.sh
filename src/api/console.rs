@@ -490,8 +490,8 @@ async fn handle_new_session(mut socket: WebSocket, state: Arc<AppState>, session
     // Note: We don't kill the child or clean up tasks here anymore.
     // The cleanup task will handle expired sessions.
     // Writer and reader tasks will continue running in the background.
-    let _ = writer_task;
-    let _ = reader_task;
+    std::mem::drop(writer_task);
+    std::mem::drop(reader_task);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1018,6 +1018,6 @@ async fn handle_new_workspace_shell(
     );
     tracing::debug!("Workspace shell session returned to pool: {}", session_key);
 
-    let _ = writer_task;
-    let _ = reader_task;
+    std::mem::drop(writer_task);
+    std::mem::drop(reader_task);
 }

@@ -36,20 +36,15 @@ use crate::nspawn::{self, NspawnDistro};
 pub const DEFAULT_WORKSPACE_ID: Uuid = Uuid::nil();
 
 /// Type of workspace execution environment.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkspaceType {
     /// Execute directly on remote host
+    #[default]
     Host,
     /// Execute inside isolated container environment
     #[serde(alias = "chroot")]
     Container,
-}
-
-impl Default for WorkspaceType {
-    fn default() -> Self {
-        Self::Host
-    }
 }
 
 impl WorkspaceType {
@@ -80,7 +75,7 @@ pub fn use_nspawn_for_workspace(workspace: &Workspace) -> bool {
 }
 
 /// Status of a workspace.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkspaceStatus {
     /// Container not yet built
@@ -88,15 +83,10 @@ pub enum WorkspaceStatus {
     /// Container build in progress
     Building,
     /// Ready for execution
+    #[default]
     Ready,
     /// Build failed
     Error,
-}
-
-impl Default for WorkspaceStatus {
-    fn default() -> Self {
-        Self::Ready
-    }
 }
 
 /// Tailscale networking mode for containers with isolated networking.
@@ -472,8 +462,10 @@ impl WorkspaceStore {
     pub async fn update(&self, workspace: Workspace) -> bool {
         let updated = {
             let mut guard = self.workspaces.write().await;
-            if guard.contains_key(&workspace.id) {
-                guard.insert(workspace.id, workspace);
+            if let std::collections::hash_map::Entry::Occupied(mut entry) =
+                guard.entry(workspace.id)
+            {
+                entry.insert(workspace);
                 true
             } else {
                 false
@@ -937,6 +929,7 @@ fn claude_entry_from_mcp(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn write_opencode_config(
     workspace_dir: &Path,
     mcp_configs: Vec<McpServerConfig>,
@@ -977,7 +970,7 @@ async fn write_opencode_config(
                 match chars.peek() {
                     Some('/') => {
                         chars.next();
-                        while let Some(n) = chars.next() {
+                        for n in chars.by_ref() {
                             if n == '\n' {
                                 out.push('\n');
                                 break;
@@ -988,7 +981,7 @@ async fn write_opencode_config(
                     Some('*') => {
                         chars.next();
                         let mut prev = '\0';
-                        while let Some(n) = chars.next() {
+                        for n in chars.by_ref() {
                             if prev == '*' && n == '/' {
                                 break;
                             }
@@ -1281,6 +1274,7 @@ async fn write_opencode_config(
 
 /// Write Claude Code configuration to the workspace.
 /// Generates `.claude/settings.local.json` and `CLAUDE.md` files.
+#[allow(clippy::too_many_arguments)]
 async fn write_claudecode_config(
     workspace_dir: &Path,
     mcp_configs: Vec<McpServerConfig>,
@@ -1954,10 +1948,10 @@ fn ensure_amp_skill_frontmatter(
     description: Option<&str>,
 ) -> String {
     // Check if the content already has frontmatter
-    if content.starts_with("---") {
+    if let Some(without_prefix) = content.strip_prefix("---") {
         // Already has frontmatter, check if name is present
-        if let Some(end_idx) = content[3..].find("---") {
-            let frontmatter = &content[3..3 + end_idx];
+        if let Some(end_idx) = without_prefix.find("---") {
+            let frontmatter = &without_prefix[..end_idx];
             let has_name = frontmatter.lines().any(|line| {
                 let trimmed = line.trim();
                 trimmed.starts_with("name:") || trimmed.starts_with("name :")
@@ -1968,7 +1962,7 @@ fn ensure_amp_skill_frontmatter(
             }
 
             // Insert name field
-            let rest = &content[3 + end_idx..];
+            let rest = &without_prefix[end_idx..];
             return format!(
                 "---\nname: {}\n{}\n{}",
                 skill_name,
@@ -1988,6 +1982,7 @@ fn ensure_amp_skill_frontmatter(
 
 /// Write backend-specific configuration to the workspace.
 /// This is the main entry point for config generation.
+#[allow(clippy::too_many_arguments)]
 pub async fn write_backend_config(
     workspace_dir: &Path,
     backend_id: &str,
@@ -3324,16 +3319,14 @@ pub async fn write_runtime_workspace_state(
     }
     let context_link = working_dir.join(context_dir_name);
     if let Some(target) = mission_context.as_ref() {
-        if context_link.exists() {
-            if tokio::fs::remove_file(&context_link).await.is_err() {
-                if let Err(e) = tokio::fs::remove_dir_all(&context_link).await {
-                    tracing::warn!(
-                        workspace = %workspace.name,
-                        mission = ?mission_id,
-                        error = %e,
-                        "Failed to clear existing context link"
-                    );
-                }
+        if context_link.exists() && tokio::fs::remove_file(&context_link).await.is_err() {
+            if let Err(e) = tokio::fs::remove_dir_all(&context_link).await {
+                tracing::warn!(
+                    workspace = %workspace.name,
+                    mission = ?mission_id,
+                    error = %e,
+                    "Failed to clear existing context link"
+                );
             }
         }
         #[cfg(unix)]
@@ -3753,7 +3746,7 @@ pub async fn build_container_workspace(
             let has_custom_script = workspace
                 .init_script
                 .as_ref()
-                .map_or(false, |s| !s.trim().is_empty());
+                .is_some_and(|s| !s.trim().is_empty());
             if has_init_scripts || has_custom_script {
                 append_to_init_log(&workspace.path, "[sandboxed] Running init script...\n");
             }
@@ -3799,7 +3792,7 @@ pub async fn build_container_workspace(
 fn append_to_init_log(container_path: &Path, msg: &str) {
     use std::io::Write;
     let log_path = container_path.join("var/log/sandboxed-init.log");
-    let target = if log_path.parent().map_or(false, |p| p.exists()) {
+    let target = if log_path.parent().is_some_and(|p| p.exists()) {
         log_path
     } else {
         nspawn::build_log_path_for(container_path)
@@ -3966,8 +3959,10 @@ echo "[sandboxed] Harness bootstrap done"
         "/bin/sh"
     };
 
-    let mut config = nspawn::NspawnConfig::default();
-    config.env = workspace.env_vars.clone();
+    let config = nspawn::NspawnConfig {
+        env: workspace.env_vars.clone(),
+        ..Default::default()
+    };
 
     let command = vec![shell.to_string(), "/sandboxed-bootstrap.sh".to_string()];
     let output = nspawn::execute_in_container(&workspace.path, &command, &config).await?;
@@ -4088,14 +4083,16 @@ async fn run_workspace_init_script(
         "/bin/sh"
     };
 
-    let mut config = nspawn::NspawnConfig::default();
-    config.env = workspace.env_vars.clone();
+    let config = nspawn::NspawnConfig {
+        env: workspace.env_vars.clone(),
+        ..Default::default()
+    };
 
     let command = vec![shell.to_string(), "/sandboxed-init.sh".to_string()];
 
     // Determine log file path for streaming output
     let log_path = workspace.path.join("var/log/sandboxed-init.log");
-    let log_file = if log_path.parent().map_or(false, |p| p.exists()) {
+    let log_file = if log_path.parent().is_some_and(|p| p.exists()) {
         log_path
     } else {
         nspawn::build_log_path_for(&workspace.path)

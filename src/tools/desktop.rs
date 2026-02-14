@@ -852,11 +852,7 @@ impl Tool for GetText {
 
         let mut output = String::new();
         for (method_name, content) in results {
-            if method_name.ends_with("_error") {
-                output.push_str(&format!("--- {} ---\n{}\n\n", method_name, content));
-            } else {
-                output.push_str(&format!("--- {} ---\n{}\n\n", method_name, content));
-            }
+            output.push_str(&format!("--- {} ---\n{}\n\n", method_name, content));
         }
 
         Ok(output.trim().to_string())

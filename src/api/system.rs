@@ -825,7 +825,7 @@ async fn get_oh_my_opencode_version() -> Option<String> {
     {
         if output.status.success() {
             let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !version.is_empty() && version.chars().next().map_or(false, |c| c.is_ascii_digit()) {
+            if !version.is_empty() && version.chars().next().is_some_and(|c| c.is_ascii_digit()) {
                 return Some(version);
             }
         }

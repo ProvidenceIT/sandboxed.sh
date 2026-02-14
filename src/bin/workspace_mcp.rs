@@ -145,8 +145,7 @@ fn is_inside_container() -> bool {
 fn translate_host_path_for_container(host_path: &str, workspace_root: Option<&str>) -> String {
     // If we have the workspace_root (container root on host), strip it from the path
     if let Some(root) = workspace_root {
-        if host_path.starts_with(root) {
-            let relative = &host_path[root.len()..];
+        if let Some(relative) = host_path.strip_prefix(root) {
             // Ensure it starts with /
             if relative.starts_with('/') {
                 return relative.to_string();

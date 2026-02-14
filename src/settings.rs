@@ -4,7 +4,7 @@
 //! Environment variables are used as initial defaults when no settings file exists.
 
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -48,7 +48,7 @@ impl SettingsStore {
     ///
     /// If no settings file exists, uses environment variables as defaults:
     /// - `LIBRARY_REMOTE` - Git remote URL for the configuration library
-    pub async fn new(working_dir: &PathBuf) -> Self {
+    pub async fn new(working_dir: &Path) -> Self {
         let storage_path = working_dir.join(".sandboxed-sh/settings.json");
 
         let settings = if storage_path.exists() {

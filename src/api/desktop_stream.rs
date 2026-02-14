@@ -390,7 +390,7 @@ async fn send_stream_error(
 fn resolve_button(button: Option<ClickButton>) -> u8 {
     match button {
         Some(ClickButton::Number(num)) => match num {
-            2 | 3 | 4 | 5 | 6 | 7 => num,
+            2..=7 => num,
             _ => 1,
         },
         Some(ClickButton::Name(name)) => {

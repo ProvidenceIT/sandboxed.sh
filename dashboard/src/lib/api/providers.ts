@@ -126,6 +126,17 @@ export interface ProvidersResponse {
   providers: Provider[];
 }
 
+export interface BackendModelOption {
+  value: string;
+  label: string;
+  description?: string;
+  provider_id?: string;
+}
+
+export interface BackendModelOptionsResponse {
+  backends: Record<string, BackendModelOption[]>;
+}
+
 // ---------------------------------------------------------------------------
 // API Functions
 // ---------------------------------------------------------------------------
@@ -237,5 +248,20 @@ export async function listProviders(options?: { includeAll?: boolean }): Promise
   const query = params.toString();
   const res = await apiFetch(`/api/providers${query ? `?${query}` : ""}`);
   if (!res.ok) throw new Error("Failed to fetch providers");
+  return res.json();
+}
+
+export async function listBackendModelOptions(options?: {
+  includeAll?: boolean;
+}): Promise<BackendModelOptionsResponse> {
+  const params = new URLSearchParams();
+  if (options?.includeAll) {
+    params.set("include_all", "true");
+  }
+  const query = params.toString();
+  const res = await apiFetch(
+    `/api/providers/backend-models${query ? `?${query}` : ""}`
+  );
+  if (!res.ok) throw new Error("Failed to fetch backend model options");
   return res.json();
 }

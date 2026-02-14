@@ -318,23 +318,10 @@ export function MissionAutomationsDialog({
     try {
       const shouldStartImmediately = startImmediately;
       const created = await createMissionAutomation(missionId, input);
-      let updated = created;
-      let pauseError: string | null = null;
-
-      // Allow users to create an automation in a paused state.
-      // The backend create endpoint does not currently accept `active`,
-      // so we create then immediately update.
-      if (!shouldStartImmediately) {
-        try {
-          updated = await updateAutomation(created.id, { active: false });
-        } catch (err) {
-          pauseError = err instanceof Error ? err.message : 'Failed to pause automation';
-        }
-      }
 
       setAutomationsForMission(missionId, [
-        updated,
-        ...automationsRef.current.filter((a) => a.id !== updated.id),
+        created,
+        ...automationsRef.current.filter((a) => a.id !== created.id),
       ]);
       // Reset form
       setCommandName('');
@@ -343,13 +330,7 @@ export function MissionAutomationsDialog({
       setIntervalUnit('minutes');
       setVariables([]);
       setStartImmediately(true);
-      if (pauseError) {
-        toast.error(
-          `Automation created but could not be paused. It is active and visible in the list. ${pauseError}`
-        );
-      } else {
-        toast.success(shouldStartImmediately ? 'Automation created' : 'Automation created (paused)');
-      }
+      toast.success(shouldStartImmediately ? 'Automation created' : 'Automation created (scheduled)');
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to create automation';
       toast.error(message);
@@ -758,7 +739,7 @@ export function MissionAutomationsDialog({
                   <div className="min-w-0">
                     <div className="text-xs font-medium text-white/70">Start immediately</div>
                     <div className="text-[11px] text-white/35">
-                      If off, the automation is created paused and will not trigger until enabled.
+                      If off, the automation waits for its next trigger instead of running right away.
                     </div>
                   </div>
                   <label className="flex items-center gap-2 shrink-0 cursor-pointer select-none">

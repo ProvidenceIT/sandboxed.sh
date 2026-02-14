@@ -149,9 +149,7 @@ fn extract_title_from_assistant(content: &str) -> Option<String> {
         .find(|l| l.len() > 5 && !l.starts_with("```"))?;
 
     // Strip markdown prefixes
-    let cleaned = first_line
-        .trim_start_matches(|c: char| c == '#' || c == '*' || c == '-' || c == ' ')
-        .trim();
+    let cleaned = first_line.trim_start_matches(['#', '*', '-', ' ']).trim();
 
     if cleaned.len() < 5 {
         return None;
@@ -314,18 +312,13 @@ pub struct ControlToolResultRequest {
     pub result: serde_json::Value,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ControlRunState {
+    #[default]
     Idle,
     Running,
     WaitingForTool,
-}
-
-impl Default for ControlRunState {
-    fn default() -> Self {
-        ControlRunState::Idle
-    }
 }
 
 /// A file shared by the agent (images render inline, other files show as download links).
@@ -998,6 +991,12 @@ impl FrontendToolHub {
     }
 }
 
+impl Default for FrontendToolHub {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Control session runtime stored in `AppState`.
 #[derive(Clone)]
 pub struct ControlState {
@@ -1475,6 +1474,23 @@ pub async fn create_mission(
         backend = Some(registry.default_id().to_string());
     }
 
+    // Normalize model override based on backend expectations.
+    // OpenCode expects provider/model; Claude Code and Codex expect raw model IDs.
+    if let Some(ref raw_model) = model_override {
+        let trimmed = raw_model.trim();
+        if trimmed.is_empty() {
+            model_override = None;
+        } else if backend.as_deref() != Some("opencode") {
+            if let Some((_, model_id)) = trimmed.split_once('/') {
+                model_override = Some(model_id.to_string());
+            } else {
+                model_override = Some(trimmed.to_string());
+            }
+        } else {
+            model_override = Some(trimmed.to_string());
+        }
+    }
+
     // Resolve the effective config profile:
     // 1. Use explicit config_profile from request if provided
     // 2. Otherwise use workspace's config_profile
@@ -1517,6 +1533,14 @@ pub async fn create_mission(
                 StatusCode::BAD_REQUEST,
                 format!("Unknown backend: {}", backend_id),
             ));
+        }
+    }
+
+    // Validate model override if provided
+    if let Some(ref model) = model_override {
+        let backend_id = backend.as_deref().unwrap_or("claudecode");
+        if let Err(e) = super::providers::validate_model_override(&state, backend_id, model).await {
+            return Err((StatusCode::BAD_REQUEST, e));
         }
     }
 
@@ -1641,7 +1665,7 @@ pub async fn get_current_mission(
     Extension(user): Extension<AuthUser>,
 ) -> Result<Json<Option<Mission>>, (StatusCode, String)> {
     let control = control_for_user(&state, &user).await;
-    let current_id = control.current_mission.read().await.clone();
+    let current_id = *control.current_mission.read().await;
 
     match current_id {
         Some(id) => {
@@ -1677,7 +1701,7 @@ pub async fn get_mission_tree(
 ) -> Result<Json<Option<AgentTreeNode>>, (StatusCode, String)> {
     let control = control_for_user(&state, &user).await;
     // Check if this is the current active mission
-    let current_id = control.current_mission.read().await.clone();
+    let current_id = *control.current_mission.read().await;
     if current_id == Some(mission_id) {
         // Return live tree from memory
         let tree = control.current_tree.read().await.clone();
@@ -3023,6 +3047,11 @@ async fn agent_finished_automation_messages(
     out
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    clippy::collapsible_match,
+    clippy::collapsible_else_if
+)]
 async fn control_actor_loop(
     config: Config,
     root_agent: AgentRef,
@@ -3143,7 +3172,7 @@ async fn control_actor_loop(
         current_mission: &Arc<RwLock<Option<Uuid>>>,
         history: &[(String, String)],
     ) {
-        let mission_id = current_mission.read().await.clone();
+        let mission_id = *current_mission.read().await;
         persist_mission_history_to(mission_store, mission_id, history).await;
     }
 
@@ -3373,7 +3402,7 @@ async fn control_actor_loop(
                         // Smart routing: decide where to send this message based on target_mission_id
                         // and what's currently running.
 
-                        let current_mission_id = current_mission.read().await.clone();
+                        let current_mission_id = *current_mission.read().await;
                         let running_mid = running_mission_id;
                         let main_mission_id = if running_mid.is_some() {
                             running_mid
@@ -3535,7 +3564,7 @@ async fn control_actor_loop(
                         // Case 3: Queue to main session (default behavior)
                         // Auto-create mission on first message if none exists
                         {
-                            let mission_id = current_mission.read().await.clone();
+                            let mission_id = *current_mission.read().await;
                             if mission_id.is_none() {
                                 // Use effective_target if available, otherwise create new
                                 if let Some(tid) = effective_target {
@@ -3667,7 +3696,7 @@ async fn control_actor_loop(
                         let content_clone = content.clone();
                         // Capture the target mission ID once, before queuing
                         // This ensures we use the same mission_id for events and execution
-                        let target_mission_id = current_mission.read().await.clone();
+                        let target_mission_id = *current_mission.read().await;
                         queue.push_back((id, content, msg_agent, target_mission_id));
                         let status_mission_id = if running.is_some() {
                             running_mission_id
@@ -3931,7 +3960,7 @@ async fn control_actor_loop(
                         }
                     }
                     ControlCommand::SetMissionStatus { id, status: new_status, respond } => {
-                        let current_id = current_mission.read().await.clone();
+                        let current_id = *current_mission.read().await;
                         if current_id == Some(id) {
                             if let Some(tree) = current_tree.read().await.clone() {
                                 if let Err(e) = mission_store.update_mission_tree(id, &tree).await
@@ -3967,18 +3996,11 @@ async fn control_actor_loop(
                                 "Maximum parallel missions ({}) reached. {} running.",
                                 max_parallel, total_running
                             )));
-                        } else if parallel_runners.contains_key(&mission_id) {
-                            let _ = respond.send(Err(format!(
-                                "Mission {} is already running in parallel",
-                                mission_id
-                            )));
-                        } else {
+                        } else if let std::collections::hash_map::Entry::Vacant(entry) =
+                            parallel_runners.entry(mission_id)
+                        {
                             // Load mission to get existing history
-                            let mission = match load_mission_record(
-                                &mission_store,
-                                mission_id,
-                            )
-                            .await {
+                            let mission = match load_mission_record(&mission_store, mission_id).await {
                                 Ok(m) => m,
                                 Err(e) => {
                                     let _ = respond.send(Err(format!("Failed to load mission: {}", e)));
@@ -4021,11 +4043,16 @@ async fn control_actor_loop(
 
                             if started {
                                 tracing::info!("Mission {} started in parallel", mission_id);
-                                parallel_runners.insert(mission_id, runner);
+                                entry.insert(runner);
                                 let _ = respond.send(Ok(()));
                             } else {
                                 let _ = respond.send(Err("Failed to start mission execution".to_string()));
                             }
+                        } else {
+                            let _ = respond.send(Err(format!(
+                                "Mission {} is already running in parallel",
+                                mission_id
+                            )));
                         }
                     }
                     ControlCommand::CancelMission { mission_id, respond } => {
@@ -4266,7 +4293,7 @@ async fn control_actor_loop(
                             if let Some(mission_id) = running_mission_id {
                                 // Only persist if the running mission is still current mission
                                 // (i.e., user didn't create a new mission while this one was running)
-                                let current_mid = current_mission.read().await.clone();
+                                let current_mid = *current_mission.read().await;
                                 if current_mid == Some(mission_id) {
                                     persist_mission_history(
                                         &mission_store,
@@ -4372,7 +4399,7 @@ async fn control_actor_loop(
                                 mission_id: if running.is_some() {
                                     running_mission_id
                                 } else {
-                                    current_mission.read().await.clone()
+                                    *current_mission.read().await
                                 },
                             });
                         }
@@ -4407,7 +4434,7 @@ async fn control_actor_loop(
                             mission_id: if running.is_some() {
                                 running_mission_id
                             } else {
-                                current_mission.read().await.clone()
+                                *current_mission.read().await
                             },
                         });
 
@@ -4421,7 +4448,7 @@ async fn control_actor_loop(
                 if let Some(cmd) = mission_cmd {
                     match cmd {
                         crate::tools::mission::MissionControlCommand::SetStatus { status, summary } => {
-                            let mission_id = current_mission.read().await.clone();
+                            let mission_id = *current_mission.read().await;
                             if let Some(id) = mission_id {
                                 let new_status = match status {
                                     crate::tools::mission::MissionStatusValue::Completed => MissionStatus::Completed,
@@ -4505,7 +4532,7 @@ async fn control_actor_loop(
                             // Note: User message was already added before execution started.
                             // If the user created a new mission mid-execution, history was cleared for that new mission,
                             // and we don't want to contaminate it with the old mission's exchange.
-                            let current_mid = current_mission.read().await.clone();
+                            let current_mid = *current_mission.read().await;
                             if completed_mission_id == current_mid {
                                 history.push(("assistant".to_string(), agent_result.output.clone()));
                             }
@@ -4875,7 +4902,7 @@ async fn control_actor_loop(
 
                 for (mission_id, runner) in parallel_runners.iter_mut() {
                     if runner.check_finished() {
-                        if let Some((msg_id, _user_msg, result)) = runner.poll_completion().await {
+                        if let Some((_msg_id, _user_msg, result)) = runner.poll_completion().await {
                             tracing::info!(
                                 "Parallel mission {} completed (success: {}, cost: {} cents)",
                                 mission_id, result.success, result.cost_cents
@@ -5331,14 +5358,12 @@ async fn control_actor_loop(
                                     keep_alive_until: None,
                                 });
                             }
-                        } else {
-                            if let Some(existing) = sessions
-                                .iter_mut()
-                                .rev()
-                                .find(|session| session.display == display && session.stopped_at.is_none())
-                            {
-                                existing.stopped_at = Some(now.clone());
-                            }
+                        } else if let Some(existing) = sessions
+                            .iter_mut()
+                            .rev()
+                            .find(|session| session.display == display && session.stopped_at.is_none())
+                        {
+                            existing.stopped_at = Some(now.clone());
                         }
 
                         if let Err(err) = mission_store
@@ -5378,9 +5403,10 @@ async fn control_actor_loop(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_single_control_turn(
     mut config: Config,
-    root_agent: AgentRef,
+    _root_agent: AgentRef,
     mcp: Arc<McpRegistry>,
     workspaces: workspace::SharedWorkspaceStore,
     library: SharedLibrary,
@@ -5410,8 +5436,9 @@ async fn run_single_control_turn(
         None
     };
     let effective_config_profile = mission_config_profile.or(workspace_config_profile);
-    if let Some(model) = model_override {
-        config.default_model = Some(model);
+    let requested_model = model_override;
+    if let Some(ref model) = requested_model {
+        config.default_model = Some(model.clone());
     } else if is_claudecode && config.default_model.is_none() {
         if let Some(default_model) =
             resolve_claudecode_default_model(&library, effective_config_profile.as_deref()).await
@@ -5492,7 +5519,7 @@ async fn run_single_control_turn(
     convo.push_str("User:\n");
     convo.push_str(&user_message);
     convo.push_str("\n\nInstructions:\n- Continue the conversation helpfully.\n- Use available tools as needed.\n- For large data processing tasks (>10KB), prefer executing scripts rather than inline processing.\n");
-    let mut task = match crate::task::Task::new(convo.clone(), Some(1000)) {
+    let _task = match crate::task::Task::new(convo.clone(), Some(1000)) {
         Ok(t) => t,
         Err(e) => {
             let r = crate::agents::AgentResult::failure(format!("Failed to create task: {}", e), 0);
@@ -5695,7 +5722,9 @@ async fn run_single_control_turn(
                 exec_workspace,
                 &ctx.working_dir,
                 &convo,
-                config.default_model.as_deref(),
+                requested_model
+                    .as_deref()
+                    .or_else(|| config.default_model.as_deref()),
                 config.opencode_agent.as_deref(),
                 mid,
                 events_tx.clone(),
@@ -5843,6 +5872,15 @@ pub async fn create_automation(
 
     let start_immediately = req.start_immediately;
 
+    // For interval-based triggers, if start_immediately is false, set last_triggered_at
+    // to now so the scheduler waits for the full interval before the first trigger.
+    let last_triggered_at =
+        if !start_immediately && matches!(trigger, mission_store::TriggerType::Interval { .. }) {
+            Some(mission_store::now_string())
+        } else {
+            None
+        };
+
     // Build the complete Automation struct
     let automation = mission_store::Automation {
         id: Uuid::new_v4(),
@@ -5852,7 +5890,7 @@ pub async fn create_automation(
         variables: req.variables,
         active: true,
         created_at: mission_store::now_string(),
-        last_triggered_at: None,
+        last_triggered_at,
         retry_config: req.retry_config.unwrap_or_default(),
     };
 
@@ -5960,33 +5998,31 @@ pub async fn update_automation(
         ))?;
 
     // Validate the command exists in the library if CommandSource::Library is being updated
-    if let Some(ref command_source) = req.command_source {
-        if let mission_store::CommandSource::Library { ref name } = command_source {
-            if let Some(lib) = state.library.read().await.as_ref() {
-                match lib.get_command(name).await {
-                    Ok(_) => {} // Command exists, continue
-                    Err(e) => {
-                        // Check if it's a "not found" error
-                        let error_msg = e.to_string();
-                        if error_msg.contains("not found") || error_msg.contains("does not exist") {
-                            return Err((
-                                StatusCode::BAD_REQUEST,
-                                format!("Command '{}' not found in library", name),
-                            ));
-                        } else {
-                            return Err((
-                                StatusCode::INTERNAL_SERVER_ERROR,
-                                format!("Failed to validate command: {}", e),
-                            ));
-                        }
+    if let Some(mission_store::CommandSource::Library { name }) = req.command_source.as_ref() {
+        if let Some(lib) = state.library.read().await.as_ref() {
+            match lib.get_command(name).await {
+                Ok(_) => {} // Command exists, continue
+                Err(e) => {
+                    // Check if it's a "not found" error
+                    let error_msg = e.to_string();
+                    if error_msg.contains("not found") || error_msg.contains("does not exist") {
+                        return Err((
+                            StatusCode::BAD_REQUEST,
+                            format!("Command '{}' not found in library", name),
+                        ));
+                    } else {
+                        return Err((
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("Failed to validate command: {}", e),
+                        ));
                     }
                 }
-            } else {
-                return Err((
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "Library not initialized".to_string(),
-                ));
             }
+        } else {
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Library not initialized".to_string(),
+            ));
         }
     }
 

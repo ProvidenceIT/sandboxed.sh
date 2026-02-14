@@ -47,17 +47,12 @@ pub enum McpStatus {
 }
 
 /// Scope for MCP servers (global or workspace-scoped).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum McpScope {
+    #[default]
     Global,
     Workspace,
-}
-
-impl Default for McpScope {
-    fn default() -> Self {
-        Self::Global
-    }
 }
 
 // ==================== JSON-RPC 2.0 Types ====================

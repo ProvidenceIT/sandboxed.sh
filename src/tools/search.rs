@@ -108,10 +108,8 @@ impl Tool for GrepSearch {
         let stderr = String::from_utf8_lossy(&output.stderr);
 
         // grep returns exit code 1 when no matches found
-        if !output.status.success() && output.status.code() != Some(1) {
-            if !stderr.is_empty() {
-                return Err(anyhow::anyhow!("Search error: {}", stderr));
-            }
+        if !output.status.success() && output.status.code() != Some(1) && !stderr.is_empty() {
+            return Err(anyhow::anyhow!("Search error: {}", stderr));
         }
 
         if stdout.is_empty() {

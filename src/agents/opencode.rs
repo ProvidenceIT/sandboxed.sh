@@ -702,6 +702,7 @@ impl Agent for OpenCodeAgent {
 
 impl OpenCodeAgent {
     /// Fallback blocking execution without streaming.
+    #[allow(clippy::too_many_arguments)]
     async fn execute_blocking(
         &self,
         task: &mut Task,

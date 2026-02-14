@@ -124,8 +124,8 @@ impl SecretsCrypto {
 
         Ok(EncryptedSecret {
             ciphertext: BASE64.encode(&ciphertext),
-            nonce: BASE64.encode(&nonce_bytes),
-            salt: BASE64.encode(&salt),
+            nonce: BASE64.encode(nonce_bytes),
+            salt: BASE64.encode(salt),
             metadata: None,
         })
     }

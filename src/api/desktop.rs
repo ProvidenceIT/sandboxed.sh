@@ -378,9 +378,7 @@ async fn collect_desktop_sessions(state: &Arc<AppState>) -> Vec<DesktopSessionDe
             let process_running = is_xvfb_running(&session.display).await;
 
             // Determine session status
-            let status = if session.stopped_at.is_some() {
-                DesktopSessionStatus::Stopped
-            } else if !process_running {
+            let status = if session.stopped_at.is_some() || !process_running {
                 DesktopSessionStatus::Stopped
             } else {
                 // Check if mission is still active
