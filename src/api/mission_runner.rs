@@ -7989,7 +7989,9 @@ fn generate_session_summary(history: &[(String, String)], last_n_turns: usize) -
     let mut last_user_request = None;
     let mut accomplishments = Vec::new();
 
-    for (role, content) in recent_entries {
+    // Save length before consuming iterator
+    let entry_count = recent_entries.len();
+    for (role, content) in &recent_entries {
         match role.as_str() {
             "user" => {
                 last_user_request = Some(content.lines().next().unwrap_or(content).to_string());
@@ -8028,7 +8030,7 @@ fn generate_session_summary(history: &[(String, String)], last_n_turns: usize) -
             summary_lines.push(format!("{}. {}", i + 1, accomplishment.chars().take(150).collect::<String>()));
         }
     } else {
-        summary_lines.push(format!("**Conversation Context:** Discussed {} topics over the last {} turns. Continue from previous context.", recent_entries.len() / 2, last_n_turns));
+        summary_lines.push(format!("**Conversation Context:** Discussed {} topics over the last {} turns. Continue from previous context.", entry_count / 2, last_n_turns));
     }
 
     summary_lines.join("\n")
