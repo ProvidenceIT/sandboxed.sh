@@ -1251,6 +1251,68 @@ async fn run_mission_turn(
         }
     };
 
+    // Session rotation: Prevent OOM by resetting sessions every N turns
+    // Calculate turn count (each assistant response = 1 turn)
+    const SESSION_ROTATION_INTERVAL: usize = 50;
+    let turn_count = history.iter().filter(|(role, _)| role == "assistant").count();
+    let should_rotate = turn_count > 0 && turn_count % SESSION_ROTATION_INTERVAL == 0;
+
+    // Prepare user message and session ID (potentially with rotation)
+    let (mut user_message, mut session_id) = (user_message, session_id);
+
+    if should_rotate && backend_id == "claudecode" {
+        tracing::info!(
+            mission_id = %mission_id,
+            turn_count = turn_count,
+            interval = SESSION_ROTATION_INTERVAL,
+            "Rotating session to prevent OOM from unbounded context accumulation"
+        );
+
+        // Generate summary of recent work from history
+        let summary = generate_session_summary(&history, SESSION_ROTATION_INTERVAL);
+
+        // Create new session ID
+        let new_session_id = Uuid::new_v4().to_string();
+
+        // Inject summary into user message
+        user_message = format!(
+            "## Session Rotated (Turn {})\n\n\
+             **Previous Work Summary:**\n{}\n\n\
+             ---\n\n\
+             ## Current Task\n\n\
+             {}",
+            turn_count,
+            summary,
+            user_message
+        );
+
+        // Update session ID and notify via events
+        let _ = events_tx.send(AgentEvent::SessionIdUpdate {
+            mission_id,
+            session_id: new_session_id.clone(),
+        });
+
+        session_id = Some(new_session_id.clone());
+
+        // Delete the session marker file to force a fresh session
+        let session_marker = mission_work_dir.join(".claude-session-initiated");
+        if session_marker.exists() {
+            if let Err(e) = std::fs::remove_file(&session_marker) {
+                tracing::warn!(
+                    error = %e,
+                    "Failed to remove session marker during rotation"
+                );
+            }
+        }
+
+        tracing::info!(
+            mission_id = %mission_id,
+            new_session_id = %new_session_id,
+            summary_length = summary.len(),
+            "Session rotated successfully"
+        );
+    }
+
     // Execute based on backend
     // For Claude Code, check if this is a continuation turn (has prior assistant response).
     // Note: history may include the current user message before the turn runs,
@@ -7905,6 +7967,71 @@ pub async fn run_codex_turn(
     }
 
     result
+}
+
+/// Generate a concise summary of recent conversation turns for session rotation.
+/// Summarizes the last N turns to preserve context when starting a new session.
+fn generate_session_summary(history: &[(String, String)], last_n_turns: usize) -> String {
+    // Get the last N turns (user + assistant pairs)
+    let recent_entries: Vec<_> = history
+        .iter()
+        .rev()
+        .take(last_n_turns * 2) // Each turn = user + assistant message
+        .rev()
+        .collect();
+
+    if recent_entries.is_empty() {
+        return "No previous work to summarize.".to_string();
+    }
+
+    // Build a concise summary focusing on key accomplishments
+    let mut summary_lines = Vec::new();
+    let mut last_user_request = None;
+    let mut accomplishments = Vec::new();
+
+    for (role, content) in recent_entries {
+        match role.as_str() {
+            "user" => {
+                last_user_request = Some(content.lines().next().unwrap_or(content).to_string());
+            }
+            "assistant" => {
+                // Extract key accomplishments from assistant responses
+                // Look for files created, commands run, decisions made
+                if content.contains("created") || content.contains("Created") {
+                    if let Some(line) = content.lines().find(|l| l.contains("created") || l.contains("Created")) {
+                        accomplishments.push(line.trim().to_string());
+                    }
+                }
+                if content.contains("implemented") || content.contains("Implemented") {
+                    if let Some(line) = content.lines().find(|l| l.contains("implemented") || l.contains("Implemented")) {
+                        accomplishments.push(line.trim().to_string());
+                    }
+                }
+                if content.contains("fixed") || content.contains("Fixed") {
+                    if let Some(line) = content.lines().find(|l| l.contains("fixed") || l.contains("Fixed")) {
+                        accomplishments.push(line.trim().to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Build summary
+    if let Some(request) = last_user_request {
+        summary_lines.push(format!("**Last Request:** {}", request.chars().take(200).collect::<String>()));
+    }
+
+    if !accomplishments.is_empty() {
+        summary_lines.push("**Recent Work:**".to_string());
+        for (i, accomplishment) in accomplishments.iter().take(10).enumerate() {
+            summary_lines.push(format!("{}. {}", i + 1, accomplishment.chars().take(150).collect::<String>()));
+        }
+    } else {
+        summary_lines.push(format!("**Conversation Context:** Discussed {} topics over the last {} turns. Continue from previous context.", recent_entries.len() / 2, last_n_turns));
+    }
+
+    summary_lines.join("\n")
 }
 
 /// Clean up old debug files to prevent disk bloat and reduce memory pressure.
