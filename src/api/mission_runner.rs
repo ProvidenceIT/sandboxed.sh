@@ -6561,15 +6561,27 @@ pub async fn run_opencode_turn(
                 }
             }
             _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {
-                if let Some(last_text) = text_output_at {
-                    if last_text.elapsed() >= std::time::Duration::from_secs(30) {
-                        tracing::info!(
-                            mission_id = %mission_id,
-                            "OpenCode output idle timeout reached; terminating CLI process"
-                        );
-                        let _ = child.kill().await;
-                        break;
-                    }
+                // Check both text output AND activity (SSE events, tool calls)
+                // to avoid killing the process during long-running tool executions
+                let should_timeout = if let Some(last_text) = text_output_at {
+                    last_text.elapsed() >= std::time::Duration::from_secs(30)
+                } else {
+                    false
+                };
+
+                let activity_timeout = if let Ok(guard) = last_activity.lock() {
+                    guard.elapsed() >= std::time::Duration::from_secs(30)
+                } else {
+                    false
+                };
+
+                if should_timeout && activity_timeout {
+                    tracing::info!(
+                        mission_id = %mission_id,
+                        "OpenCode idle timeout reached (no text output or activity for 30s); terminating CLI process"
+                    );
+                    let _ = child.kill().await;
+                    break;
                 }
             }
             line_result = stdout_lines.next_line() => {

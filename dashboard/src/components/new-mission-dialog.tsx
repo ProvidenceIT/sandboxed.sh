@@ -444,10 +444,12 @@ export function NewMissionDialog({
   }, [open, defaultSet, allAgents, config, initialValues]);
 
   useEffect(() => {
-    if (selectedBackend === 'amp' && modelOverride) {
+    // Clear model override when switching backends to prevent stale values
+    if (modelOverride) {
       setModelOverride('');
     }
-  }, [selectedBackend, modelOverride]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedBackend]);
 
   const resetForm = () => {
     setNewMissionWorkspace('');
@@ -646,7 +648,6 @@ export function NewMissionDialog({
                 </option>
                 {(() => {
                   // Group options by provider
-                  const providers = (providersResponse?.providers || []) as Provider[];
                   const groupedOptions = new Map<string, Array<{ value: string; label: string; description?: string; provider_id?: string }>>();
 
                   for (const option of modelOptions) {

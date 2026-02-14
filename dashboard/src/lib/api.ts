@@ -966,26 +966,9 @@ export { formatBytes } from "./format";
 
 // ==================== Providers ====================
 
-export interface ProviderModel {
-  id: string;
-  name: string;
-  description?: string;
-}
-
-export interface Provider {
-  id: string;
-  name: string;
-  billing: "subscription" | "pay-per-token";
-  description: string;
-  models: ProviderModel[];
-}
-
-export interface ProvidersResponse {
-  providers: Provider[];
-}
-
-// BackendModelOption, BackendModelOptionsResponse, listProviders, and listBackendModelOptions
-// are now exported from ./api/providers (see line 17)
+// ProviderModel, Provider, ProvidersResponse, BackendModelOption,
+// BackendModelOptionsResponse, listProviders, and listBackendModelOptions
+// are exported from ./api/providers (see line 17)
 
 // ==================== Library (Configuration) ====================
 
