@@ -1,6 +1,6 @@
 [package]
 name = "sandboxed_sh"
-version = "0.7.7"
+version = "0.7.8"
 edition = "2021"
 description = "Self-hosted orchestrator for AI coding agents (formerly Open Agent)"
 authors = ["sandboxed.sh Contributors"]
