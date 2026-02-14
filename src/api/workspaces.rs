@@ -37,6 +37,9 @@ pub fn routes() -> Router<Arc<super::routes::AppState>> {
         .route("/:id/debug", get(get_workspace_debug))
         .route("/:id/rerun-init", post(rerun_init_script))
         .route("/:id/init-log", get(get_init_log))
+        // Memory monitoring
+        .route("/:id/memory", get(get_workspace_memory))
+        .route("/memory/all", get(get_all_workspaces_memory))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1538,6 +1541,165 @@ async fn rerun_init_script(
         stderr,
         duration_secs,
     }))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Memory Monitoring
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+pub struct WorkspaceMemoryStats {
+    pub workspace_id: Uuid,
+    pub workspace_name: String,
+    pub workspace_type: String,
+    pub memory_current_bytes: Option<u64>,
+    pub memory_peak_bytes: Option<u64>,
+    pub memory_limit_bytes: Option<u64>,
+    pub memory_available_bytes: Option<u64>,
+    pub memory_current_mb: Option<f64>,
+    pub memory_peak_mb: Option<f64>,
+    pub memory_limit_mb: Option<String>,
+    pub container_name: Option<String>,
+    pub error: Option<String>,
+}
+
+/// Get memory statistics for a specific workspace container.
+async fn get_workspace_memory(
+    AxumPath(id): AxumPath<Uuid>,
+    State(state): State<Arc<super::routes::AppState>>,
+) -> Result<Json<WorkspaceMemoryStats>, (StatusCode, String)> {
+    let workspace = state
+        .workspaces
+        .get(id)
+        .await
+        .ok_or((StatusCode::NOT_FOUND, "Workspace not found".to_string()))?;
+
+    let stats = get_container_memory_stats(&workspace).await;
+    Ok(Json(stats))
+}
+
+/// Get memory statistics for all workspace containers.
+async fn get_all_workspaces_memory(
+    State(state): State<Arc<super::routes::AppState>>,
+) -> Json<Vec<WorkspaceMemoryStats>> {
+    let workspaces = state.workspaces.list().await;
+    let mut all_stats = Vec::new();
+
+    for workspace in workspaces {
+        let stats = get_container_memory_stats(&workspace).await;
+        all_stats.push(stats);
+    }
+
+    Json(all_stats)
+}
+
+/// Get memory stats for a workspace container using systemd cgroup data.
+async fn get_container_memory_stats(workspace: &Workspace) -> WorkspaceMemoryStats {
+    let workspace_type_str = match workspace.workspace_type {
+        WorkspaceType::Host => "host",
+        WorkspaceType::Container => "container",
+    };
+
+    // For host workspaces, return N/A
+    if workspace.workspace_type != WorkspaceType::Container {
+        return WorkspaceMemoryStats {
+            workspace_id: workspace.id,
+            workspace_name: workspace.name.clone(),
+            workspace_type: workspace_type_str.to_string(),
+            memory_current_bytes: None,
+            memory_peak_bytes: None,
+            memory_limit_bytes: None,
+            memory_available_bytes: None,
+            memory_current_mb: None,
+            memory_peak_mb: None,
+            memory_limit_mb: Some("N/A (host)".to_string()),
+            container_name: None,
+            error: None,
+        };
+    }
+
+    // Get container name from workspace ID
+    let container_name = format!("mission-{}", workspace.id.to_string().split('-').next().unwrap_or("unknown"));
+
+    // Get systemd scope name for the container
+    let scope_name = format!("machine-{}.scope", container_name);
+
+    // Query systemd for memory stats
+    let output = tokio::process::Command::new("systemctl")
+        .args(&["show", &scope_name])
+        .output()
+        .await;
+
+    let stats = match output {
+        Ok(output) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            parse_systemd_memory_stats(&stdout)
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            (None, None, None, None, Some(format!("Container not running: {}", stderr.trim())))
+        }
+        Err(e) => (None, None, None, None, Some(format!("Failed to query systemctl: {}", e))),
+    };
+
+    let (memory_current, memory_peak, memory_limit, memory_available, error) = stats;
+
+    WorkspaceMemoryStats {
+        workspace_id: workspace.id,
+        workspace_name: workspace.name.clone(),
+        workspace_type: workspace_type_str.to_string(),
+        memory_current_bytes: memory_current,
+        memory_peak_bytes: memory_peak,
+        memory_limit_bytes: memory_limit,
+        memory_available_bytes: memory_available,
+        memory_current_mb: memory_current.map(|b| b as f64 / 1024.0 / 1024.0),
+        memory_peak_mb: memory_peak.map(|b| b as f64 / 1024.0 / 1024.0),
+        memory_limit_mb: memory_limit.map(|b| {
+            if b == u64::MAX {
+                "unlimited".to_string()
+            } else {
+                format!("{:.2}", b as f64 / 1024.0 / 1024.0)
+            }
+        }).or(Some("unlimited".to_string())),
+        container_name: Some(container_name),
+        error,
+    }
+}
+
+/// Parse systemd cgroup memory statistics from `systemctl show` output.
+fn parse_systemd_memory_stats(
+    stdout: &str,
+) -> (Option<u64>, Option<u64>, Option<u64>, Option<u64>, Option<String>) {
+    let mut memory_current = None;
+    let mut memory_peak = None;
+    let mut memory_max = None;
+    let mut memory_available = None;
+
+    for line in stdout.lines() {
+        if let Some((key, value)) = line.split_once('=') {
+            match key {
+                "MemoryCurrent" => {
+                    memory_current = value.parse::<u64>().ok();
+                }
+                "MemoryPeak" => {
+                    memory_peak = value.parse::<u64>().ok();
+                }
+                "MemoryMax" => {
+                    if value == "infinity" {
+                        memory_max = Some(u64::MAX);
+                    } else {
+                        memory_max = value.parse::<u64>().ok();
+                    }
+                }
+                "MemoryAvailable" => {
+                    memory_available = value.parse::<u64>().ok();
+                }
+                _ => {}
+            }
+        }
+    }
+
+    (memory_current, memory_peak, memory_max, memory_available, None)
 }
 
 #[cfg(test)]
