@@ -1261,7 +1261,11 @@ async fn oauth_token_refresher_loop(ai_providers: Arc<crate::ai_providers::AIPro
                         expires_at,
                     });
 
-                    if ai_providers.update(provider.id, updated_provider).await.is_none() {
+                    if ai_providers
+                        .update(provider.id, updated_provider)
+                        .await
+                        .is_none()
+                    {
                         tracing::error!(
                             provider_id = %provider.id,
                             provider_name = %provider.name,

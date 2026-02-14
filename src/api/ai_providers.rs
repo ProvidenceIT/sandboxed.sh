@@ -4884,12 +4884,9 @@ pub async fn refresh_oauth_token_internal(
                 .ok_or_else(|| "No access token in Anthropic refresh response".to_string())?;
 
             // **Solution #2: Anthropic rotates refresh tokens - capture the new one**
-            let new_refresh_token = token_data["refresh_token"]
-                .as_str()
-                .ok_or_else(|| {
-                    "No refresh_token in Anthropic OAuth response - tokens may be rotating"
-                        .to_string()
-                })?;
+            let new_refresh_token = token_data["refresh_token"].as_str().ok_or_else(|| {
+                "No refresh_token in Anthropic OAuth response - tokens may be rotating".to_string()
+            })?;
 
             let expires_in = token_data["expires_in"].as_i64().unwrap_or(3600);
             let expires_at = chrono::Utc::now().timestamp_millis() + (expires_in * 1000);
@@ -4946,11 +4943,7 @@ pub async fn refresh_oauth_token_internal(
             let expires_in = token_data["expires_in"].as_i64().unwrap_or(3600);
             let expires_at = chrono::Utc::now().timestamp_millis() + (expires_in * 1000);
 
-            Ok((
-                new_access_token.to_string(),
-                new_refresh_token,
-                expires_at,
-            ))
+            Ok((new_access_token.to_string(), new_refresh_token, expires_at))
         }
         _ => Err(format!(
             "OAuth refresh not supported for provider type: {:?}",

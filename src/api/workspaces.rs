@@ -1619,7 +1619,15 @@ async fn get_container_memory_stats(workspace: &Workspace) -> WorkspaceMemorySta
     }
 
     // Get container name from workspace ID
-    let container_name = format!("mission-{}", workspace.id.to_string().split('-').next().unwrap_or("unknown"));
+    let container_name = format!(
+        "mission-{}",
+        workspace
+            .id
+            .to_string()
+            .split('-')
+            .next()
+            .unwrap_or("unknown")
+    );
 
     // Get systemd scope name for the container
     let scope_name = format!("machine-{}.scope", container_name);
@@ -1637,9 +1645,21 @@ async fn get_container_memory_stats(workspace: &Workspace) -> WorkspaceMemorySta
         }
         Ok(output) => {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            (None, None, None, None, Some(format!("Container not running: {}", stderr.trim())))
+            (
+                None,
+                None,
+                None,
+                None,
+                Some(format!("Container not running: {}", stderr.trim())),
+            )
         }
-        Err(e) => (None, None, None, None, Some(format!("Failed to query systemctl: {}", e))),
+        Err(e) => (
+            None,
+            None,
+            None,
+            None,
+            Some(format!("Failed to query systemctl: {}", e)),
+        ),
     };
 
     let (memory_current, memory_peak, memory_limit, memory_available, error) = stats;
@@ -1654,13 +1674,15 @@ async fn get_container_memory_stats(workspace: &Workspace) -> WorkspaceMemorySta
         memory_available_bytes: memory_available,
         memory_current_mb: memory_current.map(|b| b as f64 / 1024.0 / 1024.0),
         memory_peak_mb: memory_peak.map(|b| b as f64 / 1024.0 / 1024.0),
-        memory_limit_mb: memory_limit.map(|b| {
-            if b == u64::MAX {
-                "unlimited".to_string()
-            } else {
-                format!("{:.2}", b as f64 / 1024.0 / 1024.0)
-            }
-        }).or(Some("unlimited".to_string())),
+        memory_limit_mb: memory_limit
+            .map(|b| {
+                if b == u64::MAX {
+                    "unlimited".to_string()
+                } else {
+                    format!("{:.2}", b as f64 / 1024.0 / 1024.0)
+                }
+            })
+            .or(Some("unlimited".to_string())),
         container_name: Some(container_name),
         error,
     }
@@ -1669,7 +1691,13 @@ async fn get_container_memory_stats(workspace: &Workspace) -> WorkspaceMemorySta
 /// Parse systemd cgroup memory statistics from `systemctl show` output.
 fn parse_systemd_memory_stats(
     stdout: &str,
-) -> (Option<u64>, Option<u64>, Option<u64>, Option<u64>, Option<String>) {
+) -> (
+    Option<u64>,
+    Option<u64>,
+    Option<u64>,
+    Option<u64>,
+    Option<String>,
+) {
     let mut memory_current = None;
     let mut memory_peak = None;
     let mut memory_max = None;
@@ -1699,7 +1727,13 @@ fn parse_systemd_memory_stats(
         }
     }
 
-    (memory_current, memory_peak, memory_max, memory_available, None)
+    (
+        memory_current,
+        memory_peak,
+        memory_max,
+        memory_available,
+        None,
+    )
 }
 
 #[cfg(test)]
