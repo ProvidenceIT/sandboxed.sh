@@ -2863,7 +2863,9 @@ async fn oauth_token_refresher_loop(ai_providers: Arc<crate::ai_providers::AIPro
     // Refresh tokens that will expire within 1 hour
     let refresh_threshold_ms = 60 * 60 * 1000; // 1 hour in milliseconds
 
-    tracing::info!("OAuth token refresher task started (check every 15 min, refresh if < 1 hour until expiry)");
+    tracing::info!(
+        "OAuth token refresher task started (check every 15 min, refresh if < 1 hour until expiry)"
+    );
 
     loop {
         tokio::time::sleep(check_interval).await;

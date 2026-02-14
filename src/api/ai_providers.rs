@@ -4868,7 +4868,10 @@ pub async fn refresh_oauth_token_internal(
             if !token_response.status().is_success() {
                 let status = token_response.status();
                 let error_text = token_response.text().await.unwrap_or_default();
-                return Err(format!("Anthropic token refresh failed ({}): {}", status, error_text));
+                return Err(format!(
+                    "Anthropic token refresh failed ({}): {}",
+                    status, error_text
+                ));
             }
 
             let token_data: serde_json::Value = token_response
@@ -4881,9 +4884,12 @@ pub async fn refresh_oauth_token_internal(
                 .ok_or_else(|| "No access token in Anthropic refresh response".to_string())?;
 
             // **Solution #2: Anthropic rotates refresh tokens - capture the new one**
-            let new_refresh_token = token_data["refresh_token"].as_str().ok_or_else(|| {
-                "No refresh_token in Anthropic OAuth response - tokens may be rotating".to_string()
-            })?;
+            let new_refresh_token = token_data["refresh_token"]
+                .as_str()
+                .ok_or_else(|| {
+                    "No refresh_token in Anthropic OAuth response - tokens may be rotating"
+                        .to_string()
+                })?;
 
             let expires_in = token_data["expires_in"].as_i64().unwrap_or(3600);
             let expires_at = chrono::Utc::now().timestamp_millis() + (expires_in * 1000);
@@ -4919,7 +4925,10 @@ pub async fn refresh_oauth_token_internal(
             if !token_response.status().is_success() {
                 let status = token_response.status();
                 let error_text = token_response.text().await.unwrap_or_default();
-                return Err(format!("Google token refresh failed ({}): {}", status, error_text));
+                return Err(format!(
+                    "Google token refresh failed ({}): {}",
+                    status, error_text
+                ));
             }
 
             let token_data: serde_json::Value = token_response
@@ -4943,7 +4952,10 @@ pub async fn refresh_oauth_token_internal(
                 expires_at,
             ))
         }
-        _ => Err(format!("OAuth refresh not supported for provider type: {:?}", provider_type)),
+        _ => Err(format!(
+            "OAuth refresh not supported for provider type: {:?}",
+            provider_type
+        )),
     }
 }
 
