@@ -25,6 +25,7 @@ struct ControlView: View {
     @State private var isAtBottom = true
     @State private var copiedMessageId: String?
     @State private var shouldScrollImmediately = false
+    @State private var isLoadingHistory = false  // Track when loading historical messages to prevent animated scroll
 
     // Connection state for SSE stream - starts as disconnected until first event received
     @State private var connectionState: ConnectionState = .disconnected
@@ -519,7 +520,9 @@ struct ControlView: View {
                     isInputFocused = false
                 }
                 .onChange(of: messages.count) { _, _ in
-                    if isAtBottom {
+                    // Only auto-scroll on message count change if we're at bottom AND not loading historical messages
+                    // This prevents the jarring animated scroll when loading cached/historical conversations
+                    if isAtBottom && !isLoadingHistory {
                         scrollToBottom(proxy: proxy)
                     }
                 }
@@ -817,6 +820,9 @@ struct ControlView: View {
     }
 
     private func applyViewingMission(_ mission: Mission, scrollToBottom: Bool = true) {
+        isLoadingHistory = true  // Prevent animated scroll during history load
+        defer { isLoadingHistory = false }
+
         viewingMission = mission
         viewingMissionId = mission.id
         messages = mission.history.enumerated().map { index, entry in
@@ -838,6 +844,9 @@ struct ControlView: View {
     }
 
     private func applyViewingMissionWithEvents(_ mission: Mission, events: [StoredEvent], scrollToBottom: Bool = true) {
+        isLoadingHistory = true  // Prevent animated scroll during history load
+        defer { isLoadingHistory = false }
+
         viewingMission = mission
         viewingMissionId = mission.id
 
@@ -898,13 +907,18 @@ struct ControlView: View {
 
     private func loadCurrentMission(updateViewing: Bool) async {
         // Try to load cached version first for immediate display
+        var hasCache = false
         if updateViewing, let currentId = currentMission?.id ?? viewingMissionId,
            let cachedMission = loadCachedMissionHistory(currentId) {
             currentMission = cachedMission
             applyViewingMission(cachedMission)
+            hasCache = true
         }
 
-        isLoading = true
+        // Only show loading state if we don't have cached data to display
+        if !hasCache {
+            isLoading = true
+        }
         defer { isLoading = false }
 
         do {
@@ -927,11 +941,18 @@ struct ControlView: View {
         viewingMissionId = id
 
         // Try to load cached version first for immediate display
+        let hasCache: Bool
         if let cachedMission = loadCachedMissionHistory(id) {
             applyViewingMission(cachedMission)
+            hasCache = true
+        } else {
+            hasCache = false
         }
 
-        isLoading = true
+        // Only show loading state if we don't have cached data to display
+        if !hasCache {
+            isLoading = true
+        }
 
         do {
             // Fetch mission metadata first (required)
