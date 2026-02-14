@@ -1415,6 +1415,17 @@ async fn run_mission_turn(
         terminal_reason = ?result.terminal_reason,
         "Mission turn finished"
     );
+
+    // Clean up old debug files to prevent unbounded disk/memory growth
+    // Keep last 20 debug files (each ~17KB) = ~340KB retained
+    if let Err(e) = cleanup_old_debug_files(&mission_work_dir, 20) {
+        tracing::warn!(
+            mission_id = %mission_id,
+            error = %e,
+            "Failed to clean up old debug files"
+        );
+    }
+
     result
 }
 
@@ -7894,6 +7905,63 @@ pub async fn run_codex_turn(
     }
 
     result
+}
+
+/// Clean up old debug files to prevent disk bloat and reduce memory pressure.
+/// Keeps only the most recent N debug files, deleting older ones.
+fn cleanup_old_debug_files(workspace_dir: &std::path::Path, keep_last_n: usize) -> Result<(), Box<dyn std::error::Error>> {
+    let debug_dir = workspace_dir.join(".claude").join("debug");
+
+    // Skip if debug directory doesn't exist
+    if !debug_dir.exists() {
+        return Ok(());
+    }
+
+    // Collect all debug files with their modification times
+    let mut files: Vec<_> = std::fs::read_dir(&debug_dir)?
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let path = entry.path();
+            // Only process .txt files (debug logs)
+            if path.extension().and_then(|s| s.to_str()) != Some("txt") {
+                return None;
+            }
+            let metadata = entry.metadata().ok()?;
+            let modified = metadata.modified().ok()?;
+            Some((path, modified))
+        })
+        .collect();
+
+    // Sort by modification time (oldest first)
+    files.sort_by_key(|(_, modified)| *modified);
+
+    // Keep only the last N files
+    let to_delete = files.len().saturating_sub(keep_last_n);
+    for (path, _) in files.iter().take(to_delete) {
+        if let Err(e) = std::fs::remove_file(path) {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "Failed to delete old debug file"
+            );
+        } else {
+            tracing::debug!(
+                path = %path.display(),
+                "Deleted old debug file"
+            );
+        }
+    }
+
+    if to_delete > 0 {
+        tracing::info!(
+            deleted_count = to_delete,
+            kept_count = keep_last_n,
+            debug_dir = %debug_dir.display(),
+            "Cleaned up old debug files"
+        );
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
