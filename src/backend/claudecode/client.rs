@@ -127,8 +127,12 @@ impl ClaudeCodeClient {
                 if let Err(e) = stdin.write_all(msg.as_bytes()).await {
                     error!("Failed to write to Claude stdin: {}", e);
                 }
-                // Close stdin to signal end of input
-                drop(stdin);
+                // DON'T close stdin - keep it open so Claude CLI stays alive for tool execution
+                // Previously we closed stdin here, which caused the CLI to exit prematurely
+                // while bash commands were still running, resulting in MessageComplete being
+                // sent before tools completed.
+                // We intentionally leak stdin to keep the process alive.
+                std::mem::forget(stdin);
             });
         }
 
