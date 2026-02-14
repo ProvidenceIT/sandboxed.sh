@@ -961,13 +961,16 @@ struct ControlView: View {
     }
 
     private func loadCurrentMission(updateViewing: Bool) async {
-        // Try to load cached version first for immediate display
-        var hasCache = false
+        // Try to load cached version first for immediate display with consistent event-based rendering
+        let hasCache: Bool
         if updateViewing, let currentId = currentMission?.id ?? viewingMissionId,
-           let cachedMission = loadCachedMissionHistory(currentId) {
-            currentMission = cachedMission
-            applyViewingMission(cachedMission)
+           let cachedData = loadCachedMissionData(currentId) {
+            // Use cached events for consistent display (avoids flash when fresh data arrives)
+            currentMission = cachedData.mission
+            applyViewingMissionWithEvents(cachedData.mission, events: cachedData.events)
             hasCache = true
+        } else {
+            hasCache = false
         }
 
         // Only show loading state if we don't have cached data to display
@@ -979,8 +982,19 @@ struct ControlView: View {
         do {
             if let mission = try await api.getCurrentMission() {
                 currentMission = mission
+
+                // Fetch events for event-based display
                 if updateViewing || viewingMissionId == nil || viewingMissionId == mission.id {
-                    applyViewingMission(mission)
+                    let eventTypes = ["user_message", "assistant_message", "tool_call", "tool_result", "text_delta", "thinking"]
+                    if let events = try? await api.getMissionEvents(id: mission.id, types: eventTypes), !events.isEmpty {
+                        applyViewingMissionWithEvents(mission, events: events)
+                        // Update cache with fresh data
+                        cacheMissionWithEvents(mission, events: events)
+                    } else {
+                        // Clear stale cache when events are empty or fetch fails
+                        removeMissionFromCache(mission.id)
+                        applyViewingMission(mission)
+                    }
                 }
             }
         } catch {
@@ -1048,10 +1062,13 @@ struct ControlView: View {
                 guard fetchingMissionId == id else {
                     return
                 }
-                // Clear stale cache when event fetch fails to prevent visual flashing
-                removeMissionFromCache(mission.id)
-                // Fallback to basic mission history if events endpoint fails
-                applyViewingMission(mission)
+                // If we already displayed cached data, keep it and don't flash to basic view
+                // Only clear cache and fall back if we didn't have cached data to begin with
+                if !hasCache {
+                    removeMissionFromCache(mission.id)
+                    applyViewingMission(mission)
+                }
+                // Otherwise: keep the cached view displayed, don't cause a flash
             }
 
             isLoading = false
