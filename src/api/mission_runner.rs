@@ -1251,6 +1251,69 @@ async fn run_mission_turn(
         }
     };
 
+    // Session rotation: Prevent OOM by resetting sessions every N turns
+    // Calculate turn count (each assistant response = 1 turn)
+    const SESSION_ROTATION_INTERVAL: usize = 50;
+    let turn_count = history
+        .iter()
+        .filter(|(role, _)| role == "assistant")
+        .count();
+    let should_rotate = turn_count > 0 && turn_count % SESSION_ROTATION_INTERVAL == 0;
+
+    // Prepare user message and session ID (potentially with rotation)
+    let (mut user_message, mut session_id) = (user_message, session_id);
+
+    if should_rotate && backend_id == "claudecode" {
+        tracing::info!(
+            mission_id = %mission_id,
+            turn_count = turn_count,
+            interval = SESSION_ROTATION_INTERVAL,
+            "Rotating session to prevent OOM from unbounded context accumulation"
+        );
+
+        // Generate summary of recent work from history
+        let summary = generate_session_summary(&history, SESSION_ROTATION_INTERVAL);
+
+        // Create new session ID
+        let new_session_id = Uuid::new_v4().to_string();
+
+        // Inject summary into user message
+        user_message = format!(
+            "## Session Rotated (Turn {})\n\n\
+             **Previous Work Summary:**\n{}\n\n\
+             ---\n\n\
+             ## Current Task\n\n\
+             {}",
+            turn_count, summary, user_message
+        );
+
+        // Update session ID and notify via events
+        let _ = events_tx.send(AgentEvent::SessionIdUpdate {
+            mission_id,
+            session_id: new_session_id.clone(),
+        });
+
+        session_id = Some(new_session_id.clone());
+
+        // Delete the session marker file to force a fresh session
+        let session_marker = mission_work_dir.join(".claude-session-initiated");
+        if session_marker.exists() {
+            if let Err(e) = std::fs::remove_file(&session_marker) {
+                tracing::warn!(
+                    error = %e,
+                    "Failed to remove session marker during rotation"
+                );
+            }
+        }
+
+        tracing::info!(
+            mission_id = %mission_id,
+            new_session_id = %new_session_id,
+            summary_length = summary.len(),
+            "Session rotated successfully"
+        );
+    }
+
     // Execute based on backend
     // For Claude Code, check if this is a continuation turn (has prior assistant response).
     // Note: history may include the current user message before the turn runs,
@@ -1415,6 +1478,17 @@ async fn run_mission_turn(
         terminal_reason = ?result.terminal_reason,
         "Mission turn finished"
     );
+
+    // Clean up old debug files to prevent unbounded disk/memory growth
+    // Keep last 20 debug files (each ~17KB) = ~340KB retained
+    if let Err(e) = cleanup_old_debug_files(&mission_work_dir, 20) {
+        tracing::warn!(
+            mission_id = %mission_id,
+            error = %e,
+            "Failed to clean up old debug files"
+        );
+    }
+
     result
 }
 
@@ -7894,6 +7968,146 @@ pub async fn run_codex_turn(
     }
 
     result
+}
+
+/// Generate a concise summary of recent conversation turns for session rotation.
+/// Summarizes the last N turns to preserve context when starting a new session.
+fn generate_session_summary(history: &[(String, String)], last_n_turns: usize) -> String {
+    // Get the last N turns (user + assistant pairs)
+    let recent_entries: Vec<_> = history
+        .iter()
+        .rev()
+        .take(last_n_turns * 2) // Each turn = user + assistant message
+        .rev()
+        .collect();
+
+    if recent_entries.is_empty() {
+        return "No previous work to summarize.".to_string();
+    }
+
+    // Build a concise summary focusing on key accomplishments
+    let mut summary_lines = Vec::new();
+    let mut last_user_request = None;
+    let mut accomplishments = Vec::new();
+
+    // Save length before consuming iterator
+    let entry_count = recent_entries.len();
+    for (role, content) in &recent_entries {
+        match role.as_str() {
+            "user" => {
+                last_user_request = Some(content.lines().next().unwrap_or(content).to_string());
+            }
+            "assistant" => {
+                // Extract key accomplishments from assistant responses
+                // Look for files created, commands run, decisions made
+                // Use a HashSet to track already-added lines to avoid duplicates
+                let mut seen_lines = std::collections::HashSet::new();
+
+                let keywords = [
+                    ("created", "Created"),
+                    ("implemented", "Implemented"),
+                    ("fixed", "Fixed"),
+                ];
+
+                for (lower_kw, upper_kw) in &keywords {
+                    if content.contains(lower_kw) || content.contains(upper_kw) {
+                        if let Some(line) = content.lines().find(|l| {
+                            (l.contains(lower_kw) || l.contains(upper_kw))
+                                && !seen_lines.contains(l.trim())
+                        }) {
+                            let trimmed = line.trim().to_string();
+                            seen_lines.insert(trimmed.clone());
+                            accomplishments.push(trimmed);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Build summary
+    if let Some(request) = last_user_request {
+        summary_lines.push(format!(
+            "**Last Request:** {}",
+            request.chars().take(200).collect::<String>()
+        ));
+    }
+
+    if !accomplishments.is_empty() {
+        summary_lines.push("**Recent Work:**".to_string());
+        for (i, accomplishment) in accomplishments.iter().take(10).enumerate() {
+            summary_lines.push(format!(
+                "{}. {}",
+                i + 1,
+                accomplishment.chars().take(150).collect::<String>()
+            ));
+        }
+    } else {
+        summary_lines.push(format!("**Conversation Context:** Discussed {} topics over the last {} turns. Continue from previous context.", entry_count / 2, last_n_turns));
+    }
+
+    summary_lines.join("\n")
+}
+
+/// Clean up old debug files to prevent disk bloat and reduce memory pressure.
+/// Keeps only the most recent N debug files, deleting older ones.
+fn cleanup_old_debug_files(
+    workspace_dir: &std::path::Path,
+    keep_last_n: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let debug_dir = workspace_dir.join(".claude").join("debug");
+
+    // Skip if debug directory doesn't exist
+    if !debug_dir.exists() {
+        return Ok(());
+    }
+
+    // Collect all debug files with their modification times
+    let mut files: Vec<_> = std::fs::read_dir(&debug_dir)?
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let path = entry.path();
+            // Only process .txt files (debug logs)
+            if path.extension().and_then(|s| s.to_str()) != Some("txt") {
+                return None;
+            }
+            let metadata = entry.metadata().ok()?;
+            let modified = metadata.modified().ok()?;
+            Some((path, modified))
+        })
+        .collect();
+
+    // Sort by modification time (oldest first)
+    files.sort_by_key(|(_, modified)| *modified);
+
+    // Keep only the last N files
+    let to_delete = files.len().saturating_sub(keep_last_n);
+    for (path, _) in files.iter().take(to_delete) {
+        if let Err(e) = std::fs::remove_file(path) {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "Failed to delete old debug file"
+            );
+        } else {
+            tracing::debug!(
+                path = %path.display(),
+                "Deleted old debug file"
+            );
+        }
+    }
+
+    if to_delete > 0 {
+        tracing::info!(
+            deleted_count = to_delete,
+            kept_count = keep_last_n,
+            debug_dir = %debug_dir.display(),
+            "Cleaned up old debug files"
+        );
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

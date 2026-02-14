@@ -120,17 +120,28 @@ impl ClaudeCodeClient {
             )
         })?;
 
-        // Write message to stdin
-        if let Some(mut stdin) = child.stdin.take() {
+        // Write message to stdin and keep it open
+        let stdin_handle = if let Some(mut stdin) = child.stdin.take() {
             let msg = message.to_string();
             tokio::spawn(async move {
                 if let Err(e) = stdin.write_all(msg.as_bytes()).await {
                     error!("Failed to write to Claude stdin: {}", e);
+                    None
+                } else {
+                    // DON'T close stdin - keep it open so Claude CLI stays alive for tool execution
+                    // Previously we closed stdin here, which caused the CLI to exit prematurely
+                    // while bash commands were still running, resulting in MessageComplete being
+                    // sent before tools completed.
+                    // Return stdin to be stored in ProcessHandle instead of leaking it
+                    Some(stdin)
                 }
-                // Close stdin to signal end of input
-                drop(stdin);
-            });
-        }
+            })
+            .await
+            .ok()
+            .flatten()
+        } else {
+            None
+        };
 
         // Spawn task to read stdout and parse events
         let stdout = child
@@ -191,7 +202,14 @@ impl ClaudeCodeClient {
             }
         });
 
-        Ok((rx, ClaudeProcessHandle::new(child_handle, task_handle)))
+        Ok((
+            rx,
+            if let Some(stdin) = stdin_handle {
+                ClaudeProcessHandle::new_with_stdin(child_handle, task_handle, stdin)
+            } else {
+                ClaudeProcessHandle::new(child_handle, task_handle)
+            },
+        ))
     }
 
     /// Get available agents from the Claude CLI.
