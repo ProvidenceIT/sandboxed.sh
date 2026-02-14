@@ -20,13 +20,12 @@ const providerIcons: Record<string, string> = {
   anthropic: '🧠',
   openai: '🤖',
   google: '🔮',
-  'amazon-bedrock': '☁️',
-  azure: '⚡',
-  'open-router': '🔀',
-  mistral: '🌪️',
-  groq: '⚡',
-  xai: '𝕏',
-  'github-copilot': '🐙',
+  'deep-infra': '🚀',
+  cerebras: '🧬',
+  cohere: '🌊',
+  'together-ai': '🤝',
+  perplexity: '🔍',
+  zai: '⚡',
   custom: '🔧',
 };
 
@@ -64,11 +63,6 @@ const getProviderAuthMethods = (providerType: AIProviderType): AIProviderAuthMet
         description: 'Use your Gemini plan/quotas (including free tier) via Google OAuth',
       },
       { label: 'Enter API Key', type: 'api', description: 'Use an existing Google AI API key' },
-    ];
-  }
-  if (providerType === 'github-copilot') {
-    return [
-      { label: 'GitHub Copilot', type: 'oauth', description: 'Connect your subscription' },
     ];
   }
   return [];

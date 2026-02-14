@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 use tokio::task::JoinHandle;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use crate::backend::events::ExecutionEvent;
 use crate::backend::shared::convert_cli_event;
@@ -121,13 +121,26 @@ impl Backend for ClaudeCodeBackend {
 
         // Spawn event conversion task
         let handle = tokio::spawn(async move {
-            // Track pending tool calls for name lookup
+            // Track pending tool calls for name lookup AND completion tracking
             let mut pending_tools: HashMap<String, String> = HashMap::new();
 
             while let Some(event) = claude_rx.recv().await {
                 let exec_events = convert_cli_event(event, &mut pending_tools);
 
                 for exec_event in exec_events {
+                    // Track tool completion to know when it's safe to send MessageComplete
+                    match &exec_event {
+                        ExecutionEvent::ToolResult { id, .. } => {
+                            pending_tools.remove(id);
+                            debug!(
+                                "Tool completed: {}. Remaining pending: {}",
+                                id,
+                                pending_tools.len()
+                            );
+                        }
+                        _ => {}
+                    }
+
                     if tx.send(exec_event).await.is_err() {
                         debug!("ExecutionEvent receiver dropped");
                         break;
@@ -135,12 +148,31 @@ impl Backend for ClaudeCodeBackend {
                 }
             }
 
-            // Ensure MessageComplete is sent
-            let _ = tx
-                .send(ExecutionEvent::MessageComplete {
-                    session_id: session_id.clone(),
-                })
-                .await;
+            // Only send MessageComplete if no tools are pending
+            // This prevents premature completion when Claude CLI exits while tools are still running
+            if !pending_tools.is_empty() {
+                warn!(
+                    "Claude CLI process exited with {} pending tools: {:?}. This may indicate a bug.",
+                    pending_tools.len(),
+                    pending_tools.keys().collect::<Vec<_>>()
+                );
+                // Send error event instead of MessageComplete
+                let _ = tx
+                    .send(ExecutionEvent::Error {
+                        message: format!(
+                            "Claude CLI process exited unexpectedly with {} pending tools",
+                            pending_tools.len()
+                        ),
+                    })
+                    .await;
+            } else {
+                // No pending tools - safe to send MessageComplete
+                let _ = tx
+                    .send(ExecutionEvent::MessageComplete {
+                        session_id: session_id.clone(),
+                    })
+                    .await;
+            }
 
             // Note: claude_handle is dropped here, but the process is managed
             // by the ProcessHandle which will clean up when dropped
