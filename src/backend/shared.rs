@@ -9,7 +9,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::process::Child;
+use tokio::process::{Child, ChildStdin};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
@@ -23,6 +23,8 @@ use super::events::ExecutionEvent;
 pub struct ProcessHandle {
     child: Arc<Mutex<Option<Child>>>,
     _task_handle: JoinHandle<()>,
+    /// Keep stdin alive to prevent process from exiting prematurely
+    _stdin: Option<ChildStdin>,
 }
 
 impl ProcessHandle {
@@ -30,6 +32,19 @@ impl ProcessHandle {
         Self {
             child,
             _task_handle: task_handle,
+            _stdin: None,
+        }
+    }
+
+    pub fn new_with_stdin(
+        child: Arc<Mutex<Option<Child>>>,
+        task_handle: JoinHandle<()>,
+        stdin: ChildStdin,
+    ) -> Self {
+        Self {
+            child,
+            _task_handle: task_handle,
+            _stdin: Some(stdin),
         }
     }
 

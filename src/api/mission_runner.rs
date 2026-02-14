@@ -7999,19 +7999,24 @@ fn generate_session_summary(history: &[(String, String)], last_n_turns: usize) -
             "assistant" => {
                 // Extract key accomplishments from assistant responses
                 // Look for files created, commands run, decisions made
-                if content.contains("created") || content.contains("Created") {
-                    if let Some(line) = content.lines().find(|l| l.contains("created") || l.contains("Created")) {
-                        accomplishments.push(line.trim().to_string());
-                    }
-                }
-                if content.contains("implemented") || content.contains("Implemented") {
-                    if let Some(line) = content.lines().find(|l| l.contains("implemented") || l.contains("Implemented")) {
-                        accomplishments.push(line.trim().to_string());
-                    }
-                }
-                if content.contains("fixed") || content.contains("Fixed") {
-                    if let Some(line) = content.lines().find(|l| l.contains("fixed") || l.contains("Fixed")) {
-                        accomplishments.push(line.trim().to_string());
+                // Use a HashSet to track already-added lines to avoid duplicates
+                let mut seen_lines = std::collections::HashSet::new();
+
+                let keywords = [
+                    ("created", "Created"),
+                    ("implemented", "Implemented"),
+                    ("fixed", "Fixed"),
+                ];
+
+                for (lower_kw, upper_kw) in &keywords {
+                    if content.contains(lower_kw) || content.contains(upper_kw) {
+                        if let Some(line) = content.lines().find(|l| {
+                            (l.contains(lower_kw) || l.contains(upper_kw)) && !seen_lines.contains(l.trim())
+                        }) {
+                            let trimmed = line.trim().to_string();
+                            seen_lines.insert(trimmed.clone());
+                            accomplishments.push(trimmed);
+                        }
                     }
                 }
             }
