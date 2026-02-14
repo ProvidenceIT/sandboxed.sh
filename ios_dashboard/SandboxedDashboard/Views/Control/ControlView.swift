@@ -821,7 +821,6 @@ struct ControlView: View {
 
     private func applyViewingMission(_ mission: Mission, scrollToBottom: Bool = true) {
         isLoadingHistory = true  // Prevent animated scroll during history load
-        defer { isLoadingHistory = false }
 
         viewingMission = mission
         viewingMissionId = mission.id
@@ -841,11 +840,16 @@ struct ControlView: View {
             shouldScrollImmediately = true
             shouldScrollToBottom = true
         }
+
+        // Reset flag after SwiftUI has processed the state change
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 100_000_000) // 100ms
+            isLoadingHistory = false
+        }
     }
 
     private func applyViewingMissionWithEvents(_ mission: Mission, events: [StoredEvent], scrollToBottom: Bool = true) {
         isLoadingHistory = true  // Prevent animated scroll during history load
-        defer { isLoadingHistory = false }
 
         viewingMission = mission
         viewingMissionId = mission.id
@@ -902,6 +906,12 @@ struct ControlView: View {
             // Use immediate synchronous scroll to prevent visible scrolling from top
             shouldScrollImmediately = true
             shouldScrollToBottom = true
+        }
+
+        // Reset flag after SwiftUI has processed the state change
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 100_000_000) // 100ms
+            isLoadingHistory = false
         }
     }
 
@@ -1013,8 +1023,14 @@ struct ControlView: View {
     // Reload mission from server without showing loading state or cache
     // Used when app becomes active to catch missed SSE events (like web's visibility change handler)
     private func reloadMissionFromServer(id: String) async {
+        // Guard against race conditions - only apply if user is still viewing this mission
+        guard viewingMissionId == id else { return }
+
         do {
             let mission = try await api.getMission(id: id)
+
+            // Check again after async operation
+            guard viewingMissionId == id else { return }
 
             // Update current mission if it matches
             if currentMission?.id == mission.id {
@@ -1024,8 +1040,12 @@ struct ControlView: View {
             // Fetch events to get the complete updated history
             let eventTypes = ["user_message", "assistant_message", "tool_call", "tool_result", "text_delta", "thinking"]
             if let events = try? await api.getMissionEvents(id: id, types: eventTypes), !events.isEmpty {
+                // Final check before applying
+                guard viewingMissionId == id else { return }
                 applyViewingMissionWithEvents(mission, events: events, scrollToBottom: false)
             } else {
+                // Final check before applying
+                guard viewingMissionId == id else { return }
                 applyViewingMission(mission, scrollToBottom: false)
             }
         } catch {
