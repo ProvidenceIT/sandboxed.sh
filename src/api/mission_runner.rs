@@ -1254,7 +1254,10 @@ async fn run_mission_turn(
     // Session rotation: Prevent OOM by resetting sessions every N turns
     // Calculate turn count (each assistant response = 1 turn)
     const SESSION_ROTATION_INTERVAL: usize = 50;
-    let turn_count = history.iter().filter(|(role, _)| role == "assistant").count();
+    let turn_count = history
+        .iter()
+        .filter(|(role, _)| role == "assistant")
+        .count();
     let should_rotate = turn_count > 0 && turn_count % SESSION_ROTATION_INTERVAL == 0;
 
     // Prepare user message and session ID (potentially with rotation)
@@ -1281,9 +1284,7 @@ async fn run_mission_turn(
              ---\n\n\
              ## Current Task\n\n\
              {}",
-            turn_count,
-            summary,
-            user_message
+            turn_count, summary, user_message
         );
 
         // Update session ID and notify via events
@@ -8011,7 +8012,8 @@ fn generate_session_summary(history: &[(String, String)], last_n_turns: usize) -
                 for (lower_kw, upper_kw) in &keywords {
                     if content.contains(lower_kw) || content.contains(upper_kw) {
                         if let Some(line) = content.lines().find(|l| {
-                            (l.contains(lower_kw) || l.contains(upper_kw)) && !seen_lines.contains(l.trim())
+                            (l.contains(lower_kw) || l.contains(upper_kw))
+                                && !seen_lines.contains(l.trim())
                         }) {
                             let trimmed = line.trim().to_string();
                             seen_lines.insert(trimmed.clone());
@@ -8026,13 +8028,20 @@ fn generate_session_summary(history: &[(String, String)], last_n_turns: usize) -
 
     // Build summary
     if let Some(request) = last_user_request {
-        summary_lines.push(format!("**Last Request:** {}", request.chars().take(200).collect::<String>()));
+        summary_lines.push(format!(
+            "**Last Request:** {}",
+            request.chars().take(200).collect::<String>()
+        ));
     }
 
     if !accomplishments.is_empty() {
         summary_lines.push("**Recent Work:**".to_string());
         for (i, accomplishment) in accomplishments.iter().take(10).enumerate() {
-            summary_lines.push(format!("{}. {}", i + 1, accomplishment.chars().take(150).collect::<String>()));
+            summary_lines.push(format!(
+                "{}. {}",
+                i + 1,
+                accomplishment.chars().take(150).collect::<String>()
+            ));
         }
     } else {
         summary_lines.push(format!("**Conversation Context:** Discussed {} topics over the last {} turns. Continue from previous context.", entry_count / 2, last_n_turns));
@@ -8043,7 +8052,10 @@ fn generate_session_summary(history: &[(String, String)], last_n_turns: usize) -
 
 /// Clean up old debug files to prevent disk bloat and reduce memory pressure.
 /// Keeps only the most recent N debug files, deleting older ones.
-fn cleanup_old_debug_files(workspace_dir: &std::path::Path, keep_last_n: usize) -> Result<(), Box<dyn std::error::Error>> {
+fn cleanup_old_debug_files(
+    workspace_dir: &std::path::Path,
+    keep_last_n: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
     let debug_dir = workspace_dir.join(".claude").join("debug");
 
     // Skip if debug directory doesn't exist

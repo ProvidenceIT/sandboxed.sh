@@ -132,7 +132,11 @@ impl Backend for ClaudeCodeBackend {
                     match &exec_event {
                         ExecutionEvent::ToolResult { id, .. } => {
                             pending_tools.remove(id);
-                            debug!("Tool completed: {}. Remaining pending: {}", id, pending_tools.len());
+                            debug!(
+                                "Tool completed: {}. Remaining pending: {}",
+                                id,
+                                pending_tools.len()
+                            );
                         }
                         _ => {}
                     }
