@@ -802,21 +802,61 @@ struct ControlView: View {
     
     // MARK: - Actions
 
-    // Cache mission history for faster loading on reopen
-    private func cacheMissionHistory(_ mission: Mission) {
-        let key = "cached_mission_\(mission.id)"
-        if let encoded = try? JSONEncoder().encode(mission) {
-            UserDefaults.standard.set(encoded, forKey: key)
-        }
+    // MARK: - Mission Caching with LRU Eviction
+
+    // Cache both mission metadata and events for consistent display
+    private struct CachedMissionData: Codable {
+        let mission: Mission
+        let events: [StoredEvent]
+        let cachedAt: Date
     }
 
-    private func loadCachedMissionHistory(_ missionId: String) -> Mission? {
-        let key = "cached_mission_\(missionId)"
+    private static let maxCachedMissions = 10  // Limit cache size
+    private static let cachePrefix = "cached_mission_"
+    private static let cacheKeysKey = "cached_mission_keys"
+
+    // Cache mission with events for faster loading and consistent display
+    private func cacheMissionWithEvents(_ mission: Mission, events: [StoredEvent]) {
+        let key = Self.cachePrefix + mission.id
+        let cacheData = CachedMissionData(mission: mission, events: events, cachedAt: Date())
+
+        guard let encoded = try? JSONEncoder().encode(cacheData) else { return }
+
+        // Implement LRU eviction
+        var cachedKeys = UserDefaults.standard.stringArray(forKey: Self.cacheKeysKey) ?? []
+
+        // Remove this key if it exists (we'll re-add it at the end as most recent)
+        cachedKeys.removeAll { $0 == mission.id }
+
+        // If we've hit the limit, remove the oldest cached mission
+        if cachedKeys.count >= Self.maxCachedMissions {
+            if let oldestKey = cachedKeys.first {
+                UserDefaults.standard.removeObject(forKey: Self.cachePrefix + oldestKey)
+                cachedKeys.removeFirst()
+            }
+        }
+
+        // Add new entry
+        cachedKeys.append(mission.id)
+        UserDefaults.standard.set(cachedKeys, forKey: Self.cacheKeysKey)
+        UserDefaults.standard.set(encoded, forKey: key)
+    }
+
+    private func loadCachedMissionData(_ missionId: String) -> CachedMissionData? {
+        let key = Self.cachePrefix + missionId
         guard let data = UserDefaults.standard.data(forKey: key),
-              let mission = try? JSONDecoder().decode(Mission.self, from: data) else {
+              let cached = try? JSONDecoder().decode(CachedMissionData.self, from: data) else {
             return nil
         }
-        return mission
+
+        // Update LRU order - move to end as most recently accessed
+        if var cachedKeys = UserDefaults.standard.stringArray(forKey: Self.cacheKeysKey) {
+            cachedKeys.removeAll { $0 == missionId }
+            cachedKeys.append(missionId)
+            UserDefaults.standard.set(cachedKeys, forKey: Self.cacheKeysKey)
+        }
+
+        return cached
     }
 
     private func applyViewingMission(_ mission: Mission, scrollToBottom: Bool = true) {
@@ -831,9 +871,6 @@ struct ControlView: View {
                 content: entry.content
             )
         }
-
-        // Cache the mission history for faster loading next time
-        cacheMissionHistory(mission)
 
         if scrollToBottom {
             // Use immediate synchronous scroll to prevent visible scrolling from top
@@ -899,9 +936,6 @@ struct ControlView: View {
             handleStreamEvent(type: event.eventType, data: data, isHistoricalReplay: true)
         }
 
-        // Cache the mission history for faster loading next time
-        cacheMissionHistory(mission)
-
         if scrollToBottom {
             // Use immediate synchronous scroll to prevent visible scrolling from top
             shouldScrollImmediately = true
@@ -950,10 +984,11 @@ struct ControlView: View {
         let previousViewingId = viewingMissionId
         viewingMissionId = id
 
-        // Try to load cached version first for immediate display
+        // Try to load cached version first for immediate display with consistent event-based rendering
         let hasCache: Bool
-        if let cachedMission = loadCachedMissionHistory(id) {
-            applyViewingMission(cachedMission)
+        if let cachedData = loadCachedMissionData(id) {
+            // Use cached events for consistent display (avoids flash when fresh data arrives)
+            applyViewingMissionWithEvents(cachedData.mission, events: cachedData.events)
             hasCache = true
         } else {
             hasCache = false
@@ -992,6 +1027,8 @@ struct ControlView: View {
                     applyViewingMission(mission)
                 } else {
                     applyViewingMissionWithEvents(mission, events: events)
+                    // Cache the mission with events for next time
+                    cacheMissionWithEvents(mission, events: events)
                 }
             } catch {
                 print("Failed to load mission events (falling back to basic history): \(error)")
@@ -1043,6 +1080,8 @@ struct ControlView: View {
                 // Final check before applying
                 guard viewingMissionId == id else { return }
                 applyViewingMissionWithEvents(mission, events: events, scrollToBottom: false)
+                // Update cache with fresh data
+                cacheMissionWithEvents(mission, events: events)
             } else {
                 // Final check before applying
                 guard viewingMissionId == id else { return }
