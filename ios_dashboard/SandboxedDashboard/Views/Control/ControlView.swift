@@ -985,15 +985,28 @@ struct ControlView: View {
 
                 // Fetch events for event-based display
                 if updateViewing || viewingMissionId == nil || viewingMissionId == mission.id {
-                    let eventTypes = ["user_message", "assistant_message", "tool_call", "tool_result", "text_delta", "thinking"]
-                    if let events = try? await api.getMissionEvents(id: mission.id, types: eventTypes), !events.isEmpty {
-                        applyViewingMissionWithEvents(mission, events: events)
-                        // Update cache with fresh data
-                        cacheMissionWithEvents(mission, events: events)
-                    } else {
-                        // Clear stale cache when events are empty or fetch fails
-                        removeMissionFromCache(mission.id)
-                        applyViewingMission(mission)
+                    do {
+                        let eventTypes = ["user_message", "assistant_message", "tool_call", "tool_result", "text_delta", "thinking"]
+                        let events = try await api.getMissionEvents(id: mission.id, types: eventTypes)
+
+                        if events.isEmpty {
+                            // Clear stale cache when events are empty
+                            removeMissionFromCache(mission.id)
+                            applyViewingMission(mission)
+                        } else {
+                            applyViewingMissionWithEvents(mission, events: events)
+                            // Update cache with fresh data
+                            cacheMissionWithEvents(mission, events: events)
+                        }
+                    } catch {
+                        print("Failed to load mission events: \(error)")
+                        // If we already displayed cached data, keep it and don't flash to basic view
+                        // Only clear cache and fall back if we didn't have cached data to begin with
+                        if !hasCache {
+                            removeMissionFromCache(mission.id)
+                            applyViewingMission(mission)
+                        }
+                        // Otherwise: keep the cached view displayed, don't cause a flash
                     }
                 }
             }
