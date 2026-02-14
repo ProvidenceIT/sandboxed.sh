@@ -2383,9 +2383,6 @@ fn spawn_control_session(
         tracing::info!("Automation scheduler disabled by config");
     }
 
-    // Spawn OAuth token refresher task
-    tokio::spawn(oauth_token_refresher_loop(Arc::clone(&state.ai_providers)));
-
     state
 }
 
@@ -2842,128 +2839,6 @@ async fn automation_scheduler_loop(
                             break;
                         }
                     }
-                }
-            }
-        }
-    }
-}
-
-/// Background task that proactively refreshes OAuth tokens before they expire.
-///
-/// This prevents the 24-hour reconnection issue by:
-/// 1. Checking all OAuth-enabled providers every 15 minutes
-/// 2. Refreshing tokens that will expire within 1 hour
-/// 3. Syncing refreshed tokens to all storage tiers (sandboxed-sh, OpenCode, Claude CLI)
-/// 4. Handling refresh token rotation (updating stored refresh token if changed)
-async fn oauth_token_refresher_loop(ai_providers: Arc<crate::ai_providers::AIProviderStore>) {
-    use crate::ai_providers::ProviderType;
-
-    // Check every 15 minutes
-    let check_interval = std::time::Duration::from_secs(15 * 60);
-    // Refresh tokens that will expire within 1 hour
-    let refresh_threshold_ms = 60 * 60 * 1000; // 1 hour in milliseconds
-
-    tracing::info!(
-        "OAuth token refresher task started (check every 15 min, refresh if < 1 hour until expiry)"
-    );
-
-    loop {
-        tokio::time::sleep(check_interval).await;
-
-        let providers = ai_providers.list().await;
-
-        for provider in providers {
-            // Skip non-OAuth providers
-            if !provider.has_oauth() {
-                continue;
-            }
-
-            let oauth = match provider.oauth {
-                Some(ref o) => o,
-                None => continue,
-            };
-
-            // Check if token will expire soon
-            let now_ms = chrono::Utc::now().timestamp_millis();
-            let time_until_expiry = oauth.expires_at - now_ms;
-
-            if time_until_expiry > refresh_threshold_ms {
-                // Token is still fresh, skip
-                tracing::debug!(
-                    provider_id = %provider.id,
-                    provider_name = %provider.name,
-                    provider_type = ?provider.provider_type,
-                    expires_in_minutes = time_until_expiry / 1000 / 60,
-                    "OAuth token still fresh, skipping"
-                );
-                continue;
-            }
-
-            tracing::info!(
-                provider_id = %provider.id,
-                provider_name = %provider.name,
-                provider_type = ?provider.provider_type,
-                expires_in_minutes = time_until_expiry / 1000 / 60,
-                "OAuth token will expire soon, refreshing proactively"
-            );
-
-            // Attempt to refresh the token
-            match super::ai_providers::refresh_oauth_token_internal(
-                &provider.provider_type,
-                &oauth.refresh_token,
-            )
-            .await
-            {
-                Ok((new_access, new_refresh, expires_at)) => {
-                    // Update the provider in the store
-                    let mut updated_provider = provider.clone();
-                    updated_provider.oauth = Some(crate::ai_providers::OAuthCredential {
-                        access_token: new_access.clone(),
-                        refresh_token: new_refresh.clone(),
-                        expires_at,
-                    });
-
-                    if let Err(e) = ai_providers.update(provider.id, updated_provider).await {
-                        tracing::error!(
-                            provider_id = %provider.id,
-                            provider_name = %provider.name,
-                            error = %e,
-                            "Failed to update provider with refreshed OAuth token"
-                        );
-                        continue;
-                    }
-
-                    // Sync to all storage tiers (Solution #3: Multi-tier token sync)
-                    if let Err(e) = super::ai_providers::sync_oauth_to_all_tiers(
-                        provider.provider_type,
-                        &new_refresh,
-                        &new_access,
-                        expires_at,
-                    ) {
-                        tracing::warn!(
-                            provider_id = %provider.id,
-                            provider_name = %provider.name,
-                            error = %e,
-                            "Failed to sync refreshed token to all storage tiers"
-                        );
-                    }
-
-                    tracing::info!(
-                        provider_id = %provider.id,
-                        provider_name = %provider.name,
-                        provider_type = ?provider.provider_type,
-                        new_expires_in_minutes = (expires_at - now_ms) / 1000 / 60,
-                        "Successfully refreshed OAuth token proactively"
-                    );
-                }
-                Err(e) => {
-                    tracing::error!(
-                        provider_id = %provider.id,
-                        provider_name = %provider.name,
-                        provider_type = ?provider.provider_type,
-                        error = %e,
-                        "Failed to refresh OAuth token"
-                    );
                 }
             }
         }
