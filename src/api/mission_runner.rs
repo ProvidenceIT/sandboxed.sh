@@ -400,7 +400,22 @@ fn parse_opencode_sse_event(
     let mut message_complete = false;
     let event = match event_type {
         "response.output_text.delta" => None,
-        "response.completed" | "response.incomplete" => {
+        "response.completed" => {
+            tracing::info!(
+                mission_id = %mission_id,
+                "✅ response.completed - mission completing normally"
+            );
+            message_complete = true;
+            None
+        }
+        "response.incomplete" => {
+            tracing::error!(
+                mission_id = %mission_id,
+                event_data = ?props,
+                "❌ BUG DETECTED: response.incomplete received! Message was truncated. This should NOT complete the mission."
+            );
+            // TODO: This is the bug - we're completing on incomplete!
+            // For now, keeping current behavior to match prod, but logging prominently
             message_complete = true;
             None
         }
@@ -547,6 +562,11 @@ fn parse_opencode_sse_event(
             })
         }
         "message.completed" | "assistant.message.completed" => {
+            tracing::info!(
+                mission_id = %mission_id,
+                event_type = %event_type,
+                "Message completed event received"
+            );
             message_complete = true;
             None
         }
