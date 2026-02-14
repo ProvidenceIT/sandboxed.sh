@@ -859,6 +859,17 @@ struct ControlView: View {
         return cached
     }
 
+    private func removeMissionFromCache(_ missionId: String) {
+        let key = Self.cachePrefix + missionId
+        UserDefaults.standard.removeObject(forKey: key)
+
+        // Remove from LRU tracking
+        if var cachedKeys = UserDefaults.standard.stringArray(forKey: Self.cacheKeysKey) {
+            cachedKeys.removeAll { $0 == missionId }
+            UserDefaults.standard.set(cachedKeys, forKey: Self.cacheKeysKey)
+        }
+    }
+
     private func applyViewingMission(_ mission: Mission, scrollToBottom: Bool = true) {
         isLoadingHistory = true  // Prevent animated scroll during history load
 
@@ -1024,6 +1035,8 @@ struct ControlView: View {
                 }
 
                 if events.isEmpty {
+                    // Clear stale cache when events are empty to prevent visual flashing
+                    removeMissionFromCache(mission.id)
                     applyViewingMission(mission)
                 } else {
                     applyViewingMissionWithEvents(mission, events: events)
@@ -1035,6 +1048,8 @@ struct ControlView: View {
                 guard fetchingMissionId == id else {
                     return
                 }
+                // Clear stale cache when event fetch fails to prevent visual flashing
+                removeMissionFromCache(mission.id)
                 // Fallback to basic mission history if events endpoint fails
                 applyViewingMission(mission)
             }
@@ -1085,6 +1100,8 @@ struct ControlView: View {
             } else {
                 // Final check before applying
                 guard viewingMissionId == id else { return }
+                // Clear stale cache when events are empty or fetch fails to prevent visual flashing
+                removeMissionFromCache(mission.id)
                 applyViewingMission(mission, scrollToBottom: false)
             }
         } catch {
