@@ -50,7 +50,7 @@ const navigation: NavItem[] = [
       { name: 'Commands', href: '/config/commands', icon: Terminal },
       { name: 'Skills', href: '/config/skills', icon: FileCode },
       { name: 'Workspaces', href: '/config/workspace-templates', icon: LayoutGrid },
-      { name: 'Configs', href: '/config/settings', icon: Cog },
+      { name: 'Profiles', href: '/config/settings', icon: Cog },
     ],
   },
   {

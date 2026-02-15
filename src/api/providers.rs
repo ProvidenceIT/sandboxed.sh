@@ -139,8 +139,8 @@ fn default_providers_config() -> ProvidersConfig {
                         ),
                     },
                     ProviderModel {
-                        id: "claude-sonnet-4-6".to_string(),
-                        name: "Claude Sonnet 4.6".to_string(),
+                        id: "claude-sonnet-4-5-20250929".to_string(),
+                        name: "Claude Sonnet 4.5".to_string(),
                         description: Some("Balanced speed and capability".to_string()),
                     },
                     ProviderModel {
@@ -420,16 +420,23 @@ pub async fn list_backend_model_options(
             .collect()
     };
 
-    // Add custom providers from AIProviderStore (for OpenCode)
+    // Add non-default providers from AIProviderStore (Custom, Cerebras, Zai, etc.)
+    let default_provider_ids: &[&str] = &["anthropic", "openai", "google", "xai"];
     let custom_providers = state.ai_providers.list().await;
     for provider in custom_providers {
-        if provider.provider_type != ProviderType::Custom || !provider.enabled {
+        // Skip disabled providers and those already in the default catalog
+        if !provider.enabled || default_provider_ids.contains(&provider.provider_type.id()) {
             continue;
         }
         if !query.include_all && !provider.has_credentials() {
             continue;
         }
-        let id = sanitize_custom_provider_id(&provider.name);
+        // Use the canonical provider type ID for known types, sanitized name for Custom
+        let id = if provider.provider_type == ProviderType::Custom {
+            sanitize_custom_provider_id(&provider.name)
+        } else {
+            provider.provider_type.id().to_string()
+        };
         let models = provider
             .custom_models
             .clone()
@@ -510,14 +517,20 @@ pub async fn validate_model_override(
     let working_dir = state.config.working_dir.to_string_lossy().to_string();
     let config = load_providers_config(&working_dir);
 
-    // Load all providers (including configured and custom)
+    // Load all providers (including configured and non-default)
     let mut providers = config.providers;
+    let default_provider_ids: &[&str] = &["anthropic", "openai", "google", "xai"];
     let custom_providers = state.ai_providers.list().await;
     for provider in custom_providers {
-        if provider.provider_type != ProviderType::Custom || !provider.enabled {
+        // Skip disabled providers and those already in the default catalog
+        if !provider.enabled || default_provider_ids.contains(&provider.provider_type.id()) {
             continue;
         }
-        let id = sanitize_custom_provider_id(&provider.name);
+        let id = if provider.provider_type == ProviderType::Custom {
+            sanitize_custom_provider_id(&provider.name)
+        } else {
+            provider.provider_type.id().to_string()
+        };
         let models = provider
             .custom_models
             .clone()

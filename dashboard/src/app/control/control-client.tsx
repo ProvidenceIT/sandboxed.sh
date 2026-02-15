@@ -5759,6 +5759,7 @@ export default function ControlClient() {
               workspaceId: activeMission.workspace_id,
               agent: activeMission.agent,
               backend: activeMission.backend,
+              modelOverride: activeMission.model_override,
             } : undefined}
           />
 

@@ -28,6 +28,7 @@ export interface InitialMissionValues {
   workspaceId?: string;
   agent?: string;
   backend?: string;
+  modelOverride?: string;
 }
 
 interface NewMissionDialogProps {
@@ -381,6 +382,11 @@ export function NewMissionDialog({
     // Set workspace from initialValues if provided
     if (initialValues?.workspaceId) {
       setNewMissionWorkspace(initialValues.workspaceId);
+    }
+
+    // Set model override from initialValues if provided
+    if (initialValues?.modelOverride) {
+      setModelOverride(initialValues.modelOverride);
     }
 
     // Try to use initialValues for agent (from current mission)
