@@ -1370,6 +1370,8 @@ pub enum ProviderStatusResponse {
     Unknown,
     Connected,
     NeedsAuth { auth_url: Option<String> },
+    /// OAuth refresh token expired - user must re-authenticate to continue
+    NeedsReauth { reason: String, auth_url: Option<String> },
     Error { message: String },
 }
 

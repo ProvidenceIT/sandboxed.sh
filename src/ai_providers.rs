@@ -332,6 +332,8 @@ pub enum ProviderStatus {
     Unknown,
     Connected,
     NeedsAuth,
+    /// OAuth refresh token expired - user needs to re-authenticate
+    NeedsReauth(String),
     Error(String),
 }
 
