@@ -3739,8 +3739,10 @@ async fn check_provider_health(
     // Try to parse as UUID first (for custom providers), then as type ID
     let (api_key_opt, provider_type) = if let Ok(uuid) = uuid::Uuid::parse_str(&id) {
         // UUID lookup for custom providers
-        let provider = state.ai_providers.get(uuid).await
-            .ok_or((StatusCode::NOT_FOUND, format!("Provider with ID {} not found", id)))?;
+        let provider = state.ai_providers.get(uuid).await.ok_or((
+            StatusCode::NOT_FOUND,
+            format!("Provider with ID {} not found", id),
+        ))?;
 
         // Check if provider has credentials
         let has_credentials = provider.api_key.is_some()
@@ -3776,12 +3778,15 @@ async fn check_provider_health(
         } else {
             // Not in custom store - check OpenCode config for standard providers
             if matches!(provider_type, ProviderType::Custom) {
-                return Err((StatusCode::NOT_FOUND, format!("Provider {} not configured", id)));
+                return Err((
+                    StatusCode::NOT_FOUND,
+                    format!("Provider {} not configured", id),
+                ));
             }
 
             // Read OpenCode auth to get API key for standard providers
-            let auth_map = read_opencode_auth_map()
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+            let auth_map =
+                read_opencode_auth_map().map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
             let auth_kind = auth_map.get(&provider_type);
 
@@ -3810,7 +3815,10 @@ async fn check_provider_health(
             (api_key_opt, provider_type)
         }
     } else {
-        return Err((StatusCode::NOT_FOUND, format!("Invalid provider ID: {}", id)));
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("Invalid provider ID: {}", id),
+        ));
     };
 
     // Perform a test API call based on provider type
