@@ -7977,6 +7977,9 @@ fn generate_session_summary(history: &[(String, String)], last_n_turns: usize) -
 
     // Save length before consuming iterator
     let entry_count = recent_entries.len();
+    // Use a HashSet to track already-added lines to avoid duplicates across all messages
+    let mut seen_lines = std::collections::HashSet::new();
+
     for (role, content) in &recent_entries {
         match role.as_str() {
             "user" => {
@@ -7985,8 +7988,6 @@ fn generate_session_summary(history: &[(String, String)], last_n_turns: usize) -
             "assistant" => {
                 // Extract key accomplishments from assistant responses
                 // Look for files created, commands run, decisions made
-                // Use a HashSet to track already-added lines to avoid duplicates
-                let mut seen_lines = std::collections::HashSet::new();
 
                 let keywords = [
                     ("created", "Created"),
