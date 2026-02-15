@@ -1209,6 +1209,13 @@ async fn oauth_token_refresher_loop(ai_providers: Arc<crate::ai_providers::AIPro
         tokio::time::sleep(check_interval).await;
 
         let providers = ai_providers.list().await;
+        let oauth_providers: Vec<_> = providers.iter().filter(|p| p.has_oauth()).collect();
+
+        tracing::debug!(
+            total_providers = providers.len(),
+            oauth_providers = oauth_providers.len(),
+            "OAuth refresh check cycle starting"
+        );
 
         for provider in providers {
             // Skip non-OAuth providers
@@ -1218,23 +1225,49 @@ async fn oauth_token_refresher_loop(ai_providers: Arc<crate::ai_providers::AIPro
 
             let oauth = match &provider.oauth {
                 Some(o) => o,
-                None => continue,
+                None => {
+                    tracing::warn!(
+                        provider_id = %provider.id,
+                        provider_name = %provider.name,
+                        "Provider marked as has_oauth but oauth field is None"
+                    );
+                    continue;
+                }
             };
 
             // Check if token will expire soon
             let now_ms = chrono::Utc::now().timestamp_millis();
             let time_until_expiry = oauth.expires_at - now_ms;
 
+            // Also check if token is already expired
+            let is_expired = time_until_expiry <= 0;
+
+            tracing::debug!(
+                provider_id = %provider.id,
+                provider_name = %provider.name,
+                provider_type = ?provider.provider_type,
+                expires_at = oauth.expires_at,
+                now_ms = now_ms,
+                time_until_expiry_ms = time_until_expiry,
+                expires_in_minutes = time_until_expiry / 1000 / 60,
+                is_expired = is_expired,
+                needs_refresh = time_until_expiry <= refresh_threshold_ms,
+                "Checking OAuth token status"
+            );
+
             if time_until_expiry > refresh_threshold_ms {
                 // Token is still fresh, skip
-                tracing::debug!(
+                continue;
+            }
+
+            if is_expired {
+                tracing::error!(
                     provider_id = %provider.id,
                     provider_name = %provider.name,
                     provider_type = ?provider.provider_type,
-                    expires_in_minutes = time_until_expiry / 1000 / 60,
-                    "OAuth token still fresh, skipping"
+                    expired_since_minutes = (-time_until_expiry) / 1000 / 60,
+                    "OAuth token is ALREADY EXPIRED - this should not happen! Attempting emergency refresh..."
                 );
-                continue;
             }
 
             tracing::info!(
@@ -1298,13 +1331,27 @@ async fn oauth_token_refresher_loop(ai_providers: Arc<crate::ai_providers::AIPro
                     );
                 }
                 Err(e) => {
+                    let is_invalid_grant = e.to_lowercase().contains("invalid_grant");
                     tracing::error!(
                         provider_id = %provider.id,
                         provider_name = %provider.name,
                         provider_type = ?provider.provider_type,
                         error = %e,
-                        "Failed to refresh OAuth token"
+                        is_invalid_grant = is_invalid_grant,
+                        "Failed to refresh OAuth token in background loop"
                     );
+
+                    if is_invalid_grant {
+                        tracing::error!(
+                            provider_id = %provider.id,
+                            provider_name = %provider.name,
+                            "Refresh token is invalid - user needs to re-authenticate via Settings → AI Providers"
+                        );
+
+                        // Update provider status to show it needs re-auth
+                        // Note: This would require updating the provider with an error status
+                        // For now, we just log it prominently
+                    }
                 }
             }
         }
