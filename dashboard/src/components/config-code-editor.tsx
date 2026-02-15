@@ -26,6 +26,8 @@ interface ConfigCodeEditorProps {
   className?: string;
   editorClassName?: string;
   minHeight?: number | string;
+  /** Constrain the editor to this height (enables scrolling). Use "100%" to fill parent. */
+  height?: number | string;
   padding?: number;
   /** Enable highlighting of <encrypted>...</encrypted> tags */
   highlightEncrypted?: boolean;
@@ -148,6 +150,7 @@ export function ConfigCodeEditor({
   className,
   editorClassName,
   minHeight = '100%',
+  height,
   padding = 12,
   highlightEncrypted = false,
   language = 'plain',
@@ -183,7 +186,7 @@ export function ConfigCodeEditor({
   return (
     <div
       className={cn(
-        'rounded-lg bg-black/20 border border-white/[0.06] focus-within:border-indigo-500/50 transition-colors relative',
+        'rounded-lg bg-black/20 border border-white/[0.06] focus-within:border-indigo-500/50 transition-colors relative overflow-hidden',
         disabled && 'opacity-60',
         className
       )}
@@ -206,6 +209,7 @@ export function ConfigCodeEditor({
         extensions={extensions}
         theme="none"
         minHeight={typeof minHeight === 'number' ? `${minHeight}px` : minHeight}
+        height={height !== undefined ? (typeof height === 'number' ? `${height}px` : height) : undefined}
         className={cn('config-code-editor', editorClassName)}
         basicSetup={{
           lineNumbers: false,

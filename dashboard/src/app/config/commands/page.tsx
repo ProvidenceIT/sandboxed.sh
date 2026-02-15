@@ -363,6 +363,7 @@ Describe what this command does.
                             setCommandDirty(true);
                           }}
                           className="h-full"
+                          height="100%"
                           disabled={commandSaving}
                           language="markdown"
                         />

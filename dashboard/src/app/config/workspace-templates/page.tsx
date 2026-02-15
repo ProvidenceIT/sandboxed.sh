@@ -805,6 +805,7 @@ set -e
                   placeholder="#!/usr/bin/env bash"
                   padding={16}
                   minHeight="100%"
+                  height="100%"
                   language="bash"
                   className="h-full focus-within:border-emerald-500/50"
                   editorClassName="h-full"
@@ -1220,6 +1221,7 @@ set -e
                           placeholder={`#!/usr/bin/env bash\n# Additional setup that runs after fragments`}
                           padding={12}
                           minHeight="100%"
+                          height="100%"
                           language="bash"
                           className="flex-1 min-h-[150px] focus-within:border-indigo-500/50"
                           editorClassName="h-full"
