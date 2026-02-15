@@ -3283,7 +3283,7 @@ struct OpenCodeAuthState {
     has_anthropic: bool,
     has_google: bool,
     has_other: bool,
-    /// Tracks all provider IDs that have valid credentials (e.g., "xai", "zai", "cerebras").
+    /// Tracks which specific provider IDs have been detected as configured.
     configured_providers: std::collections::HashSet<String>,
 }
 
@@ -3336,12 +3336,12 @@ fn detect_opencode_provider_auth(app_working_dir: Option<&std::path::Path>) -> O
     let mut configured_providers = std::collections::HashSet::new();
 
     let mark_provider = |key: &str,
-                             has_openai: &mut bool,
-                             has_anthropic: &mut bool,
-                             has_google: &mut bool,
-                             has_other: &mut bool,
-                             configured_providers: &mut std::collections::HashSet<String>| {
-        configured_providers.insert(key.to_string());
+                         has_openai: &mut bool,
+                         has_anthropic: &mut bool,
+                         has_google: &mut bool,
+                         has_other: &mut bool,
+                         configured_providers: &mut std::collections::HashSet<String>| {
+        configured_providers.insert(key.to_lowercase());
         match key {
             "openai" | "codex" => *has_openai = true,
             "anthropic" | "claude" => *has_anthropic = true,
@@ -3359,7 +3359,7 @@ fn detect_opencode_provider_auth(app_working_dir: Option<&std::path::Path>) -> O
                             continue;
                         }
                         mark_provider(
-                            key,
+                            key.as_str(),
                             &mut has_openai,
                             &mut has_anthropic,
                             &mut has_google,
@@ -3434,7 +3434,7 @@ fn detect_opencode_provider_auth(app_working_dir: Option<&std::path::Path>) -> O
                         continue;
                     }
                     mark_provider(
-                        key,
+                        key.as_str(),
                         &mut has_openai,
                         &mut has_anthropic,
                         &mut has_google,
@@ -6014,7 +6014,6 @@ pub async fn run_opencode_turn(
                 .ok()
                 .filter(|v| !v.trim().is_empty())
         });
-
     let auth_state = detect_opencode_provider_auth(Some(app_working_dir));
     let has_openai = auth_state.has_openai;
     let has_anthropic = auth_state.has_anthropic;
@@ -6036,9 +6035,11 @@ pub async fn run_opencode_turn(
             "anthropic" | "claude" => has_anthropic,
             "openai" | "codex" => has_openai,
             "google" | "gemini" => has_google,
-            // For well-known catalog providers, check if they have credentials configured.
-            // For truly unknown/custom providers, allow them through as an escape hatch.
-            "xai" | "zai" | "cerebras" => configured_providers.contains(provider),
+            // For known catalog providers (xai, zai, cerebras), check if they are actually configured
+            p if super::providers::DEFAULT_CATALOG_PROVIDER_IDS.contains(&p) => {
+                configured_providers.contains(p)
+            }
+            // Unknown providers pass through (custom escape hatch)
             _ => true,
         }
     };
@@ -6055,7 +6056,8 @@ pub async fn run_opencode_turn(
         }
     }
 
-    // Capture model override AFTER provider availability check so unavailable providers are cleared.
+    // Capture model override AFTER provider availability check so that cleared
+    // overrides are not passed to sync_opencode_agent_config.
     let default_model_override = resolved_model.clone();
 
     let needs_google = matches!(provider_hint.as_deref(), Some("google" | "gemini"));

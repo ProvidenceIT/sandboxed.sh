@@ -17,7 +17,7 @@ use crate::ai_providers::ProviderType;
 
 /// Provider IDs that are part of the default catalog and should not be duplicated
 /// from the AIProviderStore.
-const DEFAULT_CATALOG_PROVIDER_IDS: &[&str] =
+pub const DEFAULT_CATALOG_PROVIDER_IDS: &[&str] =
     &["anthropic", "openai", "google", "xai", "cerebras", "zai"];
 
 /// A model available from a provider.

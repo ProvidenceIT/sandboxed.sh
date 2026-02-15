@@ -110,6 +110,7 @@ export function NewMissionDialog({
   const [submitting, setSubmitting] = useState(false);
   const [defaultSet, setDefaultSet] = useState(false);
   const dialogRef = useRef<HTMLDivElement>(null);
+  const prevBackendRef = useRef<string | null>(null);
 
   // SWR: fetch backends
   const { data: backends } = useSWR<Backend[]>('backends', listBackends, {
@@ -449,14 +450,12 @@ export function NewMissionDialog({
     setDefaultSet(true);
   }, [open, defaultSet, allAgents, config, initialValues]);
 
-  // Track previous backend to detect switches
-  const prevBackendRef = useRef(selectedBackend);
   useEffect(() => {
     if (selectedBackend === 'amp' && modelOverride) {
       setModelOverride('');
     }
     // When switching backends, clear model override if current value isn't valid for the new backend
-    if (prevBackendRef.current !== selectedBackend && modelOverride) {
+    if (prevBackendRef.current !== null && prevBackendRef.current !== selectedBackend && modelOverride) {
       const isValidForNewBackend = modelOptions.some(opt => opt.value === modelOverride);
       if (!isValidForNewBackend) {
         setModelOverride('');
