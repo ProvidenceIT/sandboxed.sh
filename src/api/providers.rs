@@ -15,6 +15,11 @@ use serde::{Deserialize, Serialize};
 use super::routes::AppState;
 use crate::ai_providers::ProviderType;
 
+/// Provider IDs that are part of the default catalog and should not be duplicated
+/// from the AIProviderStore.
+const DEFAULT_CATALOG_PROVIDER_IDS: &[&str] =
+    &["anthropic", "openai", "google", "xai", "cerebras", "zai"];
+
 /// A model available from a provider.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderModel {
@@ -472,8 +477,7 @@ pub async fn list_backend_model_options(
     };
 
     // Add non-default providers from AIProviderStore (Custom, Cerebras, Zai, etc.)
-    let default_provider_ids: &[&str] =
-        &["anthropic", "openai", "google", "xai", "cerebras", "zai"];
+    let default_provider_ids = DEFAULT_CATALOG_PROVIDER_IDS;
     let custom_providers = state.ai_providers.list().await;
     for provider in custom_providers {
         // Skip disabled providers and those already in the default catalog
@@ -571,8 +575,7 @@ pub async fn validate_model_override(
 
     // Load all providers (including configured and non-default)
     let mut providers = config.providers;
-    let default_provider_ids: &[&str] =
-        &["anthropic", "openai", "google", "xai", "cerebras", "zai"];
+    let default_provider_ids = DEFAULT_CATALOG_PROVIDER_IDS;
     let custom_providers = state.ai_providers.list().await;
     for provider in custom_providers {
         // Skip disabled providers and those already in the default catalog
