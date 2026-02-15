@@ -6159,7 +6159,7 @@ export default function ControlClient() {
                     Subtask
                   </span>
                   <span className="text-sm font-medium text-emerald-400 tabular-nums">
-                    {viewingProgress.completed + 1}/{viewingProgress.total}
+                    {Math.min(viewingProgress.completed + 1, viewingProgress.total)}/{viewingProgress.total}
                   </span>
                 </div>
               </>
