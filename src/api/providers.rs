@@ -579,7 +579,7 @@ pub async fn validate_model_override(
                         // Allow unknown Claude models (escape hatch for new models)
                         Ok(())
                     } else {
-                        return Err(format!(
+                        Err(format!(
                             "Model '{}' not found in Anthropic catalog. Available models: {}. For custom Claude models, use format 'claude-*'",
                             model_override,
                             provider
@@ -589,7 +589,7 @@ pub async fn validate_model_override(
                                 .cloned()
                                 .collect::<Vec<_>>()
                                 .join(", ")
-                        ));
+                        ))
                     }
                 } else {
                     Ok(())
@@ -616,7 +616,7 @@ pub async fn validate_model_override(
                         // Allow unknown OpenAI models (escape hatch for new models)
                         Ok(())
                     } else {
-                        return Err(format!(
+                        Err(format!(
                             "Model '{}' not found in OpenAI catalog. Available models: {}. For custom OpenAI models, use format 'gpt-*' or 'o1-*'",
                             model_override,
                             provider
@@ -626,7 +626,7 @@ pub async fn validate_model_override(
                                 .cloned()
                                 .collect::<Vec<_>>()
                                 .join(", ")
-                        ));
+                        ))
                     }
                 } else {
                     Ok(())

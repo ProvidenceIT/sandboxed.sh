@@ -1332,46 +1332,6 @@ fn stream_codex_uninstall() -> impl Stream<Item = Result<Event, std::convert::In
     stream_npm_package_uninstall("@openai/codex", ".codex", "Codex")
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{is_safe_repo_path, normalize_repo_path, select_repo_path};
-
-    #[test]
-    fn select_repo_path_prefers_env() {
-        let result = select_repo_path(
-            Some("/opt/custom".to_string()),
-            Some(" /env/override ".to_string()),
-        );
-        assert_eq!(result, "/env/override");
-    }
-
-    #[test]
-    fn select_repo_path_falls_back_to_settings() {
-        let result = select_repo_path(Some("/opt/custom".to_string()), None);
-        assert_eq!(result, "/opt/custom");
-    }
-
-    #[test]
-    fn select_repo_path_uses_default_when_empty() {
-        let result = select_repo_path(Some("  ".to_string()), Some("".to_string()));
-        assert_eq!(result, crate::settings::DEFAULT_SANDBOXED_REPO_PATH);
-    }
-
-    #[test]
-    fn normalize_repo_path_trims_and_drops_empty() {
-        assert_eq!(
-            normalize_repo_path(Some("  /x  ".to_string())),
-            Some("/x".to_string())
-        );
-        assert_eq!(normalize_repo_path(Some("   ".to_string())), None);
-        assert_eq!(normalize_repo_path(None), None);
-    }
-
-    #[test]
-    fn safe_repo_path_rejects_root() {
-        assert!(!is_safe_repo_path(std::path::Path::new("/")));
-    }
-}
 
 /// Stream the oh-my-opencode update process.
 fn stream_oh_my_opencode_update() -> impl Stream<Item = Result<Event, std::convert::Infallible>> {
@@ -1644,5 +1604,46 @@ fn stream_oh_my_opencode_uninstall() -> impl Stream<Item = Result<Event, std::co
         }
 
         yield sse("complete", "oh-my-opencode uninstalled successfully!", Some(100));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_safe_repo_path, normalize_repo_path, select_repo_path};
+
+    #[test]
+    fn select_repo_path_prefers_env() {
+        let result = select_repo_path(
+            Some("/opt/custom".to_string()),
+            Some(" /env/override ".to_string()),
+        );
+        assert_eq!(result, "/env/override");
+    }
+
+    #[test]
+    fn select_repo_path_falls_back_to_settings() {
+        let result = select_repo_path(Some("/opt/custom".to_string()), None);
+        assert_eq!(result, "/opt/custom");
+    }
+
+    #[test]
+    fn select_repo_path_uses_default_when_empty() {
+        let result = select_repo_path(Some("  ".to_string()), Some("".to_string()));
+        assert_eq!(result, crate::settings::DEFAULT_SANDBOXED_REPO_PATH);
+    }
+
+    #[test]
+    fn normalize_repo_path_trims_and_drops_empty() {
+        assert_eq!(
+            normalize_repo_path(Some("  /x  ".to_string())),
+            Some("/x".to_string())
+        );
+        assert_eq!(normalize_repo_path(Some("   ".to_string())), None);
+        assert_eq!(normalize_repo_path(None), None);
+    }
+
+    #[test]
+    fn safe_repo_path_rejects_root() {
+        assert!(!is_safe_repo_path(std::path::Path::new("/")));
     }
 }

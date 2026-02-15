@@ -1634,7 +1634,7 @@ async fn get_container_memory_stats(workspace: &Workspace) -> WorkspaceMemorySta
 
     // Query systemd for memory stats
     let output = tokio::process::Command::new("systemctl")
-        .args(&["show", &scope_name])
+        .args(["show", &scope_name])
         .output()
         .await;
 
@@ -1689,15 +1689,11 @@ async fn get_container_memory_stats(workspace: &Workspace) -> WorkspaceMemorySta
 }
 
 /// Parse systemd cgroup memory statistics from `systemctl show` output.
+type MemoryStats = (Option<u64>, Option<u64>, Option<u64>, Option<u64>, Option<String>);
+
 fn parse_systemd_memory_stats(
     stdout: &str,
-) -> (
-    Option<u64>,
-    Option<u64>,
-    Option<u64>,
-    Option<u64>,
-    Option<String>,
-) {
+) -> MemoryStats {
     let mut memory_current = None;
     let mut memory_peak = None;
     let mut memory_max = None;
