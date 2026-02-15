@@ -2733,6 +2733,14 @@ pub fn run_claudecode_turn<'a>(
                                             _ => {}
                                         }
                                     }
+                                    // Reset per-turn accumulation state so the next turn
+                                    // starts fresh (block indices restart from 0 each turn)
+                                    thinking_buffer.clear();
+                                    text_buffer.clear();
+                                    last_thinking_len = 0;
+                                    last_text_len = 0;
+                                    block_types.clear();
+                                    thinking_emitted = false;
                                 }
                                 ClaudeEvent::User(evt) => {
                                     for block in evt.message.content {
@@ -3335,20 +3343,21 @@ fn detect_opencode_provider_auth(app_working_dir: Option<&std::path::Path>) -> O
     let mut has_other = false;
     let mut configured_providers = std::collections::HashSet::new();
 
-    let mark_provider = |key: &str,
-                         has_openai: &mut bool,
-                         has_anthropic: &mut bool,
-                         has_google: &mut bool,
-                         has_other: &mut bool,
-                         configured_providers: &mut std::collections::HashSet<String>| {
-        configured_providers.insert(key.to_lowercase());
-        match key {
-            "openai" | "codex" => *has_openai = true,
-            "anthropic" | "claude" => *has_anthropic = true,
-            "google" | "gemini" => *has_google = true,
-            _ => *has_other = true,
-        }
-    };
+    let mark_provider =
+        |key: &str,
+         has_openai: &mut bool,
+         has_anthropic: &mut bool,
+         has_google: &mut bool,
+         has_other: &mut bool,
+         configured_providers: &mut std::collections::HashSet<String>| {
+            configured_providers.insert(key.to_lowercase());
+            match key {
+                "openai" | "codex" => *has_openai = true,
+                "anthropic" | "claude" => *has_anthropic = true,
+                "google" | "gemini" => *has_google = true,
+                _ => *has_other = true,
+            }
+        };
 
     if let Some(path) = host_opencode_auth_path() {
         if let Ok(contents) = std::fs::read_to_string(path) {
@@ -6726,14 +6735,28 @@ pub async fn run_opencode_turn(
                             );
 
                             // Extract text content from message.part.updated for final result
+                            // Only capture assistant messages - skip user message echoes
                             if event_type == "message.part.updated" {
                                 if let Some(props) = json.get("properties") {
                                     if let Some(part) = props.get("part") {
                                         let part_type = part.get("type").and_then(|t| t.as_str()).unwrap_or("");
                                         if part_type == "text" {
-                                            if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
-                                                final_result = text.to_string();
-                                                let _ = text_output_tx.send(true);
+                                            let msg_id = part.get("messageID")
+                                                .or_else(|| part.get("messageId"))
+                                                .or_else(|| part.get("message_id"))
+                                                .or_else(|| props.get("messageID"))
+                                                .or_else(|| props.get("messageId"))
+                                                .or_else(|| props.get("message_id"))
+                                                .and_then(|v| v.as_str());
+                                            let is_user = msg_id
+                                                .and_then(|id| state.message_roles.get(id))
+                                                .map(|role| role == "user")
+                                                .unwrap_or(false);
+                                            if !is_user {
+                                                if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                                                    final_result = text.to_string();
+                                                    let _ = text_output_tx.send(true);
+                                                }
                                             }
                                         }
                                     }
@@ -6801,8 +6824,16 @@ pub async fn run_opencode_turn(
                                             done: true,
                                             mission_id: Some(mission_id),
                                         });
-                                        sse_done_sent.store(true, std::sync::atomic::Ordering::SeqCst);
                                     }
+                                    // Reset per-turn thinking state so each model turn
+                                    // gets its own thinking block in the UI.
+                                    // Note: keep sse_emitted_thinking=true (session-wide flag)
+                                    // so post-session logic knows thinking was emitted.
+                                    sse_done_sent.store(false, std::sync::atomic::Ordering::SeqCst);
+                                    state.part_buffers.retain(|k, _| {
+                                        !k.starts_with("thinking:") && !k.starts_with("reasoning:")
+                                    });
+                                    state.last_emitted_thinking = None;
                                 }
                             }
                         } else {
@@ -7516,6 +7547,14 @@ pub async fn run_amp_turn(
                                         _ => {}
                                     }
                                 }
+                                // Reset per-turn accumulation state so the next turn
+                                // starts fresh (block indices restart from 0 each turn)
+                                thinking_buffer.clear();
+                                text_buffer.clear();
+                                last_thinking_len = 0;
+                                last_text_len = 0;
+                                block_types.clear();
+                                thinking_streamed = false;
                             }
                             AmpEvent::User(evt) => {
                                 for block in evt.message.content {
