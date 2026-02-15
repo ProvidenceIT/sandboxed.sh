@@ -3679,40 +3679,32 @@ async fn check_provider_health(
     let provider_type = ProviderType::from_id(&id)
         .ok_or((StatusCode::NOT_FOUND, "Unknown provider type".to_string()))?;
 
-    // Read OpenCode config to get credentials
-    let config_path = get_opencode_config_path(&state.config.working_dir);
-    let opencode_config = read_opencode_config(&config_path)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    // Get provider from store - this will only return it if it's enabled
+    let provider_opt = state.ai_providers.get_by_type(provider_type).await;
 
-    let api_key = get_provider_api_key(&opencode_config, provider_type);
+    // If not found in enabled providers, check all providers
+    let provider = if provider_opt.is_some() {
+        provider_opt
+    } else {
+        // Check all providers, even disabled ones
+        let all_providers = state.ai_providers.list().await;
+        all_providers.into_iter().find(|p| p.provider_type == provider_type)
+    };
 
-    if api_key.is_none() {
-        // Also check the new ai_providers store
-        if let Some(provider) = state.ai_providers.get_by_type(provider_type).await {
-            if provider.api_key.is_none() && provider.oauth.is_none() {
-                return Ok(Json(serde_json::json!({
-                    "healthy": false,
-                    "status": "no_credentials",
-                    "message": "Provider has no API key or OAuth credentials configured"
-                })));
-            }
-        } else {
-            return Ok(Json(serde_json::json!({
-                "healthy": false,
-                "status": "no_credentials",
-                "message": "Provider has no API key or OAuth credentials configured"
-            })));
-        }
+    let provider = provider.ok_or((
+        StatusCode::NOT_FOUND,
+        format!("Provider {} not configured", id),
+    ))?;
+
+    // Check if provider has credentials
+    let api_key = provider.api_key.clone();
+    if api_key.is_none() && provider.oauth.is_none() {
+        return Ok(Json(serde_json::json!({
+            "healthy": false,
+            "status": "no_credentials",
+            "message": "Provider has no API key or OAuth credentials configured"
+        })));
     }
-
-    let api_key = api_key.or_else(|| {
-        // Try to get from ai_providers store as fallback
-        state.ai_providers
-            .get_by_type(provider_type)
-            .now_or_never()
-            .flatten()
-            .and_then(|p| p.api_key)
-    });
 
 
     // Perform a test API call based on provider type
