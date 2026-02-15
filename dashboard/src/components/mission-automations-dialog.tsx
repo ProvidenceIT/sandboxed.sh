@@ -32,6 +32,7 @@ import {
   updateAutomation,
   deleteAutomation,
   getAutomationExecutions,
+  getLibraryCommand,
 } from '@/lib/api';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { toast } from '@/components/toast';
@@ -44,6 +45,7 @@ const BUILTIN_VARIABLES = new Set([
   'mission_id',
   'mission_name',
   'cwd',
+  'encrypted',
 ]);
 
 /** Extract `<word/>` placeholders from text, excluding built-ins and webhook patterns. */
@@ -142,6 +144,7 @@ export function MissionAutomationsDialog({
   // -- Create form state --
   const [commandSourceType, setCommandSourceType] = useState<CommandSourceType>('library');
   const [commandName, setCommandName] = useState('');
+  const commandNameRef = useRef('');
   const [inlinePrompt, setInlinePrompt] = useState('');
   const [triggerKind, setTriggerKind] = useState<TriggerKind>('interval');
   const [intervalValue, setIntervalValue] = useState('5');
@@ -186,9 +189,23 @@ export function MissionAutomationsDialog({
   const handleCommandNameChange = useCallback(
     (name: string) => {
       setCommandName(name);
+      commandNameRef.current = name;
       const cmd = commandsByName.get(name);
       if (cmd?.params?.length) {
         addAutoVariables(cmd.params.map((p) => p.name));
+      } else if (name) {
+        // Fetch full command content to extract <variable/> placeholders
+        const capturedName = name;
+        getLibraryCommand(name)
+          .then((full) => {
+            // Guard against stale response if user changed selection
+            if (commandNameRef.current !== capturedName) return;
+            const fromParams = full.params?.map((p) => p.name) ?? [];
+            const fromContent = extractPromptVariables(full.content);
+            const all = [...new Set([...fromParams, ...fromContent])];
+            if (all.length > 0) addAutoVariables(all);
+          })
+          .catch(() => {});
       }
     },
     [commandsByName, addAutoVariables]
@@ -708,21 +725,21 @@ export function MissionAutomationsDialog({
                 {commandSourceType === 'library' ? (
                   <div>
                     <label className="block text-xs text-white/50 mb-1.5">Command</label>
-                    <input
-                      list="automation-command-list"
+                    <select
                       value={commandName}
                       onChange={(e) => handleCommandNameChange(e.target.value)}
-                      placeholder={
-                        commandsLoading ? 'Loading commands...' : 'Select or type a command'
-                      }
-                      className="w-full rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2.5 text-sm text-white placeholder:text-white/30 focus:outline-none focus:border-indigo-500/50 appearance-none"
+                      className={cn(selectClass, 'w-full')}
                       style={selectStyle}
-                    />
-                    <datalist id="automation-command-list">
+                    >
+                      <option value="" className="bg-[#1a1a1a]">
+                        {commandsLoading ? 'Loading commands...' : 'Select a command'}
+                      </option>
                       {commands.map((command) => (
-                        <option key={command.name} value={command.name} />
+                        <option key={command.name} value={command.name} className="bg-[#1a1a1a]">
+                          {command.name}
+                        </option>
                       ))}
-                    </datalist>
+                    </select>
                     <div className="mt-1 text-[11px] text-white/30">
                       {commandName && commandsByName.get(commandName)?.description}
                       {!commandName && (

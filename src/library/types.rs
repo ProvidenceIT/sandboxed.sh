@@ -1,7 +1,7 @@
 //! Types for the configuration library.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::workspace::TailscaleMode;
 
@@ -843,4 +843,45 @@ pub fn extract_params(frontmatter: &Option<serde_yaml::Value>) -> Vec<CommandPar
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Built-in variables that are auto-substituted at runtime.
+const BUILTIN_VARIABLES: &[&str] = &[
+    "timestamp",
+    "date",
+    "unix_time",
+    "mission_id",
+    "mission_name",
+    "cwd",
+    "encrypted",
+];
+
+/// Extract implicit params from `<variable/>` placeholders in command body text.
+/// Returns params not already declared in `explicit_params` and not built-in.
+pub fn extract_implicit_params(body: &str, explicit_params: &[CommandParam]) -> Vec<CommandParam> {
+    let explicit_names: HashSet<&str> = explicit_params.iter().map(|p| p.name.as_str()).collect();
+    let builtins: HashSet<&str> = BUILTIN_VARIABLES.iter().copied().collect();
+
+    let re = regex::Regex::new(r"<(\w+)/>").unwrap();
+    let mut seen = HashSet::new();
+    let mut result = Vec::new();
+
+    for cap in re.captures_iter(body) {
+        let name = &cap[1];
+        if builtins.contains(name)
+            || name.starts_with("webhook")
+            || explicit_names.contains(name)
+            || seen.contains(name)
+        {
+            continue;
+        }
+        seen.insert(name.to_string());
+        result.push(CommandParam {
+            name: name.to_string(),
+            required: true,
+            description: None,
+        });
+    }
+
+    result
 }
