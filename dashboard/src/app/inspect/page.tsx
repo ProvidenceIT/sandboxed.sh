@@ -3,13 +3,8 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import Link from 'next/link';
 import useSWR from 'swr';
-import {
-  getHealth,
-  listMcps,
-  type HealthResponse,
-  type McpServerState,
-} from '@/lib/api';
-import { listWorkspaces, type Workspace } from '@/lib/api/workspaces';
+import { getHealth, listMcps } from '@/lib/api';
+import { listWorkspaces } from '@/lib/api/workspaces';
 import { cn } from '@/lib/utils';
 import { formatBytes } from '@/lib/format';
 import { getValidJwt } from '@/lib/auth';
@@ -23,7 +18,6 @@ import {
   Server,
   Wifi,
   WifiOff,
-  Wrench,
   ArrowRight,
 } from 'lucide-react';
 
