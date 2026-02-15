@@ -3803,11 +3803,17 @@ async fn check_provider_health(
                 }
                 Some(AuthKind::ApiKey) => {
                     // API key provider - read the actual key from auth.json
-                    let api_key_opt = auth
-                        .get(provider_type.id())
-                        .and_then(|v| v.get("key").or_else(|| v.get("api_key")))
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
+                    // Use opencode_auth_keys() to check all possible key aliases
+                    // (e.g. OpenAI credentials may be under "openai" or "codex")
+                    let api_key_opt =
+                        opencode_auth_keys(provider_type)
+                            .into_iter()
+                            .find_map(|key| {
+                                auth.get(key)
+                                    .and_then(|v| v.get("key").or_else(|| v.get("api_key")))
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string())
+                            });
 
                     if api_key_opt.is_none() {
                         return Ok(Json(serde_json::json!({
