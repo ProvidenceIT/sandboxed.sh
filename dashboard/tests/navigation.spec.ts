@@ -61,14 +61,14 @@ test.describe('Navigation', () => {
     await expect(page).toHaveURL(/\/config\/skills/);
   });
 
-  test('should expand Extensions submenu', async ({ page }) => {
+  test('should expand Inspect submenu', async ({ page }) => {
     await page.goto('/');
 
-    // Click Extensions button to expand (it's a button, not a link)
-    await page.getByRole('button', { name: /Extensions/i }).click();
+    // Click Inspect button to expand (it's a button, not a link)
+    await page.getByRole('button', { name: /Inspect/i }).click();
 
     // Should show submenu items
-    await expect(page.getByRole('link', { name: /MCP Servers/i })).toBeVisible();
+    await expect(page.getByRole('link', { name: /MCPs/i })).toBeVisible();
     await expect(page.getByRole('link', { name: /Tools/i })).toBeVisible();
   });
 
@@ -85,9 +85,9 @@ test.describe('Navigation', () => {
     }
   });
 
-  test('should navigate to Config and Extensions subpages', async ({ page }) => {
+  test('should navigate to Config and Inspect subpages', async ({ page }) => {
     // Navigate to MCP Servers
-    await page.goto('/extensions/mcps');
+    await page.goto('/inspect/mcps');
     // Wait for page to load (either shows MCP content or "Library unavailable" message)
     await expect(page.getByText(/MCP Servers|Library unavailable|Add MCP/i).first()).toBeVisible();
 

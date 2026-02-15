@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test';
 
 test.describe('Library - MCP Servers', () => {
   test('should load MCPs page', async ({ page }) => {
-    await page.goto('/extensions/mcps');
+    await page.goto('/inspect/mcps');
 
     // Wait for page to load (either shows content or library unavailable)
     await page.waitForTimeout(2000);
@@ -21,7 +21,7 @@ test.describe('Library - MCP Servers', () => {
   });
 
   test('should show Add MCP button when library is available', async ({ page }) => {
-    await page.goto('/extensions/mcps');
+    await page.goto('/inspect/mcps');
     await page.waitForTimeout(2000);
 
     // Check if library is available
@@ -38,7 +38,7 @@ test.describe('Library - MCP Servers', () => {
   });
 
   test('should have search functionality', async ({ page }) => {
-    await page.goto('/extensions/mcps');
+    await page.goto('/inspect/mcps');
     await page.waitForTimeout(2000);
 
     // Check if library is available
