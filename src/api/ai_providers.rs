@@ -1369,10 +1369,17 @@ pub struct ProviderResponse {
 pub enum ProviderStatusResponse {
     Unknown,
     Connected,
-    NeedsAuth { auth_url: Option<String> },
+    NeedsAuth {
+        auth_url: Option<String>,
+    },
     /// OAuth refresh token expired - user must re-authenticate to continue
-    NeedsReauth { reason: String, auth_url: Option<String> },
-    Error { message: String },
+    NeedsReauth {
+        reason: String,
+        auth_url: Option<String>,
+    },
+    Error {
+        message: String,
+    },
 }
 
 impl ProviderStatusResponse {
@@ -1389,7 +1396,10 @@ impl ProviderStatusResponse {
     /// );
     /// ```
     #[allow(dead_code)]
-    fn from_provider_status(status: &crate::ai_providers::ProviderStatus, auth_url: Option<String>) -> Self {
+    fn from_provider_status(
+        status: &crate::ai_providers::ProviderStatus,
+        auth_url: Option<String>,
+    ) -> Self {
         use crate::ai_providers::ProviderStatus;
         match status {
             ProviderStatus::Unknown => ProviderStatusResponse::Unknown,
