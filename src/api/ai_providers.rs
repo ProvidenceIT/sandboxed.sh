@@ -3727,6 +3727,7 @@ async fn check_provider_health(
             // Read OpenCode auth to get API key for standard providers
             let auth_map =
                 read_opencode_auth_map().map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+            let auth = read_opencode_auth().map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
             let auth_kind = auth_map.get(&provider_type);
 
@@ -3741,10 +3742,12 @@ async fn check_provider_health(
                     })));
                 }
                 Some(AuthKind::ApiKey) => {
-                    // API key provider - get the key from environment variable
-                    let api_key_opt = provider_type
-                        .env_var_name()
-                        .and_then(|env_var| std::env::var(env_var).ok());
+                    // API key provider - read the actual key from auth.json
+                    let api_key_opt = auth
+                        .get(provider_type.id())
+                        .and_then(|v| v.get("key").or_else(|| v.get("api_key")))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
 
                     if api_key_opt.is_none() {
                         return Ok(Json(serde_json::json!({
