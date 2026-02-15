@@ -6616,11 +6616,9 @@ pub async fn run_opencode_turn(
                     .with_terminal_reason(TerminalReason::Cancelled);
             }
             changed = sse_complete_rx.changed() => {
-                if changed.is_ok() && *sse_complete_rx.borrow() {
-                    if !sse_complete_seen {
-                        sse_complete_seen = true;
-                        sse_complete_at = Some(std::time::Instant::now());
-                    }
+                if changed.is_ok() && *sse_complete_rx.borrow() && !sse_complete_seen {
+                    sse_complete_seen = true;
+                    sse_complete_at = Some(std::time::Instant::now());
                 }
             }
             changed = text_output_rx.changed() => {
@@ -7977,6 +7975,9 @@ fn generate_session_summary(history: &[(String, String)], last_n_turns: usize) -
 
     // Save length before consuming iterator
     let entry_count = recent_entries.len();
+    // Use a HashSet to track already-added lines to avoid duplicates across all messages
+    let mut seen_lines = std::collections::HashSet::new();
+
     for (role, content) in &recent_entries {
         match role.as_str() {
             "user" => {
@@ -7985,8 +7986,6 @@ fn generate_session_summary(history: &[(String, String)], last_n_turns: usize) -
             "assistant" => {
                 // Extract key accomplishments from assistant responses
                 // Look for files created, commands run, decisions made
-                // Use a HashSet to track already-added lines to avoid duplicates
-                let mut seen_lines = std::collections::HashSet::new();
 
                 let keywords = [
                     ("created", "Created"),

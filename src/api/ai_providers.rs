@@ -100,7 +100,7 @@ async fn exchange_openai_id_token_for_api_key(
 async fn refresh_openai_oauth_tokens(
     client: &reqwest::Client,
     refresh_token: &str,
-) -> Result<(String, String, i64, Option<String>), String> {
+) -> Result<(String, String, i64, Option<String>), OAuthRefreshError> {
     let body = url::form_urlencoded::Serializer::new(String::new())
         .append_pair("grant_type", "refresh_token")
         .append_pair("client_id", OPENAI_CLIENT_ID)
@@ -113,26 +113,37 @@ async fn refresh_openai_oauth_tokens(
         .body(body)
         .send()
         .await
-        .map_err(|e| format!("Failed to refresh OpenAI OAuth token: {}", e))?;
+        .map_err(|e| OAuthRefreshError::Other(format!("Failed to refresh OpenAI OAuth token: {}", e)))?;
 
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
-        return Err(format!(
+
+        // Check if the error is invalid_grant (expired/revoked refresh token)
+        if text.contains("invalid_grant") || text.contains("Invalid grant") {
+            return Err(OAuthRefreshError::InvalidGrant(format!(
+                "OpenAI refresh token expired or revoked ({}): {}",
+                status, text
+            )));
+        }
+
+        return Err(OAuthRefreshError::Other(format!(
             "OpenAI OAuth refresh failed ({}): {}",
             status, text
-        ));
+        )));
     }
 
     let data: serde_json::Value = resp
         .json()
         .await
-        .map_err(|e| format!("Failed to parse OpenAI refresh response: {}", e))?;
+        .map_err(|e| OAuthRefreshError::Other(format!("Failed to parse OpenAI refresh response: {}", e)))?;
 
     let access_token = data
         .get("access_token")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| "No access_token in OpenAI refresh response".to_string())?;
+        .ok_or_else(|| {
+            OAuthRefreshError::Other("No access_token in OpenAI refresh response".to_string())
+        })?;
 
     let new_refresh = data
         .get("refresh_token")
@@ -1369,8 +1380,51 @@ pub struct ProviderResponse {
 pub enum ProviderStatusResponse {
     Unknown,
     Connected,
-    NeedsAuth { auth_url: Option<String> },
-    Error { message: String },
+    NeedsAuth {
+        auth_url: Option<String>,
+    },
+    /// OAuth refresh token expired - user must re-authenticate to continue
+    NeedsReauth {
+        reason: String,
+        auth_url: Option<String>,
+    },
+    Error {
+        message: String,
+    },
+}
+
+impl ProviderStatusResponse {
+    /// Convert from internal ProviderStatus to API response format.
+    ///
+    /// This ensures the NeedsReauth variant is properly mapped when
+    /// the OAuth refresh loop detects expired tokens.
+    ///
+    /// # Example Usage (future OAuth refresh implementation)
+    /// ```ignore
+    /// // In OAuth refresh loop when invalid_grant is detected:
+    /// provider.status = ProviderStatus::NeedsReauth(
+    ///     "Refresh token expired - please re-authenticate".to_string()
+    /// );
+    /// ```
+    #[allow(dead_code)]
+    fn from_provider_status(
+        status: &crate::ai_providers::ProviderStatus,
+        auth_url: Option<String>,
+    ) -> Self {
+        use crate::ai_providers::ProviderStatus;
+        match status {
+            ProviderStatus::Unknown => ProviderStatusResponse::Unknown,
+            ProviderStatus::Connected => ProviderStatusResponse::Connected,
+            ProviderStatus::NeedsAuth => ProviderStatusResponse::NeedsAuth { auth_url },
+            ProviderStatus::NeedsReauth(reason) => ProviderStatusResponse::NeedsReauth {
+                reason: reason.clone(),
+                auth_url,
+            },
+            ProviderStatus::Error(msg) => ProviderStatusResponse::Error {
+                message: msg.clone(),
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4841,6 +4895,30 @@ async fn oauth_callback_inner(
 // Proactive Token Refresh & Multi-Tier Sync (Solution #1, #2, #3)
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// OAuth token refresh error types
+#[derive(Debug)]
+pub enum OAuthRefreshError {
+    /// Refresh token is invalid or expired (invalid_grant) - user needs to re-authenticate
+    InvalidGrant(String),
+    /// Other refresh errors (network, server errors, etc.)
+    Other(String),
+}
+
+impl std::fmt::Display for OAuthRefreshError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OAuthRefreshError::InvalidGrant(msg) => write!(f, "Invalid grant: {}", msg),
+            OAuthRefreshError::Other(msg) => write!(f, "{}", msg),
+        }
+    }
+}
+
+impl From<OAuthRefreshError> for String {
+    fn from(err: OAuthRefreshError) -> String {
+        err.to_string()
+    }
+}
+
 /// Internal function to refresh an OAuth token for any provider.
 ///
 /// Returns (new_access_token, new_refresh_token, expires_at).
@@ -4852,7 +4930,7 @@ async fn oauth_callback_inner(
 pub async fn refresh_oauth_token_internal(
     provider_type: &ProviderType,
     refresh_token: &str,
-) -> Result<(String, String, i64), String> {
+) -> Result<(String, String, i64), OAuthRefreshError> {
     let client = reqwest::Client::new();
 
     match provider_type {
@@ -4868,29 +4946,41 @@ pub async fn refresh_oauth_token_internal(
                 ])
                 .send()
                 .await
-                .map_err(|e| format!("Failed to refresh Anthropic token: {}", e))?;
+                .map_err(|e| OAuthRefreshError::Other(format!("Failed to refresh Anthropic token: {}", e)))?;
 
             if !token_response.status().is_success() {
                 let status = token_response.status();
                 let error_text = token_response.text().await.unwrap_or_default();
-                return Err(format!(
+
+                // Check if the error is invalid_grant (expired/revoked refresh token)
+                if error_text.contains("invalid_grant") || error_text.contains("Invalid grant") {
+                    return Err(OAuthRefreshError::InvalidGrant(format!(
+                        "Anthropic refresh token expired or revoked ({}): {}",
+                        status, error_text
+                    )));
+                }
+
+                return Err(OAuthRefreshError::Other(format!(
                     "Anthropic token refresh failed ({}): {}",
                     status, error_text
-                ));
+                )));
             }
 
             let token_data: serde_json::Value = token_response
                 .json()
                 .await
-                .map_err(|e| format!("Failed to parse Anthropic token response: {}", e))?;
+                .map_err(|e| OAuthRefreshError::Other(format!("Failed to parse Anthropic token response: {}", e)))?;
 
-            let new_access_token = token_data["access_token"]
-                .as_str()
-                .ok_or_else(|| "No access token in Anthropic refresh response".to_string())?;
+            let new_access_token = token_data["access_token"].as_str().ok_or_else(|| {
+                OAuthRefreshError::Other("No access token in Anthropic refresh response".to_string())
+            })?;
 
             // **Solution #2: Anthropic rotates refresh tokens - capture the new one**
             let new_refresh_token = token_data["refresh_token"].as_str().ok_or_else(|| {
-                "No refresh_token in Anthropic OAuth response - tokens may be rotating".to_string()
+                OAuthRefreshError::Other(
+                    "No refresh_token in Anthropic OAuth response - tokens may be rotating"
+                        .to_string(),
+                )
             })?;
 
             let expires_in = token_data["expires_in"].as_i64().unwrap_or(3600);
@@ -4922,25 +5012,34 @@ pub async fn refresh_oauth_token_internal(
                 ])
                 .send()
                 .await
-                .map_err(|e| format!("Failed to refresh Google token: {}", e))?;
+                .map_err(|e| OAuthRefreshError::Other(format!("Failed to refresh Google token: {}", e)))?;
 
             if !token_response.status().is_success() {
                 let status = token_response.status();
                 let error_text = token_response.text().await.unwrap_or_default();
-                return Err(format!(
+
+                // Check if the error is invalid_grant (expired/revoked refresh token)
+                if error_text.contains("invalid_grant") || error_text.contains("Invalid grant") {
+                    return Err(OAuthRefreshError::InvalidGrant(format!(
+                        "Google refresh token expired or revoked ({}): {}",
+                        status, error_text
+                    )));
+                }
+
+                return Err(OAuthRefreshError::Other(format!(
                     "Google token refresh failed ({}): {}",
                     status, error_text
-                ));
+                )));
             }
 
             let token_data: serde_json::Value = token_response
                 .json()
                 .await
-                .map_err(|e| format!("Failed to parse Google token response: {}", e))?;
+                .map_err(|e| OAuthRefreshError::Other(format!("Failed to parse Google token response: {}", e)))?;
 
             let new_access_token = token_data["access_token"]
                 .as_str()
-                .ok_or_else(|| "No access token in Google refresh response".to_string())?;
+                .ok_or_else(|| OAuthRefreshError::Other("No access token in Google refresh response".to_string()))?;
 
             // Google doesn't rotate refresh tokens - use the existing one
             let new_refresh_token = refresh_token.to_string();
@@ -4950,10 +5049,10 @@ pub async fn refresh_oauth_token_internal(
 
             Ok((new_access_token.to_string(), new_refresh_token, expires_at))
         }
-        _ => Err(format!(
+        _ => Err(OAuthRefreshError::Other(format!(
             "OAuth refresh not supported for provider type: {:?}",
             provider_type
-        )),
+        ))),
     }
 }
 

@@ -332,6 +332,8 @@ pub enum ProviderStatus {
     Unknown,
     Connected,
     NeedsAuth,
+    /// OAuth refresh token expired - user needs to re-authenticate
+    NeedsReauth(String),
     Error(String),
 }
 
@@ -589,6 +591,26 @@ impl AIProviderStore {
         if let Some(provider) = providers.get_mut(&id) {
             provider.api_key = Some(api_key);
             provider.status = ProviderStatus::Connected;
+            provider.updated_at = chrono::Utc::now();
+            let updated = provider.clone();
+            drop(providers);
+
+            if let Err(e) = self.save_to_disk().await {
+                tracing::error!("Failed to save AI providers to disk: {}", e);
+            }
+
+            Some(updated)
+        } else {
+            None
+        }
+    }
+
+    /// Set provider status (e.g., to NeedsReauth when OAuth token is invalid)
+    pub async fn set_status(&self, id: Uuid, status: ProviderStatus) -> Option<AIProvider> {
+        let mut providers = self.providers.write().await;
+
+        if let Some(provider) = providers.get_mut(&id) {
+            provider.status = status;
             provider.updated_at = chrono::Utc::now();
             let updated = provider.clone();
             drop(providers);

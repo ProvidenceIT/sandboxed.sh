@@ -1197,7 +1197,6 @@ async fn search_memory(Query(params): Query<SearchMemoryQuery>) -> Json<serde_js
 /// 3. Syncing refreshed tokens to all storage tiers (sandboxed-sh, OpenCode, Claude CLI)
 /// 4. Handling refresh token rotation (updating stored refresh token if changed)
 async fn oauth_token_refresher_loop(ai_providers: Arc<crate::ai_providers::AIProviderStore>) {
-    use crate::ai_providers::ProviderType;
 
     // Check every 15 minutes
     let check_interval = std::time::Duration::from_secs(15 * 60);
@@ -1334,26 +1333,44 @@ async fn oauth_token_refresher_loop(ai_providers: Arc<crate::ai_providers::AIPro
                     );
                 }
                 Err(e) => {
-                    let is_invalid_grant = e.to_lowercase().contains("invalid_grant");
-                    tracing::error!(
-                        provider_id = %provider.id,
-                        provider_name = %provider.name,
-                        provider_type = ?provider.provider_type,
-                        error = %e,
-                        is_invalid_grant = is_invalid_grant,
-                        "Failed to refresh OAuth token in background loop"
-                    );
+                    // Check if this is an invalid_grant error (expired/revoked refresh token)
+                    match e {
+                        ai_providers_api::OAuthRefreshError::InvalidGrant(reason) => {
+                            tracing::warn!(
+                                provider_id = %provider.id,
+                                provider_name = %provider.name,
+                                provider_type = ?provider.provider_type,
+                                reason = %reason,
+                                "OAuth refresh token expired or revoked - setting provider to NeedsReauth"
+                            );
 
-                    if is_invalid_grant {
-                        tracing::error!(
-                            provider_id = %provider.id,
-                            provider_name = %provider.name,
-                            "Refresh token is invalid - user needs to re-authenticate via Settings → AI Providers"
-                        );
-
-                        // Update provider status to show it needs re-auth
-                        // Note: This would require updating the provider with an error status
-                        // For now, we just log it prominently
+                            // Set provider status to NeedsReauth so frontend can prompt user to re-authenticate
+                            if let Some(_updated) = ai_providers
+                                .set_status(provider.id, crate::ai_providers::ProviderStatus::NeedsReauth(reason))
+                                .await
+                            {
+                                tracing::info!(
+                                    provider_id = %provider.id,
+                                    provider_name = %provider.name,
+                                    "Provider status updated to NeedsReauth"
+                                );
+                            } else {
+                                tracing::error!(
+                                    provider_id = %provider.id,
+                                    provider_name = %provider.name,
+                                    "Failed to update provider status to NeedsReauth (provider not found)"
+                                );
+                            }
+                        }
+                        ai_providers_api::OAuthRefreshError::Other(msg) => {
+                            tracing::error!(
+                                provider_id = %provider.id,
+                                provider_name = %provider.name,
+                                provider_type = ?provider.provider_type,
+                                error = %msg,
+                                "Failed to refresh OAuth token"
+                            );
+                        }
                     }
                 }
             }

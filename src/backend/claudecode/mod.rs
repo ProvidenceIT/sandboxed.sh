@@ -129,16 +129,13 @@ impl Backend for ClaudeCodeBackend {
 
                 for exec_event in exec_events {
                     // Track tool completion to know when it's safe to send MessageComplete
-                    match &exec_event {
-                        ExecutionEvent::ToolResult { id, .. } => {
-                            pending_tools.remove(id);
-                            debug!(
-                                "Tool completed: {}. Remaining pending: {}",
-                                id,
-                                pending_tools.len()
-                            );
-                        }
-                        _ => {}
+                    if let ExecutionEvent::ToolResult { id, .. } = &exec_event {
+                        pending_tools.remove(id);
+                        debug!(
+                            "Tool completed: {}. Remaining pending: {}",
+                            id,
+                            pending_tools.len()
+                        );
                     }
 
                     if tx.send(exec_event).await.is_err() {
