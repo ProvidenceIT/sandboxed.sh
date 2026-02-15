@@ -708,21 +708,21 @@ export function MissionAutomationsDialog({
                 {commandSourceType === 'library' ? (
                   <div>
                     <label className="block text-xs text-white/50 mb-1.5">Command</label>
-                    <input
-                      list="automation-command-list"
+                    <select
                       value={commandName}
                       onChange={(e) => handleCommandNameChange(e.target.value)}
-                      placeholder={
-                        commandsLoading ? 'Loading commands...' : 'Select or type a command'
-                      }
-                      className="w-full rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2.5 text-sm text-white placeholder:text-white/30 focus:outline-none focus:border-indigo-500/50 appearance-none"
+                      className={cn(selectClass, 'w-full')}
                       style={selectStyle}
-                    />
-                    <datalist id="automation-command-list">
+                    >
+                      <option value="" className="bg-[#1a1a1a]">
+                        {commandsLoading ? 'Loading commands...' : 'Select a command'}
+                      </option>
                       {commands.map((command) => (
-                        <option key={command.name} value={command.name} />
+                        <option key={command.name} value={command.name} className="bg-[#1a1a1a]">
+                          {command.name}
+                        </option>
                       ))}
-                    </datalist>
+                    </select>
                     <div className="mt-1 text-[11px] text-white/30">
                       {commandName && commandsByName.get(commandName)?.description}
                       {!commandName && (

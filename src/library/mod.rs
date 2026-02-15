@@ -878,13 +878,15 @@ impl LibraryStore {
 
             // Read and parse frontmatter for description
             let content = fs::read_to_string(&entry_path).await.ok();
-            let (frontmatter, _) = content
+            let (frontmatter, body) = content
                 .as_ref()
                 .map(|c| parse_frontmatter(c))
                 .unwrap_or((None, ""));
 
             let description = extract_description(&frontmatter);
-            let params = extract_params(&frontmatter);
+            let mut params = extract_params(&frontmatter);
+            let implicit = extract_implicit_params(body, &params);
+            params.extend(implicit);
 
             commands.push(CommandSummary {
                 name,
@@ -913,9 +915,11 @@ impl LibraryStore {
             .await
             .context("Failed to read command file")?;
 
-        let (frontmatter, _body) = parse_frontmatter(&content);
+        let (frontmatter, body) = parse_frontmatter(&content);
         let description = extract_description(&frontmatter);
-        let params = extract_params(&frontmatter);
+        let mut params = extract_params(&frontmatter);
+        let implicit = extract_implicit_params(body, &params);
+        params.extend(implicit);
 
         Ok(Command {
             name: name.to_string(),
