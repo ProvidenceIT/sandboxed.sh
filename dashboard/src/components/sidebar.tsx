@@ -18,7 +18,7 @@ import {
   Plug,
   FileCode,
   Server,
-  Puzzle,
+  Search,
   Wrench,
   LayoutGrid,
   Library,
@@ -54,12 +54,13 @@ const navigation: NavItem[] = [
     ],
   },
   {
-    name: 'Extensions',
-    href: '/extensions',
-    icon: Puzzle,
+    name: 'Inspect',
+    href: '/inspect',
+    icon: Search,
     children: [
-      { name: 'MCP Servers', href: '/extensions/mcps', icon: Plug },
-      { name: 'Tools', href: '/extensions/tools', icon: Wrench },
+      { name: 'System', href: '/inspect/system', icon: Activity },
+      { name: 'MCPs', href: '/inspect/mcps', icon: Plug },
+      { name: 'Tools', href: '/inspect/tools', icon: Wrench },
     ],
   },
   {
@@ -72,7 +73,6 @@ const navigation: NavItem[] = [
       { name: 'Providers', href: '/settings/providers', icon: Key },
       { name: 'Security', href: '/settings/secrets', icon: Lock },
       { name: 'Data', href: '/settings/data', icon: Archive },
-      { name: 'Monitoring', href: '/settings/monitoring', icon: Activity },
     ],
   },
 ];
@@ -92,8 +92,8 @@ export function Sidebar() {
     if (pathname.startsWith('/config')) {
       setExpandedItems((prev) => new Set([...prev, 'Library']));
     }
-    if (pathname.startsWith('/extensions')) {
-      setExpandedItems((prev) => new Set([...prev, 'Extensions']));
+    if (pathname.startsWith('/inspect')) {
+      setExpandedItems((prev) => new Set([...prev, 'Inspect']));
     }
     if (pathname.startsWith('/settings')) {
       setExpandedItems((prev) => new Set([...prev, 'Settings']));
