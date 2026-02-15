@@ -28,6 +28,7 @@ export interface InitialMissionValues {
   workspaceId?: string;
   agent?: string;
   backend?: string;
+  modelOverride?: string;
 }
 
 interface NewMissionDialogProps {
@@ -109,6 +110,7 @@ export function NewMissionDialog({
   const [submitting, setSubmitting] = useState(false);
   const [defaultSet, setDefaultSet] = useState(false);
   const dialogRef = useRef<HTMLDivElement>(null);
+  const prevBackendRef = useRef<string | null>(null);
 
   // SWR: fetch backends
   const { data: backends } = useSWR<Backend[]>('backends', listBackends, {
@@ -212,7 +214,7 @@ export function NewMissionDialog({
     return targetWorkspace?.config_profile || null;
   }, [newMissionWorkspace, workspaces]);
 
-  const effectiveProfileForAgents = workspaceProfile || null;
+  const effectiveProfileForAgents = workspaceProfile || 'default';
 
   const { data: opencodeProfileSettings } = useSWR(
     effectiveProfileForAgents ? ['opencode-profile-settings', effectiveProfileForAgents] : null,
@@ -383,6 +385,11 @@ export function NewMissionDialog({
       setNewMissionWorkspace(initialValues.workspaceId);
     }
 
+    // Set model override from initialValues if provided
+    if (initialValues?.modelOverride) {
+      setModelOverride(initialValues.modelOverride);
+    }
+
     // Try to use initialValues for agent (from current mission)
     if (initialValues?.backend && initialValues?.agent) {
       const matchingAgent = allAgents.find(
@@ -447,7 +454,15 @@ export function NewMissionDialog({
     if (selectedBackend === 'amp' && modelOverride) {
       setModelOverride('');
     }
-  }, [selectedBackend, modelOverride]);
+    // When switching backends, clear model override if current value isn't valid for the new backend
+    if (prevBackendRef.current !== null && prevBackendRef.current !== selectedBackend && modelOverride) {
+      const isValidForNewBackend = modelOptions.some(opt => opt.value === modelOverride);
+      if (!isValidForNewBackend) {
+        setModelOverride('');
+      }
+    }
+    prevBackendRef.current = selectedBackend;
+  }, [selectedBackend, modelOverride, modelOptions]);
 
   const resetForm = () => {
     setNewMissionWorkspace('');

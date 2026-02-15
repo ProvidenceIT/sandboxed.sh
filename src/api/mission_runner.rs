@@ -700,6 +700,9 @@ pub struct MissionRunner {
     /// Agent override for this mission
     pub agent_override: Option<String>,
 
+    /// Model override for this mission (e.g. "zai/glm-5")
+    pub model_override: Option<String>,
+
     /// Message queue for this mission
     pub queue: VecDeque<QueuedMessage>,
 
@@ -743,6 +746,7 @@ impl MissionRunner {
         backend_id: Option<String>,
         session_id: Option<String>,
         config_profile: Option<String>,
+        model_override: Option<String>,
     ) -> Self {
         Self {
             mission_id,
@@ -752,6 +756,7 @@ impl MissionRunner {
             config_profile,
             state: MissionRunState::Queued,
             agent_override,
+            model_override,
             queue: VecDeque::new(),
             history: Vec::new(),
             cancel_token: None,
@@ -897,6 +902,7 @@ impl MissionRunner {
         let mission_id = self.mission_id;
         let workspace_id = self.workspace_id;
         let agent_override = self.agent_override.clone();
+        let model_override = self.model_override.clone();
         let backend_id = self.backend_id.clone();
         let session_id = self.session_id.clone();
         let config_profile = self.config_profile.clone();
@@ -945,6 +951,7 @@ impl MissionRunner {
                 Some(workspace_id),
                 backend_id,
                 agent_override,
+                model_override,
                 secrets,
                 session_id,
                 config_profile,
@@ -1101,6 +1108,7 @@ async fn run_mission_turn(
     workspace_id: Option<Uuid>,
     backend_id: String,
     agent_override: Option<String>,
+    model_override: Option<String>,
     secrets: Option<Arc<SecretsStore>>,
     session_id: Option<String>,
     mission_config_profile: Option<String>,
@@ -1109,6 +1117,9 @@ async fn run_mission_turn(
     let effective_agent = agent_override.clone();
     if let Some(ref agent) = effective_agent {
         config.opencode_agent = Some(agent.clone());
+    }
+    if let Some(ref model) = model_override {
+        config.default_model = Some(model.clone());
     }
     // Get config profile: mission's config_profile takes priority over workspace's
     let workspace_config_profile = if let Some(ws_id) = workspace_id {
@@ -2722,6 +2733,14 @@ pub fn run_claudecode_turn<'a>(
                                             _ => {}
                                         }
                                     }
+                                    // Reset per-turn accumulation state so the next turn
+                                    // starts fresh (block indices restart from 0 each turn)
+                                    thinking_buffer.clear();
+                                    text_buffer.clear();
+                                    last_thinking_len = 0;
+                                    last_text_len = 0;
+                                    block_types.clear();
+                                    thinking_emitted = false;
                                 }
                                 ClaudeEvent::User(evt) => {
                                     for block in evt.message.content {
@@ -3272,6 +3291,8 @@ struct OpenCodeAuthState {
     has_anthropic: bool,
     has_google: bool,
     has_other: bool,
+    /// Tracks which specific provider IDs have been detected as configured.
+    configured_providers: std::collections::HashSet<String>,
 }
 
 fn auth_entry_has_credentials(value: &serde_json::Value) -> bool {
@@ -3320,6 +3341,23 @@ fn detect_opencode_provider_auth(app_working_dir: Option<&std::path::Path>) -> O
     let mut has_anthropic = false;
     let mut has_google = false;
     let mut has_other = false;
+    let mut configured_providers = std::collections::HashSet::new();
+
+    let mark_provider =
+        |key: &str,
+         has_openai: &mut bool,
+         has_anthropic: &mut bool,
+         has_google: &mut bool,
+         has_other: &mut bool,
+         configured_providers: &mut std::collections::HashSet<String>| {
+            configured_providers.insert(key.to_lowercase());
+            match key {
+                "openai" | "codex" => *has_openai = true,
+                "anthropic" | "claude" => *has_anthropic = true,
+                "google" | "gemini" => *has_google = true,
+                _ => *has_other = true,
+            }
+        };
 
     if let Some(path) = host_opencode_auth_path() {
         if let Ok(contents) = std::fs::read_to_string(path) {
@@ -3329,12 +3367,14 @@ fn detect_opencode_provider_auth(app_working_dir: Option<&std::path::Path>) -> O
                         if !auth_entry_has_credentials(value) {
                             continue;
                         }
-                        match key.as_str() {
-                            "openai" | "codex" => has_openai = true,
-                            "anthropic" | "claude" => has_anthropic = true,
-                            "google" | "gemini" => has_google = true,
-                            _ => has_other = true,
-                        }
+                        mark_provider(
+                            key.as_str(),
+                            &mut has_openai,
+                            &mut has_anthropic,
+                            &mut has_google,
+                            &mut has_other,
+                            &mut configured_providers,
+                        );
                     }
                 }
             }
@@ -3349,13 +3389,17 @@ fn detect_opencode_provider_auth(app_working_dir: Option<&std::path::Path>) -> O
                     continue;
                 }
                 let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-                match stem {
-                    "openai" | "codex" => has_openai = true,
-                    "anthropic" | "claude" => has_anthropic = true,
-                    "google" | "gemini" => has_google = true,
-                    "" => {}
-                    _ => has_other = true,
+                if stem.is_empty() {
+                    continue;
                 }
+                mark_provider(
+                    stem,
+                    &mut has_openai,
+                    &mut has_anthropic,
+                    &mut has_google,
+                    &mut has_other,
+                    &mut configured_providers,
+                );
             }
         }
     }
@@ -3363,26 +3407,31 @@ fn detect_opencode_provider_auth(app_working_dir: Option<&std::path::Path>) -> O
     if let Ok(value) = std::env::var("OPENAI_API_KEY") {
         if !value.trim().is_empty() {
             has_openai = true;
+            configured_providers.insert("openai".to_string());
         }
     }
     if let Ok(value) = std::env::var("ANTHROPIC_API_KEY") {
         if !value.trim().is_empty() {
             has_anthropic = true;
+            configured_providers.insert("anthropic".to_string());
         }
     }
     if let Ok(value) = std::env::var("GOOGLE_GENERATIVE_AI_API_KEY") {
         if !value.trim().is_empty() {
             has_google = true;
+            configured_providers.insert("google".to_string());
         }
     }
     if let Ok(value) = std::env::var("GOOGLE_API_KEY") {
         if !value.trim().is_empty() {
             has_google = true;
+            configured_providers.insert("google".to_string());
         }
     }
     if let Ok(value) = std::env::var("XAI_API_KEY") {
         if !value.trim().is_empty() {
             has_other = true;
+            configured_providers.insert("xai".to_string());
         }
     }
 
@@ -3393,12 +3442,14 @@ fn detect_opencode_provider_auth(app_working_dir: Option<&std::path::Path>) -> O
                     if !auth_entry_has_credentials(value) {
                         continue;
                     }
-                    match key.as_str() {
-                        "openai" | "codex" => has_openai = true,
-                        "anthropic" | "claude" => has_anthropic = true,
-                        "google" | "gemini" => has_google = true,
-                        _ => has_other = true,
-                    }
+                    mark_provider(
+                        key.as_str(),
+                        &mut has_openai,
+                        &mut has_anthropic,
+                        &mut has_google,
+                        &mut has_other,
+                        &mut configured_providers,
+                    );
                 }
             }
         }
@@ -3409,6 +3460,7 @@ fn detect_opencode_provider_auth(app_working_dir: Option<&std::path::Path>) -> O
         has_anthropic,
         has_google,
         has_other,
+        configured_providers,
     }
 }
 
@@ -5971,8 +6023,6 @@ pub async fn run_opencode_turn(
                 .ok()
                 .filter(|v| !v.trim().is_empty())
         });
-    let default_model_override = resolved_model.clone();
-
     let auth_state = detect_opencode_provider_auth(Some(app_working_dir));
     let has_openai = auth_state.has_openai;
     let has_anthropic = auth_state.has_anthropic;
@@ -5988,11 +6038,17 @@ pub async fn run_opencode_turn(
         .and_then(|m| m.split_once('/'))
         .map(|(provider, _)| provider.to_lowercase());
 
+    let configured_providers = &auth_state.configured_providers;
     let provider_available = |provider: &str| -> bool {
         match provider {
             "anthropic" | "claude" => has_anthropic,
             "openai" | "codex" => has_openai,
             "google" | "gemini" => has_google,
+            // For known catalog providers (xai, zai, cerebras), check if they are actually configured
+            p if super::providers::DEFAULT_CATALOG_PROVIDER_IDS.contains(&p) => {
+                configured_providers.contains(p)
+            }
+            // Unknown providers pass through (custom escape hatch)
             _ => true,
         }
     };
@@ -6008,6 +6064,10 @@ pub async fn run_opencode_turn(
             provider_hint = None;
         }
     }
+
+    // Capture model override AFTER provider availability check so that cleared
+    // overrides are not passed to sync_opencode_agent_config.
+    let default_model_override = resolved_model.clone();
 
     let needs_google = matches!(provider_hint.as_deref(), Some("google" | "gemini"));
 
@@ -6557,18 +6617,36 @@ pub async fn run_opencode_turn(
         tokio::spawn(async move {
             let stderr_reader = BufReader::new(stderr);
             let mut stderr_lines = stderr_reader.lines();
+            // Track the last message role seen in stderr so we only capture
+            // assistant text parts (not user message echoes) into the buffer.
+            let mut last_stderr_role = String::new();
             while let Ok(Some(line)) = stderr_lines.next_line().await {
                 let clean = line.trim().to_string();
                 if !clean.is_empty() {
                     tracing::debug!(mission_id = %mission_id_clone, line = %clean, "OpenCode CLI stderr");
 
-                    if let Some(text_part) = parse_opencode_stderr_text_part(&clean) {
-                        if let Ok(mut buffer) = stderr_text_capture.lock() {
-                            if !buffer.ends_with(&text_part) {
-                                buffer.push_str(&text_part);
-                            }
+                    // Track message role from stderr event lines like:
+                    //   [MAIN] message.updated (user, build)
+                    //   [MAIN] message.updated (assistant, build, glm-4.7)
+                    if clean.contains("message.updated") {
+                        if clean.contains("(user") {
+                            last_stderr_role = "user".to_string();
+                        } else if clean.contains("(assistant") {
+                            last_stderr_role = "assistant".to_string();
                         }
-                        let _ = stderr_text_output_tx.send(true);
+                    }
+
+                    if let Some(text_part) = parse_opencode_stderr_text_part(&clean) {
+                        // Only capture text parts that follow an assistant message,
+                        // skip user message echoes
+                        if last_stderr_role != "user" {
+                            if let Ok(mut buffer) = stderr_text_capture.lock() {
+                                if !buffer.ends_with(&text_part) {
+                                    buffer.push_str(&text_part);
+                                }
+                            }
+                            let _ = stderr_text_output_tx.send(true);
+                        }
                     }
 
                     // Detect session errors from stderr
@@ -6675,14 +6753,28 @@ pub async fn run_opencode_turn(
                             );
 
                             // Extract text content from message.part.updated for final result
+                            // Only capture assistant messages - skip user message echoes
                             if event_type == "message.part.updated" {
                                 if let Some(props) = json.get("properties") {
                                     if let Some(part) = props.get("part") {
                                         let part_type = part.get("type").and_then(|t| t.as_str()).unwrap_or("");
                                         if part_type == "text" {
-                                            if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
-                                                final_result = text.to_string();
-                                                let _ = text_output_tx.send(true);
+                                            let msg_id = part.get("messageID")
+                                                .or_else(|| part.get("messageId"))
+                                                .or_else(|| part.get("message_id"))
+                                                .or_else(|| props.get("messageID"))
+                                                .or_else(|| props.get("messageId"))
+                                                .or_else(|| props.get("message_id"))
+                                                .and_then(|v| v.as_str());
+                                            let is_user = msg_id
+                                                .and_then(|id| state.message_roles.get(id))
+                                                .map(|role| role == "user")
+                                                .unwrap_or(false);
+                                            if !is_user {
+                                                if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                                                    final_result = text.to_string();
+                                                    let _ = text_output_tx.send(true);
+                                                }
                                             }
                                         }
                                     }
@@ -6732,6 +6824,9 @@ pub async fn run_opencode_turn(
                                     }
                                     if matches!(event, AgentEvent::Thinking { .. }) {
                                         sse_emitted_thinking.store(true, std::sync::atomic::Ordering::SeqCst);
+                                        // New thinking content arrived; reset done flag so this
+                                        // turn's thinking block will get its own done event.
+                                        sse_done_sent.store(false, std::sync::atomic::Ordering::SeqCst);
                                     }
                                     if matches!(event, AgentEvent::TextDelta { .. }) {
                                         let _ = text_output_tx.send(true);
@@ -6752,6 +6847,16 @@ pub async fn run_opencode_turn(
                                         });
                                         sse_done_sent.store(true, std::sync::atomic::Ordering::SeqCst);
                                     }
+                                    // Clear per-turn thinking buffers so each model turn
+                                    // gets its own thinking block in the UI.
+                                    // Note: sse_done_sent stays true here to prevent the
+                                    // end-of-session fallback from emitting a duplicate done
+                                    // event. It is reset to false when new thinking content
+                                    // arrives for the next turn (see AgentEvent::Thinking above).
+                                    state.part_buffers.retain(|k, _| {
+                                        !k.starts_with("thinking:") && !k.starts_with("reasoning:")
+                                    });
+                                    state.last_emitted_thinking = None;
                                 }
                             }
                         } else {
@@ -7465,6 +7570,14 @@ pub async fn run_amp_turn(
                                         _ => {}
                                     }
                                 }
+                                // Reset per-turn accumulation state so the next turn
+                                // starts fresh (block indices restart from 0 each turn)
+                                thinking_buffer.clear();
+                                text_buffer.clear();
+                                last_thinking_len = 0;
+                                last_text_len = 0;
+                                block_types.clear();
+                                thinking_streamed = false;
                             }
                             AmpEvent::User(evt) => {
                                 for block in evt.message.content {

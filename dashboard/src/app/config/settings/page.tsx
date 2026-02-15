@@ -1301,6 +1301,7 @@ export default function SettingsPage() {
               placeholder='{\n  "key": "value"\n}'
               disabled={saving || !selectedFile}
               className="h-full"
+              height="100%"
               padding={16}
               language="json"
             />

@@ -39,6 +39,8 @@ fn cli_available(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+use super::providers::ModelCatalog;
+
 use super::ai_providers as ai_providers_api;
 use super::ampcode as ampcode_api;
 use super::auth::{self, AuthUser};
@@ -92,6 +94,8 @@ pub struct AppState {
     pub backend_registry: Arc<RwLock<BackendRegistry>>,
     /// Backend configuration store
     pub backend_configs: Arc<crate::backend_config::BackendConfigStore>,
+    /// Cached model catalog fetched from provider APIs at startup
+    pub model_catalog: ModelCatalog,
 }
 
 /// Start the HTTP server.
@@ -353,6 +357,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         settings,
         backend_registry,
         backend_configs,
+        model_catalog: Arc::new(RwLock::new(HashMap::new())),
     });
 
     // Start background desktop session cleanup task
@@ -368,6 +373,24 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         let ai_providers = Arc::clone(&state.ai_providers);
         tokio::spawn(async move {
             oauth_token_refresher_loop(ai_providers).await;
+        });
+    }
+
+    // Fetch model catalog from provider APIs in background
+    {
+        let catalog = Arc::clone(&state.model_catalog);
+        let ai_providers = Arc::clone(&state.ai_providers);
+        let working_dir = config.working_dir.clone();
+        tokio::spawn(async move {
+            let fetched = super::providers::fetch_model_catalog(&ai_providers, &working_dir).await;
+            let provider_count = fetched.len();
+            let model_count: usize = fetched.values().map(|v| v.len()).sum();
+            *catalog.write().await = fetched;
+            tracing::info!(
+                "Model catalog populated: {} models from {} providers",
+                model_count,
+                provider_count
+            );
         });
     }
 

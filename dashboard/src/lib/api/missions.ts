@@ -32,6 +32,7 @@ export interface Mission {
   workspace_id?: string;
   workspace_name?: string;
   agent?: string;
+  model_override?: string;
   backend?: string;
   history: MissionHistoryEntry[];
   desktop_sessions?: DesktopSessionInfo[];
