@@ -32,6 +32,7 @@ import {
   updateAutomation,
   deleteAutomation,
   getAutomationExecutions,
+  getLibraryCommand,
 } from '@/lib/api';
 import { ConfirmDialog } from '@/components/ui/confirm-dialog';
 import { toast } from '@/components/toast';
@@ -189,6 +190,16 @@ export function MissionAutomationsDialog({
       const cmd = commandsByName.get(name);
       if (cmd?.params?.length) {
         addAutoVariables(cmd.params.map((p) => p.name));
+      } else if (name) {
+        // Fetch full command content to extract <variable/> placeholders
+        getLibraryCommand(name)
+          .then((full) => {
+            const fromParams = full.params?.map((p) => p.name) ?? [];
+            const fromContent = extractPromptVariables(full.content);
+            const all = [...new Set([...fromParams, ...fromContent])];
+            if (all.length > 0) addAutoVariables(all);
+          })
+          .catch(() => {});
       }
     },
     [commandsByName, addAutoVariables]
