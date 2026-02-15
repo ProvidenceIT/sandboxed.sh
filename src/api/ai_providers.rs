@@ -141,7 +141,9 @@ async fn refresh_openai_oauth_tokens(
     let access_token = data
         .get("access_token")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| OAuthRefreshError::Other("No access_token in OpenAI refresh response".to_string()))?;
+        .ok_or_else(|| {
+            OAuthRefreshError::Other("No access_token in OpenAI refresh response".to_string())
+        })?;
 
     let new_refresh = data
         .get("refresh_token")
@@ -4969,9 +4971,9 @@ pub async fn refresh_oauth_token_internal(
                 .await
                 .map_err(|e| OAuthRefreshError::Other(format!("Failed to parse Anthropic token response: {}", e)))?;
 
-            let new_access_token = token_data["access_token"]
-                .as_str()
-                .ok_or_else(|| OAuthRefreshError::Other("No access token in Anthropic refresh response".to_string()))?;
+            let new_access_token = token_data["access_token"].as_str().ok_or_else(|| {
+                OAuthRefreshError::Other("No access token in Anthropic refresh response".to_string())
+            })?;
 
             // **Solution #2: Anthropic rotates refresh tokens - capture the new one**
             let new_refresh_token = token_data["refresh_token"].as_str().ok_or_else(|| {
