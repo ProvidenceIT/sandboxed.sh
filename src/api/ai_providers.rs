@@ -4977,7 +4977,10 @@ pub async fn refresh_oauth_token_internal(
 
             // **Solution #2: Anthropic rotates refresh tokens - capture the new one**
             let new_refresh_token = token_data["refresh_token"].as_str().ok_or_else(|| {
-                OAuthRefreshError::Other("No refresh_token in Anthropic OAuth response - tokens may be rotating".to_string())
+                OAuthRefreshError::Other(
+                    "No refresh_token in Anthropic OAuth response - tokens may be rotating"
+                        .to_string(),
+                )
             })?;
 
             let expires_in = token_data["expires_in"].as_i64().unwrap_or(3600);
