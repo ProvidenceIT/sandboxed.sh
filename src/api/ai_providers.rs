@@ -3677,54 +3677,81 @@ async fn check_provider_health(
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     // Try to parse as UUID first (for custom providers), then as type ID
-    let (provider, provider_type) = if let Ok(uuid) = uuid::Uuid::parse_str(&id) {
+    let (api_key_opt, provider_type) = if let Ok(uuid) = uuid::Uuid::parse_str(&id) {
         // UUID lookup for custom providers
         let provider = state.ai_providers.get(uuid).await
             .ok_or((StatusCode::NOT_FOUND, format!("Provider with ID {} not found", id)))?;
-        let provider_type = provider.provider_type;
-        (Some(provider), provider_type)
-    } else if let Some(provider_type) = ProviderType::from_id(&id) {
-        // Type ID lookup - check custom provider store first
-        let provider_opt = state.ai_providers.get_by_type(provider_type).await;
 
-        // If not in custom store, it might be a standard provider configured via OpenCode
-        if provider_opt.is_none() && !matches!(provider_type, ProviderType::Custom) {
-            // Standard provider - check if it's configured (has credentials in config/auth files)
-            // For now, we'll return a basic "configured" status since we can't easily
-            // access the OpenCode config from here. This is acceptable because the
-            // list_providers endpoint already shows their status.
+        // Check if provider has credentials
+        let has_credentials = provider.api_key.is_some()
+            || provider.oauth.is_some()
+            || (provider.provider_type == ProviderType::Custom && provider.base_url.is_some());
+
+        if !has_credentials {
             return Ok(Json(serde_json::json!({
-                "healthy": true,
-                "status": "configured",
-                "message": format!("Provider {} is configured (health check only available for custom providers)", id)
+                "healthy": false,
+                "status": "no_credentials",
+                "message": "Provider has no API key, OAuth credentials, or base URL configured"
             })));
         }
 
-        (provider_opt, provider_type)
+        (provider.api_key.clone(), provider.provider_type)
+    } else if let Some(provider_type) = ProviderType::from_id(&id) {
+        // Type ID lookup - check custom provider store first
+        if let Some(provider) = state.ai_providers.get_by_type(provider_type).await {
+            // Found in custom store
+            let has_credentials = provider.api_key.is_some()
+                || provider.oauth.is_some()
+                || (provider_type == ProviderType::Custom && provider.base_url.is_some());
+
+            if !has_credentials {
+                return Ok(Json(serde_json::json!({
+                    "healthy": false,
+                    "status": "no_credentials",
+                    "message": "Provider has no API key, OAuth credentials, or base URL configured"
+                })));
+            }
+
+            (provider.api_key.clone(), provider_type)
+        } else {
+            // Not in custom store - check OpenCode config for standard providers
+            if matches!(provider_type, ProviderType::Custom) {
+                return Err((StatusCode::NOT_FOUND, format!("Provider {} not configured", id)));
+            }
+
+            // Read OpenCode auth to get API key for standard providers
+            let auth_map = read_opencode_auth_map()
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+            let auth_kind = auth_map.get(&provider_type);
+
+            // Check if provider has credentials in OpenCode config
+            let api_key_opt = match auth_kind {
+                Some(AuthKind::EnvVar(env_var)) => std::env::var(env_var).ok(),
+                Some(AuthKind::OAuth) => {
+                    // OAuth providers - just verify they're configured
+                    return Ok(Json(serde_json::json!({
+                        "healthy": true,
+                        "status": "configured",
+                        "message": "Provider has OAuth credentials configured (OAuth providers not tested)"
+                    })));
+                }
+                None => None,
+            };
+
+            if api_key_opt.is_none() {
+                return Ok(Json(serde_json::json!({
+                    "healthy": false,
+                    "status": "no_credentials",
+                    "message": format!("Provider {} has no API key configured", id)
+                })));
+            }
+
+            (api_key_opt, provider_type)
+        }
     } else {
         return Err((StatusCode::NOT_FOUND, format!("Invalid provider ID: {}", id)));
     };
-
-    let provider = provider.ok_or((
-        StatusCode::NOT_FOUND,
-        format!("Provider {} not configured", id),
-    ))?;
-
-    // Check if provider has credentials
-    // For custom providers, base_url alone is valid (e.g., local inference servers)
-    let api_key = provider.api_key.clone();
-    let has_credentials = api_key.is_some()
-        || provider.oauth.is_some()
-        || (provider_type == ProviderType::Custom && provider.base_url.is_some());
-
-    if !has_credentials {
-        return Ok(Json(serde_json::json!({
-            "healthy": false,
-            "status": "no_credentials",
-            "message": "Provider has no API key, OAuth credentials, or base URL configured"
-        })));
-    }
-
 
     // Perform a test API call based on provider type
     let client = reqwest::Client::builder()
@@ -3734,7 +3761,7 @@ async fn check_provider_health(
 
     let (api_url, test_body, auth_header) = match provider_type {
         ProviderType::Cerebras => {
-            let key = api_key
+            let key = api_key_opt
                 .as_ref()
                 .ok_or((StatusCode::BAD_REQUEST, "No API key".to_string()))?;
             (
@@ -3748,7 +3775,7 @@ async fn check_provider_health(
             )
         }
         ProviderType::Zai => {
-            let key = api_key
+            let key = api_key_opt
                 .as_ref()
                 .ok_or((StatusCode::BAD_REQUEST, "No API key".to_string()))?;
             (
@@ -3762,7 +3789,7 @@ async fn check_provider_health(
             )
         }
         ProviderType::DeepInfra => {
-            let key = api_key
+            let key = api_key_opt
                 .as_ref()
                 .ok_or((StatusCode::BAD_REQUEST, "No API key".to_string()))?;
             (
