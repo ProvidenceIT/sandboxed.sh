@@ -43,7 +43,7 @@ const OPENAI_ID_TOKEN_TYPE: &str = "urn:ietf:params:oauth:token-type:id_token";
 
 /// Get the HOME directory path, defaulting to /root if not set.
 fn home_dir() -> String {
-    home_dir()
+    std::env::var("HOME").unwrap_or_else(|_| "/root".to_string())
 }
 
 async fn exchange_openai_id_token_for_api_key(
