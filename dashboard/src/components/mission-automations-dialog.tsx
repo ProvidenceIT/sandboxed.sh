@@ -45,6 +45,7 @@ const BUILTIN_VARIABLES = new Set([
   'mission_id',
   'mission_name',
   'cwd',
+  'encrypted',
 ]);
 
 /** Extract `<word/>` placeholders from text, excluding built-ins and webhook patterns. */
@@ -143,6 +144,7 @@ export function MissionAutomationsDialog({
   // -- Create form state --
   const [commandSourceType, setCommandSourceType] = useState<CommandSourceType>('library');
   const [commandName, setCommandName] = useState('');
+  const commandNameRef = useRef('');
   const [inlinePrompt, setInlinePrompt] = useState('');
   const [triggerKind, setTriggerKind] = useState<TriggerKind>('interval');
   const [intervalValue, setIntervalValue] = useState('5');
@@ -187,13 +189,17 @@ export function MissionAutomationsDialog({
   const handleCommandNameChange = useCallback(
     (name: string) => {
       setCommandName(name);
+      commandNameRef.current = name;
       const cmd = commandsByName.get(name);
       if (cmd?.params?.length) {
         addAutoVariables(cmd.params.map((p) => p.name));
       } else if (name) {
         // Fetch full command content to extract <variable/> placeholders
+        const capturedName = name;
         getLibraryCommand(name)
           .then((full) => {
+            // Guard against stale response if user changed selection
+            if (commandNameRef.current !== capturedName) return;
             const fromParams = full.params?.map((p) => p.name) ?? [];
             const fromContent = extractPromptVariables(full.content);
             const all = [...new Set([...fromParams, ...fromContent])];
