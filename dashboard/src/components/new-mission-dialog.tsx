@@ -449,11 +449,21 @@ export function NewMissionDialog({
     setDefaultSet(true);
   }, [open, defaultSet, allAgents, config, initialValues]);
 
+  // Track previous backend to detect switches
+  const prevBackendRef = useRef(selectedBackend);
   useEffect(() => {
     if (selectedBackend === 'amp' && modelOverride) {
       setModelOverride('');
     }
-  }, [selectedBackend, modelOverride]);
+    // When switching backends, clear model override if current value isn't valid for the new backend
+    if (prevBackendRef.current !== selectedBackend && modelOverride) {
+      const isValidForNewBackend = modelOptions.some(opt => opt.value === modelOverride);
+      if (!isValidForNewBackend) {
+        setModelOverride('');
+      }
+    }
+    prevBackendRef.current = selectedBackend;
+  }, [selectedBackend, modelOverride, modelOptions]);
 
   const resetForm = () => {
     setNewMissionWorkspace('');
