@@ -255,19 +255,24 @@ fn default_providers_config() -> ProvidersConfig {
                 description: "Grok models via xAI API key".to_string(),
                 models: vec![
                     ProviderModel {
-                        id: "grok-2".to_string(),
-                        name: "Grok 2".to_string(),
+                        id: "grok-4-fast".to_string(),
+                        name: "Grok 4 Fast".to_string(),
                         description: Some("Most capable Grok model".to_string()),
                     },
                     ProviderModel {
-                        id: "grok-2-mini".to_string(),
-                        name: "Grok 2 Mini".to_string(),
-                        description: Some("Faster, lighter Grok model".to_string()),
+                        id: "grok-3".to_string(),
+                        name: "Grok 3".to_string(),
+                        description: Some("Balanced capability and speed".to_string()),
                     },
                     ProviderModel {
-                        id: "grok-2-vision".to_string(),
-                        name: "Grok 2 Vision".to_string(),
-                        description: Some("Vision-capable Grok model".to_string()),
+                        id: "grok-3-fast".to_string(),
+                        name: "Grok 3 Fast".to_string(),
+                        description: Some("Fast Grok model".to_string()),
+                    },
+                    ProviderModel {
+                        id: "grok-3-mini".to_string(),
+                        name: "Grok 3 Mini".to_string(),
+                        description: Some("Fast and economical".to_string()),
                     },
                 ],
             },
@@ -278,14 +283,14 @@ fn default_providers_config() -> ProvidersConfig {
                 description: "Ultra-fast inference via Cerebras".to_string(),
                 models: vec![
                     ProviderModel {
-                        id: "llama-3.3-70b".to_string(),
-                        name: "Llama 3.3 70B".to_string(),
+                        id: "gpt-oss-120b-cs".to_string(),
+                        name: "GPT-OSS 120B".to_string(),
                         description: Some("Most capable Cerebras model".to_string()),
                     },
                     ProviderModel {
-                        id: "llama-3.1-8b".to_string(),
-                        name: "Llama 3.1 8B".to_string(),
-                        description: Some("Fast and lightweight".to_string()),
+                        id: "zai-glm-4.6-cs".to_string(),
+                        name: "GLM-4.6 (Cerebras)".to_string(),
+                        description: Some("GLM-4.6 via Cerebras inference".to_string()),
                     },
                 ],
             },
@@ -296,14 +301,24 @@ fn default_providers_config() -> ProvidersConfig {
                 description: "GLM models via Z.AI API key".to_string(),
                 models: vec![
                     ProviderModel {
-                        id: "glm-5".to_string(),
-                        name: "GLM-5".to_string(),
+                        id: "glm-4.7".to_string(),
+                        name: "GLM-4.7".to_string(),
                         description: Some("Most capable GLM model".to_string()),
                     },
                     ProviderModel {
-                        id: "glm-4-flash".to_string(),
-                        name: "GLM-4 Flash".to_string(),
+                        id: "glm-4.6".to_string(),
+                        name: "GLM-4.6".to_string(),
+                        description: Some("Balanced capability and speed".to_string()),
+                    },
+                    ProviderModel {
+                        id: "glm-4.5".to_string(),
+                        name: "GLM-4.5".to_string(),
                         description: Some("Fast and economical".to_string()),
+                    },
+                    ProviderModel {
+                        id: "glm-4.6v-flash".to_string(),
+                        name: "GLM-4.6V Flash".to_string(),
+                        description: Some("Vision model, fast variant".to_string()),
                     },
                 ],
             },
