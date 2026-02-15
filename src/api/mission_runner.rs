@@ -6617,18 +6617,36 @@ pub async fn run_opencode_turn(
         tokio::spawn(async move {
             let stderr_reader = BufReader::new(stderr);
             let mut stderr_lines = stderr_reader.lines();
+            // Track the last message role seen in stderr so we only capture
+            // assistant text parts (not user message echoes) into the buffer.
+            let mut last_stderr_role = String::new();
             while let Ok(Some(line)) = stderr_lines.next_line().await {
                 let clean = line.trim().to_string();
                 if !clean.is_empty() {
                     tracing::debug!(mission_id = %mission_id_clone, line = %clean, "OpenCode CLI stderr");
 
-                    if let Some(text_part) = parse_opencode_stderr_text_part(&clean) {
-                        if let Ok(mut buffer) = stderr_text_capture.lock() {
-                            if !buffer.ends_with(&text_part) {
-                                buffer.push_str(&text_part);
-                            }
+                    // Track message role from stderr event lines like:
+                    //   [MAIN] message.updated (user, build)
+                    //   [MAIN] message.updated (assistant, build, glm-4.7)
+                    if clean.contains("message.updated") {
+                        if clean.contains("(user") {
+                            last_stderr_role = "user".to_string();
+                        } else if clean.contains("(assistant") {
+                            last_stderr_role = "assistant".to_string();
                         }
-                        let _ = stderr_text_output_tx.send(true);
+                    }
+
+                    if let Some(text_part) = parse_opencode_stderr_text_part(&clean) {
+                        // Only capture text parts that follow an assistant message,
+                        // skip user message echoes
+                        if last_stderr_role != "user" {
+                            if let Ok(mut buffer) = stderr_text_capture.lock() {
+                                if !buffer.ends_with(&text_part) {
+                                    buffer.push_str(&text_part);
+                                }
+                            }
+                            let _ = stderr_text_output_tx.send(true);
+                        }
                     }
 
                     // Detect session errors from stderr
