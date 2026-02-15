@@ -41,6 +41,11 @@ const OPENAI_SCOPE: &str = "openid profile email offline_access";
 const OPENAI_TOKEN_EXCHANGE_GRANT: &str = "urn:ietf:params:oauth:grant-type:token-exchange";
 const OPENAI_ID_TOKEN_TYPE: &str = "urn:ietf:params:oauth:token-type:id_token";
 
+/// Get the HOME directory path, defaulting to /root if not set.
+fn home_dir() -> String {
+    home_dir()
+}
+
 async fn exchange_openai_id_token_for_api_key(
     client: &reqwest::Client,
     id_token: &str,
@@ -1019,7 +1024,7 @@ fn get_openai_api_key_for_codex(working_dir: &Path) -> Option<String> {
 /// OAuth login flow. We cannot reconstruct these from the credential store,
 /// so we look for an existing auth.json on the host and copy it verbatim.
 fn find_host_codex_auth_json() -> Option<std::path::PathBuf> {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+    let home = home_dir();
     let candidates = [
         std::path::PathBuf::from(&home)
             .join(".codex")
@@ -1167,7 +1172,7 @@ fn ensure_codex_auth_json(config_dir: &std::path::Path) -> Result<(), String> {
             };
 
         if same_file {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+            let home = home_dir();
             return Err(format!(
                 "Codex auth.json is missing or empty at {}. Run `HOME={} codex login --with-api-key` on the backend host to (re)create ~/.codex/auth.json.",
                 auth_path.display(),
@@ -1189,7 +1194,7 @@ fn ensure_codex_auth_json(config_dir: &std::path::Path) -> Result<(), String> {
         );
 
         if !looks_like_json_file(&auth_path) {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+            let home = home_dir();
             return Err(format!(
                 "Copied Codex auth.json to {} but it is still empty/invalid. Run `HOME={} codex login --with-api-key` on the backend host.",
                 auth_path.display(),
@@ -1200,7 +1205,7 @@ fn ensure_codex_auth_json(config_dir: &std::path::Path) -> Result<(), String> {
         return Ok(());
     }
 
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+    let home = home_dir();
     Err(format!(
         "No Codex authentication found. Configure an OpenAI API key (Settings → AI Providers) or run `HOME={} codex login --with-api-key` on the backend host, then retry.",
         home,
@@ -1232,7 +1237,7 @@ pub fn write_codex_credentials_for_workspace(
         }
         WorkspaceType::Host => {
             // For host workspaces, use host home directory
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+            let home = home_dir();
             std::path::PathBuf::from(home).join(".codex")
         }
     };
@@ -1657,7 +1662,7 @@ struct OAuthTokenEntry {
 
 /// Path to Open Agent's canonical credential store.
 fn get_sandboxed_credentials_path() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+    let home = home_dir();
     PathBuf::from(home)
         .join(".sandboxed-sh")
         .join("credentials.json")
@@ -1795,7 +1800,7 @@ fn remove_sandboxed_credential(provider_type: ProviderType) -> Result<(), String
 /// Checks `$HOME/.claude/.credentials.json` and `/var/lib/opencode/.claude/.credentials.json`.
 /// Parses the `claudeAiOauth` format and converts to `OAuthTokenEntry`.
 fn read_anthropic_from_claude_credentials() -> Option<OAuthTokenEntry> {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+    let home = home_dir();
     let candidates = vec![
         PathBuf::from(&home)
             .join(".claude")
@@ -1946,7 +1951,7 @@ fn get_all_opencode_auth_paths() -> Vec<PathBuf> {
         paths.push(PathBuf::from(data_home).join("opencode").join("auth.json"));
     }
 
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+    let home = home_dir();
     paths.push(
         PathBuf::from(&home)
             .join(".local")
@@ -1987,7 +1992,7 @@ fn is_anthropic_oauth_token_expired() -> bool {
 
 /// Get the path to the OAuth refresh lock file for a provider.
 fn get_oauth_refresh_lock_path(provider_type: ProviderType) -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+    let home = home_dir();
     let provider_name = match provider_type {
         ProviderType::Anthropic => "anthropic",
         ProviderType::OpenAI => "openai",
@@ -2775,7 +2780,7 @@ fn get_opencode_auth_path() -> PathBuf {
     if let Ok(data_home) = std::env::var("XDG_DATA_HOME") {
         candidates.push(PathBuf::from(data_home).join("opencode").join("auth.json"));
     }
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+    let home = home_dir();
     candidates.push(
         PathBuf::from(&home)
             .join(".local")
@@ -2803,7 +2808,7 @@ fn get_opencode_auth_path() -> PathBuf {
 }
 
 fn get_opencode_provider_auth_path(provider_type: ProviderType) -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+    let home = home_dir();
     let candidates = vec![
         PathBuf::from(&home)
             .join(".opencode")
