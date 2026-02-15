@@ -3739,23 +3739,41 @@ async fn check_provider_health(
     let provider_type = ProviderType::from_id(&id)
         .ok_or((StatusCode::NOT_FOUND, "Unknown provider type".to_string()))?;
 
-    let provider = state
-        .ai_providers
-        .get_by_type(provider_type)
-        .await
-        .ok_or((
-            StatusCode::NOT_FOUND,
-            format!("Provider {} not configured", id),
-        ))?;
+    // Read OpenCode config to get credentials
+    let config_path = get_opencode_config_path(&state.config.working_dir);
+    let opencode_config = read_opencode_config(&config_path)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    // Check if provider has credentials
-    if provider.api_key.is_none() && provider.oauth.is_none() {
-        return Ok(Json(serde_json::json!({
-            "healthy": false,
-            "status": "no_credentials",
-            "message": "Provider has no API key or OAuth credentials configured"
-        })));
+    let api_key = get_provider_api_key(&opencode_config, provider_type);
+
+    if api_key.is_none() {
+        // Also check the new ai_providers store
+        if let Some(provider) = state.ai_providers.get_by_type(provider_type).await {
+            if provider.api_key.is_none() && provider.oauth.is_none() {
+                return Ok(Json(serde_json::json!({
+                    "healthy": false,
+                    "status": "no_credentials",
+                    "message": "Provider has no API key or OAuth credentials configured"
+                })));
+            }
+        } else {
+            return Ok(Json(serde_json::json!({
+                "healthy": false,
+                "status": "no_credentials",
+                "message": "Provider has no API key or OAuth credentials configured"
+            })));
+        }
     }
+
+    let api_key = api_key.or_else(|| {
+        // Try to get from ai_providers store as fallback
+        state.ai_providers
+            .get_by_type(provider_type)
+            .now_or_never()
+            .flatten()
+            .and_then(|p| p.api_key)
+    });
+
 
     // Perform a test API call based on provider type
     let client = reqwest::Client::builder()
@@ -3765,8 +3783,7 @@ async fn check_provider_health(
 
     let (api_url, test_body, auth_header) = match provider_type {
         ProviderType::Cerebras => {
-            let api_key = provider
-                .api_key
+            let key = api_key
                 .as_ref()
                 .ok_or((StatusCode::BAD_REQUEST, "No API key".to_string()))?;
             (
@@ -3776,12 +3793,11 @@ async fn check_provider_health(
                     "messages": [{"role": "user", "content": "test"}],
                     "max_tokens": 1
                 }),
-                format!("Bearer {}", api_key),
+                format!("Bearer {}", key),
             )
         }
         ProviderType::Zai => {
-            let api_key = provider
-                .api_key
+            let key = api_key
                 .as_ref()
                 .ok_or((StatusCode::BAD_REQUEST, "No API key".to_string()))?;
             (
@@ -3791,12 +3807,11 @@ async fn check_provider_health(
                     "messages": [{"role": "user", "content": "test"}],
                     "max_tokens": 1
                 }),
-                format!("Bearer {}", api_key),
+                format!("Bearer {}", key),
             )
         }
         ProviderType::DeepInfra => {
-            let api_key = provider
-                .api_key
+            let key = api_key
                 .as_ref()
                 .ok_or((StatusCode::BAD_REQUEST, "No API key".to_string()))?;
             (
@@ -3806,7 +3821,7 @@ async fn check_provider_health(
                     "messages": [{"role": "user", "content": "test"}],
                     "max_tokens": 1
                 }),
-                format!("Bearer {}", api_key),
+                format!("Bearer {}", key),
             )
         }
         ProviderType::Anthropic | ProviderType::OpenAI | ProviderType::Google => {
