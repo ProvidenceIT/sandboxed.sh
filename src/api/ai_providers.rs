@@ -3731,8 +3731,7 @@ async fn check_provider_health(
             let auth_kind = auth_map.get(&provider_type);
 
             // Check if provider has credentials in OpenCode config
-            let api_key_opt = match auth_kind {
-                Some(AuthKind::EnvVar(env_var)) => std::env::var(env_var).ok(),
+            match auth_kind {
                 Some(AuthKind::OAuth) => {
                     // OAuth providers - just verify they're configured
                     return Ok(Json(serde_json::json!({
@@ -3741,18 +3740,30 @@ async fn check_provider_health(
                         "message": "Provider has OAuth credentials configured (OAuth providers not tested)"
                     })));
                 }
-                None => None,
-            };
+                Some(AuthKind::ApiKey) => {
+                    // API key provider - get the key from environment variable
+                    let api_key_opt = provider_type
+                        .env_var_name()
+                        .and_then(|env_var| std::env::var(env_var).ok());
 
-            if api_key_opt.is_none() {
-                return Ok(Json(serde_json::json!({
-                    "healthy": false,
-                    "status": "no_credentials",
-                    "message": format!("Provider {} has no API key configured", id)
-                })));
+                    if api_key_opt.is_none() {
+                        return Ok(Json(serde_json::json!({
+                            "healthy": false,
+                            "status": "no_credentials",
+                            "message": format!("Provider {} has no API key configured", id)
+                        })));
+                    }
+
+                    (api_key_opt, provider_type)
+                }
+                None => {
+                    return Ok(Json(serde_json::json!({
+                        "healthy": false,
+                        "status": "no_credentials",
+                        "message": format!("Provider {} is not configured", id)
+                    })));
+                }
             }
-
-            (api_key_opt, provider_type)
         }
     } else {
         return Err((
