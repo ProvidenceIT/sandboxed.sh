@@ -1268,15 +1268,15 @@ async fn oauth_token_refresher_loop(ai_providers: Arc<crate::ai_providers::AIPro
                     expired_since_minutes = (-time_until_expiry) / 1000 / 60,
                     "OAuth token is ALREADY EXPIRED - this should not happen! Attempting emergency refresh..."
                 );
+            } else {
+                tracing::info!(
+                    provider_id = %provider.id,
+                    provider_name = %provider.name,
+                    provider_type = ?provider.provider_type,
+                    expires_in_minutes = time_until_expiry / 1000 / 60,
+                    "OAuth token will expire soon, refreshing proactively"
+                );
             }
-
-            tracing::info!(
-                provider_id = %provider.id,
-                provider_name = %provider.name,
-                provider_type = ?provider.provider_type,
-                expires_in_minutes = time_until_expiry / 1000 / 60,
-                "OAuth token will expire soon, refreshing proactively"
-            );
 
             // Attempt to refresh the token
             match ai_providers_api::refresh_oauth_token_internal(
