@@ -3810,7 +3810,11 @@ async fn check_provider_health(
                             .into_iter()
                             .find_map(|key| {
                                 auth.get(key)
-                                    .and_then(|v| v.get("key").or_else(|| v.get("api_key")))
+                                    .and_then(|v| {
+                                        v.get("key")
+                                            .or_else(|| v.get("api_key"))
+                                            .or_else(|| v.get("apiKey"))
+                                    })
                                     .and_then(|v| v.as_str())
                                     .map(|s| s.to_string())
                             });
