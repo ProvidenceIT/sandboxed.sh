@@ -3514,6 +3514,7 @@ async fn control_actor_loop(
                                                 Some(mission.backend.clone()),
                                                 mission.session_id.clone(),
                                                 mission.config_profile.clone(),
+                                                mission.model_override.clone(),
                                             );
                                             // Load existing history
                                             for entry in &mission.history {
@@ -4011,6 +4012,7 @@ async fn control_actor_loop(
                                 Some(mission.backend.clone()),
                                 mission.session_id.clone(),
                                 mission.config_profile.clone(),
+                                mission.model_override.clone(),
                             );
 
                             // Load existing history into runner to preserve conversation context

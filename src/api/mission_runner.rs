@@ -700,6 +700,9 @@ pub struct MissionRunner {
     /// Agent override for this mission
     pub agent_override: Option<String>,
 
+    /// Model override for this mission (e.g. "zai/glm-5")
+    pub model_override: Option<String>,
+
     /// Message queue for this mission
     pub queue: VecDeque<QueuedMessage>,
 
@@ -743,6 +746,7 @@ impl MissionRunner {
         backend_id: Option<String>,
         session_id: Option<String>,
         config_profile: Option<String>,
+        model_override: Option<String>,
     ) -> Self {
         Self {
             mission_id,
@@ -752,6 +756,7 @@ impl MissionRunner {
             config_profile,
             state: MissionRunState::Queued,
             agent_override,
+            model_override,
             queue: VecDeque::new(),
             history: Vec::new(),
             cancel_token: None,
@@ -897,6 +902,7 @@ impl MissionRunner {
         let mission_id = self.mission_id;
         let workspace_id = self.workspace_id;
         let agent_override = self.agent_override.clone();
+        let model_override = self.model_override.clone();
         let backend_id = self.backend_id.clone();
         let session_id = self.session_id.clone();
         let config_profile = self.config_profile.clone();
@@ -945,6 +951,7 @@ impl MissionRunner {
                 Some(workspace_id),
                 backend_id,
                 agent_override,
+                model_override,
                 secrets,
                 session_id,
                 config_profile,
@@ -1101,6 +1108,7 @@ async fn run_mission_turn(
     workspace_id: Option<Uuid>,
     backend_id: String,
     agent_override: Option<String>,
+    model_override: Option<String>,
     secrets: Option<Arc<SecretsStore>>,
     session_id: Option<String>,
     mission_config_profile: Option<String>,
@@ -1109,6 +1117,9 @@ async fn run_mission_turn(
     let effective_agent = agent_override.clone();
     if let Some(ref agent) = effective_agent {
         config.opencode_agent = Some(agent.clone());
+    }
+    if let Some(ref model) = model_override {
+        config.default_model = Some(model.clone());
     }
     // Get config profile: mission's config_profile takes priority over workspace's
     let workspace_config_profile = if let Some(ws_id) = workspace_id {
