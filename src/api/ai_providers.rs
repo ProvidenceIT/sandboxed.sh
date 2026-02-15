@@ -4911,6 +4911,12 @@ impl std::fmt::Display for OAuthRefreshError {
     }
 }
 
+impl From<OAuthRefreshError> for String {
+    fn from(err: OAuthRefreshError) -> String {
+        err.to_string()
+    }
+}
+
 /// Internal function to refresh an OAuth token for any provider.
 ///
 /// Returns (new_access_token, new_refresh_token, expires_at).
