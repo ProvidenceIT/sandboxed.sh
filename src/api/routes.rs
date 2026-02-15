@@ -1197,7 +1197,6 @@ async fn search_memory(Query(params): Query<SearchMemoryQuery>) -> Json<serde_js
 /// 3. Syncing refreshed tokens to all storage tiers (sandboxed-sh, OpenCode, Claude CLI)
 /// 4. Handling refresh token rotation (updating stored refresh token if changed)
 async fn oauth_token_refresher_loop(ai_providers: Arc<crate::ai_providers::AIProviderStore>) {
-    use crate::ai_providers::ProviderType;
 
     // Check every 15 minutes
     let check_interval = std::time::Duration::from_secs(15 * 60);
