@@ -271,6 +271,42 @@ fn default_providers_config() -> ProvidersConfig {
                     },
                 ],
             },
+            Provider {
+                id: "cerebras".to_string(),
+                name: "Cerebras (API Key)".to_string(),
+                billing: "pay-per-token".to_string(),
+                description: "Ultra-fast inference via Cerebras".to_string(),
+                models: vec![
+                    ProviderModel {
+                        id: "llama-3.3-70b".to_string(),
+                        name: "Llama 3.3 70B".to_string(),
+                        description: Some("Most capable Cerebras model".to_string()),
+                    },
+                    ProviderModel {
+                        id: "llama-3.1-8b".to_string(),
+                        name: "Llama 3.1 8B".to_string(),
+                        description: Some("Fast and lightweight".to_string()),
+                    },
+                ],
+            },
+            Provider {
+                id: "zai".to_string(),
+                name: "Z.AI (API Key)".to_string(),
+                billing: "pay-per-token".to_string(),
+                description: "GLM models via Z.AI API key".to_string(),
+                models: vec![
+                    ProviderModel {
+                        id: "glm-5".to_string(),
+                        name: "GLM-5".to_string(),
+                        description: Some("Most capable GLM model".to_string()),
+                    },
+                    ProviderModel {
+                        id: "glm-4-flash".to_string(),
+                        name: "GLM-4 Flash".to_string(),
+                        description: Some("Fast and economical".to_string()),
+                    },
+                ],
+            },
         ],
     }
 }
@@ -421,7 +457,8 @@ pub async fn list_backend_model_options(
     };
 
     // Add non-default providers from AIProviderStore (Custom, Cerebras, Zai, etc.)
-    let default_provider_ids: &[&str] = &["anthropic", "openai", "google", "xai"];
+    let default_provider_ids: &[&str] =
+        &["anthropic", "openai", "google", "xai", "cerebras", "zai"];
     let custom_providers = state.ai_providers.list().await;
     for provider in custom_providers {
         // Skip disabled providers and those already in the default catalog
@@ -519,7 +556,8 @@ pub async fn validate_model_override(
 
     // Load all providers (including configured and non-default)
     let mut providers = config.providers;
-    let default_provider_ids: &[&str] = &["anthropic", "openai", "google", "xai"];
+    let default_provider_ids: &[&str] =
+        &["anthropic", "openai", "google", "xai", "cerebras", "zai"];
     let custom_providers = state.ai_providers.list().await;
     for provider in custom_providers {
         // Skip disabled providers and those already in the default catalog

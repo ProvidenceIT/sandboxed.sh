@@ -213,7 +213,7 @@ export function NewMissionDialog({
     return targetWorkspace?.config_profile || null;
   }, [newMissionWorkspace, workspaces]);
 
-  const effectiveProfileForAgents = workspaceProfile || null;
+  const effectiveProfileForAgents = workspaceProfile || 'default';
 
   const { data: opencodeProfileSettings } = useSWR(
     effectiveProfileForAgents ? ['opencode-profile-settings', effectiveProfileForAgents] : null,
