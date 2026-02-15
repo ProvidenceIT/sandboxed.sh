@@ -6824,6 +6824,9 @@ pub async fn run_opencode_turn(
                                     }
                                     if matches!(event, AgentEvent::Thinking { .. }) {
                                         sse_emitted_thinking.store(true, std::sync::atomic::Ordering::SeqCst);
+                                        // New thinking content arrived; reset done flag so this
+                                        // turn's thinking block will get its own done event.
+                                        sse_done_sent.store(false, std::sync::atomic::Ordering::SeqCst);
                                     }
                                     if matches!(event, AgentEvent::TextDelta { .. }) {
                                         let _ = text_output_tx.send(true);
@@ -6842,12 +6845,14 @@ pub async fn run_opencode_turn(
                                             done: true,
                                             mission_id: Some(mission_id),
                                         });
+                                        sse_done_sent.store(true, std::sync::atomic::Ordering::SeqCst);
                                     }
-                                    // Reset per-turn thinking state so each model turn
+                                    // Clear per-turn thinking buffers so each model turn
                                     // gets its own thinking block in the UI.
-                                    // Note: keep sse_emitted_thinking=true (session-wide flag)
-                                    // so post-session logic knows thinking was emitted.
-                                    sse_done_sent.store(false, std::sync::atomic::Ordering::SeqCst);
+                                    // Note: sse_done_sent stays true here to prevent the
+                                    // end-of-session fallback from emitting a duplicate done
+                                    // event. It is reset to false when new thinking content
+                                    // arrives for the next turn (see AgentEvent::Thinking above).
                                     state.part_buffers.retain(|k, _| {
                                         !k.starts_with("thinking:") && !k.starts_with("reasoning:")
                                     });
