@@ -3456,6 +3456,18 @@ fn detect_opencode_provider_auth(app_working_dir: Option<&std::path::Path>) -> O
             configured_providers.insert("xai".to_string());
         }
     }
+    if let Ok(value) = std::env::var("ZHIPU_API_KEY") {
+        if !value.trim().is_empty() {
+            has_other = true;
+            configured_providers.insert("zai".to_string());
+        }
+    }
+    if let Ok(value) = std::env::var("CEREBRAS_API_KEY") {
+        if !value.trim().is_empty() {
+            has_other = true;
+            configured_providers.insert("cerebras".to_string());
+        }
+    }
 
     if let Some(app_dir) = app_working_dir {
         if let Some(auth) = build_opencode_auth_from_ai_providers(app_dir) {
@@ -4186,6 +4198,180 @@ fn apply_model_override_to_oh_my_opencode(
     }
 }
 
+/// Ensure the `opencode.json` `provider` section contains a definition for the
+/// provider used by the model override.  OpenCode's built-in snapshot only knows
+/// about a subset of models per provider; if a model (e.g. `zai/glm-5`) is not
+/// in the snapshot the session silently fails.  By injecting a custom provider
+/// definition we tell the AI-SDK adapter *how* to reach the provider and declare
+/// the model as valid.
+fn ensure_opencode_provider_for_model(
+    opencode_config_dir: &std::path::Path,
+    model_override: &str,
+) {
+    let model_override = model_override.trim();
+    if model_override.is_empty() {
+        return;
+    }
+
+    let (provider_id, model_id) = match model_override.split_once('/') {
+        Some(pair) => pair,
+        None => return,
+    };
+
+    // Only inject definitions for providers that need it.
+    // OpenAI, Anthropic, Google are natively supported by OpenCode.
+    let provider_def: Option<serde_json::Value> = match provider_id {
+        "zai" => Some(serde_json::json!({
+            "npm": "@ai-sdk/openai-compatible",
+            "name": "Z.AI",
+            "options": {
+                "baseURL": "https://open.bigmodel.cn/api/paas/v4"
+            },
+            "models": {
+                model_id: { "name": model_id }
+            }
+        })),
+        "cerebras" => Some(serde_json::json!({
+            "npm": "@ai-sdk/cerebras",
+            "name": "Cerebras",
+            "models": {
+                model_id: { "name": model_id }
+            }
+        })),
+        "xai" => Some(serde_json::json!({
+            "npm": "@ai-sdk/xai",
+            "name": "xAI",
+            "models": {
+                model_id: { "name": model_id }
+            }
+        })),
+        _ => None,
+    };
+
+    let Some(provider_def) = provider_def else {
+        return;
+    };
+
+    let opencode_path = opencode_config_dir.join("opencode.json");
+    let mut root = if opencode_path.exists() {
+        match std::fs::read_to_string(&opencode_path)
+            .ok()
+            .and_then(|contents| serde_json::from_str::<serde_json::Value>(&contents).ok())
+        {
+            Some(value) => value,
+            None => serde_json::json!({}),
+        }
+    } else {
+        serde_json::json!({})
+    };
+
+    let obj = match root.as_object_mut() {
+        Some(obj) => obj,
+        None => return,
+    };
+
+    let providers = obj
+        .entry("provider".to_string())
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+
+    let providers_map = match providers.as_object_mut() {
+        Some(map) => map,
+        None => return,
+    };
+
+    if let Some(existing) = providers_map.get_mut(provider_id) {
+        // Provider already exists – make sure the model is listed.
+        if let Some(models) = existing
+            .as_object_mut()
+            .and_then(|o| o.get_mut("models"))
+            .and_then(|m| m.as_object_mut())
+        {
+            if !models.contains_key(model_id) {
+                models.insert(
+                    model_id.to_string(),
+                    serde_json::json!({ "name": model_id }),
+                );
+            } else {
+                return; // already present, nothing to do
+            }
+        } else {
+            return;
+        }
+    } else {
+        providers_map.insert(provider_id.to_string(), provider_def);
+    }
+
+    if let Err(err) = std::fs::write(
+        &opencode_path,
+        serde_json::to_string_pretty(&root).unwrap_or_else(|_| "{}".to_string()),
+    ) {
+        tracing::warn!(
+            "Failed to update OpenCode provider config at {}: {}",
+            opencode_path.display(),
+            err
+        );
+    } else {
+        tracing::info!(
+            "Injected OpenCode provider definition for {}/{} into {}",
+            provider_id,
+            model_id,
+            opencode_path.display()
+        );
+    }
+}
+
+/// Scan the oh-my-opencode config for all model references (top-level, agents,
+/// categories) and ensure each provider has a definition in `opencode.json`.
+fn ensure_opencode_providers_for_omo_config(opencode_config_dir: &std::path::Path) {
+    let (omo_path, omo_path_jsonc) = workspace_oh_my_opencode_config_paths(opencode_config_dir);
+    let target_path = if omo_path.exists() {
+        omo_path
+    } else if omo_path_jsonc.exists() {
+        omo_path_jsonc
+    } else {
+        return;
+    };
+
+    let contents = match std::fs::read_to_string(&target_path) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    let json: serde_json::Value = match serde_json::from_str(&contents) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+
+    let mut models = std::collections::HashSet::new();
+
+    // Collect top-level model
+    if let Some(m) = json.get("model").and_then(|v| v.as_str()) {
+        models.insert(m.to_string());
+    }
+
+    // Collect agent models
+    if let Some(agents) = json.get("agents").and_then(|v| v.as_object()) {
+        for agent in agents.values() {
+            if let Some(m) = agent.get("model").and_then(|v| v.as_str()) {
+                models.insert(m.to_string());
+            }
+        }
+    }
+
+    // Collect category models
+    if let Some(categories) = json.get("categories").and_then(|v| v.as_object()) {
+        for cat in categories.values() {
+            if let Some(m) = cat.get("model").and_then(|v| v.as_str()) {
+                models.insert(m.to_string());
+            }
+        }
+    }
+
+    for model in &models {
+        ensure_opencode_provider_for_model(opencode_config_dir, model);
+    }
+}
+
 fn workspace_abs_path(workspace: &Workspace, path: &std::path::Path) -> std::path::PathBuf {
     if workspace.workspace_type == WorkspaceType::Container
         && workspace::use_nspawn_for_workspace(workspace)
@@ -4549,7 +4735,7 @@ fn sync_opencode_auth_to_workspace(
         }
     }
 
-    let providers = ["openai", "anthropic", "google", "xai"];
+    let providers = ["openai", "anthropic", "google", "xai", "zai", "cerebras"];
     if let (Some(src_dir), Some(dest_dir)) = (
         host_opencode_provider_auth_dir(),
         workspace_opencode_provider_auth_dir(workspace),
@@ -4618,6 +4804,8 @@ fn sync_opencode_auth_to_workspace(
             ("anthropic", "Anthropic"),
             ("google", "Google"),
             ("xai", "xAI"),
+            ("zai", "Z.AI"),
+            ("cerebras", "Cerebras"),
         ];
         for (key, label) in provider_entries {
             let entry = if key == "openai" {
@@ -6206,6 +6394,7 @@ pub async fn run_opencode_turn(
     if model.is_some() {
         if let Some(model_override) = resolved_model.as_deref() {
             apply_model_override_to_oh_my_opencode(&opencode_config_dir_host, model_override);
+            ensure_opencode_provider_for_model(&opencode_config_dir_host, model_override);
         }
     }
     sync_opencode_agent_config(
@@ -6223,6 +6412,12 @@ pub async fn run_opencode_turn(
     if resolved_model.is_none() {
         resolved_model = agent_model.clone();
     }
+    // Ensure provider definitions exist for the resolved agent model (may differ from override)
+    if let Some(ref am) = agent_model {
+        ensure_opencode_provider_for_model(&opencode_config_dir_host, am);
+    }
+    // Also ensure provider definitions for any models referenced in OMO categories
+    ensure_opencode_providers_for_omo_config(&opencode_config_dir_host);
     if needs_google {
         if let Some(project_id) = detect_google_project_id() {
             ensure_opencode_google_project_id(&opencode_config_dir_host, &project_id);
