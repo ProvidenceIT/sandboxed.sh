@@ -313,6 +313,7 @@ pub fn routes() -> Router<Arc<super::routes::AppState>> {
         .route("/:id/oauth/authorize", post(oauth_authorize))
         .route("/:id/oauth/callback", post(oauth_callback))
         .route("/:id/default", post(set_default))
+        .route("/:id/health", post(check_provider_health))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3668,6 +3669,141 @@ async fn get_provider_for_backend(
         oauth,
         has_credentials,
     }))
+}
+
+/// POST /api/ai/providers/:id/health - Check provider health and validate credentials.
+async fn check_provider_health(
+    State(state): State<Arc<super::routes::AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let provider_type = ProviderType::from_id(&id)
+        .ok_or((StatusCode::NOT_FOUND, "Unknown provider type".to_string()))?;
+
+    let provider_store = &state.ai_provider_store;
+    let provider = provider_store
+        .get_by_type(provider_type)
+        .await
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            format!("Provider {} not configured", id),
+        ))?;
+
+    // Check if provider has credentials
+    if provider.api_key.is_none() && provider.oauth.is_none() {
+        return Ok(Json(serde_json::json!({
+            "healthy": false,
+            "status": "no_credentials",
+            "message": "Provider has no API key or OAuth credentials configured"
+        })));
+    }
+
+    // Perform a test API call based on provider type
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let (api_url, test_body, auth_header) = match provider_type {
+        ProviderType::Cerebras => {
+            let api_key = provider
+                .api_key
+                .as_ref()
+                .ok_or((StatusCode::BAD_REQUEST, "No API key".to_string()))?;
+            (
+                "https://api.cerebras.ai/v1/chat/completions",
+                serde_json::json!({
+                    "model": "llama-3.1-8b",
+                    "messages": [{"role": "user", "content": "test"}],
+                    "max_tokens": 1
+                }),
+                format!("Bearer {}", api_key),
+            )
+        }
+        ProviderType::Zai => {
+            let api_key = provider
+                .api_key
+                .as_ref()
+                .ok_or((StatusCode::BAD_REQUEST, "No API key".to_string()))?;
+            (
+                "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+                serde_json::json!({
+                    "model": "glm-4-flash",
+                    "messages": [{"role": "user", "content": "test"}],
+                    "max_tokens": 1
+                }),
+                format!("Bearer {}", api_key),
+            )
+        }
+        ProviderType::DeepInfra => {
+            let api_key = provider
+                .api_key
+                .as_ref()
+                .ok_or((StatusCode::BAD_REQUEST, "No API key".to_string()))?;
+            (
+                "https://api.deepinfra.com/v1/openai/chat/completions",
+                serde_json::json!({
+                    "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+                    "messages": [{"role": "user", "content": "test"}],
+                    "max_tokens": 1
+                }),
+                format!("Bearer {}", api_key),
+            )
+        }
+        ProviderType::Anthropic | ProviderType::OpenAI | ProviderType::Google => {
+            // These providers use OAuth or have complex auth, skip API test
+            return Ok(Json(serde_json::json!({
+                "healthy": true,
+                "status": "configured",
+                "message": "Provider has credentials configured (OAuth providers not tested)"
+            })));
+        }
+        _ => {
+            // For other providers, just check if credentials exist
+            return Ok(Json(serde_json::json!({
+                "healthy": true,
+                "status": "configured",
+                "message": "Provider has credentials configured"
+            })));
+        }
+    };
+
+    // Make test request
+    match client
+        .post(api_url)
+        .header("Authorization", auth_header)
+        .header("Content-Type", "application/json")
+        .json(&test_body)
+        .send()
+        .await
+    {
+        Ok(response) => {
+            if response.status().is_success() || response.status().as_u16() == 402 {
+                // 402 = insufficient credits, but auth is valid
+                Ok(Json(serde_json::json!({
+                    "healthy": true,
+                    "status": "connected",
+                    "message": "Provider API key is valid and working"
+                })))
+            } else {
+                let status_code = response.status().as_u16();
+                let error_text = response
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "Unknown error".to_string());
+                Ok(Json(serde_json::json!({
+                    "healthy": false,
+                    "status": "api_error",
+                    "message": format!("API returned status {}: {}", status_code, error_text),
+                    "status_code": status_code
+                })))
+            }
+        }
+        Err(e) => Ok(Json(serde_json::json!({
+            "healthy": false,
+            "status": "connection_error",
+            "message": format!("Failed to connect to provider API: {}", e)
+        }))),
+    }
 }
 
 /// POST /api/ai/providers - Create a new provider.
