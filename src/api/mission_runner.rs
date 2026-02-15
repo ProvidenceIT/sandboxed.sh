@@ -4225,7 +4225,7 @@ fn ensure_opencode_provider_for_model(opencode_config_dir: &std::path::Path, mod
             "npm": "@ai-sdk/openai-compatible",
             "name": "Z.AI",
             "options": {
-                "baseURL": "https://open.bigmodel.cn/api/paas/v4"
+                "baseURL": "https://api.z.ai/api/paas/v4"
             },
             "models": {
                 model_id: { "name": model_id }
