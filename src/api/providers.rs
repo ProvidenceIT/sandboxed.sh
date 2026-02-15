@@ -340,12 +340,12 @@ fn default_providers_config() -> ProvidersConfig {
 // ==================== Dynamic Model Catalog Fetching ====================
 
 /// Convert a model ID to a human-readable display name by title-casing segments.
-/// e.g. "glm-5" → "GLM 5", "grok-4-fast" → "Grok 4 Fast", "gpt-5.3-codex" → "GPT 5.3 Codex"
+/// e.g. "glm-5" -> "GLM 5", "grok-4-fast" -> "Grok 4 Fast", "gpt-5.3-codex" -> "GPT 5.3 Codex"
 fn model_id_to_display_name(id: &str) -> String {
     id.split('-')
         .map(|segment| {
-            // If the segment is all-alpha and <= 4 chars, uppercase it (likely an acronym)
-            if segment.chars().all(|c| c.is_ascii_alphabetic()) && segment.len() <= 4 {
+            // If the segment is all-alpha and <= 3 chars, uppercase it (likely an acronym: gpt, glm, etc.)
+            if segment.chars().all(|c| c.is_ascii_alphabetic()) && segment.len() <= 3 {
                 segment.to_uppercase()
             } else {
                 // Title-case: capitalize first letter
@@ -1115,12 +1115,15 @@ mod tests {
     #[test]
     fn test_model_id_to_display_name() {
         assert_eq!(model_id_to_display_name("glm-5"), "GLM 5");
-        assert_eq!(model_id_to_display_name("grok-4-fast"), "GROK 4 Fast");
+        assert_eq!(model_id_to_display_name("grok-4-fast"), "Grok 4 Fast");
         assert_eq!(model_id_to_display_name("gpt-5.3-codex"), "GPT 5.3 Codex");
         assert_eq!(
             model_id_to_display_name("claude-opus-4-6"),
             "Claude Opus 4 6"
         );
+        // Acronyms <= 3 chars get uppercased
+        assert_eq!(model_id_to_display_name("gpt-4"), "GPT 4");
+        assert_eq!(model_id_to_display_name("glm-4.6v-flash"), "GLM 4.6v Flash");
     }
 
     /// Fetch models from all provider APIs that have credentials available,
@@ -1255,27 +1258,12 @@ mod tests {
                             "  [WARN] {} NEW models not in hardcoded list:",
                             new_models.len()
                         );
-                        let mut sorted: Vec<_> = new_models;
+                        let mut sorted = new_models;
                         sorted.sort();
-                        for id in sorted {
+                        for id in &sorted {
                             eprintln!("    + {}", id);
                         }
-                    }
 
-                    if !removed_models.is_empty() {
-                        eprintln!(
-                            "  [WARN] {} hardcoded models NOT found in API (possibly removed/renamed):",
-                            removed_models.len()
-                        );
-                        let mut sorted: Vec<_> = removed_models;
-                        sorted.sort();
-                        for id in sorted {
-                            eprintln!("    - {}", id);
-                        }
-                    }
-
-                    // Print suggested code for updating hardcoded defaults
-                    if !new_models.is_empty() {
                         eprintln!("\n  Suggested additions to default_providers_config():");
                         let mut new_sorted: Vec<_> = models
                             .iter()
@@ -1288,6 +1276,18 @@ mod tests {
                             eprintln!("        name: \"{}\".to_string(),", model.name);
                             eprintln!("        description: None,");
                             eprintln!("    }},");
+                        }
+                    }
+
+                    if !removed_models.is_empty() {
+                        eprintln!(
+                            "  [WARN] {} hardcoded models NOT found in API (possibly removed/renamed):",
+                            removed_models.len()
+                        );
+                        let mut sorted: Vec<_> = removed_models;
+                        sorted.sort();
+                        for id in sorted {
+                            eprintln!("    - {}", id);
                         }
                     }
                 }
