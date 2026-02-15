@@ -3679,8 +3679,8 @@ async fn check_provider_health(
     let provider_type = ProviderType::from_id(&id)
         .ok_or((StatusCode::NOT_FOUND, "Unknown provider type".to_string()))?;
 
-    let provider_store = &state.ai_provider_store;
-    let provider = provider_store
+    let provider = state
+        .ai_providers
         .get_by_type(provider_type)
         .await
         .ok_or((
