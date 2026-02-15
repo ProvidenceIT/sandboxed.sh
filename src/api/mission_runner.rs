@@ -2419,7 +2419,7 @@ pub fn run_claudecode_turn<'a>(
         let mut block_types: HashMap<u32, String> = HashMap::new();
         let mut thinking_buffer: HashMap<u32, String> = HashMap::new();
         let mut text_buffer: HashMap<u32, String> = HashMap::new();
-        let mut last_thinking_len: usize = 0; // Track last emitted length to avoid re-sending same content
+        let mut active_thinking_index: Option<u32> = None; // Track which thinking block is active
         let mut last_text_len: usize = 0; // Track last emitted text length for streaming text deltas
         let mut thinking_emitted = false;
 
@@ -2560,25 +2560,27 @@ pub fn run_claudecode_turn<'a>(
                                                 let thinking_text = delta.thinking.or(delta.text.clone());
                                                 if let Some(thinking_content) = thinking_text {
                                                     if !thinking_content.is_empty() {
-                                                        // Accumulate thinking content
+                                                        // If a new thinking block started, finalize the previous one
+                                                        if active_thinking_index.is_some() && active_thinking_index != Some(index) {
+                                                            let _ = events_tx.send(AgentEvent::Thinking {
+                                                                content: String::new(),
+                                                                done: true,
+                                                                mission_id: Some(mission_id),
+                                                            });
+                                                        }
+                                                        active_thinking_index = Some(index);
+
+                                                        // Accumulate thinking content per block
                                                         let buffer = thinking_buffer.entry(index).or_default();
                                                         buffer.push_str(&thinking_content);
 
-                                                        // Send accumulated thinking content (cumulative, like OpenCode)
-                                                        // Only send if we have new content since last emit
-                                                        let total_len = thinking_buffer.values().map(|s| s.len()).sum::<usize>();
-                                                        if total_len > last_thinking_len {
-                                                            // Combine all thinking buffers for the cumulative content
-                                                            let accumulated: String = thinking_buffer.values().cloned().collect::<Vec<_>>().join("");
-                                                            last_thinking_len = total_len;
-
-                                                            let _ = events_tx.send(AgentEvent::Thinking {
-                                                                content: accumulated,
-                                                                done: false,
-                                                                mission_id: Some(mission_id),
-                                                            });
-                                                            thinking_emitted = true;
-                                                        }
+                                                        // Send this block's accumulated content
+                                                        let _ = events_tx.send(AgentEvent::Thinking {
+                                                            content: buffer.clone(),
+                                                            done: false,
+                                                            mission_id: Some(mission_id),
+                                                        });
+                                                        thinking_emitted = true;
                                                     }
                                                 }
                                             } else if delta.delta_type == "text_delta" {
@@ -2757,7 +2759,7 @@ pub fn run_claudecode_turn<'a>(
                                     // starts fresh (block indices restart from 0 each turn)
                                     thinking_buffer.clear();
                                     text_buffer.clear();
-                                    last_thinking_len = 0;
+                                    active_thinking_index = None;
                                     last_text_len = 0;
                                     block_types.clear();
                                     thinking_emitted = false;
@@ -7399,7 +7401,7 @@ pub async fn run_amp_turn(
     let mut block_types: HashMap<u32, String> = HashMap::new();
     let mut thinking_buffer: HashMap<u32, String> = HashMap::new();
     let mut text_buffer: HashMap<u32, String> = HashMap::new();
-    let mut last_thinking_len: usize = 0;
+    let mut active_thinking_index: Option<u32> = None;
     let mut last_text_len: usize = 0;
     let mut thinking_streamed = false; // Track if thinking was already streamed
 
@@ -7471,21 +7473,25 @@ pub async fn run_amp_turn(
                                             let thinking_text = delta.thinking.or(delta.text.clone());
                                             if let Some(thinking_text) = thinking_text {
                                                 if !thinking_text.is_empty() {
-                                                    let buffer = thinking_buffer.entry(index).or_default();
-                                                    buffer.push_str(&thinking_text);
-
-                                                    let total_len = thinking_buffer.values().map(|s| s.len()).sum::<usize>();
-                                                    if total_len > last_thinking_len {
-                                                        let accumulated: String = thinking_buffer.values().cloned().collect::<Vec<_>>().join("");
-                                                        last_thinking_len = total_len;
-                                                        thinking_streamed = true;
-
+                                                    // If a new thinking block started, finalize the previous one
+                                                    if active_thinking_index.is_some() && active_thinking_index != Some(index) {
                                                         let _ = events_tx.send(AgentEvent::Thinking {
-                                                            content: accumulated,
-                                                            done: false,
+                                                            content: String::new(),
+                                                            done: true,
                                                             mission_id: Some(mission_id),
                                                         });
                                                     }
+                                                    active_thinking_index = Some(index);
+
+                                                    let buffer = thinking_buffer.entry(index).or_default();
+                                                    buffer.push_str(&thinking_text);
+                                                    thinking_streamed = true;
+
+                                                    let _ = events_tx.send(AgentEvent::Thinking {
+                                                        content: buffer.clone(),
+                                                        done: false,
+                                                        mission_id: Some(mission_id),
+                                                    });
                                                 }
                                             }
                                         } else if delta.delta_type == "text_delta" {
@@ -7594,7 +7600,7 @@ pub async fn run_amp_turn(
                                 // starts fresh (block indices restart from 0 each turn)
                                 thinking_buffer.clear();
                                 text_buffer.clear();
-                                last_thinking_len = 0;
+                                active_thinking_index = None;
                                 last_text_len = 0;
                                 block_types.clear();
                                 thinking_streamed = false;
