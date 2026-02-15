@@ -1375,6 +1375,37 @@ pub enum ProviderStatusResponse {
     Error { message: String },
 }
 
+impl ProviderStatusResponse {
+    /// Convert from internal ProviderStatus to API response format.
+    ///
+    /// This ensures the NeedsReauth variant is properly mapped when
+    /// the OAuth refresh loop detects expired tokens.
+    ///
+    /// # Example Usage (future OAuth refresh implementation)
+    /// ```ignore
+    /// // In OAuth refresh loop when invalid_grant is detected:
+    /// provider.status = ProviderStatus::NeedsReauth(
+    ///     "Refresh token expired - please re-authenticate".to_string()
+    /// );
+    /// ```
+    #[allow(dead_code)]
+    fn from_provider_status(status: &crate::ai_providers::ProviderStatus, auth_url: Option<String>) -> Self {
+        use crate::ai_providers::ProviderStatus;
+        match status {
+            ProviderStatus::Unknown => ProviderStatusResponse::Unknown,
+            ProviderStatus::Connected => ProviderStatusResponse::Connected,
+            ProviderStatus::NeedsAuth => ProviderStatusResponse::NeedsAuth { auth_url },
+            ProviderStatus::NeedsReauth(reason) => ProviderStatusResponse::NeedsReauth {
+                reason: reason.clone(),
+                auth_url,
+            },
+            ProviderStatus::Error(msg) => ProviderStatusResponse::Error {
+                message: msg.clone(),
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AuthKind {
     ApiKey,
