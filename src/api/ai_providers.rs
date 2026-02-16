@@ -841,25 +841,48 @@ fn get_anthropic_auth_from_opencode_auth() -> Option<ClaudeCodeAuth> {
 
 /// Get Anthropic API key or OAuth access token from Open Agent's ai_providers.json.
 fn get_anthropic_auth_from_ai_providers(working_dir: &Path) -> Option<ClaudeCodeAuth> {
+    get_all_anthropic_auth_from_ai_providers(working_dir)
+        .into_iter()
+        .next()
+}
+
+/// Get all Anthropic credentials from ai_providers.json, sorted by priority.
+fn get_all_anthropic_auth_from_ai_providers(working_dir: &Path) -> Vec<ClaudeCodeAuth> {
     let ai_providers_path = working_dir.join(".sandboxed-sh/ai_providers.json");
-    if !ai_providers_path.exists() {
-        return None;
-    }
+    let contents = match std::fs::read_to_string(&ai_providers_path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    let providers: Vec<serde_json::Value> = match serde_json::from_str(&contents) {
+        Ok(p) => p,
+        Err(_) => return Vec::new(),
+    };
 
-    let contents = std::fs::read_to_string(&ai_providers_path).ok()?;
-    let providers: Vec<serde_json::Value> = serde_json::from_str(&contents).ok()?;
+    // Collect (priority, auth) pairs for sorting
+    let mut entries: Vec<(u32, ClaudeCodeAuth)> = Vec::new();
 
-    // Find Anthropic provider
     for provider in providers {
         let provider_type = provider.get("provider_type").and_then(|v| v.as_str());
         if provider_type != Some("anthropic") {
             continue;
         }
+        let enabled = provider
+            .get("enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        if !enabled {
+            continue;
+        }
+        let priority = provider
+            .get("priority")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
 
         // Check for API key first
         if let Some(api_key) = provider.get("api_key").and_then(|v| v.as_str()) {
             if !api_key.is_empty() {
-                return Some(ClaudeCodeAuth::ApiKey(api_key.to_string()));
+                entries.push((priority, ClaudeCodeAuth::ApiKey(api_key.to_string())));
+                continue;
             }
         }
 
@@ -867,13 +890,59 @@ fn get_anthropic_auth_from_ai_providers(working_dir: &Path) -> Option<ClaudeCode
         if let Some(oauth) = provider.get("oauth") {
             if let Some(access_token) = oauth.get("access_token").and_then(|v| v.as_str()) {
                 if !access_token.is_empty() {
-                    return Some(ClaudeCodeAuth::OAuthToken(access_token.to_string()));
+                    entries.push((
+                        priority,
+                        ClaudeCodeAuth::OAuthToken(access_token.to_string()),
+                    ));
                 }
             }
         }
     }
 
-    None
+    entries.sort_by_key(|(p, _)| *p);
+    entries.into_iter().map(|(_, auth)| auth).collect()
+}
+
+/// Get all available Anthropic credentials for Claude Code, in priority order.
+///
+/// Collects credentials from all sources:
+/// 1. OpenCode auth.json (anthropic entry)
+/// 2. ai_providers.json (potentially multiple accounts, sorted by priority)
+/// 3. Claude CLI credentials file
+///
+/// Used for account rotation: when one account hits a rate limit, the mission
+/// runner can try the next credential in the list.
+pub fn get_all_anthropic_auth_for_claudecode(working_dir: &Path) -> Vec<ClaudeCodeAuth> {
+    let mut all_auth = Vec::new();
+    let mut seen_tokens = std::collections::HashSet::new();
+
+    // Helper to deduplicate by credential value
+    let mut push_unique = |auth: ClaudeCodeAuth| {
+        let key = match &auth {
+            ClaudeCodeAuth::ApiKey(k) => k.clone(),
+            ClaudeCodeAuth::OAuthToken(t) => t.clone(),
+        };
+        if seen_tokens.insert(key) {
+            all_auth.push(auth);
+        }
+    };
+
+    // 1. OpenCode auth.json (highest priority — it's the "default" credential)
+    if let Some(auth) = get_anthropic_auth_from_opencode_auth() {
+        push_unique(auth);
+    }
+
+    // 2. ai_providers.json (multi-account, sorted by priority)
+    for auth in get_all_anthropic_auth_from_ai_providers(working_dir) {
+        push_unique(auth);
+    }
+
+    // 3. Claude CLI credentials
+    if let Some(auth) = get_anthropic_auth_from_claude_cli_credentials() {
+        push_unique(auth);
+    }
+
+    all_auth
 }
 
 /// Get Anthropic auth from Claude CLI's own credentials file.

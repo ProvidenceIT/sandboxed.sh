@@ -1503,6 +1503,7 @@ async fn run_mission_turn(
                 is_continuation,
                 Some(Arc::clone(&tool_hub)),
                 Some(Arc::clone(&status)),
+                None, // override_auth: use default credential resolution
             )
             .await;
 
@@ -1563,15 +1564,66 @@ async fn run_mission_turn(
                     effective_agent.as_deref(),
                     mission_id,
                     events_tx.clone(),
-                    cancel,
-                    secrets,
+                    cancel.clone(),
+                    secrets.clone(),
                     &config.working_dir,
                     Some(&new_session_id),
                     is_continuation,
                     Some(Arc::clone(&tool_hub)),
                     Some(Arc::clone(&status)),
+                    None, // override_auth
                 )
                 .await;
+            }
+
+            // Account rotation: if rate-limited, try alternate Anthropic credentials.
+            if result.terminal_reason == Some(TerminalReason::RateLimited) {
+                let alt_accounts = super::ai_providers::get_all_anthropic_auth_for_claudecode(
+                    &config.working_dir,
+                );
+                if alt_accounts.len() > 1 {
+                    tracing::info!(
+                        mission_id = %mission_id,
+                        total_accounts = alt_accounts.len(),
+                        "Rate limited on primary account; trying alternate credentials"
+                    );
+                    // Skip the first account (already tried via default resolution).
+                    for (idx, alt_auth) in alt_accounts.into_iter().skip(1).enumerate() {
+                        if cancel.is_cancelled() {
+                            break;
+                        }
+                        tracing::info!(
+                            mission_id = %mission_id,
+                            attempt = idx + 2,
+                            auth_type = match &alt_auth {
+                                super::ai_providers::ClaudeCodeAuth::ApiKey(_) => "api_key",
+                                super::ai_providers::ClaudeCodeAuth::OAuthToken(_) => "oauth_token",
+                            },
+                            "Rotating to alternate Anthropic account"
+                        );
+                        result = run_claudecode_turn(
+                            &workspace,
+                            &mission_work_dir,
+                            &user_message,
+                            config.default_model.as_deref(),
+                            effective_agent.as_deref(),
+                            mission_id,
+                            events_tx.clone(),
+                            cancel.clone(),
+                            secrets.clone(),
+                            &config.working_dir,
+                            session_id.as_deref(),
+                            is_continuation,
+                            Some(Arc::clone(&tool_hub)),
+                            Some(Arc::clone(&status)),
+                            Some(alt_auth),
+                        )
+                        .await;
+                        if result.terminal_reason != Some(TerminalReason::RateLimited) {
+                            break;
+                        }
+                    }
+                }
             }
 
             result
@@ -1813,6 +1865,7 @@ pub fn run_claudecode_turn<'a>(
     is_continuation: bool,
     tool_hub: Option<Arc<FrontendToolHub>>,
     status: Option<Arc<RwLock<ControlStatus>>>,
+    override_auth: Option<super::ai_providers::ClaudeCodeAuth>,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = AgentResult> + Send + 'a>> {
     Box::pin(async move {
         use super::ai_providers::{
@@ -1953,10 +2006,22 @@ pub fn run_claudecode_turn<'a>(
             tracing::warn!("Failed to refresh Anthropic OAuth token: {}", e);
         }
 
+        // If an override credential was provided (account rotation), use it directly.
+        let api_auth = if let Some(auth) = override_auth {
+            tracing::info!(
+                mission_id = %mission_id,
+                auth_type = match &auth {
+                    ClaudeCodeAuth::ApiKey(_) => "api_key",
+                    ClaudeCodeAuth::OAuthToken(_) => "oauth_token",
+                },
+                "Using override credential for account rotation"
+            );
+            Some(auth)
+        } else
         // Try to get API key/OAuth token from Anthropic provider configured for Claude Code backend.
         // For container workspaces, compare workspace auth vs host auth and use the fresher one.
         // If workspace auth is expired, try to refresh it using the refresh token.
-        let api_auth = if has_cli_creds {
+        if has_cli_creds {
             None
         } else {
             // For container workspaces, get both workspace and host auth with expiry info
@@ -2881,6 +2946,7 @@ pub fn run_claudecode_turn<'a>(
                                                             true,
                                                             tool_hub,
                                                             status,
+                                                            None, // override_auth
                                                         ).await;
                                                     }
                                                 }
@@ -3065,8 +3131,19 @@ pub fn run_claudecode_turn<'a>(
         }
 
         let mut result = if had_error {
-            AgentResult::failure(final_result, cost_cents)
-                .with_terminal_reason(TerminalReason::LlmError)
+            // Detect rate limit / overloaded errors for account rotation.
+            let is_rate_limited = final_result.contains("overloaded_error")
+                || final_result.contains("rate_limit_error")
+                || final_result.contains("resource_exhausted")
+                || final_result.contains("Too many requests")
+                || final_result.contains("status code: 429")
+                || final_result.contains("status code: 529");
+            let reason = if is_rate_limited {
+                TerminalReason::RateLimited
+            } else {
+                TerminalReason::LlmError
+            };
+            AgentResult::failure(final_result, cost_cents).with_terminal_reason(reason)
         } else {
             AgentResult::success(final_result, cost_cents)
                 .with_terminal_reason(TerminalReason::Completed)

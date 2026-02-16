@@ -5608,6 +5608,7 @@ async fn run_single_control_turn(
                 is_continuation,
                 Some(tool_hub.clone()),
                 Some(status.clone()),
+                None, // override_auth
             ))
             .await;
 
@@ -5681,6 +5682,7 @@ async fn run_single_control_turn(
                     is_continuation,
                     Some(tool_hub.clone()),
                     Some(status.clone()),
+                    None, // override_auth
                 ))
                 .await;
             }
