@@ -30,6 +30,7 @@ pub mod library;
 pub mod mcp;
 pub mod mission_runner;
 pub mod mission_store;
+mod model_routing;
 mod monitoring;
 pub mod opencode;
 mod providers;

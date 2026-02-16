@@ -53,6 +53,7 @@ use super::desktop_stream;
 use super::fs;
 use super::library as library_api;
 use super::mcp as mcp_api;
+use super::model_routing as model_routing_api;
 use super::monitoring;
 use super::opencode as opencode_api;
 use super::secrets as secrets_api;
@@ -96,6 +97,10 @@ pub struct AppState {
     pub backend_configs: Arc<crate::backend_config::BackendConfigStore>,
     /// Cached model catalog fetched from provider APIs at startup
     pub model_catalog: ModelCatalog,
+    /// Provider health tracker (per-account cooldown and stats)
+    pub health_tracker: crate::provider_health::SharedProviderHealthTracker,
+    /// Model chain store (fallback chain definitions)
+    pub chain_store: crate::provider_health::SharedModelChainStore,
 }
 
 /// Start the HTTP server.
@@ -138,6 +143,15 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         .await,
     );
     let pending_oauth = Arc::new(RwLock::new(HashMap::new()));
+
+    // Initialize provider health tracker and model chain store
+    let health_tracker = Arc::new(crate::provider_health::ProviderHealthTracker::new());
+    let chain_store = Arc::new(
+        crate::provider_health::ModelChainStore::new(
+            config.working_dir.join(".sandboxed-sh/model_chains.json"),
+        )
+        .await,
+    );
 
     // Initialize secrets store
     let secrets = match crate::secrets::SecretsStore::new(&config.working_dir).await {
@@ -358,6 +372,8 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         backend_registry,
         backend_configs,
         model_catalog: Arc::new(RwLock::new(HashMap::new())),
+        health_tracker,
+        chain_store,
     });
 
     // Start background desktop session cleanup task
@@ -611,6 +627,8 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         )
         // AI Provider endpoints
         .nest("/api/ai/providers", ai_providers_api::routes())
+        // Model routing (chains + health)
+        .nest("/api/model-routing", model_routing_api::routes())
         // Secrets management endpoints
         .nest("/api/secrets", secrets_api::routes())
         // Global settings endpoints

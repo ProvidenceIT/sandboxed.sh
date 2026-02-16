@@ -105,6 +105,23 @@ export {
   listBackendModelOptions,
 } from "./providers";
 
+// Model Routing
+export {
+  type ChainEntry,
+  type ModelChain,
+  type ResolvedEntry,
+  type AccountHealthSnapshot,
+  listModelChains,
+  getModelChain,
+  createModelChain,
+  updateModelChain,
+  deleteModelChain,
+  resolveModelChain,
+  listAccountHealth,
+  getAccountHealth,
+  clearAccountCooldown,
+} from "./model-routing";
+
 // Automations
 export {
   type CommandSource,
