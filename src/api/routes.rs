@@ -55,6 +55,7 @@ use super::library as library_api;
 use super::mcp as mcp_api;
 use super::model_routing as model_routing_api;
 use super::monitoring;
+use super::proxy as proxy_api;
 use super::opencode as opencode_api;
 use super::secrets as secrets_api;
 use super::settings as settings_api;
@@ -101,6 +102,8 @@ pub struct AppState {
     pub health_tracker: crate::provider_health::SharedProviderHealthTracker,
     /// Model chain store (fallback chain definitions)
     pub chain_store: crate::provider_health::SharedModelChainStore,
+    /// Shared HTTP client for the proxy (connection pooling)
+    pub http_client: reqwest::Client,
 }
 
 /// Start the HTTP server.
@@ -374,6 +377,11 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         model_catalog: Arc::new(RwLock::new(HashMap::new())),
         health_tracker,
         chain_store,
+        http_client: reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(300))
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap_or_default(),
     });
 
     // Start background desktop session cleanup task
@@ -629,6 +637,8 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         .nest("/api/ai/providers", ai_providers_api::routes())
         // Model routing (chains + health)
         .nest("/api/model-routing", model_routing_api::routes())
+        // OpenAI-compatible proxy endpoint
+        .nest("/v1", proxy_api::routes())
         // Secrets management endpoints
         .nest("/api/secrets", secrets_api::routes())
         // Global settings endpoints
