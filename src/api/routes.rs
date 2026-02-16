@@ -380,7 +380,9 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         health_tracker,
         chain_store,
         http_client: reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(300))
+            // No global timeout — it applies to the full response body including
+            // streaming chunks, which would kill long-running LLM generations.
+            // Per-request timeouts are set in the proxy where needed.
             .connect_timeout(std::time::Duration::from_secs(10))
             .build()
             .unwrap_or_default(),

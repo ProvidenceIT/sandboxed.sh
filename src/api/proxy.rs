@@ -215,7 +215,14 @@ async fn chat_completions(
             prefixed
         } else {
             match state.chain_store.get_default().await {
-                Some(chain) => chain.id,
+                Some(chain) => {
+                    tracing::warn!(
+                        requested_model = %requested_model,
+                        default_chain = %chain.id,
+                        "Unknown model requested; falling back to default chain"
+                    );
+                    chain.id
+                }
                 None => {
                     return error_response(
                         StatusCode::BAD_REQUEST,
@@ -280,13 +287,20 @@ async fn chat_completions(
             }
         };
 
-        // Forward the request
+        // Forward the request.
+        //
+        // For non-streaming requests, set a 300s timeout.  For streaming
+        // requests, don't set a timeout — reqwest applies it to the full
+        // response body, which would kill long-running LLM generations.
         let mut upstream_req = state
             .http_client
             .post(&url)
             .header("Content-Type", "application/json")
             .header("Authorization", format!("Bearer {}", api_key))
             .body(upstream_body);
+        if !is_stream {
+            upstream_req = upstream_req.timeout(std::time::Duration::from_secs(300));
+        }
 
         // Forward select client headers
         if let Some(org) = headers.get("openai-organization") {

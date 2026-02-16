@@ -3132,12 +3132,21 @@ pub fn run_claudecode_turn<'a>(
 
         let mut result = if had_error {
             // Detect rate limit / overloaded errors for account rotation.
-            let is_rate_limited = final_result.contains("overloaded_error")
-                || final_result.contains("rate_limit_error")
-                || final_result.contains("resource_exhausted")
-                || final_result.contains("Too many requests")
-                || final_result.contains("status code: 429")
-                || final_result.contains("status code: 529");
+            //
+            // The error_message() parser may have extracted the human-readable
+            // message (e.g. "Overloaded") or passed through raw JSON containing
+            // type fields (e.g. "overloaded_error"), so we check both forms.
+            // Case-insensitive comparison catches all variants.
+            let lower = final_result.to_lowercase();
+            let is_rate_limited = lower.contains("overloaded")
+                || lower.contains("rate limit")
+                || lower.contains("rate_limit")
+                || lower.contains("resource_exhausted")
+                || lower.contains("too many requests")
+                || lower.contains("error: 429")
+                || lower.contains("error: 529")
+                || lower.contains("status code: 429")
+                || lower.contains("status code: 529");
             let reason = if is_rate_limited {
                 TerminalReason::RateLimited
             } else {

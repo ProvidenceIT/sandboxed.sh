@@ -575,6 +575,10 @@ impl ModelChainStore {
                 }
             };
 
+            // Collect account IDs we've already added to avoid duplicates
+            // when both store and standard accounts exist for the same provider.
+            let mut seen_account_ids = std::collections::HashSet::new();
+
             // 1. Check AIProviderStore (custom providers, multi-account)
             let store_accounts = ai_providers.get_all_by_type(provider_type).await;
 
@@ -590,6 +594,7 @@ impl ModelChainStore {
                 if !account.has_credentials() {
                     continue;
                 }
+                seen_account_ids.insert(account.id);
                 resolved.push(ResolvedEntry {
                     provider_id: entry.provider_id.clone(),
                     model_id: entry.model_id.clone(),
@@ -599,33 +604,35 @@ impl ModelChainStore {
                 });
             }
 
-            // 2. Check standard accounts from OpenCode config (if none found in store)
-            // Standard providers only appear here; custom providers only appear above.
-            if store_accounts.is_empty() {
-                for sa in standard_accounts {
-                    if sa.provider_type != provider_type {
-                        continue;
-                    }
-                    if !health_tracker.is_healthy(sa.account_id).await {
-                        tracing::debug!(
-                            account_id = %sa.account_id,
-                            provider = %entry.provider_id,
-                            "Skipping standard account in cooldown"
-                        );
-                        continue;
-                    }
-                    // Standard accounts must have an API key to be usable
-                    if sa.api_key.is_none() {
-                        continue;
-                    }
-                    resolved.push(ResolvedEntry {
-                        provider_id: entry.provider_id.clone(),
-                        model_id: entry.model_id.clone(),
-                        account_id: sa.account_id,
-                        api_key: sa.api_key.clone(),
-                        base_url: sa.base_url.clone(),
-                    });
+            // 2. Also check standard accounts from OpenCode config.
+            // These complement store accounts — a user may have both custom
+            // multi-account entries AND standard credentials from auth.json.
+            for sa in standard_accounts {
+                if sa.provider_type != provider_type {
+                    continue;
                 }
+                if seen_account_ids.contains(&sa.account_id) {
+                    continue;
+                }
+                if !health_tracker.is_healthy(sa.account_id).await {
+                    tracing::debug!(
+                        account_id = %sa.account_id,
+                        provider = %entry.provider_id,
+                        "Skipping standard account in cooldown"
+                    );
+                    continue;
+                }
+                // Standard accounts must have an API key to be usable
+                if sa.api_key.is_none() {
+                    continue;
+                }
+                resolved.push(ResolvedEntry {
+                    provider_id: entry.provider_id.clone(),
+                    model_id: entry.model_id.clone(),
+                    account_id: sa.account_id,
+                    api_key: sa.api_key.clone(),
+                    base_url: sa.base_url.clone(),
+                });
             }
         }
 
