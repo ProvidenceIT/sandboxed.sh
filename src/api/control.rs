@@ -5461,7 +5461,10 @@ async fn run_single_control_turn(
         {
             config.default_model = Some(default_model);
         }
-    } else if !is_claudecode && effective_config_profile.is_some() && requested_model.is_none() {
+    } else if backend_id.as_deref() == Some("opencode")
+        && effective_config_profile.is_some()
+        && requested_model.is_none()
+    {
         // For OpenCode with a config profile but no explicit model override,
         // clear the global default so the profile's oh-my-opencode agent
         // models take precedence instead of being overridden.

@@ -1232,7 +1232,7 @@ async fn run_mission_turn(
         {
             config.default_model = Some(default_model);
         }
-    } else if backend_id != "claudecode"
+    } else if backend_id == "opencode"
         && effective_config_profile.is_some()
         && model_override.is_none()
     {
@@ -6961,6 +6961,7 @@ pub async fn run_opencode_turn(
     let stderr_error_capture = sse_error_message.clone();
     let stderr_text_capture = stderr_text_buffer.clone();
     let stderr_text_output_tx = text_output_tx.clone();
+    let stderr_last_activity = last_activity.clone();
     let stderr_handle = stderr.map(|stderr| {
         tokio::spawn(async move {
             let stderr_reader = BufReader::new(stderr);
@@ -6971,6 +6972,11 @@ pub async fn run_opencode_turn(
             while let Ok(Some(line)) = stderr_lines.next_line().await {
                 let clean = line.trim().to_string();
                 if !clean.is_empty() {
+                    // Refresh global inactivity timer so stderr-only progress
+                    // is not mistaken for a stuck process.
+                    if let Ok(mut guard) = stderr_last_activity.lock() {
+                        *guard = std::time::Instant::now();
+                    }
                     tracing::debug!(mission_id = %mission_id_clone, line = %clean, "OpenCode CLI stderr");
 
                     // Track message role from stderr event lines like:
@@ -7031,8 +7037,11 @@ pub async fn run_opencode_turn(
     let mut session_idle_at: Option<std::time::Instant> = None;
     let mut had_meaningful_work = false;
     // Track consecutive retries — if the model API keeps failing, abort early
-    // instead of waiting for the full idle timeout.
+    // instead of waiting for the full idle timeout.  We track the last-seen
+    // cumulative value from the SSE channel so that a text-output reset only
+    // zeroes the *local* counter and later retries are counted as a fresh run.
     let mut consecutive_retries: u32 = 0;
+    let mut last_seen_total_retries: u32 = 0;
     let max_consecutive_retries: u32 = 5;
 
     loop {
@@ -7071,7 +7080,10 @@ pub async fn run_opencode_turn(
             }
             changed = sse_retry_rx.changed() => {
                 if changed.is_ok() {
-                    consecutive_retries = *sse_retry_rx.borrow();
+                    let new_total = *sse_retry_rx.borrow();
+                    let delta = new_total.saturating_sub(last_seen_total_retries);
+                    last_seen_total_retries = new_total;
+                    consecutive_retries += delta;
                     tracing::info!(
                         mission_id = %mission_id,
                         consecutive_retries = consecutive_retries,
