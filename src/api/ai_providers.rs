@@ -342,11 +342,6 @@ pub fn read_standard_accounts(
         if provider_type == ProviderType::Custom {
             continue;
         }
-        // Skip duplicates — e.g. "openai" and "codex" both map to OpenAI
-        if !seen_types.insert(provider_type) {
-            continue;
-        }
-
         // Extract actual API key from the auth entry
         let api_key = value
             .get("key")
@@ -356,6 +351,13 @@ pub fn read_standard_accounts(
 
         // Only include accounts that have an API key
         if api_key.is_none() {
+            continue;
+        }
+
+        // Skip duplicates — e.g. "openai" and "codex" both map to OpenAI.
+        // Must come after the api_key check so a keyless alias doesn't
+        // shadow a valid one.
+        if !seen_types.insert(provider_type) {
             continue;
         }
 
@@ -4265,7 +4267,7 @@ async fn update_provider(
                 "label is only supported for custom providers".to_string(),
             ));
         }
-        if req.priority.is_some() {
+        if req.priority.is_some() && req.priority != Some(0) {
             return Err((
                 StatusCode::BAD_REQUEST,
                 "priority is only supported for custom providers".to_string(),
