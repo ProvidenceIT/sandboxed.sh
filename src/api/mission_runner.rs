@@ -4498,7 +4498,11 @@ fn ensure_opencode_provider_for_model(opencode_config_dir: &std::path::Path, mod
         None => return,
     };
 
-    if let Some(existing) = providers_map.get_mut(provider_id) {
+    if provider_id == "builtin" {
+        // Always overwrite the builtin provider definition — the proxy secret
+        // (options.apiKey) changes on every server restart.
+        providers_map.insert(provider_id.to_string(), provider_def);
+    } else if let Some(existing) = providers_map.get_mut(provider_id) {
         // Provider already exists – make sure the model is listed.
         let obj = match existing.as_object_mut() {
             Some(o) => o,
