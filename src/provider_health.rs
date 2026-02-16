@@ -330,6 +330,40 @@ pub struct ModelChain {
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// A standard (non-custom) provider account read from OpenCode's config.
+///
+/// Standard providers live in `opencode.json` + `auth.json`, not in
+/// `AIProviderStore`. This struct lets the chain resolver include them
+/// without coupling to OpenCode's config format.
+#[derive(Debug, Clone)]
+pub struct StandardAccount {
+    /// Stable UUID for health tracking (derived from provider type ID).
+    pub account_id: Uuid,
+    /// Which provider type this account belongs to.
+    pub provider_type: crate::ai_providers::ProviderType,
+    /// API key from auth.json (None if OAuth-only or unconfigured).
+    pub api_key: Option<String>,
+    /// Base URL override from opencode.json (if any).
+    pub base_url: Option<String>,
+}
+
+/// Derive a deterministic UUID from a provider type ID string.
+///
+/// Uses a simple hash-to-UUID scheme so each standard provider always gets the
+/// same UUID across restarts, which lets the health tracker persist state.
+pub fn stable_provider_uuid(provider_id: &str) -> Uuid {
+    // Use a fixed namespace prefix + provider_id bytes to build a deterministic UUID.
+    let mut bytes = [0u8; 16];
+    // Simple hash: XOR provider_id bytes into the 16-byte buffer
+    for (i, b) in provider_id.bytes().enumerate() {
+        bytes[i % 16] ^= b;
+    }
+    // Set version 4 bits (to be a valid UUID) but deterministic
+    bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
+    bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant 1
+    Uuid::from_bytes(bytes)
+}
+
 /// A resolved chain entry: a specific account + model ready for routing.
 #[derive(Debug, Clone)]
 pub struct ResolvedEntry {
@@ -506,11 +540,16 @@ impl ModelChainStore {
     /// expanding each chain entry across all configured accounts for that
     /// provider and filtering out accounts currently in cooldown.
     ///
+    /// Accounts come from two sources:
+    /// 1. `AIProviderStore` — custom providers and future multi-account standard providers
+    /// 2. `standard_accounts` — standard providers from OpenCode's config files
+    ///
     /// Returns entries in priority order, ready for waterfall routing.
     pub async fn resolve_chain(
         &self,
         chain_id: &str,
         ai_providers: &crate::ai_providers::AIProviderStore,
+        standard_accounts: &[StandardAccount],
         health_tracker: &ProviderHealthTracker,
     ) -> Vec<ResolvedEntry> {
         let chain = match self.get(chain_id).await {
@@ -533,11 +572,10 @@ impl ModelChainStore {
                 }
             };
 
-            // Get all accounts for this provider, sorted by priority
-            let accounts = ai_providers.get_all_by_type(provider_type).await;
+            // 1. Check AIProviderStore (custom providers, multi-account)
+            let store_accounts = ai_providers.get_all_by_type(provider_type).await;
 
-            for account in accounts {
-                // Skip accounts in cooldown
+            for account in &store_accounts {
                 if !health_tracker.is_healthy(account.id).await {
                     tracing::debug!(
                         account_id = %account.id,
@@ -546,12 +584,9 @@ impl ModelChainStore {
                     );
                     continue;
                 }
-
-                // Skip accounts without credentials
                 if !account.has_credentials() {
                     continue;
                 }
-
                 resolved.push(ResolvedEntry {
                     provider_id: entry.provider_id.clone(),
                     model_id: entry.model_id.clone(),
@@ -559,6 +594,35 @@ impl ModelChainStore {
                     api_key: account.api_key.clone(),
                     base_url: account.base_url.clone(),
                 });
+            }
+
+            // 2. Check standard accounts from OpenCode config (if none found in store)
+            // Standard providers only appear here; custom providers only appear above.
+            if store_accounts.is_empty() {
+                for sa in standard_accounts {
+                    if sa.provider_type != provider_type {
+                        continue;
+                    }
+                    if !health_tracker.is_healthy(sa.account_id).await {
+                        tracing::debug!(
+                            account_id = %sa.account_id,
+                            provider = %entry.provider_id,
+                            "Skipping standard account in cooldown"
+                        );
+                        continue;
+                    }
+                    // Standard accounts must have an API key to be usable
+                    if sa.api_key.is_none() {
+                        continue;
+                    }
+                    resolved.push(ResolvedEntry {
+                        provider_id: entry.provider_id.clone(),
+                        model_id: entry.model_id.clone(),
+                        account_id: sa.account_id,
+                        api_key: sa.api_key.clone(),
+                        base_url: sa.base_url.clone(),
+                    });
+                }
             }
         }
 

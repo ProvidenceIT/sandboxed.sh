@@ -247,9 +247,19 @@ async fn resolve_chain(
     State(state): State<Arc<super::routes::AppState>>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<Vec<ResolvedEntryResponse>>, (StatusCode, String)> {
+    // Read standard provider accounts from OpenCode config so chain resolution
+    // can include them alongside custom providers from AIProviderStore.
+    let standard_accounts =
+        super::ai_providers::read_standard_accounts(&state.config.working_dir);
+
     let resolved = state
         .chain_store
-        .resolve_chain(&id, &state.ai_providers, &state.health_tracker)
+        .resolve_chain(
+            &id,
+            &state.ai_providers,
+            &standard_accounts,
+            &state.health_tracker,
+        )
         .await;
 
     if resolved.is_empty() {

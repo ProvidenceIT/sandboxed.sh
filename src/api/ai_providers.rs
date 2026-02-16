@@ -313,6 +313,68 @@ fn google_authorize_url(challenge: &str, state: &str) -> Result<String, String> 
     Ok(url.to_string())
 }
 
+/// Build [`StandardAccount`] entries for all standard (non-custom) providers
+/// that have API-key credentials in OpenCode's `auth.json`.
+///
+/// These are used by chain resolution to include standard providers alongside
+/// custom providers from `AIProviderStore`.
+pub fn read_standard_accounts(
+    working_dir: &Path,
+) -> Vec<crate::provider_health::StandardAccount> {
+    let config_path = get_opencode_config_path(working_dir);
+    let opencode_config = read_opencode_config(&config_path).unwrap_or_default();
+    let auth = read_opencode_auth().unwrap_or_else(|_| serde_json::json!({}));
+    let auth_obj = auth.as_object();
+
+    let mut accounts = Vec::new();
+
+    // Iterate over all keys in auth.json
+    let Some(auth_map) = auth_obj else {
+        return accounts;
+    };
+
+    for (key, value) in auth_map {
+        let Some(provider_type) = ProviderType::from_id(key.as_str()) else {
+            continue;
+        };
+        // Skip custom providers — they live in AIProviderStore
+        if provider_type == ProviderType::Custom {
+            continue;
+        }
+
+        // Extract actual API key from the auth entry
+        let api_key = value
+            .get("key")
+            .or_else(|| value.get("api_key"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        // Only include accounts that have an API key
+        if api_key.is_none() {
+            continue;
+        }
+
+        // Check if this provider is disabled in opencode.json
+        let config_entry = get_provider_config_entry(&opencode_config, provider_type);
+        if let Some(ref entry) = config_entry {
+            if entry.enabled == Some(false) {
+                continue;
+            }
+        }
+
+        let base_url = config_entry.and_then(|e| e.base_url);
+
+        accounts.push(crate::provider_health::StandardAccount {
+            account_id: crate::provider_health::stable_provider_uuid(provider_type.id()),
+            provider_type,
+            api_key,
+            base_url,
+        });
+    }
+
+    accounts
+}
+
 /// Create AI provider routes.
 pub fn routes() -> Router<Arc<super::routes::AppState>> {
     Router::new()
