@@ -463,28 +463,30 @@ impl AIProviderStore {
         if let Some(provider) = providers.values().find(|p| p.is_default && p.enabled) {
             return Some(provider.clone());
         }
-        // Fallback to highest-priority enabled
+        // Fallback to highest-priority enabled (UUID tiebreaker for determinism)
         providers
             .values()
             .filter(|p| p.enabled)
-            .min_by_key(|p| p.priority)
+            .min_by_key(|p| (p.priority, p.id))
             .cloned()
     }
 
     /// Get highest-priority enabled provider by type.
     ///
     /// When multiple accounts exist for the same provider type, returns the one
-    /// with the lowest `priority` value (i.e. highest priority).
+    /// with the lowest `priority` value (i.e. highest priority).  Ties are
+    /// broken by UUID for deterministic ordering.
     pub async fn get_by_type(&self, provider_type: ProviderType) -> Option<AIProvider> {
         let providers = self.providers.read().await;
         providers
             .values()
             .filter(|p| p.provider_type == provider_type && p.enabled)
-            .min_by_key(|p| p.priority)
+            .min_by_key(|p| (p.priority, p.id))
             .cloned()
     }
 
     /// Get all providers of a given type, sorted by priority (lower = higher priority).
+    /// Ties are broken by UUID for deterministic ordering.
     pub async fn get_all_by_type(&self, provider_type: ProviderType) -> Vec<AIProvider> {
         let providers = self.providers.read().await;
         let mut matched: Vec<AIProvider> = providers
@@ -492,7 +494,7 @@ impl AIProviderStore {
             .filter(|p| p.provider_type == provider_type && p.enabled)
             .cloned()
             .collect();
-        matched.sort_by_key(|p| p.priority);
+        matched.sort_by_key(|p| (p.priority, p.id));
         matched
     }
 

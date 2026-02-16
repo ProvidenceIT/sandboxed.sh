@@ -327,6 +327,7 @@ pub fn read_standard_accounts(
     let auth_obj = auth.as_object();
 
     let mut accounts = Vec::new();
+    let mut seen_types = std::collections::HashSet::new();
 
     // Iterate over all keys in auth.json
     let Some(auth_map) = auth_obj else {
@@ -339,6 +340,10 @@ pub fn read_standard_accounts(
         };
         // Skip custom providers — they live in AIProviderStore
         if provider_type == ProviderType::Custom {
+            continue;
+        }
+        // Skip duplicates — e.g. "openai" and "codex" both map to OpenAI
+        if !seen_types.insert(provider_type) {
             continue;
         }
 
