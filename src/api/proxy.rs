@@ -132,9 +132,29 @@ struct ModelObject {
     owned_by: &'static str,
 }
 
+/// Verify the proxy bearer token from the Authorization header.
+fn verify_proxy_auth(headers: &HeaderMap, expected: &str) -> Result<(), Response> {
+    let token = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+    match token {
+        Some(t) if t == expected => Ok(()),
+        _ => Err(error_response(
+            StatusCode::UNAUTHORIZED,
+            "Invalid or missing proxy authorization".to_string(),
+            "authentication_error",
+        )),
+    }
+}
+
 async fn list_models(
     State(state): State<Arc<super::routes::AppState>>,
-) -> Json<ModelsResponse> {
+    headers: HeaderMap,
+) -> Response {
+    if let Err(resp) = verify_proxy_auth(&headers, &state.proxy_secret) {
+        return resp;
+    }
     let chains = state.chain_store.list().await;
     let data = chains
         .into_iter()
@@ -149,6 +169,7 @@ async fn list_models(
         object: "list",
         data,
     })
+    .into_response()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -160,6 +181,11 @@ async fn chat_completions(
     headers: HeaderMap,
     body: bytes::Bytes,
 ) -> Response {
+    // 0. Verify proxy authorization
+    if let Err(resp) = verify_proxy_auth(&headers, &state.proxy_secret) {
+        return resp;
+    }
+
     // 1. Parse the request to extract the model name
     let req: ChatCompletionRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,

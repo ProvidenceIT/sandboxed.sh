@@ -104,6 +104,8 @@ pub struct AppState {
     pub chain_store: crate::provider_health::SharedModelChainStore,
     /// Shared HTTP client for the proxy (connection pooling)
     pub http_client: reqwest::Client,
+    /// Bearer token for the internal proxy endpoint
+    pub proxy_secret: String,
 }
 
 /// Start the HTTP server.
@@ -382,6 +384,12 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
             .connect_timeout(std::time::Duration::from_secs(10))
             .build()
             .unwrap_or_default(),
+        proxy_secret: std::env::var("SANDBOXED_PROXY_SECRET")
+            .unwrap_or_else(|_| {
+                let secret = uuid::Uuid::new_v4().to_string();
+                std::env::set_var("SANDBOXED_PROXY_SECRET", &secret);
+                secret
+            }),
     });
 
     // Start background desktop session cleanup task
