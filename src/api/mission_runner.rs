@@ -11,12 +11,26 @@
 //! - Working directory (isolated per mission)
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
-use tokio::sync::{broadcast, mpsc, RwLock};
+use tokio::sync::{broadcast, mpsc, RwLock, Semaphore};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+
+/// Per-provider concurrency semaphores.
+/// ZAI's coding subscription endpoint rate-limits concurrent requests (typically
+/// 1 at a time). The semaphore serializes missions targeting the same provider
+/// so we don't trigger 429s.
+static PROVIDER_SEMAPHORES: LazyLock<HashMap<&'static str, Semaphore>> = LazyLock::new(|| {
+    let zai_max: usize = std::env::var("ZAI_MAX_CONCURRENT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1);
+    let mut m = HashMap::new();
+    m.insert("zai", Semaphore::new(zai_max));
+    m
+});
 
 use crate::agents::{AgentRef, AgentResult, TerminalReason};
 use crate::backend::claudecode::client::{ClaudeEvent, ContentBlock, StreamEvent};
@@ -3315,6 +3329,7 @@ struct OpenCodeAuthState {
     has_openai: bool,
     has_anthropic: bool,
     has_google: bool,
+    has_zai: bool,
     has_other: bool,
     /// Tracks which specific provider IDs have been detected as configured.
     configured_providers: std::collections::HashSet<String>,
@@ -3365,6 +3380,7 @@ fn detect_opencode_provider_auth(app_working_dir: Option<&std::path::Path>) -> O
     let mut has_openai = false;
     let mut has_anthropic = false;
     let mut has_google = false;
+    let mut has_zai = false;
     let mut has_other = false;
     let mut configured_providers = std::collections::HashSet::new();
 
@@ -3373,6 +3389,7 @@ fn detect_opencode_provider_auth(app_working_dir: Option<&std::path::Path>) -> O
          has_openai: &mut bool,
          has_anthropic: &mut bool,
          has_google: &mut bool,
+         has_zai: &mut bool,
          has_other: &mut bool,
          configured_providers: &mut std::collections::HashSet<String>| {
             configured_providers.insert(key.to_lowercase());
@@ -3380,6 +3397,10 @@ fn detect_opencode_provider_auth(app_working_dir: Option<&std::path::Path>) -> O
                 "openai" | "codex" => *has_openai = true,
                 "anthropic" | "claude" => *has_anthropic = true,
                 "google" | "gemini" => *has_google = true,
+                "zai" | "zhipu" => {
+                    *has_zai = true;
+                    *has_other = true;
+                }
                 _ => *has_other = true,
             }
         };
@@ -3397,6 +3418,7 @@ fn detect_opencode_provider_auth(app_working_dir: Option<&std::path::Path>) -> O
                             &mut has_openai,
                             &mut has_anthropic,
                             &mut has_google,
+                            &mut has_zai,
                             &mut has_other,
                             &mut configured_providers,
                         );
@@ -3422,6 +3444,7 @@ fn detect_opencode_provider_auth(app_working_dir: Option<&std::path::Path>) -> O
                     &mut has_openai,
                     &mut has_anthropic,
                     &mut has_google,
+                    &mut has_zai,
                     &mut has_other,
                     &mut configured_providers,
                 );
@@ -3461,6 +3484,7 @@ fn detect_opencode_provider_auth(app_working_dir: Option<&std::path::Path>) -> O
     }
     if let Ok(value) = std::env::var("ZHIPU_API_KEY") {
         if !value.trim().is_empty() {
+            has_zai = true;
             has_other = true;
             configured_providers.insert("zai".to_string());
         }
@@ -3484,6 +3508,7 @@ fn detect_opencode_provider_auth(app_working_dir: Option<&std::path::Path>) -> O
                         &mut has_openai,
                         &mut has_anthropic,
                         &mut has_google,
+                        &mut has_zai,
                         &mut has_other,
                         &mut configured_providers,
                     );
@@ -3496,6 +3521,7 @@ fn detect_opencode_provider_auth(app_working_dir: Option<&std::path::Path>) -> O
         has_openai,
         has_anthropic,
         has_google,
+        has_zai,
         has_other,
         configured_providers,
     }
@@ -4223,10 +4249,11 @@ fn ensure_opencode_provider_for_model(opencode_config_dir: &std::path::Path, mod
     let provider_def: Option<serde_json::Value> = match provider_id {
         "zai" => {
             // Z.AI has two billing endpoints:
+            //   - /api/coding/paas/v4   → coding subscription quota (default)
             //   - /api/paas/v4          → pay-per-use balance
-            //   - /api/coding/paas/v4   → coding subscription quota
-            // Default to the coding subscription endpoint since that is the most
-            // common paid plan.  Users can override via ZAI_BASE_URL env var.
+            // The coding subscription endpoint rate-limits concurrent requests;
+            // the provider semaphore (PROVIDER_SEMAPHORES) serializes ZAI missions
+            // to avoid 429s.  Users can override via ZAI_BASE_URL.
             let base_url = std::env::var("ZAI_BASE_URL")
                 .unwrap_or_else(|_| "https://api.z.ai/api/coding/paas/v4".to_string());
             Some(serde_json::json!({
@@ -5576,6 +5603,12 @@ const GOOGLE_AI_API: ApiEndpoint = ApiEndpoint {
     hostname: "generativelanguage.googleapis.com",
 };
 
+const ZAI_API: ApiEndpoint = ApiEndpoint {
+    name: "Z.AI",
+    url: "https://api.z.ai/api/coding/paas/v4/chat/completions",
+    hostname: "api.z.ai",
+};
+
 /// Proactive API connectivity check for Claude Code.
 /// Tests basic internet, then DNS, then Anthropic API reachability.
 async fn check_claudecode_connectivity(
@@ -5600,12 +5633,13 @@ async fn check_opencode_connectivity(
     has_openai: bool,
     has_anthropic: bool,
     has_google: bool,
+    has_zai: bool,
 ) -> Result<(), String> {
     // First check basic internet connectivity
     check_basic_internet_connectivity(workspace_exec, cwd).await?;
 
     // Determine which API to check based on configured providers
-    // Priority: OpenAI > Anthropic > Google (most common first)
+    // Priority: OpenAI > Anthropic > Google > Z.AI (most common first)
     // If none are explicitly configured, we already verified internet works
     let api = if has_openai {
         Some(&OPENAI_API)
@@ -5613,6 +5647,8 @@ async fn check_opencode_connectivity(
         Some(&ANTHROPIC_API)
     } else if has_google {
         Some(&GOOGLE_AI_API)
+    } else if has_zai {
+        Some(&ZAI_API)
     } else {
         // No specific provider detected - basic internet check is sufficient
         // The actual API will be determined by OpenCode's config
@@ -6335,6 +6371,63 @@ pub async fn run_opencode_turn(
         return AgentResult::failure(err_msg, 0).with_terminal_reason(TerminalReason::LlmError);
     }
 
+    // Acquire provider concurrency permit (e.g. ZAI coding subscription allows ~1 concurrent request).
+    // The permit is held for the entire CLI process lifetime via RAII.
+    let _provider_permit = if let Some(semaphore) = provider_hint
+        .as_deref()
+        .and_then(|p| PROVIDER_SEMAPHORES.get(p))
+    {
+        let provider_name = provider_hint.as_deref().unwrap_or("unknown");
+        let semaphore_timeout_secs: u64 = std::env::var("ZAI_SEMAPHORE_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(300);
+        tracing::info!(
+            mission_id = %mission_id,
+            provider = %provider_name,
+            timeout_secs = semaphore_timeout_secs,
+            "Waiting for provider concurrency permit"
+        );
+        let permit = tokio::select! {
+            _ = cancel.cancelled() => {
+                tracing::info!(mission_id = %mission_id, "Cancelled while waiting for provider permit");
+                return AgentResult::failure("Cancelled".to_string(), 0)
+                    .with_terminal_reason(TerminalReason::Cancelled);
+            }
+            result = tokio::time::timeout(
+                std::time::Duration::from_secs(semaphore_timeout_secs),
+                semaphore.acquire(),
+            ) => {
+                match result {
+                    Ok(Ok(permit)) => permit,
+                    Ok(Err(_closed)) => {
+                        return AgentResult::failure(
+                            "Provider semaphore closed unexpectedly".to_string(), 0
+                        ).with_terminal_reason(TerminalReason::LlmError);
+                    }
+                    Err(_timeout) => {
+                        let msg = format!(
+                            "Timed out waiting for {} provider concurrency slot after {}s. \
+                             Another mission may be holding the slot.",
+                            provider_name, semaphore_timeout_secs
+                        );
+                        tracing::warn!(mission_id = %mission_id, "{}", msg);
+                        return AgentResult::failure(msg, 0)
+                            .with_terminal_reason(TerminalReason::RateLimited);
+                    }
+                }
+            }
+        };
+        tracing::info!(
+            mission_id = %mission_id,
+            provider = %provider_name,
+            "Acquired provider concurrency permit"
+        );
+        Some(permit)
+    } else {
+        None
+    };
+
     let configured_runner = get_opencode_cli_path_from_config(app_working_dir)
         .or_else(|| std::env::var("OPENCODE_CLI_PATH").ok());
 
@@ -6373,6 +6466,7 @@ pub async fn run_opencode_turn(
         has_openai,
         has_anthropic,
         has_google,
+        auth_state.has_zai,
     )
     .await
     {
@@ -6613,249 +6707,276 @@ pub async fn run_opencode_turn(
         install_opencode_serve_port_wrapper(&mut env, workspace, &opencode_port);
     }
 
-    cleanup_opencode_listeners(&workspace_exec, work_dir, Some(&opencode_port)).await;
+    // Rate-limit retry configuration
+    let max_turn_retries: u32 = std::env::var("ZAI_MAX_TURN_RETRIES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2);
+    let is_rate_limited_provider = provider_hint.as_deref() == Some("zai");
 
-    // Use WorkspaceExec to spawn the CLI in the correct workspace context
-    let mut child = match workspace_exec
-        .spawn_streaming(work_dir, &cli_runner, &args, env)
-        .await
-    {
-        Ok(child) => child,
-        Err(e) => {
-            let err_msg = format!("Failed to start OpenCode CLI: {}", e);
-            tracing::error!("{}", err_msg);
-            return AgentResult::failure(err_msg, 0).with_terminal_reason(TerminalReason::LlmError);
-        }
-    };
-
-    // Get stdout and stderr for reading output
-    // oh-my-opencode run writes:
-    // - stdout: assistant text output (the actual response)
-    // - stderr: event logs (tool calls, results, session status)
-    let stdout = match child.stdout.take() {
-        Some(stdout) => stdout,
-        None => {
-            let err_msg = "Failed to capture OpenCode stdout";
-            tracing::error!("{}", err_msg);
-            return AgentResult::failure(err_msg.to_string(), 0)
-                .with_terminal_reason(TerminalReason::LlmError);
-        }
-    };
-
-    let stderr = child.stderr.take();
-
-    let mut final_result = String::new();
-    let mut had_error = false;
-    let session_id_capture: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-    let stderr_text_buffer: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
-    let sse_emitted_thinking = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let sse_emitted_text = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let sse_done_sent = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let sse_error_message: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-    let sse_cancel = CancellationToken::new();
-    let (sse_complete_tx, mut sse_complete_rx) = tokio::sync::watch::channel(false);
-    let last_activity = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
-    let (text_output_tx, mut text_output_rx) = tokio::sync::watch::channel(false);
-
-    // oh-my-opencode doesn't support --format json, so use SSE curl for events.
-    let use_json_stdout = false;
-    let sse_handle = if !use_json_stdout
-        && command_available(&workspace_exec, work_dir, "curl").await
-    {
-        let workspace_exec = workspace_exec.clone();
-        let work_dir = work_dir.to_path_buf();
-        let work_dir_arg = work_dir_arg.clone();
-        let session_id_capture = session_id_capture.clone();
-        let sse_emitted_thinking = sse_emitted_thinking.clone();
-        let sse_emitted_text = sse_emitted_text.clone();
-        let sse_done_sent = sse_done_sent.clone();
-        let sse_error_message = sse_error_message.clone();
-        let sse_cancel = sse_cancel.clone();
-        let sse_complete_tx = sse_complete_tx.clone();
-        let last_activity = last_activity.clone();
-        let text_output_tx = text_output_tx.clone();
-        let events_tx = events_tx.clone();
-        let opencode_port = opencode_port.clone();
-        let sse_host = std::env::var("SANDBOXED_SH_OPENCODE_SERVER_HOSTNAME")
-            .ok()
-            .filter(|v| !v.trim().is_empty())
-            .unwrap_or_else(|| "127.0.0.1".to_string());
-
-        Some(tokio::spawn(async move {
-            let event_url = format!(
-                "http://{}:{}/event?directory={}",
-                sse_host,
-                opencode_port,
-                urlencoding::encode(&work_dir_arg)
+    let mut attempt: u32 = 0;
+    'attempt: loop {
+        attempt += 1;
+        if attempt > 1 {
+            tracing::info!(
+                mission_id = %mission_id,
+                attempt = attempt,
+                "Retrying OpenCode turn (rate-limit recovery)"
             );
+        }
 
-            let mut attempts = 0u32;
-            loop {
-                if sse_cancel.is_cancelled() {
-                    break;
-                }
-                if attempts > 5 {
-                    break;
-                }
-                attempts += 1;
+        cleanup_opencode_listeners(&workspace_exec, work_dir, Some(&opencode_port)).await;
 
-                let args = vec![
-                    "-N".to_string(),
-                    "-s".to_string(),
-                    "-H".to_string(),
-                    "Accept: text/event-stream".to_string(),
-                    "-H".to_string(),
-                    "Cache-Control: no-cache".to_string(),
-                    event_url.clone(),
-                ];
+        // Use WorkspaceExec to spawn the CLI in the correct workspace context
+        let mut child = match workspace_exec
+            .spawn_streaming(work_dir, &cli_runner, &args, env.clone())
+            .await
+        {
+            Ok(child) => child,
+            Err(e) => {
+                let err_msg = format!("Failed to start OpenCode CLI: {}", e);
+                tracing::error!("{}", err_msg);
+                return AgentResult::failure(err_msg, 0)
+                    .with_terminal_reason(TerminalReason::LlmError);
+            }
+        };
 
-                let child = workspace_exec
-                    .spawn_streaming(&work_dir, "curl", &args, HashMap::new())
-                    .await;
+        // Get stdout and stderr for reading output
+        // oh-my-opencode run writes:
+        // - stdout: assistant text output (the actual response)
+        // - stderr: event logs (tool calls, results, session status)
+        let stdout = match child.stdout.take() {
+            Some(stdout) => stdout,
+            None => {
+                let err_msg = "Failed to capture OpenCode stdout";
+                tracing::error!("{}", err_msg);
+                return AgentResult::failure(err_msg.to_string(), 0)
+                    .with_terminal_reason(TerminalReason::LlmError);
+            }
+        };
 
-                let mut child = match child {
-                    Ok(child) => child,
-                    Err(_) => {
-                        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-                        continue;
-                    }
-                };
+        let stderr = child.stderr.take();
 
-                let stdout = match child.stdout.take() {
-                    Some(stdout) => stdout,
-                    None => {
-                        let _ = child.kill().await;
-                        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-                        continue;
-                    }
-                };
+        let mut final_result = String::new();
+        let mut had_error = false;
+        let session_id_capture: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let stderr_text_buffer: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+        let sse_emitted_thinking = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let sse_emitted_text = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let sse_done_sent = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let sse_error_message: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let sse_cancel = CancellationToken::new();
+        let (sse_complete_tx, mut sse_complete_rx) = tokio::sync::watch::channel(false);
+        let last_activity = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
+        let (text_output_tx, mut text_output_rx) = tokio::sync::watch::channel(false);
+        // Flag set by stderr reader when 3+ consecutive retry statuses are detected.
+        // The main select loop uses this to kill the process early for faster recovery.
+        let rate_limit_detected = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-                let mut reader = BufReader::new(stdout);
-                let mut line = String::new();
-                let mut current_event: Option<String> = None;
-                let mut data_lines: Vec<String> = Vec::new();
-                let mut state = OpencodeSseState::default();
-                let mut saw_complete = false;
+        // oh-my-opencode doesn't support --format json, so use SSE curl for events.
+        let use_json_stdout = false;
+        let sse_handle = if !use_json_stdout
+            && command_available(&workspace_exec, work_dir, "curl").await
+        {
+            let workspace_exec = workspace_exec.clone();
+            let work_dir = work_dir.to_path_buf();
+            let work_dir_arg = work_dir_arg.clone();
+            let session_id_capture = session_id_capture.clone();
+            let sse_emitted_thinking = sse_emitted_thinking.clone();
+            let sse_emitted_text = sse_emitted_text.clone();
+            let sse_done_sent = sse_done_sent.clone();
+            let sse_error_message = sse_error_message.clone();
+            let sse_cancel = sse_cancel.clone();
+            let sse_complete_tx = sse_complete_tx.clone();
+            let last_activity = last_activity.clone();
+            let text_output_tx = text_output_tx.clone();
+            let events_tx = events_tx.clone();
+            let opencode_port = opencode_port.clone();
+            let sse_host = std::env::var("SANDBOXED_SH_OPENCODE_SERVER_HOSTNAME")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+                .unwrap_or_else(|| "127.0.0.1".to_string());
 
+            Some(tokio::spawn(async move {
+                let event_url = format!(
+                    "http://{}:{}/event?directory={}",
+                    sse_host,
+                    opencode_port,
+                    urlencoding::encode(&work_dir_arg)
+                );
+
+                let mut attempts = 0u32;
                 loop {
                     if sse_cancel.is_cancelled() {
-                        let _ = child.kill().await;
-                        return;
+                        break;
                     }
-                    line.clear();
-                    match reader.read_line(&mut line).await {
-                        Ok(0) => break,
-                        Ok(_) => {
-                            let trimmed = line.trim_end();
-                            if trimmed.is_empty() {
-                                if !data_lines.is_empty() {
-                                    let data = data_lines.join("\n");
-                                    let current_session =
-                                        session_id_capture.lock().unwrap().clone();
-                                    if let Some(parsed) = parse_opencode_sse_event(
-                                        &data,
-                                        current_event.as_deref(),
-                                        current_session.as_deref(),
-                                        &mut state,
-                                        mission_id,
-                                    ) {
-                                        if let Some(session_id) = parsed.session_id {
-                                            let mut guard = session_id_capture.lock().unwrap();
-                                            if guard.is_none() {
-                                                *guard = Some(session_id);
-                                            }
-                                        }
-                                        if let Some(event) = parsed.event {
-                                            if let Ok(mut guard) = last_activity.lock() {
-                                                *guard = std::time::Instant::now();
-                                            }
-                                            if let AgentEvent::Error { ref message, .. } = event {
-                                                let mut guard = sse_error_message.lock().unwrap();
+                    if attempts > 5 {
+                        break;
+                    }
+                    attempts += 1;
+
+                    let args = vec![
+                        "-N".to_string(),
+                        "-s".to_string(),
+                        "-H".to_string(),
+                        "Accept: text/event-stream".to_string(),
+                        "-H".to_string(),
+                        "Cache-Control: no-cache".to_string(),
+                        event_url.clone(),
+                    ];
+
+                    let child = workspace_exec
+                        .spawn_streaming(&work_dir, "curl", &args, HashMap::new())
+                        .await;
+
+                    let mut child = match child {
+                        Ok(child) => child,
+                        Err(_) => {
+                            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                            continue;
+                        }
+                    };
+
+                    let stdout = match child.stdout.take() {
+                        Some(stdout) => stdout,
+                        None => {
+                            let _ = child.kill().await;
+                            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                            continue;
+                        }
+                    };
+
+                    let mut reader = BufReader::new(stdout);
+                    let mut line = String::new();
+                    let mut current_event: Option<String> = None;
+                    let mut data_lines: Vec<String> = Vec::new();
+                    let mut state = OpencodeSseState::default();
+                    let mut saw_complete = false;
+
+                    loop {
+                        if sse_cancel.is_cancelled() {
+                            let _ = child.kill().await;
+                            return;
+                        }
+                        line.clear();
+                        match reader.read_line(&mut line).await {
+                            Ok(0) => break,
+                            Ok(_) => {
+                                let trimmed = line.trim_end();
+                                if trimmed.is_empty() {
+                                    if !data_lines.is_empty() {
+                                        let data = data_lines.join("\n");
+                                        let current_session =
+                                            session_id_capture.lock().unwrap().clone();
+                                        if let Some(parsed) = parse_opencode_sse_event(
+                                            &data,
+                                            current_event.as_deref(),
+                                            current_session.as_deref(),
+                                            &mut state,
+                                            mission_id,
+                                        ) {
+                                            if let Some(session_id) = parsed.session_id {
+                                                let mut guard = session_id_capture.lock().unwrap();
                                                 if guard.is_none() {
-                                                    *guard = Some(message.clone());
+                                                    *guard = Some(session_id);
                                                 }
                                             }
-                                            if matches!(event, AgentEvent::Thinking { .. }) {
-                                                sse_emitted_thinking.store(
-                                                    true,
-                                                    std::sync::atomic::Ordering::SeqCst,
-                                                );
+                                            if let Some(event) = parsed.event {
+                                                if let Ok(mut guard) = last_activity.lock() {
+                                                    *guard = std::time::Instant::now();
+                                                }
+                                                if let AgentEvent::Error { ref message, .. } = event
+                                                {
+                                                    let mut guard =
+                                                        sse_error_message.lock().unwrap();
+                                                    if guard.is_none() {
+                                                        *guard = Some(message.clone());
+                                                    }
+                                                }
+                                                if matches!(event, AgentEvent::Thinking { .. }) {
+                                                    sse_emitted_thinking.store(
+                                                        true,
+                                                        std::sync::atomic::Ordering::SeqCst,
+                                                    );
+                                                }
+                                                if matches!(event, AgentEvent::TextDelta { .. }) {
+                                                    let _ = text_output_tx.send(true);
+                                                    sse_emitted_text.store(
+                                                        true,
+                                                        std::sync::atomic::Ordering::SeqCst,
+                                                    );
+                                                }
+                                                let _ = events_tx.send(event);
                                             }
-                                            if matches!(event, AgentEvent::TextDelta { .. }) {
-                                                let _ = text_output_tx.send(true);
-                                                sse_emitted_text.store(
-                                                    true,
-                                                    std::sync::atomic::Ordering::SeqCst,
-                                                );
-                                            }
-                                            let _ = events_tx.send(event);
-                                        }
-                                        if parsed.message_complete {
-                                            saw_complete = true;
-                                            let _ = sse_complete_tx.send(true);
-                                            if sse_emitted_thinking
-                                                .load(std::sync::atomic::Ordering::SeqCst)
-                                                && !sse_done_sent
+                                            if parsed.message_complete {
+                                                saw_complete = true;
+                                                let _ = sse_complete_tx.send(true);
+                                                if sse_emitted_thinking
                                                     .load(std::sync::atomic::Ordering::SeqCst)
-                                            {
-                                                let _ = events_tx.send(AgentEvent::Thinking {
-                                                    content: String::new(),
-                                                    done: true,
-                                                    mission_id: Some(mission_id),
-                                                });
-                                                sse_done_sent.store(
-                                                    true,
-                                                    std::sync::atomic::Ordering::SeqCst,
-                                                );
+                                                    && !sse_done_sent
+                                                        .load(std::sync::atomic::Ordering::SeqCst)
+                                                {
+                                                    let _ = events_tx.send(AgentEvent::Thinking {
+                                                        content: String::new(),
+                                                        done: true,
+                                                        mission_id: Some(mission_id),
+                                                    });
+                                                    sse_done_sent.store(
+                                                        true,
+                                                        std::sync::atomic::Ordering::SeqCst,
+                                                    );
+                                                }
+                                                let _ = child.kill().await;
+                                                break;
                                             }
-                                            let _ = child.kill().await;
-                                            break;
                                         }
                                     }
+
+                                    current_event = None;
+                                    data_lines.clear();
+                                    continue;
                                 }
 
-                                current_event = None;
-                                data_lines.clear();
-                                continue;
-                            }
+                                if let Some(rest) = trimmed.strip_prefix("event:") {
+                                    current_event = Some(rest.trim_start().to_string());
+                                    continue;
+                                }
 
-                            if let Some(rest) = trimmed.strip_prefix("event:") {
-                                current_event = Some(rest.trim_start().to_string());
-                                continue;
+                                if let Some(rest) = trimmed.strip_prefix("data:") {
+                                    data_lines.push(rest.trim_start().to_string());
+                                    continue;
+                                }
                             }
-
-                            if let Some(rest) = trimmed.strip_prefix("data:") {
-                                data_lines.push(rest.trim_start().to_string());
-                                continue;
-                            }
+                            Err(_) => break,
                         }
-                        Err(_) => break,
                     }
-                }
 
-                let _ = child.kill().await;
-                if saw_complete {
-                    break;
+                    let _ = child.kill().await;
+                    if saw_complete {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-            }
-        }))
-    } else {
-        None
-    };
+            }))
+        } else {
+            None
+        };
 
-    // Spawn a task to read stderr (just log in JSON mode, events come on stdout)
-    let mission_id_clone = mission_id;
-    let stderr_error_capture = sse_error_message.clone();
-    let stderr_text_capture = stderr_text_buffer.clone();
-    let stderr_text_output_tx = text_output_tx.clone();
-    let stderr_handle = stderr.map(|stderr| {
+        // Spawn a task to read stderr (just log in JSON mode, events come on stdout)
+        let mission_id_clone = mission_id;
+        let stderr_error_capture = sse_error_message.clone();
+        let stderr_text_capture = stderr_text_buffer.clone();
+        let stderr_text_output_tx = text_output_tx.clone();
+        let stderr_rate_limit = rate_limit_detected.clone();
+        let stderr_handle = stderr.map(|stderr| {
         tokio::spawn(async move {
             let stderr_reader = BufReader::new(stderr);
             let mut stderr_lines = stderr_reader.lines();
             // Track the last message role seen in stderr so we only capture
             // assistant text parts (not user message echoes) into the buffer.
             let mut last_stderr_role = String::new();
+            // Track consecutive retry statuses to detect stuck retry loops.
+            let mut retry_count: u32 = 0;
             while let Ok(Some(line)) = stderr_lines.next_line().await {
                 let clean = line.trim().to_string();
                 if !clean.is_empty() {
@@ -6899,310 +7020,371 @@ pub async fn run_opencode_turn(
                             }
                         }
                     }
+
+                    // Detect retry loops: OpenCode emits "session.status: retry"
+                    // on stderr when the LLM API call fails and it retries.
+                    // After several consecutive retries without progress, surface
+                    // this as an error so the mission doesn't silently hang.
+                    if lower.contains("session.status: retry")
+                        || lower.contains("session.status:retry")
+                    {
+                        retry_count += 1;
+                        if retry_count >= 3 {
+                            tracing::warn!(
+                                mission_id = %mission_id_clone,
+                                retry_count = retry_count,
+                                "OpenCode stuck in retry loop — LLM API is likely returning errors (e.g. 429 rate limit)"
+                            );
+                            // Signal the main loop to kill the process early for faster recovery.
+                            stderr_rate_limit.store(true, std::sync::atomic::Ordering::SeqCst);
+                            let mut guard = stderr_error_capture.lock().unwrap();
+                            if guard.is_none() {
+                                *guard = Some(format!(
+                                    "LLM API request failed after {} retries (possible rate limit or API error). \
+                                     Check your API key and provider endpoint configuration.",
+                                    retry_count
+                                ));
+                            }
+                        }
+                    } else if lower.contains("session.status: busy")
+                        || lower.contains("session.status:busy")
+                    {
+                        // busy between retries is normal, don't reset
+                    } else if lower.contains("message.updated")
+                        || lower.contains("message.completed")
+                    {
+                        // Real progress — reset retry counter
+                        retry_count = 0;
+                    }
                 }
             }
         })
     });
 
-    // Process stdout output from oh-my-opencode
-    // Events come via SSE (when curl is available), stdout contains the assistant's text response.
-    let stdout_reader = BufReader::new(stdout);
-    let mut stdout_lines = stdout_reader.lines();
-    let mut state = OpencodeSseState::default();
+        // Process stdout output from oh-my-opencode
+        // Events come via SSE (when curl is available), stdout contains the assistant's text response.
+        let stdout_reader = BufReader::new(stdout);
+        let mut stdout_lines = stdout_reader.lines();
+        let mut state = OpencodeSseState::default();
 
-    let mut sse_complete_seen = false;
-    let mut sse_complete_at: Option<std::time::Instant> = None;
-    let mut text_output_at: Option<std::time::Instant> = None;
+        let mut sse_complete_seen = false;
+        let mut sse_complete_at: Option<std::time::Instant> = None;
+        let mut text_output_at: Option<std::time::Instant> = None;
+        let mut killed_by_idle_timeout = false;
 
-    loop {
-        tokio::select! {
-            _ = cancel.cancelled() => {
-                tracing::info!(mission_id = %mission_id, "OpenCode execution cancelled, killing process");
-                let _ = child.kill().await;
-                if let Some(handle) = stderr_handle {
-                    handle.abort();
+        loop {
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    tracing::info!(mission_id = %mission_id, "OpenCode execution cancelled, killing process");
+                    let _ = child.kill().await;
+                    if let Some(handle) = stderr_handle {
+                        handle.abort();
+                    }
+                    sse_cancel.cancel();
+                    if let Some(handle) = sse_handle {
+                        handle.abort();
+                    }
+                    return AgentResult::failure("Cancelled".to_string(), 0)
+                        .with_terminal_reason(TerminalReason::Cancelled);
                 }
-                sse_cancel.cancel();
-                if let Some(handle) = sse_handle {
-                    handle.abort();
-                }
-                return AgentResult::failure("Cancelled".to_string(), 0)
-                    .with_terminal_reason(TerminalReason::Cancelled);
-            }
-            changed = sse_complete_rx.changed() => {
-                if changed.is_ok() && *sse_complete_rx.borrow() && !sse_complete_seen {
-                    sse_complete_seen = true;
-                    sse_complete_at = Some(std::time::Instant::now());
-                }
-            }
-            changed = text_output_rx.changed() => {
-                if changed.is_ok() && *text_output_rx.borrow() {
-                    text_output_at = Some(std::time::Instant::now());
-                }
-            }
-            _ = tokio::time::sleep(std::time::Duration::from_millis(200)), if sse_complete_seen => {
-                if let Some(started) = sse_complete_at {
-                    if started.elapsed() >= std::time::Duration::from_secs(2) {
-                        tracing::info!(
-                            mission_id = %mission_id,
-                            "OpenCode completion observed; terminating lingering CLI process"
-                        );
-                        let _ = child.kill().await;
-                        break;
+                changed = sse_complete_rx.changed() => {
+                    if changed.is_ok() && *sse_complete_rx.borrow() && !sse_complete_seen {
+                        sse_complete_seen = true;
+                        sse_complete_at = Some(std::time::Instant::now());
                     }
                 }
-            }
-            _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {
-                if let Some(last_text) = text_output_at {
-                    if last_text.elapsed() >= std::time::Duration::from_secs(30) {
-                        tracing::info!(
-                            mission_id = %mission_id,
-                            "OpenCode output idle timeout reached; terminating CLI process"
-                        );
-                        let _ = child.kill().await;
-                        break;
+                changed = text_output_rx.changed() => {
+                    if changed.is_ok() && *text_output_rx.borrow() {
+                        text_output_at = Some(std::time::Instant::now());
                     }
                 }
-            }
-            line_result = stdout_lines.next_line() => {
-                match line_result {
-                    Ok(None) => {
-                        // EOF - process finished
-                        break;
-                    }
-                    Ok(Some(line)) => {
-                        let trimmed = line.trim();
-                        if trimmed.is_empty() {
-                            continue;
-                        }
-                        if let Ok(mut guard) = last_activity.lock() {
-                            *guard = std::time::Instant::now();
-                        }
-
-                        // Try to parse as JSON event
-                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                            let event_type = json.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                            tracing::debug!(
+                _ = tokio::time::sleep(std::time::Duration::from_millis(200)), if sse_complete_seen => {
+                    if let Some(started) = sse_complete_at {
+                        if started.elapsed() >= std::time::Duration::from_secs(2) {
+                            tracing::info!(
                                 mission_id = %mission_id,
-                                event_type = %event_type,
-                                "OpenCode JSON event"
+                                "OpenCode completion observed; terminating lingering CLI process"
                             );
+                            let _ = child.kill().await;
+                            break;
+                        }
+                    }
+                }
+                _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {
+                    // Early kill when stderr reader detects a rate-limit retry loop.
+                    // Don't wait the full 30s idle timeout — kill after ~15s for faster recovery.
+                    if rate_limit_detected.load(std::sync::atomic::Ordering::SeqCst) {
+                        let elapsed = text_output_at
+                            .map(|t| t.elapsed())
+                            .unwrap_or_else(|| std::time::Duration::from_secs(15));
+                        if elapsed >= std::time::Duration::from_secs(15) {
+                            tracing::info!(
+                                mission_id = %mission_id,
+                                "Rate-limit retry loop detected; terminating CLI process early"
+                            );
+                            killed_by_idle_timeout = true;
+                            let _ = child.kill().await;
+                            break;
+                        }
+                    }
+                    if let Some(last_text) = text_output_at {
+                        if last_text.elapsed() >= std::time::Duration::from_secs(30) {
+                            tracing::info!(
+                                mission_id = %mission_id,
+                                "OpenCode output idle timeout reached; terminating CLI process"
+                            );
+                            killed_by_idle_timeout = true;
+                            let _ = child.kill().await;
+                            break;
+                        }
+                    }
+                }
+                line_result = stdout_lines.next_line() => {
+                    match line_result {
+                        Ok(None) => {
+                            // EOF - process finished
+                            break;
+                        }
+                        Ok(Some(line)) => {
+                            let trimmed = line.trim();
+                            if trimmed.is_empty() {
+                                continue;
+                            }
+                            if let Ok(mut guard) = last_activity.lock() {
+                                *guard = std::time::Instant::now();
+                            }
 
-                            // Extract text content from message.part.updated for final result
-                            // Only capture assistant messages - skip user message echoes
-                            if event_type == "message.part.updated" {
-                                if let Some(props) = json.get("properties") {
-                                    if let Some(part) = props.get("part") {
-                                        let part_type = part.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                                        if part_type == "text" {
-                                            let msg_id = part.get("messageID")
-                                                .or_else(|| part.get("messageId"))
-                                                .or_else(|| part.get("message_id"))
-                                                .or_else(|| props.get("messageID"))
-                                                .or_else(|| props.get("messageId"))
-                                                .or_else(|| props.get("message_id"))
-                                                .and_then(|v| v.as_str());
-                                            let is_user = msg_id
-                                                .and_then(|id| state.message_roles.get(id))
-                                                .map(|role| role == "user")
-                                                .unwrap_or(false);
-                                            if !is_user {
-                                                if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
-                                                    final_result = text.to_string();
-                                                    let _ = text_output_tx.send(true);
+                            // Try to parse as JSON event
+                            if let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                                let event_type = json.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                                tracing::debug!(
+                                    mission_id = %mission_id,
+                                    event_type = %event_type,
+                                    "OpenCode JSON event"
+                                );
+
+                                // Extract text content from message.part.updated for final result
+                                // Only capture assistant messages - skip user message echoes
+                                if event_type == "message.part.updated" {
+                                    if let Some(props) = json.get("properties") {
+                                        if let Some(part) = props.get("part") {
+                                            let part_type = part.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                                            if part_type == "text" {
+                                                let msg_id = part.get("messageID")
+                                                    .or_else(|| part.get("messageId"))
+                                                    .or_else(|| part.get("message_id"))
+                                                    .or_else(|| props.get("messageID"))
+                                                    .or_else(|| props.get("messageId"))
+                                                    .or_else(|| props.get("message_id"))
+                                                    .and_then(|v| v.as_str());
+                                                let is_user = msg_id
+                                                    .and_then(|id| state.message_roles.get(id))
+                                                    .map(|role| role == "user")
+                                                    .unwrap_or(false);
+                                                if !is_user {
+                                                    if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                                                        final_result = text.to_string();
+                                                        let _ = text_output_tx.send(true);
+                                                    }
                                                 }
                                             }
                                         }
                                     }
                                 }
-                            }
 
-                            // Handle completion and error events from oh-my-opencode
-                            if event_type == "completion" {
-                                tracing::info!(mission_id = %mission_id, "OpenCode JSON completion event");
-                                let _ = sse_complete_tx.send(true);
-                            } else if event_type == "error" {
-                                had_error = true;
-                                if let Some(props) = json.get("properties") {
-                                    if let Some(err) = props.get("error").and_then(|e| e.as_str()) {
-                                        tracing::warn!(mission_id = %mission_id, error = %err, "OpenCode JSON error event");
-                                        if final_result.is_empty() {
-                                            final_result = err.to_string();
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Route through SSE event parser for thinking/tool events
-                            let current_session = session_id_capture.lock().unwrap().clone();
-                            if let Some(parsed) = parse_opencode_sse_event(
-                                trimmed,
-                                None,
-                                current_session.as_deref(),
-                                &mut state,
-                                mission_id,
-                            ) {
-                                if let Some(session_id) = parsed.session_id {
-                                    let mut guard = session_id_capture.lock().unwrap();
-                                    if guard.is_none() {
-                                        *guard = Some(session_id);
-                                    }
-                                }
-                                if let Some(event) = parsed.event {
-                                    if let Ok(mut guard) = last_activity.lock() {
-                                        *guard = std::time::Instant::now();
-                                    }
-                                    if let AgentEvent::Error { ref message, .. } = event {
-                                        let mut guard = sse_error_message.lock().unwrap();
-                                        if guard.is_none() {
-                                            *guard = Some(message.clone());
-                                        }
-                                    }
-                                    if matches!(event, AgentEvent::Thinking { .. }) {
-                                        sse_emitted_thinking.store(true, std::sync::atomic::Ordering::SeqCst);
-                                        // New thinking content arrived; reset done flag so this
-                                        // turn's thinking block will get its own done event.
-                                        sse_done_sent.store(false, std::sync::atomic::Ordering::SeqCst);
-                                    }
-                                    if matches!(event, AgentEvent::TextDelta { .. }) {
-                                        let _ = text_output_tx.send(true);
-                                        sse_emitted_text.store(true, std::sync::atomic::Ordering::SeqCst);
-                                    }
-                                    let _ = events_tx.send(event);
-                                }
-                                if parsed.message_complete {
+                                // Handle completion and error events from oh-my-opencode
+                                if event_type == "completion" {
+                                    tracing::info!(mission_id = %mission_id, "OpenCode JSON completion event");
                                     let _ = sse_complete_tx.send(true);
-                                    // Send thinking done signal if needed
-                                    if sse_emitted_thinking.load(std::sync::atomic::Ordering::SeqCst)
-                                        && !sse_done_sent.load(std::sync::atomic::Ordering::SeqCst)
-                                    {
-                                        let _ = events_tx.send(AgentEvent::Thinking {
-                                            content: String::new(),
-                                            done: true,
-                                            mission_id: Some(mission_id),
-                                        });
-                                        sse_done_sent.store(true, std::sync::atomic::Ordering::SeqCst);
-                                    }
-                                    // Clear per-turn thinking buffers so each model turn
-                                    // gets its own thinking block in the UI.
-                                    // Note: sse_done_sent stays true here to prevent the
-                                    // end-of-session fallback from emitting a duplicate done
-                                    // event. It is reset to false when new thinking content
-                                    // arrives for the next turn (see AgentEvent::Thinking above).
-                                    state.part_buffers.retain(|k, _| {
-                                        !k.starts_with("thinking:") && !k.starts_with("reasoning:")
-                                    });
-                                    state.last_emitted_thinking = None;
-                                }
-                            }
-                        } else {
-                            // Non-JSON line - this is the expected output format without --format json
-                            tracing::debug!(mission_id = %mission_id, line = %trimmed, "OpenCode stdout");
-
-                            // Detect error lines from CLI stdout
-                            let lower = trimmed.to_lowercase();
-                            if lower.contains("session ended with error")
-                                || lower.contains("session.error")
-                            {
-                                had_error = true;
-                                if let Some(pos) = trimmed.find(": ") {
-                                    let err_part = trimmed[pos + 2..].trim();
-                                    if !err_part.is_empty() {
-                                        let mut guard = sse_error_message.lock().unwrap();
-                                        if guard.is_none() {
-                                            *guard = Some(err_part.to_string());
+                                } else if event_type == "error" {
+                                    had_error = true;
+                                    if let Some(props) = json.get("properties") {
+                                        if let Some(err) = props.get("error").and_then(|e| e.as_str()) {
+                                            tracing::warn!(mission_id = %mission_id, error = %err, "OpenCode JSON error event");
+                                            if final_result.is_empty() {
+                                                final_result = err.to_string();
+                                            }
                                         }
                                     }
                                 }
-                            }
 
-                            final_result.push_str(trimmed);
-                            final_result.push('\n');
-                            let _ = text_output_tx.send(true);
+                                // Route through SSE event parser for thinking/tool events
+                                let current_session = session_id_capture.lock().unwrap().clone();
+                                if let Some(parsed) = parse_opencode_sse_event(
+                                    trimmed,
+                                    None,
+                                    current_session.as_deref(),
+                                    &mut state,
+                                    mission_id,
+                                ) {
+                                    if let Some(session_id) = parsed.session_id {
+                                        let mut guard = session_id_capture.lock().unwrap();
+                                        if guard.is_none() {
+                                            *guard = Some(session_id);
+                                        }
+                                    }
+                                    if let Some(event) = parsed.event {
+                                        if let Ok(mut guard) = last_activity.lock() {
+                                            *guard = std::time::Instant::now();
+                                        }
+                                        if let AgentEvent::Error { ref message, .. } = event {
+                                            let mut guard = sse_error_message.lock().unwrap();
+                                            if guard.is_none() {
+                                                *guard = Some(message.clone());
+                                            }
+                                        }
+                                        if matches!(event, AgentEvent::Thinking { .. }) {
+                                            sse_emitted_thinking.store(true, std::sync::atomic::Ordering::SeqCst);
+                                            // New thinking content arrived; reset done flag so this
+                                            // turn's thinking block will get its own done event.
+                                            sse_done_sent.store(false, std::sync::atomic::Ordering::SeqCst);
+                                        }
+                                        if matches!(event, AgentEvent::TextDelta { .. }) {
+                                            let _ = text_output_tx.send(true);
+                                            sse_emitted_text.store(true, std::sync::atomic::Ordering::SeqCst);
+                                        }
+                                        let _ = events_tx.send(event);
+                                    }
+                                    if parsed.message_complete {
+                                        let _ = sse_complete_tx.send(true);
+                                        // Send thinking done signal if needed
+                                        if sse_emitted_thinking.load(std::sync::atomic::Ordering::SeqCst)
+                                            && !sse_done_sent.load(std::sync::atomic::Ordering::SeqCst)
+                                        {
+                                            let _ = events_tx.send(AgentEvent::Thinking {
+                                                content: String::new(),
+                                                done: true,
+                                                mission_id: Some(mission_id),
+                                            });
+                                            sse_done_sent.store(true, std::sync::atomic::Ordering::SeqCst);
+                                        }
+                                        // Clear per-turn thinking buffers so each model turn
+                                        // gets its own thinking block in the UI.
+                                        // Note: sse_done_sent stays true here to prevent the
+                                        // end-of-session fallback from emitting a duplicate done
+                                        // event. It is reset to false when new thinking content
+                                        // arrives for the next turn (see AgentEvent::Thinking above).
+                                        state.part_buffers.retain(|k, _| {
+                                            !k.starts_with("thinking:") && !k.starts_with("reasoning:")
+                                        });
+                                        state.last_emitted_thinking = None;
+                                    }
+                                }
+                            } else {
+                                // Non-JSON line - this is the expected output format without --format json
+                                tracing::debug!(mission_id = %mission_id, line = %trimmed, "OpenCode stdout");
+
+                                // Detect error lines from CLI stdout
+                                let lower = trimmed.to_lowercase();
+                                if lower.contains("session ended with error")
+                                    || lower.contains("session.error")
+                                {
+                                    had_error = true;
+                                    if let Some(pos) = trimmed.find(": ") {
+                                        let err_part = trimmed[pos + 2..].trim();
+                                        if !err_part.is_empty() {
+                                            let mut guard = sse_error_message.lock().unwrap();
+                                            if guard.is_none() {
+                                                *guard = Some(err_part.to_string());
+                                            }
+                                        }
+                                    }
+                                }
+
+                                final_result.push_str(trimmed);
+                                final_result.push('\n');
+                                let _ = text_output_tx.send(true);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!("Error reading from OpenCode CLI stdout: {}", e);
+                            break;
                         }
                     }
-                    Err(e) => {
-                        tracing::error!("Error reading from OpenCode CLI stdout: {}", e);
-                        break;
-                    }
                 }
             }
         }
-    }
 
-    // Wait for stderr task to complete (avoid hangs if the process won't exit)
-    if let Some(mut handle) = stderr_handle {
-        tokio::select! {
-            _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {
-                handle.abort();
+        // Wait for stderr task to complete (avoid hangs if the process won't exit)
+        if let Some(mut handle) = stderr_handle {
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {
+                    handle.abort();
+                }
+                _ = &mut handle => {}
             }
-            _ = &mut handle => {}
         }
-    }
 
-    // Wait for child process to finish and clean up (with timeout to avoid hangs)
-    let exit_status =
-        match tokio::time::timeout(std::time::Duration::from_secs(10), child.wait()).await {
-            Ok(status) => status,
-            Err(_) => {
-                tracing::warn!(
-                    mission_id = %mission_id,
-                    "OpenCode CLI wait timed out; forcing shutdown"
-                );
-                let _ = child.kill().await;
+        // Wait for child process to finish and clean up (with timeout to avoid hangs)
+        let exit_status =
+            match tokio::time::timeout(std::time::Duration::from_secs(10), child.wait()).await {
+                Ok(status) => status,
+                Err(_) => {
+                    tracing::warn!(
+                        mission_id = %mission_id,
+                        "OpenCode CLI wait timed out; forcing shutdown"
+                    );
+                    let _ = child.kill().await;
+                    had_error = true;
+                    if final_result.is_empty() {
+                        final_result = "OpenCode CLI did not exit after completion".to_string();
+                    }
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "OpenCode CLI wait timed out",
+                    ))
+                }
+            };
+
+        sse_cancel.cancel();
+        if let Some(handle) = sse_handle {
+            handle.abort();
+        }
+
+        // Check exit status
+        if let Ok(status) = exit_status {
+            if !status.success() {
                 had_error = true;
                 if final_result.is_empty() {
-                    final_result = "OpenCode CLI did not exit after completion".to_string();
+                    final_result = format!("OpenCode CLI exited with status: {}", status);
                 }
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "OpenCode CLI wait timed out",
-                ))
             }
-        };
+        }
 
-    sse_cancel.cancel();
-    if let Some(handle) = sse_handle {
-        handle.abort();
-    }
-
-    // Check exit status
-    if let Ok(status) = exit_status {
-        if !status.success() {
+        // Surface SSE error messages (e.g. session.error) that were captured during streaming
+        if let Some(err_msg) = sse_error_message.lock().unwrap().clone() {
             had_error = true;
-            if final_result.is_empty() {
-                final_result = format!("OpenCode CLI exited with status: {}", status);
+            if opencode_output_needs_fallback(&final_result) {
+                final_result = err_msg;
             }
         }
-    }
 
-    // Surface SSE error messages (e.g. session.error) that were captured during streaming
-    if let Some(err_msg) = sse_error_message.lock().unwrap().clone() {
-        had_error = true;
+        let session_id = session_id_capture.lock().unwrap().clone();
+        let session_id = session_id.or_else(|| extract_opencode_session_id(&final_result));
+        let stored_message = session_id
+            .as_deref()
+            .and_then(|id| load_latest_opencode_assistant_message(workspace, id));
+
+        let mut recovered_from_stderr = false;
         if opencode_output_needs_fallback(&final_result) {
-            final_result = err_msg;
-        }
-    }
-
-    let session_id = session_id_capture.lock().unwrap().clone();
-    let session_id = session_id.or_else(|| extract_opencode_session_id(&final_result));
-    let stored_message = session_id
-        .as_deref()
-        .and_then(|id| load_latest_opencode_assistant_message(workspace, id));
-
-    let mut recovered_from_stderr = false;
-    if opencode_output_needs_fallback(&final_result) {
-        if let Some(session_id) = session_id.as_deref() {
-            if let Some(message) = stored_message.as_ref() {
-                let text = extract_text(&message.parts);
-                if !text.trim().is_empty() {
-                    tracing::info!(
-                        mission_id = %mission_id,
-                        session_id = %session_id,
-                        text_len = text.len(),
-                        "Recovered OpenCode assistant output from storage"
-                    );
-                    final_result = text;
+            if let Some(session_id) = session_id.as_deref() {
+                if let Some(message) = stored_message.as_ref() {
+                    let text = extract_text(&message.parts);
+                    if !text.trim().is_empty() {
+                        tracing::info!(
+                            mission_id = %mission_id,
+                            session_id = %session_id,
+                            text_len = text.len(),
+                            "Recovered OpenCode assistant output from storage"
+                        );
+                        final_result = text;
+                    } else {
+                        tracing::warn!(
+                            mission_id = %mission_id,
+                            session_id = %session_id,
+                            "OpenCode assistant output not found in storage"
+                        );
+                    }
                 } else {
                     tracing::warn!(
                         mission_id = %mission_id,
@@ -7213,105 +7395,176 @@ pub async fn run_opencode_turn(
             } else {
                 tracing::warn!(
                     mission_id = %mission_id,
-                    session_id = %session_id,
-                    "OpenCode assistant output not found in storage"
+                    "OpenCode output was empty/banner-only and no session id was detected"
                 );
             }
-        } else {
-            tracing::warn!(
-                mission_id = %mission_id,
-                "OpenCode output was empty/banner-only and no session id was detected"
-            );
         }
-    }
 
-    if opencode_output_needs_fallback(&final_result) {
-        if let Ok(buffer) = stderr_text_buffer.lock() {
-            if !buffer.trim().is_empty() {
-                final_result = buffer.clone();
-                recovered_from_stderr = true;
+        if opencode_output_needs_fallback(&final_result) {
+            if let Ok(buffer) = stderr_text_buffer.lock() {
+                if !buffer.trim().is_empty() {
+                    final_result = buffer.clone();
+                    recovered_from_stderr = true;
+                }
             }
         }
-    }
 
-    if recovered_from_stderr {
-        had_error = false;
-    }
-
-    if had_error && !final_result.trim().is_empty() && sse_error_message.lock().unwrap().is_none() {
-        had_error = false;
-    }
-
-    let mut emitted_thinking = false;
-    let sse_emitted = sse_emitted_thinking.load(std::sync::atomic::Ordering::SeqCst);
-    if let Some(message) = stored_message.as_ref() {
-        if let Some(model) = message.model.clone() {
-            model_used = Some(model);
+        if recovered_from_stderr {
+            had_error = false;
         }
-        if !sse_emitted {
-            if let Some(reasoning) = extract_reasoning(&message.parts) {
+
+        if had_error
+            && !final_result.trim().is_empty()
+            && sse_error_message.lock().unwrap().is_none()
+        {
+            had_error = false;
+        }
+
+        // If the process was killed by idle timeout and we still have only banner output,
+        // this is an error — the model never responded (e.g., API rate limit / retry loop).
+        // This check comes last so it cannot be overridden by the generic reset above.
+        // Capture idle-timeout-with-no-output BEFORE overwriting final_result for retry logic.
+        let idle_timeout_no_output =
+            killed_by_idle_timeout && opencode_output_needs_fallback(&final_result);
+        if idle_timeout_no_output {
+            had_error = true;
+            let err = sse_error_message
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(|| {
+                    "Model did not respond — the process was terminated after 30s of inactivity. \
+                 This usually indicates the LLM API is returning errors (e.g., 429 rate limit). \
+                 Check your API key and provider endpoint."
+                        .to_string()
+                });
+            final_result = err;
+        }
+
+        // Rate-limit retry: if this looks like a rate-limit failure and we have retries left,
+        // sleep with exponential backoff and try again.
+        if is_rate_limited_provider && attempt <= max_turn_retries {
+            let is_rate_limit_failure = idle_timeout_no_output
+                || rate_limit_detected.load(std::sync::atomic::Ordering::SeqCst)
+                || sse_error_message
+                    .lock()
+                    .unwrap()
+                    .as_deref()
+                    .map(|m| {
+                        let lower = m.to_lowercase();
+                        lower.contains("retries")
+                            || lower.contains("rate limit")
+                            || lower.contains("429")
+                    })
+                    .unwrap_or(false);
+
+            if is_rate_limit_failure {
+                let backoff_secs = 5u64 * 2u64.pow(attempt - 1); // 5s, 10s, ...
+                let msg = format!(
+                    "Rate limited by Z.AI API, retrying in {}s... (attempt {}/{})",
+                    backoff_secs,
+                    attempt,
+                    max_turn_retries + 1,
+                );
+                tracing::warn!(mission_id = %mission_id, "{}", msg);
+                let _ = events_tx.send(AgentEvent::TextDelta {
+                    content: format!("\n{}\n", msg),
+                    mission_id: Some(mission_id),
+                });
+
+                // Sleep with cancellation support
+                tokio::select! {
+                    _ = cancel.cancelled() => {
+                        return AgentResult::failure("Cancelled".to_string(), 0)
+                            .with_terminal_reason(TerminalReason::Cancelled);
+                    }
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)) => {}
+                }
+
+                continue 'attempt;
+            }
+        }
+
+        // No retry needed — fall through to result processing below.
+
+        let mut emitted_thinking = false;
+        let sse_emitted = sse_emitted_thinking.load(std::sync::atomic::Ordering::SeqCst);
+        if let Some(message) = stored_message.as_ref() {
+            if let Some(model) = message.model.clone() {
+                model_used = Some(model);
+            }
+            if !sse_emitted {
+                if let Some(reasoning) = extract_reasoning(&message.parts) {
+                    let _ = events_tx.send(AgentEvent::Thinking {
+                        content: reasoning,
+                        done: false,
+                        mission_id: Some(mission_id),
+                    });
+                    emitted_thinking = true;
+                }
+            }
+        }
+
+        if !sse_emitted && !emitted_thinking {
+            if let Some((thought, cleaned)) = extract_thought_line(&final_result) {
                 let _ = events_tx.send(AgentEvent::Thinking {
-                    content: reasoning,
+                    content: thought,
                     done: false,
                     mission_id: Some(mission_id),
                 });
                 emitted_thinking = true;
+                final_result = cleaned;
             }
         }
-    }
 
-    if !sse_emitted && !emitted_thinking {
-        if let Some((thought, cleaned)) = extract_thought_line(&final_result) {
+        if emitted_thinking
+            || (sse_emitted && !sse_done_sent.load(std::sync::atomic::Ordering::SeqCst))
+        {
             let _ = events_tx.send(AgentEvent::Thinking {
-                content: thought,
-                done: false,
+                content: String::new(),
+                done: true,
                 mission_id: Some(mission_id),
             });
-            emitted_thinking = true;
-            final_result = cleaned;
         }
-    }
 
-    if emitted_thinking || (sse_emitted && !sse_done_sent.load(std::sync::atomic::Ordering::SeqCst))
-    {
-        let _ = events_tx.send(AgentEvent::Thinking {
-            content: String::new(),
-            done: true,
-            mission_id: Some(mission_id),
-        });
-    }
+        if !sse_emitted_text.load(std::sync::atomic::Ordering::SeqCst)
+            && !final_result.trim().is_empty()
+        {
+            let _ = events_tx.send(AgentEvent::TextDelta {
+                content: final_result.clone(),
+                mission_id: Some(mission_id),
+            });
+        }
 
-    if !sse_emitted_text.load(std::sync::atomic::Ordering::SeqCst)
-        && !final_result.trim().is_empty()
-    {
-        let _ = events_tx.send(AgentEvent::TextDelta {
-            content: final_result.clone(),
-            mission_id: Some(mission_id),
-        });
-    }
+        if final_result.trim().is_empty() && !had_error {
+            had_error = true;
+            final_result = "OpenCode produced no output. Check CLI installation or authentication."
+                .to_string();
+        }
 
-    if final_result.trim().is_empty() && !had_error {
-        had_error = true;
-        final_result =
-            "OpenCode produced no output. Check CLI installation or authentication.".to_string();
-    }
+        tracing::info!(
+            mission_id = %mission_id,
+            had_error = had_error,
+            result_len = final_result.len(),
+            "OpenCode CLI execution completed"
+        );
 
-    tracing::info!(
-        mission_id = %mission_id,
-        had_error = had_error,
-        result_len = final_result.len(),
-        "OpenCode CLI execution completed"
-    );
-
-    let mut result = if had_error {
-        AgentResult::failure(final_result, 0).with_terminal_reason(TerminalReason::LlmError)
-    } else {
-        AgentResult::success(final_result, 0).with_terminal_reason(TerminalReason::Completed)
-    };
-    if let Some(model) = model_used {
-        result = result.with_model(model);
-    }
-    result
+        let mut result = if had_error {
+            // Use RateLimited terminal reason when rate limit was detected
+            let reason = if rate_limit_detected.load(std::sync::atomic::Ordering::SeqCst) {
+                TerminalReason::RateLimited
+            } else {
+                TerminalReason::LlmError
+            };
+            AgentResult::failure(final_result, 0).with_terminal_reason(reason)
+        } else {
+            AgentResult::success(final_result, 0).with_terminal_reason(TerminalReason::Completed)
+        };
+        if let Some(model) = model_used {
+            result = result.with_model(model);
+        }
+        return result;
+    } // end 'attempt loop
 }
 
 /// Execute a turn using Amp CLI backend.

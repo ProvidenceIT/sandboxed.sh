@@ -141,6 +141,8 @@ pub enum TerminalReason {
     InfiniteLoop,
     /// Hit maximum iterations limit
     MaxIterations,
+    /// Provider rate-limited all retry attempts
+    RateLimited,
 }
 
 /// Errors that can occur in agent operations.

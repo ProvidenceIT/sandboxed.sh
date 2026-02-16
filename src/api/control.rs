@@ -4628,6 +4628,7 @@ async fn control_actor_loop(
                                                     TerminalReason::Stalled => "stalled",
                                                     TerminalReason::InfiniteLoop => "infinite_loop",
                                                     TerminalReason::MaxIterations => "max_iterations",
+                                                    TerminalReason::RateLimited => "rate_limited",
                                                 });
                                                 if new_status == MissionStatus::Completed
                                                     && mission_has_active_automation(&mission_store, mission_id).await
@@ -4657,6 +4658,7 @@ async fn control_actor_loop(
                                                             Some(TerminalReason::Stalled) => Some("No progress detected".to_string()),
                                                             Some(TerminalReason::InfiniteLoop) => Some("Detected repetitive behavior".to_string()),
                                                             Some(TerminalReason::LlmError) => Some("Model error".to_string()),
+                                                            Some(TerminalReason::RateLimited) => Some("Provider rate limited".to_string()),
                                                             None if agent_result.success => None,
                                                             None => Some("Unexpected termination".to_string()),
                                                         };
