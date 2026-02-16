@@ -456,23 +456,31 @@ impl AIProviderStore {
         providers.get(&id).cloned()
     }
 
-    /// Get the default provider (first enabled, or first overall).
+    /// Get the default provider (first enabled default, or highest-priority enabled).
     pub async fn get_default(&self) -> Option<AIProvider> {
         let providers = self.providers.read().await;
         // Find the one marked as default
         if let Some(provider) = providers.values().find(|p| p.is_default && p.enabled) {
             return Some(provider.clone());
         }
-        // Fallback to first enabled
-        providers.values().find(|p| p.enabled).cloned()
+        // Fallback to highest-priority enabled
+        providers
+            .values()
+            .filter(|p| p.enabled)
+            .min_by_key(|p| p.priority)
+            .cloned()
     }
 
-    /// Get first enabled provider by type (for backwards compatibility).
+    /// Get highest-priority enabled provider by type.
+    ///
+    /// When multiple accounts exist for the same provider type, returns the one
+    /// with the lowest `priority` value (i.e. highest priority).
     pub async fn get_by_type(&self, provider_type: ProviderType) -> Option<AIProvider> {
         let providers = self.providers.read().await;
         providers
             .values()
-            .find(|p| p.provider_type == provider_type && p.enabled)
+            .filter(|p| p.provider_type == provider_type && p.enabled)
+            .min_by_key(|p| p.priority)
             .cloned()
     }
 

@@ -4009,6 +4009,23 @@ async fn create_provider(
 
     let provider_type = req.provider_type;
 
+    // label and priority are only supported for custom providers (stored in AIProviderStore).
+    // Standard providers are stored in OpenCode's config which doesn't support these fields.
+    if provider_type != ProviderType::Custom {
+        if req.label.is_some() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "label is only supported for custom providers".to_string(),
+            ));
+        }
+        if req.priority.is_some() && req.priority != Some(0) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "priority is only supported for custom providers".to_string(),
+            ));
+        }
+    }
+
     // For custom providers, store in AIProviderStore (ai_providers.json)
     // so that workspace preparation can read custom models and base URL
     if provider_type == ProviderType::Custom {
@@ -4170,6 +4187,22 @@ async fn update_provider(
     if let Some(Some(base_url)) = req.base_url.as_ref() {
         if url::Url::parse(base_url).is_err() {
             return Err((StatusCode::BAD_REQUEST, "Invalid URL format".to_string()));
+        }
+    }
+
+    // label and priority are only supported for custom providers
+    if provider_type != ProviderType::Custom {
+        if req.label.is_some() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "label is only supported for custom providers".to_string(),
+            ));
+        }
+        if req.priority.is_some() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "priority is only supported for custom providers".to_string(),
+            ));
         }
     }
 
