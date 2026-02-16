@@ -50,6 +50,11 @@ struct OpencodeSseParseResult {
     event: Option<AgentEvent>,
     message_complete: bool,
     session_id: Option<String>,
+    /// The SSE stream indicated the session became idle.  This is a weaker
+    /// signal than `message_complete` — it means OpenCode is no longer
+    /// processing, but not necessarily that a `response.completed` was sent
+    /// (common with GLM models that emit `response.incomplete` instead).
+    session_idle: bool,
 }
 
 fn extract_str<'a>(value: &'a serde_json::Value, keys: &[&str]) -> Option<&'a str> {
@@ -435,13 +440,13 @@ fn parse_opencode_sse_event(
             tracing::warn!(
                 mission_id = %mission_id,
                 event_data = ?props,
-                "response.incomplete received — response was truncated, not completing mission"
+                "response.incomplete received — treating as completion (common with GLM models)"
             );
-            // Don't set message_complete: the agent backend may send a follow-up
-            // response or retry. Don't emit AgentEvent::Error either, because
-            // downstream consumers (sse_error_message) would treat it as a terminal
-            // failure and override the outcome even if a later response.completed
-            // arrives successfully.
+            // GLM models from z.ai frequently emit response.incomplete as their
+            // terminal event without a subsequent response.completed.  Treat it
+            // the same as response.completed so the mission can finish.  If a
+            // retry does happen, it will produce a new response.completed.
+            message_complete = true;
             None
         }
         "response.output_item.added" => {
@@ -626,10 +631,27 @@ fn parse_opencode_sse_event(
         _ => None,
     };
 
+    // Detect session idle signals — oh-my-opencode emits these when the
+    // agent finishes all work.  This is critical for GLM models that may
+    // not emit response.completed.
+    let session_idle = match event_type {
+        "session.idle" => true,
+        "session.status" => {
+            // { "type": "session.status", "properties": { "type": "idle" } }
+            props
+                .get("type")
+                .or_else(|| props.get("status"))
+                .and_then(|v| v.as_str())
+                == Some("idle")
+        }
+        _ => false,
+    };
+
     Some(OpencodeSseParseResult {
         event,
         message_complete,
         session_id,
+        session_idle,
     })
 }
 
@@ -6713,6 +6735,7 @@ pub async fn run_opencode_turn(
     let sse_error_message: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let sse_cancel = CancellationToken::new();
     let (sse_complete_tx, mut sse_complete_rx) = tokio::sync::watch::channel(false);
+    let (sse_session_idle_tx, mut sse_session_idle_rx) = tokio::sync::watch::channel(false);
     let last_activity = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
     let (text_output_tx, mut text_output_rx) = tokio::sync::watch::channel(false);
 
@@ -6731,6 +6754,7 @@ pub async fn run_opencode_turn(
         let sse_error_message = sse_error_message.clone();
         let sse_cancel = sse_cancel.clone();
         let sse_complete_tx = sse_complete_tx.clone();
+        let sse_session_idle_tx = sse_session_idle_tx.clone();
         let last_activity = last_activity.clone();
         let text_output_tx = text_output_tx.clone();
         let events_tx = events_tx.clone();
@@ -6873,6 +6897,9 @@ pub async fn run_opencode_turn(
                                             let _ = child.kill().await;
                                             break;
                                         }
+                                        if parsed.session_idle {
+                                            let _ = sse_session_idle_tx.send(true);
+                                        }
                                     }
                                 }
 
@@ -6977,6 +7004,11 @@ pub async fn run_opencode_turn(
     let mut sse_complete_seen = false;
     let mut sse_complete_at: Option<std::time::Instant> = None;
     let mut text_output_at: Option<std::time::Instant> = None;
+    // Track session idle state — used as a fallback completion signal when
+    // response.completed is not emitted (common with GLM models).
+    let mut session_idle_seen = false;
+    let mut session_idle_at: Option<std::time::Instant> = None;
+    let mut had_meaningful_work = false;
 
     loop {
         tokio::select! {
@@ -6999,9 +7031,27 @@ pub async fn run_opencode_turn(
                     sse_complete_at = Some(std::time::Instant::now());
                 }
             }
+            changed = sse_session_idle_rx.changed() => {
+                if changed.is_ok() && *sse_session_idle_rx.borrow() {
+                    if !session_idle_seen {
+                        session_idle_seen = true;
+                        session_idle_at = Some(std::time::Instant::now());
+                        tracing::debug!(
+                            mission_id = %mission_id,
+                            had_meaningful_work = had_meaningful_work,
+                            "Session idle signal received from SSE"
+                        );
+                    }
+                }
+            }
             changed = text_output_rx.changed() => {
                 if changed.is_ok() && *text_output_rx.borrow() {
                     text_output_at = Some(std::time::Instant::now());
+                    had_meaningful_work = true;
+                    // Reset idle state — new activity means the session is
+                    // not truly idle yet.
+                    session_idle_seen = false;
+                    session_idle_at = None;
                 }
             }
             _ = tokio::time::sleep(std::time::Duration::from_millis(200)), if sse_complete_seen => {
@@ -7010,6 +7060,24 @@ pub async fn run_opencode_turn(
                         tracing::info!(
                             mission_id = %mission_id,
                             "OpenCode completion observed; terminating lingering CLI process"
+                        );
+                        let _ = child.kill().await;
+                        break;
+                    }
+                }
+            }
+            // Session idle grace period: if the session has been idle for 10s
+            // after meaningful work was produced, treat as completed.  This
+            // catches GLM models that emit response.incomplete without a
+            // subsequent response.completed.
+            _ = tokio::time::sleep(std::time::Duration::from_millis(500)), if session_idle_seen && !sse_complete_seen && (had_meaningful_work
+                || sse_emitted_thinking.load(std::sync::atomic::Ordering::SeqCst)
+                || sse_emitted_text.load(std::sync::atomic::Ordering::SeqCst)) => {
+                if let Some(idle_since) = session_idle_at {
+                    if idle_since.elapsed() >= std::time::Duration::from_secs(10) {
+                        tracing::info!(
+                            mission_id = %mission_id,
+                            "Session idle for 10s after meaningful work; treating as completion"
                         );
                         let _ = child.kill().await;
                         break;
@@ -7026,6 +7094,22 @@ pub async fn run_opencode_turn(
                         let _ = child.kill().await;
                         break;
                     }
+                }
+                // Global inactivity timeout: if nothing at all has happened
+                // for 120s (no SSE events, no stdout, no stderr), the process
+                // is likely stuck.  Kill it and let the fallback recovery
+                // logic read the result from OpenCode storage.
+                let inactive_too_long = last_activity
+                    .lock()
+                    .map(|g| g.elapsed() >= std::time::Duration::from_secs(120))
+                    .unwrap_or(false);
+                if inactive_too_long {
+                    tracing::warn!(
+                        mission_id = %mission_id,
+                        "Global inactivity timeout (120s); terminating stuck CLI process"
+                    );
+                    let _ = child.kill().await;
+                    break;
                 }
             }
             line_result = stdout_lines.next_line() => {
@@ -7157,6 +7241,9 @@ pub async fn run_opencode_turn(
                                         !k.starts_with("thinking:") && !k.starts_with("reasoning:")
                                     });
                                     state.last_emitted_thinking = None;
+                                }
+                                if parsed.session_idle {
+                                    let _ = sse_session_idle_tx.send(true);
                                 }
                             }
                         } else {

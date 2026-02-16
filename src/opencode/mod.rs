@@ -1283,6 +1283,36 @@ fn parse_sse_event(
             Some(OpenCodeEvent::Error { message })
         }
 
+        // Session idle signals — emitted when OpenCode finishes all work.
+        // Treat as completion so we don't hang when response.completed is
+        // not emitted (e.g. after response.incomplete from GLM models).
+        "session.idle" => {
+            tracing::info!(
+                session_id = %session_id,
+                "session.idle received — treating as message complete"
+            );
+            Some(OpenCodeEvent::MessageComplete {
+                session_id: session_id.to_string(),
+            })
+        }
+        "session.status" => {
+            let is_idle = props
+                .get("type")
+                .or_else(|| props.get("status"))
+                .and_then(|v| v.as_str())
+                == Some("idle");
+            if is_idle {
+                tracing::info!(
+                    session_id = %session_id,
+                    "session.status idle received — treating as message complete"
+                );
+                Some(OpenCodeEvent::MessageComplete {
+                    session_id: session_id.to_string(),
+                })
+            } else {
+                None
+            }
+        }
         _ => {
             // Log unknown event types to help debug which events OpenCode sends
             tracing::debug!(
