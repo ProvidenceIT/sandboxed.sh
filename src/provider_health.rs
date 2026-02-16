@@ -40,6 +40,7 @@ impl std::fmt::Display for CooldownReason {
             Self::Overloaded => write!(f, "overloaded"),
             Self::Timeout => write!(f, "timeout"),
             Self::ServerError => write!(f, "server_error"),
+            Self::AuthError => write!(f, "auth_error"),
         }
     }
 }
