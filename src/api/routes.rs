@@ -439,7 +439,9 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
             get(desktop_stream::desktop_stream_ws),
         )
         // WebSocket system monitoring uses subprotocol-based auth
-        .route("/api/monitoring/ws", get(monitoring::monitoring_ws));
+        .route("/api/monitoring/ws", get(monitoring::monitoring_ws))
+        // OpenAI-compatible proxy endpoint (no auth — internal use from workspaces)
+        .nest("/v1", proxy_api::routes());
 
     // File upload routes with increased body limit (10GB)
     let upload_route = Router::new()
@@ -637,8 +639,6 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         .nest("/api/ai/providers", ai_providers_api::routes())
         // Model routing (chains + health)
         .nest("/api/model-routing", model_routing_api::routes())
-        // OpenAI-compatible proxy endpoint
-        .nest("/v1", proxy_api::routes())
         // Secrets management endpoints
         .nest("/api/secrets", secrets_api::routes())
         // Global settings endpoints

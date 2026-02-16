@@ -4445,6 +4445,25 @@ fn ensure_opencode_provider_for_model(opencode_config_dir: &std::path::Path, mod
                 model_id: model_entry.clone()
             }
         })),
+        "builtin" => {
+            // Point at the local OpenAI-compatible proxy that handles model
+            // chain resolution and failover.  The proxy runs on the same host
+            // and is accessible from shared-network workspaces.
+            let port = std::env::var("PORT").unwrap_or_else(|_| "3000".to_string());
+            // The proxy doesn't require auth, but the AI-SDK adapter
+            // needs a non-empty apiKey to proceed.
+            Some(serde_json::json!({
+                "npm": "@ai-sdk/openai-compatible",
+                "name": "Builtin",
+                "models": {
+                    model_id: { "name": model_id }
+                },
+                "options": {
+                    "baseURL": format!("http://127.0.0.1:{}/v1", port),
+                    "apiKey": "builtin"
+                }
+            }))
+        }
         _ => None,
     };
 
