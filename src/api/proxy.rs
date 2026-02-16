@@ -327,7 +327,22 @@ async fn chat_completions(
             continue;
         }
 
-        // Success (or client error like 400/401 which we pass through)
+        // Auth errors (401/403) — bad credentials, try next account
+        if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+            tracing::warn!(
+                provider = %entry.provider_id,
+                account_id = %entry.account_id,
+                status = %status,
+                "Upstream auth error, trying next entry"
+            );
+            state
+                .health_tracker
+                .record_failure(entry.account_id, CooldownReason::AuthError, None)
+                .await;
+            continue;
+        }
+
+        // Success (or other client error like 400 which we pass through)
         state
             .health_tracker
             .record_success(entry.account_id)
@@ -345,11 +360,7 @@ async fn chat_completions(
                 "no-cache".parse().unwrap(),
             );
 
-            let byte_stream = upstream_resp.bytes_stream().map(|chunk| {
-                chunk.map_err(|e| {
-                    std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
-                })
-            });
+            let byte_stream = normalize_sse_stream(upstream_resp.bytes_stream());
 
             return (
                 status,
@@ -428,4 +439,106 @@ fn parse_retry_after(headers: &HeaderMap) -> Option<std::time::Duration> {
     } else {
         None
     }
+}
+
+/// Normalize an SSE byte stream to fix provider-specific quirks.
+///
+/// Processes `data:` lines, parses the JSON chunk, and strips fields that
+/// break OpenAI-compatible clients (e.g. MiniMax sending `delta.role: ""`).
+fn normalize_sse_stream(
+    inner: impl futures::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
+) -> impl futures::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send + 'static {
+    futures::stream::unfold(
+        (Box::pin(inner), Vec::<u8>::new()),
+        |(mut stream, mut buf)| async move {
+            loop {
+                // Check if we have a complete line in the buffer
+                if let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+                    let line = buf.drain(..=pos).collect::<Vec<u8>>();
+                    let normalized = normalize_sse_line(&line);
+                    return Some((
+                        Ok(bytes::Bytes::from(normalized)),
+                        (stream, buf),
+                    ));
+                }
+
+                // Need more data
+                match stream.next().await {
+                    Some(Ok(chunk)) => {
+                        buf.extend_from_slice(&chunk);
+                    }
+                    Some(Err(e)) => {
+                        return Some((
+                            Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())),
+                            (stream, buf),
+                        ));
+                    }
+                    None => {
+                        // Stream ended — flush remaining buffer
+                        if buf.is_empty() {
+                            return None;
+                        }
+                        let remaining = std::mem::take(&mut buf);
+                        let normalized = normalize_sse_line(&remaining);
+                        return Some((
+                            Ok(bytes::Bytes::from(normalized)),
+                            (stream, buf),
+                        ));
+                    }
+                }
+            }
+        },
+    )
+}
+
+/// Normalize a single SSE line.  If it's a `data: {...}` line, parse and
+/// fix known provider quirks; otherwise pass through unchanged.
+fn normalize_sse_line(line: &[u8]) -> Vec<u8> {
+    let trimmed = line.strip_suffix(b"\r\n").or_else(|| line.strip_suffix(b"\n")).unwrap_or(line);
+    let data_prefix = b"data: ";
+
+    if !trimmed.starts_with(data_prefix) {
+        return line.to_vec();
+    }
+
+    let json_bytes = &trimmed[data_prefix.len()..];
+
+    // "data: [DONE]" — pass through
+    let json_trimmed: &[u8] = {
+        let s = std::str::from_utf8(json_bytes).unwrap_or("");
+        s.trim().as_bytes()
+    };
+    if json_trimmed == b"[DONE]" {
+        return line.to_vec();
+    }
+
+    let mut chunk: serde_json::Value = match serde_json::from_slice(json_bytes) {
+        Ok(v) => v,
+        Err(_) => return line.to_vec(), // not valid JSON, pass through
+    };
+
+    let mut modified = false;
+
+    // Fix MiniMax: strip empty `delta.role` field
+    if let Some(choices) = chunk.get_mut("choices").and_then(|v| v.as_array_mut()) {
+        for choice in choices {
+            if let Some(delta) = choice.get_mut("delta").and_then(|v| v.as_object_mut()) {
+                if delta.get("role").and_then(|v| v.as_str()) == Some("") {
+                    delta.remove("role");
+                    modified = true;
+                }
+            }
+        }
+    }
+
+    if !modified {
+        return line.to_vec();
+    }
+
+    // Re-serialize and preserve the original line ending
+    let suffix = if line.ends_with(b"\r\n") { &b"\r\n"[..] } else if line.ends_with(b"\n") { &b"\n"[..] } else { &b""[..] };
+    let mut out = Vec::from(&b"data: "[..]);
+    let _ = serde_json::to_writer(&mut out, &chunk);
+    out.extend_from_slice(suffix);
+    out
 }

@@ -29,6 +29,8 @@ pub enum CooldownReason {
     Timeout,
     /// Server error (5xx other than 529)
     ServerError,
+    /// Authentication/authorization error (401/403)
+    AuthError,
 }
 
 impl std::fmt::Display for CooldownReason {
