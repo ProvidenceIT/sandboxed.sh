@@ -201,23 +201,31 @@ async fn chat_completions(
     let is_stream = req.stream.unwrap_or(false);
     let requested_model = req.model.clone();
 
-    // 2. Check if the model name maps to a chain ID
-    //    Convention: chain models start with "builtin/" or match a chain ID directly
+    // 2. Check if the model name maps to a chain ID.
+    //    The @ai-sdk/openai-compatible adapter strips the provider prefix, so
+    //    a model override "builtin/smart" arrives as just "smart".  We try:
+    //      1. Exact match (e.g. "builtin/smart")
+    //      2. "builtin/{model}" prefix (e.g. "smart" → "builtin/smart")
+    //      3. Default chain fallback
     let chain_id = if state.chain_store.get(&requested_model).await.is_some() {
         requested_model.clone()
     } else {
-        // Not a chain — check for default chain
-        match state.chain_store.get_default().await {
-            Some(chain) => chain.id,
-            None => {
-                return error_response(
-                    StatusCode::BAD_REQUEST,
-                    format!(
-                        "Model '{}' is not a known chain. Available chains can be listed at /api/model-routing/chains",
-                        requested_model
-                    ),
-                    "model_not_found",
-                );
+        let prefixed = format!("builtin/{}", requested_model);
+        if state.chain_store.get(&prefixed).await.is_some() {
+            prefixed
+        } else {
+            match state.chain_store.get_default().await {
+                Some(chain) => chain.id,
+                None => {
+                    return error_response(
+                        StatusCode::BAD_REQUEST,
+                        format!(
+                            "Model '{}' is not a known chain. Available chains can be listed at /api/model-routing/chains",
+                            requested_model
+                        ),
+                        "model_not_found",
+                    );
+                }
             }
         }
     };
