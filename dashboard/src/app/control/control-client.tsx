@@ -281,7 +281,7 @@ function parseQuestionArgs(args: unknown): QuestionInfo[] {
             }))
             .filter((opt) => opt.label.length > 0)
         : [],
-      multiple: Boolean(entry["multiple"]),
+      multiple: Boolean(entry["multiple"] ?? entry["multiSelect"]),
     }))
     .filter((q) => (q.question?.length ?? 0) > 0);
 }
@@ -2808,7 +2808,7 @@ export default function ControlClient() {
       items.some(
         (item) =>
           item.kind === "tool" &&
-          item.name === "question" &&
+          (item.name === "question" || item.name === "AskUserQuestion") &&
           item.result === undefined
       ),
     [items]
@@ -3510,7 +3510,7 @@ export default function ControlClient() {
           finalizePendingThinking(timestamp);
           const toolCallId = event.tool_call_id || `unknown-${event.id}`;
           const name = event.tool_name || "unknown";
-          const isUiTool = name.startsWith("ui_") || name === "question";
+          const isUiTool = name.startsWith("ui_") || name === "question" || name === "AskUserQuestion";
           // Parse args from content (stored as JSON string)
           let args: unknown = undefined;
           try {
@@ -4922,7 +4922,7 @@ export default function ControlClient() {
 
       if (event.type === "tool_call" && isRecord(data)) {
         const name = String(data["name"] ?? "");
-        const isUiTool = name.startsWith("ui_") || name === "question";
+        const isUiTool = name.startsWith("ui_") || name === "question" || name === "AskUserQuestion";
         const toolCallId = String(data["tool_call_id"] ?? "");
 
         setItems((prev) => {
@@ -6465,7 +6465,7 @@ export default function ControlClient() {
                 if (item.kind === "tool") {
                   // UI tools get special interactive rendering
                   if (item.isUiTool) {
-                    if (item.name === "question") {
+                    if (item.name === "question" || item.name === "AskUserQuestion") {
                       return (
                         <QuestionToolItem
                           key={item.id}

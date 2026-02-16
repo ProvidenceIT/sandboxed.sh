@@ -191,7 +191,7 @@ impl OpenCodeClient {
             let mut event_count = 0u64;
             let mut sse_state = SseState::default();
 
-            tracing::warn!(session_id = %session_id_clone, url = %event_url, "Starting SSE consumer with subprocess curl");
+            tracing::info!(session_id = %session_id_clone, url = %event_url, "Starting SSE consumer with subprocess curl");
 
             // Use tokio::process to spawn curl for SSE
             let mut child = match tokio::process::Command::new("curl")
@@ -229,7 +229,7 @@ impl OpenCodeClient {
             let mut current_event: Option<String> = None;
             let mut data_lines: Vec<String> = Vec::new();
 
-            tracing::warn!(session_id = %session_id_clone, "SSE curl process started, reading lines");
+            tracing::info!(session_id = %session_id_clone, "SSE curl process started, reading lines");
 
             // No timeout - we let OpenCode handle all timeouts internally.
             // The SSE stream will run until OpenCode sends MessageComplete or closes the connection.
@@ -320,7 +320,7 @@ impl OpenCodeClient {
         let session_id_for_message = session_id.clone();
         let message_handle = tokio::spawn(async move {
             // Delay to ensure SSE subscription is ready and connection is established
-            tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
             tracing::debug!(session_id = %session_id_for_message, "Sending HTTP POST to OpenCode");
             let start = std::time::Instant::now();
@@ -832,8 +832,11 @@ fn extract_str<'a>(value: &'a serde_json::Value, keys: &[&str]) -> Option<&'a st
 }
 
 fn extract_part_text<'a>(part: &'a serde_json::Value, part_type: &str) -> Option<&'a str> {
-    if part_type == "thinking" {
-        extract_str(part, &["thinking", "text", "content"])
+    if matches!(
+        part_type,
+        "thinking" | "reasoning" | "step-start" | "step-finish"
+    ) {
+        extract_str(part, &["thinking", "reasoning", "text", "content"])
     } else {
         extract_str(part, &["text", "content", "output_text"])
     }
@@ -855,7 +858,14 @@ fn handle_part_update(props: &serde_json::Value, state: &mut SseState) -> Option
         return handle_tool_part_update(part, state);
     }
 
-    if !matches!(part_type, "text" | "output_text" | "reasoning" | "thinking") {
+    if !matches!(
+        part_type,
+        "text" | "output_text" | "reasoning" | "thinking" | "step-start" | "step-finish"
+    ) {
+        tracing::debug!(
+            part_type = %part_type,
+            "Unhandled part type in handle_part_update"
+        );
         return None;
     }
 
@@ -898,7 +908,10 @@ fn handle_part_update(props: &serde_json::Value, state: &mut SseState) -> Option
         return None;
     }
 
-    if matches!(part_type, "reasoning" | "thinking") {
+    if matches!(
+        part_type,
+        "reasoning" | "thinking" | "step-start" | "step-finish"
+    ) {
         // Skip if content is identical to last emitted thinking
         if state.last_emitted_thinking.as_ref() == Some(&content) {
             tracing::debug!(
@@ -1081,11 +1094,9 @@ fn parse_sse_event(
         .cloned()
         .unwrap_or_else(|| json.clone());
 
-    // Log all event types for debugging
-    tracing::warn!(
+    tracing::debug!(
         event_type = %event_type,
         session_id = %session_id,
-        props_keys = ?props.as_object().map(|o| o.keys().collect::<Vec<_>>()),
         "OpenCode SSE event received"
     );
 
@@ -1096,20 +1107,13 @@ fn parse_sse_event(
         .or_else(|| props.get("part").and_then(|v| v.get("sessionID")))
         .and_then(|v| v.as_str());
 
-    tracing::warn!(
-        event_session_id = ?event_session_id,
-        our_session_id = %session_id,
-        event_type = %event_type,
-        "Checking session ID filter"
-    );
-
     if let Some(event_session_id) = event_session_id {
         if event_session_id != session_id {
-            tracing::warn!(
+            tracing::debug!(
                 event_session_id = %event_session_id,
                 our_session_id = %session_id,
                 event_type = %event_type,
-                "SKIPPING event - session ID mismatch"
+                "Skipping event - session ID mismatch"
             );
             return None;
         }
@@ -1279,6 +1283,36 @@ fn parse_sse_event(
             Some(OpenCodeEvent::Error { message })
         }
 
+        // Session idle signals — emitted when OpenCode finishes all work.
+        // Treat as completion so we don't hang when response.completed is
+        // not emitted (e.g. after response.incomplete from GLM models).
+        "session.idle" => {
+            tracing::info!(
+                session_id = %session_id,
+                "session.idle received — treating as message complete"
+            );
+            Some(OpenCodeEvent::MessageComplete {
+                session_id: session_id.to_string(),
+            })
+        }
+        "session.status" => {
+            let is_idle = props
+                .get("type")
+                .or_else(|| props.get("status"))
+                .and_then(|v| v.as_str())
+                == Some("idle");
+            if is_idle {
+                tracing::info!(
+                    session_id = %session_id,
+                    "session.status idle received — treating as message complete"
+                );
+                Some(OpenCodeEvent::MessageComplete {
+                    session_id: session_id.to_string(),
+                })
+            } else {
+                None
+            }
+        }
         _ => {
             // Log unknown event types to help debug which events OpenCode sends
             tracing::debug!(
