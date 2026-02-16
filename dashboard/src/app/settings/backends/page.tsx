@@ -215,7 +215,7 @@ export default function BackendsPage() {
 
   return (
     <div className="flex-1 flex flex-col items-center p-6 overflow-auto">
-      <div className="w-full max-w-xl">
+      <div className="w-full max-w-xl space-y-6">
         {/* Header */}
         <div className="mb-8">
           <h1 className="text-xl font-semibold text-white">Backends</h1>

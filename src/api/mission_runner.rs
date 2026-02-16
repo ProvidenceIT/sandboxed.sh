@@ -95,6 +95,43 @@ fn extract_part_text<'a>(part: &'a serde_json::Value, part_type: &str) -> Option
     }
 }
 
+/// Strip `<think>...</think>` tags from text output.
+/// Some models (e.g. Minimax, DeepSeek) emit internal reasoning inside inline
+/// `<think>` tags that should not be shown in the text output.
+fn strip_think_tags(text: &str) -> String {
+    let lower = text.to_lowercase();
+    if !lower.contains("<think>") {
+        return text.to_string();
+    }
+
+    let mut result = String::new();
+    let mut pos = 0;
+
+    while pos < text.len() {
+        if let Some(rel_start) = lower[pos..].find("<think>") {
+            let abs_start = pos + rel_start;
+            result.push_str(&text[pos..abs_start]);
+
+            let after_open = abs_start + 7; // len("<think>")
+            if after_open <= text.len() {
+                if let Some(rel_close) = lower[after_open..].find("</think>") {
+                    pos = after_open + rel_close + 8; // len("</think>")
+                } else {
+                    // Unclosed <think> — suppress remaining content until tag closes
+                    break;
+                }
+            } else {
+                break;
+            }
+        } else {
+            result.push_str(&text[pos..]);
+            break;
+        }
+    }
+
+    result
+}
+
 /// Prefixes that indicate a thought/reasoning line
 const THOUGHT_PREFIXES: &[&str] = &["thought:", "thoughts:", "thinking:"];
 
@@ -187,43 +224,6 @@ fn strip_opencode_status_lines(text: &str) -> String {
         .join("\n")
         .trim()
         .to_string()
-}
-
-/// Strip `<think>...</think>` tags from text output.
-/// Some models (e.g. Minimax, DeepSeek) emit internal reasoning inside inline
-/// `<think>` tags that should not be shown in the text output.
-fn strip_think_tags(text: &str) -> String {
-    let lower = text.to_lowercase();
-    if !lower.contains("<think>") {
-        return text.to_string();
-    }
-
-    let mut result = String::new();
-    let mut pos = 0;
-
-    while pos < text.len() {
-        if let Some(rel_start) = lower[pos..].find("<think>") {
-            let abs_start = pos + rel_start;
-            result.push_str(&text[pos..abs_start]);
-
-            let after_open = abs_start + 7; // len("<think>")
-            if after_open <= text.len() {
-                if let Some(rel_close) = lower[after_open..].find("</think>") {
-                    pos = after_open + rel_close + 8; // len("</think>")
-                } else {
-                    // Unclosed <think> — suppress remaining content until tag closes
-                    break;
-                }
-            } else {
-                break;
-            }
-        } else {
-            result.push_str(&text[pos..]);
-            break;
-        }
-    }
-
-    result
 }
 
 fn handle_tool_part_update(
@@ -6891,12 +6891,7 @@ pub async fn run_opencode_turn(
         install_opencode_serve_port_wrapper(&mut env, workspace, &opencode_port);
     }
 
-    // Rate-limit retry configuration
-    let max_turn_retries: u32 = std::env::var("ZAI_MAX_TURN_RETRIES")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(2);
-    let is_rate_limited_provider = provider_hint.as_deref() == Some("zai");
+    cleanup_opencode_listeners(&workspace_exec, work_dir, Some(&opencode_port)).await;
 
     // Use WorkspaceExec to spawn the CLI in the correct workspace context
     let mut child = match workspace_exec
@@ -6935,6 +6930,7 @@ pub async fn run_opencode_turn(
     let sse_emitted_text = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let sse_done_sent = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let sse_error_message: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let rate_limit_detected = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let sse_cancel = CancellationToken::new();
     let (sse_complete_tx, mut sse_complete_rx) = tokio::sync::watch::channel(false);
     let (sse_session_idle_tx, mut sse_session_idle_rx) = tokio::sync::watch::channel(false);
@@ -6975,7 +6971,6 @@ pub async fn run_opencode_turn(
                 opencode_port,
                 urlencoding::encode(&work_dir_arg)
             );
-        }
 
             let mut attempts = 0u32;
             loop {
@@ -6987,33 +6982,19 @@ pub async fn run_opencode_turn(
                 }
                 attempts += 1;
 
-        // Use WorkspaceExec to spawn the CLI in the correct workspace context
-        let mut child = match workspace_exec
-            .spawn_streaming(work_dir, &cli_runner, &args, env.clone())
-            .await
-        {
-            Ok(child) => child,
-            Err(e) => {
-                let err_msg = format!("Failed to start OpenCode CLI: {}", e);
-                tracing::error!("{}", err_msg);
-                return AgentResult::failure(err_msg, 0)
-                    .with_terminal_reason(TerminalReason::LlmError);
-            }
-        };
+                let args = vec![
+                    "-N".to_string(),
+                    "-s".to_string(),
+                    "-H".to_string(),
+                    "Accept: text/event-stream".to_string(),
+                    "-H".to_string(),
+                    "Cache-Control: no-cache".to_string(),
+                    event_url.clone(),
+                ];
 
-        // Get stdout and stderr for reading output
-        // oh-my-opencode run writes:
-        // - stdout: assistant text output (the actual response)
-        // - stderr: event logs (tool calls, results, session status)
-        let stdout = match child.stdout.take() {
-            Some(stdout) => stdout,
-            None => {
-                let err_msg = "Failed to capture OpenCode stdout";
-                tracing::error!("{}", err_msg);
-                return AgentResult::failure(err_msg.to_string(), 0)
-                    .with_terminal_reason(TerminalReason::LlmError);
-            }
-        };
+                let child = workspace_exec
+                    .spawn_streaming(&work_dir, "curl", &args, HashMap::new())
+                    .await;
 
                 // Exponential backoff: 50ms, 100ms, 200ms, 400ms, ...
                 let backoff_ms = 50u64 * (1u64 << (attempts - 1).min(6));
@@ -7035,162 +7016,86 @@ pub async fn run_opencode_turn(
                     }
                 };
 
-        // oh-my-opencode doesn't support --format json, so use SSE curl for events.
-        let use_json_stdout = false;
-        let sse_handle = if !use_json_stdout
-            && command_available(&workspace_exec, work_dir, "curl").await
-        {
-            let workspace_exec = workspace_exec.clone();
-            let work_dir = work_dir.to_path_buf();
-            let work_dir_arg = work_dir_arg.clone();
-            let session_id_capture = session_id_capture.clone();
-            let sse_emitted_thinking = sse_emitted_thinking.clone();
-            let sse_emitted_text = sse_emitted_text.clone();
-            let sse_done_sent = sse_done_sent.clone();
-            let sse_error_message = sse_error_message.clone();
-            let sse_cancel = sse_cancel.clone();
-            let sse_complete_tx = sse_complete_tx.clone();
-            let last_activity = last_activity.clone();
-            let text_output_tx = text_output_tx.clone();
-            let events_tx = events_tx.clone();
-            let opencode_port = opencode_port.clone();
-            let sse_host = std::env::var("SANDBOXED_SH_OPENCODE_SERVER_HOSTNAME")
-                .ok()
-                .filter(|v| !v.trim().is_empty())
-                .unwrap_or_else(|| "127.0.0.1".to_string());
+                let mut reader = BufReader::new(stdout);
+                let mut line = String::new();
+                let mut current_event: Option<String> = None;
+                let mut data_lines: Vec<String> = Vec::new();
+                let mut state = OpencodeSseState::default();
+                let mut saw_complete = false;
 
-            Some(tokio::spawn(async move {
-                let event_url = format!(
-                    "http://{}:{}/event?directory={}",
-                    sse_host,
-                    opencode_port,
-                    urlencoding::encode(&work_dir_arg)
-                );
-
-                let mut attempts = 0u32;
                 loop {
                     if sse_cancel.is_cancelled() {
-                        break;
+                        let _ = child.kill().await;
+                        return;
                     }
-                    if attempts > 5 {
-                        break;
-                    }
-                    attempts += 1;
-
-                    let args = vec![
-                        "-N".to_string(),
-                        "-s".to_string(),
-                        "-H".to_string(),
-                        "Accept: text/event-stream".to_string(),
-                        "-H".to_string(),
-                        "Cache-Control: no-cache".to_string(),
-                        event_url.clone(),
-                    ];
-
-                    let child = workspace_exec
-                        .spawn_streaming(&work_dir, "curl", &args, HashMap::new())
-                        .await;
-
-                    let mut child = match child {
-                        Ok(child) => child,
-                        Err(_) => {
-                            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-                            continue;
-                        }
-                    };
-
-                    let stdout = match child.stdout.take() {
-                        Some(stdout) => stdout,
-                        None => {
-                            let _ = child.kill().await;
-                            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-                            continue;
-                        }
-                    };
-
-                    let mut reader = BufReader::new(stdout);
-                    let mut line = String::new();
-                    let mut current_event: Option<String> = None;
-                    let mut data_lines: Vec<String> = Vec::new();
-                    let mut state = OpencodeSseState::default();
-                    let mut saw_complete = false;
-
-                    loop {
-                        if sse_cancel.is_cancelled() {
-                            let _ = child.kill().await;
-                            return;
-                        }
-                        line.clear();
-                        match reader.read_line(&mut line).await {
-                            Ok(0) => break,
-                            Ok(_) => {
-                                let trimmed = line.trim_end();
-                                if trimmed.is_empty() {
-                                    if !data_lines.is_empty() {
-                                        let data = data_lines.join("\n");
-                                        let current_session =
-                                            session_id_capture.lock().unwrap().clone();
-                                        if let Some(parsed) = parse_opencode_sse_event(
-                                            &data,
-                                            current_event.as_deref(),
-                                            current_session.as_deref(),
-                                            &mut state,
-                                            mission_id,
-                                        ) {
-                                            if let Some(session_id) = parsed.session_id {
-                                                let mut guard = session_id_capture.lock().unwrap();
+                    line.clear();
+                    match reader.read_line(&mut line).await {
+                        Ok(0) => break,
+                        Ok(_) => {
+                            let trimmed = line.trim_end();
+                            if trimmed.is_empty() {
+                                if !data_lines.is_empty() {
+                                    let data = data_lines.join("\n");
+                                    let current_session =
+                                        session_id_capture.lock().unwrap().clone();
+                                    if let Some(parsed) = parse_opencode_sse_event(
+                                        &data,
+                                        current_event.as_deref(),
+                                        current_session.as_deref(),
+                                        &mut state,
+                                        mission_id,
+                                    ) {
+                                        if let Some(session_id) = parsed.session_id {
+                                            let mut guard = session_id_capture.lock().unwrap();
+                                            if guard.is_none() {
+                                                *guard = Some(session_id);
+                                            }
+                                        }
+                                        if let Some(event) = parsed.event {
+                                            if let Ok(mut guard) = last_activity.lock() {
+                                                *guard = std::time::Instant::now();
+                                            }
+                                            if let AgentEvent::Error { ref message, .. } = event {
+                                                let mut guard = sse_error_message.lock().unwrap();
                                                 if guard.is_none() {
-                                                    *guard = Some(session_id);
+                                                    *guard = Some(message.clone());
                                                 }
                                             }
-                                            if let Some(event) = parsed.event {
-                                                if let Ok(mut guard) = last_activity.lock() {
-                                                    *guard = std::time::Instant::now();
-                                                }
-                                                if let AgentEvent::Error { ref message, .. } = event
-                                                {
-                                                    let mut guard =
-                                                        sse_error_message.lock().unwrap();
-                                                    if guard.is_none() {
-                                                        *guard = Some(message.clone());
-                                                    }
-                                                }
-                                                if matches!(event, AgentEvent::Thinking { .. }) {
-                                                    sse_emitted_thinking.store(
-                                                        true,
-                                                        std::sync::atomic::Ordering::SeqCst,
-                                                    );
-                                                }
-                                                if matches!(event, AgentEvent::TextDelta { .. }) {
-                                                    let _ = text_output_tx.send(true);
-                                                    sse_emitted_text.store(
-                                                        true,
-                                                        std::sync::atomic::Ordering::SeqCst,
-                                                    );
-                                                }
-                                                let _ = events_tx.send(event);
+                                            if matches!(event, AgentEvent::Thinking { .. }) {
+                                                sse_emitted_thinking.store(
+                                                    true,
+                                                    std::sync::atomic::Ordering::SeqCst,
+                                                );
                                             }
-                                            if parsed.message_complete {
-                                                saw_complete = true;
-                                                let _ = sse_complete_tx.send(true);
-                                                if sse_emitted_thinking
+                                            if matches!(event, AgentEvent::TextDelta { .. }) {
+                                                let _ = text_output_tx.send(true);
+                                                sse_emitted_text.store(
+                                                    true,
+                                                    std::sync::atomic::Ordering::SeqCst,
+                                                );
+                                            }
+                                            let _ = events_tx.send(event);
+                                        }
+                                        if parsed.message_complete {
+                                            saw_complete = true;
+                                            let _ = sse_complete_tx.send(true);
+                                            if sse_emitted_thinking
+                                                .load(std::sync::atomic::Ordering::SeqCst)
+                                                && !sse_done_sent
                                                     .load(std::sync::atomic::Ordering::SeqCst)
-                                                    && !sse_done_sent
-                                                        .load(std::sync::atomic::Ordering::SeqCst)
-                                                {
-                                                    let _ = events_tx.send(AgentEvent::Thinking {
-                                                        content: String::new(),
-                                                        done: true,
-                                                        mission_id: Some(mission_id),
-                                                    });
-                                                    sse_done_sent.store(
-                                                        true,
-                                                        std::sync::atomic::Ordering::SeqCst,
-                                                    );
-                                                }
-                                                let _ = child.kill().await;
-                                                break;
+                                            {
+                                                let _ = events_tx.send(AgentEvent::Thinking {
+                                                    content: String::new(),
+                                                    done: true,
+                                                    mission_id: Some(mission_id),
+                                                });
+                                                sse_done_sent.store(
+                                                    true,
+                                                    std::sync::atomic::Ordering::SeqCst,
+                                                );
                                             }
+                                            let _ = child.kill().await;
+                                            break;
                                         }
                                         if parsed.session_idle {
                                             let _ = sse_session_idle_tx.send(true);
@@ -7199,31 +7104,30 @@ pub async fn run_opencode_turn(
                                             let _ = sse_retry_tx.send_modify(|v| *v += 1);
                                         }
                                     }
-
-                                    current_event = None;
-                                    data_lines.clear();
-                                    continue;
                                 }
 
-                                if let Some(rest) = trimmed.strip_prefix("event:") {
-                                    current_event = Some(rest.trim_start().to_string());
-                                    continue;
-                                }
-
-                                if let Some(rest) = trimmed.strip_prefix("data:") {
-                                    data_lines.push(rest.trim_start().to_string());
-                                    continue;
-                                }
+                                current_event = None;
+                                data_lines.clear();
+                                continue;
                             }
-                            Err(_) => break,
-                        }
-                    }
 
-                    let _ = child.kill().await;
-                    if saw_complete {
-                        break;
+                            if let Some(rest) = trimmed.strip_prefix("event:") {
+                                current_event = Some(rest.trim_start().to_string());
+                                continue;
+                            }
+
+                            if let Some(rest) = trimmed.strip_prefix("data:") {
+                                data_lines.push(rest.trim_start().to_string());
+                                continue;
+                            }
+                        }
+                        Err(_) => break,
                     }
-                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                }
+
+                let _ = child.kill().await;
+                if saw_complete {
+                    break;
                 }
                 // Exponential backoff before reconnecting
                 let backoff_ms = 50u64 * (1u64 << attempts.min(6));
@@ -7240,6 +7144,7 @@ pub async fn run_opencode_turn(
     let stderr_text_capture = stderr_text_buffer.clone();
     let stderr_text_output_tx = text_output_tx.clone();
     let stderr_last_activity = last_activity.clone();
+    let stderr_rate_limit = rate_limit_detected.clone();
     let stderr_handle = stderr.map(|stderr| {
         tokio::spawn(async move {
             let stderr_reader = BufReader::new(stderr);
@@ -7247,7 +7152,6 @@ pub async fn run_opencode_turn(
             // Track the last message role seen in stderr so we only capture
             // assistant text parts (not user message echoes) into the buffer.
             let mut last_stderr_role = String::new();
-            // Track consecutive retry statuses to detect stuck retry loops.
             let mut retry_count: u32 = 0;
             while let Ok(Some(line)) = stderr_lines.next_line().await {
                 let clean = line.trim().to_string();
@@ -7340,11 +7244,11 @@ pub async fn run_opencode_turn(
         })
     });
 
-        // Process stdout output from oh-my-opencode
-        // Events come via SSE (when curl is available), stdout contains the assistant's text response.
-        let stdout_reader = BufReader::new(stdout);
-        let mut stdout_lines = stdout_reader.lines();
-        let mut state = OpencodeSseState::default();
+    // Process stdout output from oh-my-opencode
+    // Events come via SSE (when curl is available), stdout contains the assistant's text response.
+    let stdout_reader = BufReader::new(stdout);
+    let mut stdout_lines = stdout_reader.lines();
+    let mut state = OpencodeSseState::default();
 
     let mut sse_complete_seen = false;
     let mut sse_complete_at: Option<std::time::Instant> = None;
@@ -7362,20 +7266,13 @@ pub async fn run_opencode_turn(
     let mut last_seen_total_retries: u32 = 0;
     let max_consecutive_retries: u32 = 5;
 
-        loop {
-            tokio::select! {
-                _ = cancel.cancelled() => {
-                    tracing::info!(mission_id = %mission_id, "OpenCode execution cancelled, killing process");
-                    let _ = child.kill().await;
-                    if let Some(handle) = stderr_handle {
-                        handle.abort();
-                    }
-                    sse_cancel.cancel();
-                    if let Some(handle) = sse_handle {
-                        handle.abort();
-                    }
-                    return AgentResult::failure("Cancelled".to_string(), 0)
-                        .with_terminal_reason(TerminalReason::Cancelled);
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                tracing::info!(mission_id = %mission_id, "OpenCode execution cancelled, killing process");
+                let _ = child.kill().await;
+                if let Some(handle) = stderr_handle {
+                    handle.abort();
                 }
                 sse_cancel.cancel();
                 if let Some(handle) = sse_handle {
@@ -7477,6 +7374,24 @@ pub async fn run_opencode_turn(
                 }
             }
             _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {
+                // Early kill when stderr reader detects a rate-limit retry loop.
+                // Only kill if there's also no real SSE activity (tool calls, thinking).
+                // If the model is doing tool calls, the retry status may be transient.
+                if rate_limit_detected.load(std::sync::atomic::Ordering::SeqCst) {
+                    let sse_idle = last_activity
+                        .lock()
+                        .ok()
+                        .map(|g| g.elapsed() >= std::time::Duration::from_secs(15))
+                        .unwrap_or(true);
+                    if sse_idle {
+                        tracing::info!(
+                            mission_id = %mission_id,
+                            "Rate-limit retry loop detected with no SSE activity; terminating CLI process early"
+                        );
+                        let _ = child.kill().await;
+                        break;
+                    }
+                }
                 if let Some(last_text) = text_output_at {
                     if last_text.elapsed() >= std::time::Duration::from_secs(30) {
                         tracing::info!(
@@ -7524,134 +7439,93 @@ pub async fn run_opencode_turn(
                             let event_type = json.get("type").and_then(|t| t.as_str()).unwrap_or("");
                             tracing::debug!(
                                 mission_id = %mission_id,
-                                "OpenCode completion observed; terminating lingering CLI process"
+                                event_type = %event_type,
+                                "OpenCode JSON event"
                             );
-                            let _ = child.kill().await;
-                            break;
-                        }
-                    }
-                }
-                _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {
-                    // Early kill when stderr reader detects a rate-limit retry loop.
-                    // Only kill if there's also no real SSE activity (tool calls, thinking).
-                    // If the model is doing tool calls, the retry status may be transient.
-                    if rate_limit_detected.load(std::sync::atomic::Ordering::SeqCst) {
-                        let sse_idle = last_activity
-                            .lock()
-                            .ok()
-                            .map(|g| g.elapsed() >= std::time::Duration::from_secs(15))
-                            .unwrap_or(true);
-                        if sse_idle {
-                            tracing::info!(
-                                mission_id = %mission_id,
-                                "Rate-limit retry loop detected with no SSE activity; terminating CLI process early"
-                            );
-                            killed_by_idle_timeout = true;
-                            let _ = child.kill().await;
-                            break;
-                        }
-                    }
-                    // Check idle timeout using last_activity (updated by SSE events
-                    // including tool calls, thinking, text) rather than just text_output_at.
-                    // This prevents killing a working model that's doing long tool calls.
-                    let activity_elapsed = last_activity
-                        .lock()
-                        .ok()
-                        .map(|g| g.elapsed())
-                        .unwrap_or_default();
-                    let idle_secs: u64 = std::env::var("OPENCODE_IDLE_TIMEOUT_SECS")
-                        .ok()
-                        .and_then(|v| v.parse().ok())
-                        .unwrap_or(30);
-                    if activity_elapsed >= std::time::Duration::from_secs(idle_secs) {
-                        // No SSE events at all for idle_secs — truly idle
-                        tracing::info!(
-                            mission_id = %mission_id,
-                            idle_secs = idle_secs,
-                            activity_elapsed_secs = activity_elapsed.as_secs(),
-                            "OpenCode fully idle (no SSE activity); terminating CLI process"
-                        );
-                        killed_by_idle_timeout = true;
-                        let _ = child.kill().await;
-                        break;
-                    }
-                    // Also check for extended periods with SSE activity but no text output.
-                    // This catches cases where the model is stuck in a tool loop without
-                    // producing any text response (e.g., infinite tool retry cycles).
-                    if let Some(last_text) = text_output_at {
-                        let no_text_secs: u64 = std::env::var("OPENCODE_NO_TEXT_TIMEOUT_SECS")
-                            .ok()
-                            .and_then(|v| v.parse().ok())
-                            .unwrap_or(180);
-                        if last_text.elapsed() >= std::time::Duration::from_secs(no_text_secs) {
-                            tracing::info!(
-                                mission_id = %mission_id,
-                                no_text_secs = no_text_secs,
-                                "OpenCode has SSE activity but no text output for {}s; terminating",
-                                no_text_secs
-                            );
-                            killed_by_idle_timeout = true;
-                            let _ = child.kill().await;
-                            break;
-                        }
-                    }
-                }
-                line_result = stdout_lines.next_line() => {
-                    match line_result {
-                        Ok(None) => {
-                            // EOF - process finished
-                            break;
-                        }
-                        Ok(Some(line)) => {
-                            let trimmed = line.trim();
-                            if trimmed.is_empty() {
-                                continue;
-                            }
-                            if let Ok(mut guard) = last_activity.lock() {
-                                *guard = std::time::Instant::now();
-                            }
 
-                            // Try to parse as JSON event
-                            if let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                                let event_type = json.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                                tracing::debug!(
-                                    mission_id = %mission_id,
-                                    event_type = %event_type,
-                                    "OpenCode JSON event"
-                                );
-
-                                // Extract text content from message.part.updated for final result
-                                // Only capture assistant messages - skip user message echoes
-                                if event_type == "message.part.updated" {
-                                    if let Some(props) = json.get("properties") {
-                                        if let Some(part) = props.get("part") {
-                                            let part_type = part.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                                            if part_type == "text" {
-                                                let msg_id = part.get("messageID")
-                                                    .or_else(|| part.get("messageId"))
-                                                    .or_else(|| part.get("message_id"))
-                                                    .or_else(|| props.get("messageID"))
-                                                    .or_else(|| props.get("messageId"))
-                                                    .or_else(|| props.get("message_id"))
-                                                    .and_then(|v| v.as_str());
-                                                let is_user = msg_id
-                                                    .and_then(|id| state.message_roles.get(id))
-                                                    .map(|role| role == "user")
-                                                    .unwrap_or(false);
-                                                if !is_user {
-                                                    if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
-                                                        final_result = text.to_string();
-                                                        let _ = text_output_tx.send(true);
-                                                    }
+                            // Extract text content from message.part.updated for final result
+                            // Only capture assistant messages - skip user message echoes
+                            if event_type == "message.part.updated" {
+                                if let Some(props) = json.get("properties") {
+                                    if let Some(part) = props.get("part") {
+                                        let part_type = part.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                                        if part_type == "text" {
+                                            let msg_id = part.get("messageID")
+                                                .or_else(|| part.get("messageId"))
+                                                .or_else(|| part.get("message_id"))
+                                                .or_else(|| props.get("messageID"))
+                                                .or_else(|| props.get("messageId"))
+                                                .or_else(|| props.get("message_id"))
+                                                .and_then(|v| v.as_str());
+                                            let is_user = msg_id
+                                                .and_then(|id| state.message_roles.get(id))
+                                                .map(|role| role == "user")
+                                                .unwrap_or(false);
+                                            if !is_user {
+                                                if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                                                    final_result = text.to_string();
+                                                    let _ = text_output_tx.send(true);
                                                 }
                                             }
                                         }
                                     }
                                 }
+                            }
 
-                                // Handle completion and error events from oh-my-opencode
-                                if event_type == "completion" {
-                                    tracing::info!(mission_id = %mission_id, "OpenCode JSON completion event");
+                            // Handle completion and error events from oh-my-opencode
+                            if event_type == "completion" {
+                                tracing::info!(mission_id = %mission_id, "OpenCode JSON completion event");
+                                let _ = sse_complete_tx.send(true);
+                            } else if event_type == "error" {
+                                had_error = true;
+                                if let Some(props) = json.get("properties") {
+                                    if let Some(err) = props.get("error").and_then(|e| e.as_str()) {
+                                        tracing::warn!(mission_id = %mission_id, error = %err, "OpenCode JSON error event");
+                                        if final_result.is_empty() {
+                                            final_result = err.to_string();
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Route through SSE event parser for thinking/tool events
+                            let current_session = session_id_capture.lock().unwrap().clone();
+                            if let Some(parsed) = parse_opencode_sse_event(
+                                trimmed,
+                                None,
+                                current_session.as_deref(),
+                                &mut state,
+                                mission_id,
+                            ) {
+                                if let Some(session_id) = parsed.session_id {
+                                    let mut guard = session_id_capture.lock().unwrap();
+                                    if guard.is_none() {
+                                        *guard = Some(session_id);
+                                    }
+                                }
+                                if let Some(event) = parsed.event {
+                                    if let Ok(mut guard) = last_activity.lock() {
+                                        *guard = std::time::Instant::now();
+                                    }
+                                    if let AgentEvent::Error { ref message, .. } = event {
+                                        let mut guard = sse_error_message.lock().unwrap();
+                                        if guard.is_none() {
+                                            *guard = Some(message.clone());
+                                        }
+                                    }
+                                    if matches!(event, AgentEvent::Thinking { .. }) {
+                                        sse_emitted_thinking.store(true, std::sync::atomic::Ordering::SeqCst);
+                                        // New thinking content arrived; reset done flag so this
+                                        // turn's thinking block will get its own done event.
+                                        sse_done_sent.store(false, std::sync::atomic::Ordering::SeqCst);
+                                    }
+                                    if matches!(event, AgentEvent::TextDelta { .. }) {
+                                        let _ = text_output_tx.send(true);
+                                        sse_emitted_text.store(true, std::sync::atomic::Ordering::SeqCst);
+                                    }
+                                    let _ = events_tx.send(event);
+                                }
+                                if parsed.message_complete {
                                     let _ = sse_complete_tx.send(true);
                                     // Send thinking done signal if needed
                                     if sse_emitted_thinking.load(std::sync::atomic::Ordering::SeqCst)
@@ -7701,184 +7575,95 @@ pub async fn run_opencode_turn(
                                         }
                                     }
                                 }
-
-                                // Route through SSE event parser for thinking/tool events
-                                let current_session = session_id_capture.lock().unwrap().clone();
-                                if let Some(parsed) = parse_opencode_sse_event(
-                                    trimmed,
-                                    None,
-                                    current_session.as_deref(),
-                                    &mut state,
-                                    mission_id,
-                                ) {
-                                    if let Some(session_id) = parsed.session_id {
-                                        let mut guard = session_id_capture.lock().unwrap();
-                                        if guard.is_none() {
-                                            *guard = Some(session_id);
-                                        }
-                                    }
-                                    if let Some(event) = parsed.event {
-                                        if let Ok(mut guard) = last_activity.lock() {
-                                            *guard = std::time::Instant::now();
-                                        }
-                                        if let AgentEvent::Error { ref message, .. } = event {
-                                            let mut guard = sse_error_message.lock().unwrap();
-                                            if guard.is_none() {
-                                                *guard = Some(message.clone());
-                                            }
-                                        }
-                                        if matches!(event, AgentEvent::Thinking { .. }) {
-                                            sse_emitted_thinking.store(true, std::sync::atomic::Ordering::SeqCst);
-                                            // New thinking content arrived; reset done flag so this
-                                            // turn's thinking block will get its own done event.
-                                            sse_done_sent.store(false, std::sync::atomic::Ordering::SeqCst);
-                                        }
-                                        if matches!(event, AgentEvent::TextDelta { .. }) {
-                                            let _ = text_output_tx.send(true);
-                                            sse_emitted_text.store(true, std::sync::atomic::Ordering::SeqCst);
-                                        }
-                                        let _ = events_tx.send(event);
-                                    }
-                                    if parsed.message_complete {
-                                        let _ = sse_complete_tx.send(true);
-                                        // Send thinking done signal if needed
-                                        if sse_emitted_thinking.load(std::sync::atomic::Ordering::SeqCst)
-                                            && !sse_done_sent.load(std::sync::atomic::Ordering::SeqCst)
-                                        {
-                                            let _ = events_tx.send(AgentEvent::Thinking {
-                                                content: String::new(),
-                                                done: true,
-                                                mission_id: Some(mission_id),
-                                            });
-                                            sse_done_sent.store(true, std::sync::atomic::Ordering::SeqCst);
-                                        }
-                                        // Clear per-turn thinking buffers so each model turn
-                                        // gets its own thinking block in the UI.
-                                        // Note: sse_done_sent stays true here to prevent the
-                                        // end-of-session fallback from emitting a duplicate done
-                                        // event. It is reset to false when new thinking content
-                                        // arrives for the next turn (see AgentEvent::Thinking above).
-                                        state.part_buffers.retain(|k, _| {
-                                            !k.starts_with("thinking:") && !k.starts_with("reasoning:")
-                                        });
-                                        state.last_emitted_thinking = None;
-                                    }
-                                }
-                            } else {
-                                // Non-JSON line - this is the expected output format without --format json
-                                tracing::debug!(mission_id = %mission_id, line = %trimmed, "OpenCode stdout");
-
-                                // Detect error lines from CLI stdout
-                                let lower = trimmed.to_lowercase();
-                                if lower.contains("session ended with error")
-                                    || lower.contains("session.error")
-                                {
-                                    had_error = true;
-                                    if let Some(pos) = trimmed.find(": ") {
-                                        let err_part = trimmed[pos + 2..].trim();
-                                        if !err_part.is_empty() {
-                                            let mut guard = sse_error_message.lock().unwrap();
-                                            if guard.is_none() {
-                                                *guard = Some(err_part.to_string());
-                                            }
-                                        }
-                                    }
-                                }
-
-                                final_result.push_str(trimmed);
-                                final_result.push('\n');
-                                let _ = text_output_tx.send(true);
                             }
+
+                            final_result.push_str(trimmed);
+                            final_result.push('\n');
+                            let _ = text_output_tx.send(true);
                         }
-                        Err(e) => {
-                            tracing::error!("Error reading from OpenCode CLI stdout: {}", e);
-                            break;
-                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("Error reading from OpenCode CLI stdout: {}", e);
+                        break;
                     }
                 }
             }
         }
+    }
 
-        // Wait for stderr task to complete (avoid hangs if the process won't exit)
-        if let Some(mut handle) = stderr_handle {
-            tokio::select! {
-                _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {
-                    handle.abort();
-                }
-                _ = &mut handle => {}
+    // Wait for stderr task to complete (avoid hangs if the process won't exit)
+    if let Some(mut handle) = stderr_handle {
+        tokio::select! {
+            _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {
+                handle.abort();
             }
+            _ = &mut handle => {}
         }
+    }
 
-        // Wait for child process to finish and clean up (with timeout to avoid hangs)
-        let exit_status =
-            match tokio::time::timeout(std::time::Duration::from_secs(10), child.wait()).await {
-                Ok(status) => status,
-                Err(_) => {
-                    tracing::warn!(
-                        mission_id = %mission_id,
-                        "OpenCode CLI wait timed out; forcing shutdown"
-                    );
-                    let _ = child.kill().await;
-                    had_error = true;
-                    if final_result.is_empty() {
-                        final_result = "OpenCode CLI did not exit after completion".to_string();
-                    }
-                    Err(std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        "OpenCode CLI wait timed out",
-                    ))
-                }
-            };
-
-        sse_cancel.cancel();
-        if let Some(handle) = sse_handle {
-            handle.abort();
-        }
-
-        // Check exit status
-        if let Ok(status) = exit_status {
-            if !status.success() {
+    // Wait for child process to finish and clean up (with timeout to avoid hangs)
+    let exit_status =
+        match tokio::time::timeout(std::time::Duration::from_secs(10), child.wait()).await {
+            Ok(status) => status,
+            Err(_) => {
+                tracing::warn!(
+                    mission_id = %mission_id,
+                    "OpenCode CLI wait timed out; forcing shutdown"
+                );
+                let _ = child.kill().await;
                 had_error = true;
                 if final_result.is_empty() {
-                    final_result = format!("OpenCode CLI exited with status: {}", status);
+                    final_result = "OpenCode CLI did not exit after completion".to_string();
                 }
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "OpenCode CLI wait timed out",
+                ))
             }
-        }
+        };
 
-        // Surface SSE error messages (e.g. session.error) that were captured during streaming
-        if let Some(err_msg) = sse_error_message.lock().unwrap().clone() {
+    sse_cancel.cancel();
+    if let Some(handle) = sse_handle {
+        handle.abort();
+    }
+
+    // Check exit status
+    if let Ok(status) = exit_status {
+        if !status.success() {
             had_error = true;
-            if opencode_output_needs_fallback(&final_result) {
-                final_result = err_msg;
+            if final_result.is_empty() {
+                final_result = format!("OpenCode CLI exited with status: {}", status);
             }
         }
+    }
 
-        let session_id = session_id_capture.lock().unwrap().clone();
-        let session_id = session_id.or_else(|| extract_opencode_session_id(&final_result));
-        let stored_message = session_id
-            .as_deref()
-            .and_then(|id| load_latest_opencode_assistant_message(workspace, id));
-
-        let mut recovered_from_stderr = false;
+    // Surface SSE error messages (e.g. session.error) that were captured during streaming
+    if let Some(err_msg) = sse_error_message.lock().unwrap().clone() {
+        had_error = true;
         if opencode_output_needs_fallback(&final_result) {
-            if let Some(session_id) = session_id.as_deref() {
-                if let Some(message) = stored_message.as_ref() {
-                    let text = strip_think_tags(&extract_text(&message.parts));
-                    if !text.trim().is_empty() {
-                        tracing::info!(
-                            mission_id = %mission_id,
-                            session_id = %session_id,
-                            text_len = text.len(),
-                            "Recovered OpenCode assistant output from storage"
-                        );
-                        final_result = text;
-                    } else {
-                        tracing::warn!(
-                            mission_id = %mission_id,
-                            session_id = %session_id,
-                            "OpenCode assistant output not found in storage"
-                        );
-                    }
+            final_result = err_msg;
+        }
+    }
+
+    let session_id = session_id_capture.lock().unwrap().clone();
+    let session_id = session_id.or_else(|| extract_opencode_session_id(&final_result));
+    let stored_message = session_id
+        .as_deref()
+        .and_then(|id| load_latest_opencode_assistant_message(workspace, id));
+
+    let mut recovered_from_stderr = false;
+    if opencode_output_needs_fallback(&final_result) {
+        if let Some(session_id) = session_id.as_deref() {
+            if let Some(message) = stored_message.as_ref() {
+                let text = strip_think_tags(&extract_text(&message.parts));
+                if !text.trim().is_empty() {
+                    tracing::info!(
+                        mission_id = %mission_id,
+                        session_id = %session_id,
+                        text_len = text.len(),
+                        "Recovered OpenCode assistant output from storage"
+                    );
+                    final_result = text;
                 } else {
                     tracing::warn!(
                         mission_id = %mission_id,
@@ -7889,179 +7674,114 @@ pub async fn run_opencode_turn(
             } else {
                 tracing::warn!(
                     mission_id = %mission_id,
-                    "OpenCode output was empty/banner-only and no session id was detected"
+                    session_id = %session_id,
+                    "OpenCode assistant output not found in storage"
                 );
             }
+        } else {
+            tracing::warn!(
+                mission_id = %mission_id,
+                "OpenCode output was empty/banner-only and no session id was detected"
+            );
         }
+    }
 
-        if opencode_output_needs_fallback(&final_result) {
-            if let Ok(buffer) = stderr_text_buffer.lock() {
-                if !buffer.trim().is_empty() {
-                    final_result = buffer.clone();
-                    recovered_from_stderr = true;
-                }
+    if opencode_output_needs_fallback(&final_result) {
+        if let Ok(buffer) = stderr_text_buffer.lock() {
+            if !buffer.trim().is_empty() {
+                final_result = buffer.clone();
+                recovered_from_stderr = true;
             }
         }
+    }
 
-        if recovered_from_stderr {
-            had_error = false;
+    if recovered_from_stderr {
+        had_error = false;
+    }
+
+    if had_error && !final_result.trim().is_empty() && sse_error_message.lock().unwrap().is_none() {
+        had_error = false;
+    }
+
+    // Strip inline <think>...</think> tags from final output (Minimax, DeepSeek, etc.)
+    final_result = strip_think_tags(&final_result);
+
+    let mut emitted_thinking = false;
+    let sse_emitted = sse_emitted_thinking.load(std::sync::atomic::Ordering::SeqCst);
+    if let Some(message) = stored_message.as_ref() {
+        if let Some(model) = message.model.clone() {
+            model_used = Some(model);
         }
-
-        if had_error
-            && !final_result.trim().is_empty()
-            && sse_error_message.lock().unwrap().is_none()
-        {
-            had_error = false;
-        }
-
-        // If the process was killed by idle timeout and we still have only banner output,
-        // this is an error — the model never responded (e.g., API rate limit / retry loop).
-        // This check comes last so it cannot be overridden by the generic reset above.
-        // Capture idle-timeout-with-no-output BEFORE overwriting final_result for retry logic.
-        let idle_timeout_no_output =
-            killed_by_idle_timeout && opencode_output_needs_fallback(&final_result);
-        if idle_timeout_no_output {
-            had_error = true;
-            let err = sse_error_message
-                .lock()
-                .unwrap()
-                .clone()
-                .unwrap_or_else(|| {
-                    "Model did not respond — the process was terminated after 30s of inactivity. \
-                 This usually indicates the LLM API is returning errors (e.g., 429 rate limit). \
-                 Check your API key and provider endpoint."
-                        .to_string()
-                });
-            final_result = err;
-        }
-
-        // Rate-limit retry: if this looks like a rate-limit failure and we have retries left,
-        // sleep with exponential backoff and try again.
-        if is_rate_limited_provider && attempt <= max_turn_retries {
-            let is_rate_limit_failure = idle_timeout_no_output
-                || rate_limit_detected.load(std::sync::atomic::Ordering::SeqCst)
-                || sse_error_message
-                    .lock()
-                    .unwrap()
-                    .as_deref()
-                    .map(|m| {
-                        let lower = m.to_lowercase();
-                        lower.contains("retries")
-                            || lower.contains("rate limit")
-                            || lower.contains("429")
-                    })
-                    .unwrap_or(false);
-
-            if is_rate_limit_failure {
-                let backoff_secs = 5u64 * 2u64.pow(attempt - 1); // 5s, 10s, ...
-                let msg = format!(
-                    "Rate limited by Z.AI API, retrying in {}s... (attempt {}/{})",
-                    backoff_secs,
-                    attempt,
-                    max_turn_retries + 1,
-                );
-                tracing::warn!(mission_id = %mission_id, "{}", msg);
-                let _ = events_tx.send(AgentEvent::TextDelta {
-                    content: format!("\n{}\n", msg),
-                    mission_id: Some(mission_id),
-                });
-
-                // Sleep with cancellation support
-                tokio::select! {
-                    _ = cancel.cancelled() => {
-                        return AgentResult::failure("Cancelled".to_string(), 0)
-                            .with_terminal_reason(TerminalReason::Cancelled);
-                    }
-                    _ = tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)) => {}
-                }
-
-                continue 'attempt;
-            }
-        }
-
-        // No retry needed — fall through to result processing below.
-
-        // Strip inline <think>...</think> tags from final output (Minimax, DeepSeek, etc.)
-        final_result = strip_think_tags(&final_result);
-
-        let mut emitted_thinking = false;
-        let sse_emitted = sse_emitted_thinking.load(std::sync::atomic::Ordering::SeqCst);
-        if let Some(message) = stored_message.as_ref() {
-            if let Some(model) = message.model.clone() {
-                model_used = Some(model);
-            }
-            if !sse_emitted {
-                if let Some(reasoning) = extract_reasoning(&message.parts) {
-                    let _ = events_tx.send(AgentEvent::Thinking {
-                        content: reasoning,
-                        done: false,
-                        mission_id: Some(mission_id),
-                    });
-                    emitted_thinking = true;
-                }
-            }
-        }
-
-        if !sse_emitted && !emitted_thinking {
-            if let Some((thought, cleaned)) = extract_thought_line(&final_result) {
+        if !sse_emitted {
+            if let Some(reasoning) = extract_reasoning(&message.parts) {
                 let _ = events_tx.send(AgentEvent::Thinking {
-                    content: thought,
+                    content: reasoning,
                     done: false,
                     mission_id: Some(mission_id),
                 });
                 emitted_thinking = true;
-                final_result = cleaned;
             }
         }
+    }
 
-        if emitted_thinking
-            || (sse_emitted && !sse_done_sent.load(std::sync::atomic::Ordering::SeqCst))
-        {
+    if !sse_emitted && !emitted_thinking {
+        if let Some((thought, cleaned)) = extract_thought_line(&final_result) {
             let _ = events_tx.send(AgentEvent::Thinking {
-                content: String::new(),
-                done: true,
+                content: thought,
+                done: false,
                 mission_id: Some(mission_id),
             });
+            emitted_thinking = true;
+            final_result = cleaned;
         }
+    }
 
-        if !sse_emitted_text.load(std::sync::atomic::Ordering::SeqCst)
-            && !final_result.trim().is_empty()
-        {
-            let _ = events_tx.send(AgentEvent::TextDelta {
-                content: final_result.clone(),
-                mission_id: Some(mission_id),
-            });
-        }
+    if emitted_thinking || (sse_emitted && !sse_done_sent.load(std::sync::atomic::Ordering::SeqCst))
+    {
+        let _ = events_tx.send(AgentEvent::Thinking {
+            content: String::new(),
+            done: true,
+            mission_id: Some(mission_id),
+        });
+    }
 
-        if final_result.trim().is_empty() && !had_error {
-            had_error = true;
-            final_result = "OpenCode produced no output. Check CLI installation or authentication."
-                .to_string();
-        }
+    if !sse_emitted_text.load(std::sync::atomic::Ordering::SeqCst)
+        && !final_result.trim().is_empty()
+    {
+        let _ = events_tx.send(AgentEvent::TextDelta {
+            content: final_result.clone(),
+            mission_id: Some(mission_id),
+        });
+    }
 
-        tracing::info!(
-            mission_id = %mission_id,
-            had_error = had_error,
-            result_len = final_result.len(),
-            "OpenCode CLI execution completed"
-        );
+    if final_result.trim().is_empty() && !had_error {
+        had_error = true;
+        final_result =
+            "OpenCode produced no output. Check CLI installation or authentication.".to_string();
+    }
 
-        let mut result = if had_error {
-            // Use RateLimited terminal reason when rate limit was detected
-            let reason = if rate_limit_detected.load(std::sync::atomic::Ordering::SeqCst) {
-                TerminalReason::RateLimited
-            } else {
-                TerminalReason::LlmError
-            };
-            AgentResult::failure(final_result, 0).with_terminal_reason(reason)
+    tracing::info!(
+        mission_id = %mission_id,
+        had_error = had_error,
+        result_len = final_result.len(),
+        "OpenCode CLI execution completed"
+    );
+
+    let mut result = if had_error {
+        // Use RateLimited terminal reason when rate limit was detected
+        let reason = if rate_limit_detected.load(std::sync::atomic::Ordering::SeqCst) {
+            TerminalReason::RateLimited
         } else {
-            AgentResult::success(final_result, 0).with_terminal_reason(TerminalReason::Completed)
+            TerminalReason::LlmError
         };
-        if let Some(model) = model_used {
-            result = result.with_model(model);
-        }
-        return result;
-    } // end 'attempt loop
+        AgentResult::failure(final_result, 0).with_terminal_reason(reason)
+    } else {
+        AgentResult::success(final_result, 0).with_terminal_reason(TerminalReason::Completed)
+    };
+    if let Some(model) = model_used {
+        result = result.with_model(model);
+    }
+    result
 }
 
 /// Execute a turn using Amp CLI backend.
