@@ -53,6 +53,10 @@ export interface AIProvider {
   provider_type: AIProviderType;
   provider_type_name: string;
   name: string;
+  /** Optional label to distinguish multiple accounts of the same provider type */
+  label?: string | null;
+  /** Priority order for fallback chains (lower = higher priority) */
+  priority?: number;
   google_project_id?: string | null;
   has_api_key: boolean;
   has_oauth: boolean;
@@ -150,6 +154,10 @@ export async function getAIProvider(id: string): Promise<AIProvider> {
 export async function createAIProvider(data: {
   provider_type: AIProviderType;
   name: string;
+  /** Optional label to distinguish multiple accounts of the same provider type */
+  label?: string;
+  /** Priority order for fallback chains (lower = higher priority) */
+  priority?: number;
   google_project_id?: string;
   api_key?: string;
   base_url?: string;
@@ -169,6 +177,10 @@ export async function updateAIProvider(
   id: string,
   data: {
     name?: string;
+    /** Optional label to distinguish multiple accounts of the same provider type */
+    label?: string | null;
+    /** Priority order for fallback chains (lower = higher priority) */
+    priority?: number;
     google_project_id?: string | null;
     api_key?: string | null;
     base_url?: string | null;

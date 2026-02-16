@@ -291,6 +291,13 @@ pub struct AIProvider {
     pub provider_type: ProviderType,
     /// Human-readable name (e.g., "My Claude Account", "Work OpenAI")
     pub name: String,
+    /// Optional label to distinguish multiple accounts of the same provider type
+    /// (e.g., "Thomas (OAuth)", "Ben (OAuth)", "Team (API key)")
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Priority order for fallback chains (lower = higher priority, used first)
+    #[serde(default)]
+    pub priority: u32,
     /// Optional Google Cloud project ID (required for Gemini via OpenCode)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub google_project_id: Option<String>,
@@ -349,6 +356,8 @@ impl AIProvider {
             id: Uuid::new_v4(),
             provider_type,
             name,
+            label: None,
+            priority: 0,
             google_project_id: None,
             api_key: None,
             oauth: None,
@@ -458,13 +467,34 @@ impl AIProviderStore {
         providers.values().find(|p| p.enabled).cloned()
     }
 
-    /// Get provider by type.
+    /// Get first enabled provider by type (for backwards compatibility).
     pub async fn get_by_type(&self, provider_type: ProviderType) -> Option<AIProvider> {
         let providers = self.providers.read().await;
         providers
             .values()
             .find(|p| p.provider_type == provider_type && p.enabled)
             .cloned()
+    }
+
+    /// Get all providers of a given type, sorted by priority (lower = higher priority).
+    pub async fn get_all_by_type(&self, provider_type: ProviderType) -> Vec<AIProvider> {
+        let providers = self.providers.read().await;
+        let mut matched: Vec<AIProvider> = providers
+            .values()
+            .filter(|p| p.provider_type == provider_type && p.enabled)
+            .cloned()
+            .collect();
+        matched.sort_by_key(|p| p.priority);
+        matched
+    }
+
+    /// Count how many accounts exist for a given provider type.
+    pub async fn count_by_type(&self, provider_type: ProviderType) -> usize {
+        let providers = self.providers.read().await;
+        providers
+            .values()
+            .filter(|p| p.provider_type == provider_type)
+            .count()
     }
 
     pub async fn add(&self, provider: AIProvider) -> Uuid {

@@ -1304,6 +1304,12 @@ pub struct ProviderTypeInfo {
 pub struct CreateProviderRequest {
     pub provider_type: ProviderType,
     pub name: String,
+    /// Optional label to distinguish multiple accounts of the same provider type
+    #[serde(default)]
+    pub label: Option<String>,
+    /// Priority order for fallback chains (lower = higher priority)
+    #[serde(default)]
+    pub priority: Option<u32>,
     /// Optional Google Cloud project ID (for Google provider)
     #[serde(default)]
     pub google_project_id: Option<String>,
@@ -1338,6 +1344,10 @@ fn default_true() -> bool {
 #[derive(Debug, Deserialize)]
 pub struct UpdateProviderRequest {
     pub name: Option<String>,
+    /// Optional label to distinguish multiple accounts of the same provider type
+    pub label: Option<Option<String>>,
+    /// Priority order for fallback chains (lower = higher priority)
+    pub priority: Option<u32>,
     /// Optional Google Cloud project ID update (for Google provider)
     pub google_project_id: Option<Option<String>>,
     pub api_key: Option<Option<String>>,
@@ -1353,6 +1363,12 @@ pub struct ProviderResponse {
     pub provider_type: ProviderType,
     pub provider_type_name: String,
     pub name: String,
+    /// Optional label to distinguish multiple accounts of the same provider type
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Priority order for fallback chains (lower = higher priority)
+    #[serde(default)]
+    pub priority: u32,
     pub google_project_id: Option<String>,
     pub has_api_key: bool,
     pub has_oauth: bool,
@@ -1476,6 +1492,8 @@ fn build_provider_response(
         provider_type,
         provider_type_name: provider_type.display_name().to_string(),
         name,
+        label: None,
+        priority: 0,
         google_project_id,
         has_api_key: matches!(auth, Some(AuthKind::ApiKey)),
         has_oauth: matches!(auth, Some(AuthKind::OAuth)),
@@ -3584,6 +3602,8 @@ async fn list_providers(
                 provider_type: ProviderType::Custom,
                 provider_type_name: "Custom".to_string(),
                 name: provider.name.clone(),
+                label: provider.label.clone(),
+                priority: provider.priority,
                 google_project_id: None,
                 has_api_key: provider.api_key.is_some(),
                 has_oauth: false,
@@ -3993,6 +4013,8 @@ async fn create_provider(
     // so that workspace preparation can read custom models and base URL
     if provider_type == ProviderType::Custom {
         let mut provider = crate::ai_providers::AIProvider::new(provider_type, req.name.clone());
+        provider.label = req.label.clone();
+        provider.priority = req.priority.unwrap_or(0);
         provider.base_url = req.base_url.clone();
         provider.api_key = req.api_key.clone();
         provider.custom_models = req.custom_models.clone();
@@ -4015,6 +4037,8 @@ async fn create_provider(
             provider_type: ProviderType::Custom,
             provider_type_name: "Custom".to_string(),
             name: req.name,
+            label: req.label,
+            priority: req.priority.unwrap_or(0),
             google_project_id: None,
             has_api_key: req.api_key.is_some(),
             has_oauth: false,
