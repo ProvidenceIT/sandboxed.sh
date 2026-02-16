@@ -4288,22 +4288,24 @@ fn ensure_opencode_provider_for_model(opencode_config_dir: &std::path::Path, mod
 
     if let Some(existing) = providers_map.get_mut(provider_id) {
         // Provider already exists – make sure the model is listed.
-        if let Some(models) = existing
-            .as_object_mut()
-            .and_then(|o| o.get_mut("models"))
-            .and_then(|m| m.as_object_mut())
-        {
-            if !models.contains_key(model_id) {
-                models.insert(
-                    model_id.to_string(),
-                    serde_json::json!({ "name": model_id }),
-                );
-            } else {
-                return; // already present, nothing to do
-            }
-        } else {
-            return;
+        let obj = match existing.as_object_mut() {
+            Some(o) => o,
+            None => return,
+        };
+        let models = obj
+            .entry("models".to_string())
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        let models_map = match models.as_object_mut() {
+            Some(m) => m,
+            None => return,
+        };
+        if models_map.contains_key(model_id) {
+            return; // already present, nothing to do
         }
+        models_map.insert(
+            model_id.to_string(),
+            serde_json::json!({ "name": model_id }),
+        );
     } else {
         providers_map.insert(provider_id.to_string(), provider_def);
     }
