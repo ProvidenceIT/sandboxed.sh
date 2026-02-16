@@ -26,7 +26,8 @@ static PROVIDER_SEMAPHORES: LazyLock<HashMap<&'static str, Semaphore>> = LazyLoc
     let zai_max: usize = std::env::var("ZAI_MAX_CONCURRENT")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(1);
+        .unwrap_or(1)
+        .max(1);
     let mut m = HashMap::new();
     m.insert("zai", Semaphore::new(zai_max));
     m
@@ -7095,8 +7096,10 @@ pub async fn run_opencode_turn(
                     } else if lower.contains("message.updated")
                         || lower.contains("message.completed")
                     {
-                        // Real progress — reset retry counter
+                        // Real progress — reset retry counter and clear rate-limit flag
                         retry_count = 0;
+                        stderr_rate_limit
+                            .store(false, std::sync::atomic::Ordering::SeqCst);
                     }
                 }
             }
