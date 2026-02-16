@@ -62,7 +62,7 @@ fn extract_str<'a>(value: &'a serde_json::Value, keys: &[&str]) -> Option<&'a st
 }
 
 fn extract_part_text<'a>(part: &'a serde_json::Value, part_type: &str) -> Option<&'a str> {
-    if matches!(part_type, "thinking" | "reasoning") {
+    if matches!(part_type, "thinking" | "reasoning" | "step-start" | "step-finish") {
         extract_str(part, &["thinking", "reasoning", "text", "content"])
     } else {
         extract_str(part, &["text", "content", "output_text"])
@@ -245,7 +245,7 @@ fn handle_part_update(
         return handle_tool_part_update(part, state, mission_id);
     }
 
-    let is_thinking = matches!(part_type, "thinking" | "reasoning");
+    let is_thinking = matches!(part_type, "thinking" | "reasoning" | "step-start" | "step-finish");
     let is_text = matches!(part_type, "text" | "output_text");
 
     if !is_thinking && !is_text {
@@ -389,7 +389,34 @@ fn parse_opencode_sse_event(
 
     let mut message_complete = false;
     let event = match event_type {
-        "response.output_text.delta" => None,
+        "response.output_text.delta" => {
+            let delta = props
+                .get("delta")
+                .or_else(|| props.get("text"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if delta.is_empty() {
+                None
+            } else {
+                let response_id = props
+                    .get("response")
+                    .and_then(|v| v.get("id"))
+                    .and_then(|v| v.as_str());
+                let key = response_id.unwrap_or("response.output_text").to_string();
+                let buffer = state.part_buffers.entry(key).or_default();
+                buffer.push_str(delta);
+                let content = buffer.clone();
+                if state.last_emitted_text.as_ref() == Some(&content) {
+                    None
+                } else {
+                    state.last_emitted_text = Some(content.clone());
+                    Some(AgentEvent::TextDelta {
+                        content,
+                        mission_id: Some(mission_id),
+                    })
+                }
+            }
+        }
         "response.completed" => {
             tracing::info!(
                 mission_id = %mission_id,
@@ -4223,35 +4250,32 @@ fn ensure_opencode_provider_for_model(opencode_config_dir: &std::path::Path, mod
         None => return,
     };
 
+    // Build the model definition — include capabilities for reasoning models.
+    // GLM-5/6 support "Deep Thinking" mode which sends reasoning tokens via
+    // the `reasoning_content` field.  Declaring `capabilities.interleaved`
+    // tells the AI-SDK adapter to map that field to `part.type = "reasoning"`.
+    let model_entry = if provider_id == "zai"
+        && (model_id.starts_with("glm-5") || model_id.starts_with("glm-6"))
+    {
+        serde_json::json!({
+            "name": model_id,
+            "capabilities": {
+                "interleaved": { "field": "reasoning_content" }
+            }
+        })
+    } else {
+        serde_json::json!({ "name": model_id })
+    };
+
     // Only inject definitions for providers that need it.
     // OpenAI, Anthropic, Google are natively supported by OpenCode.
     let provider_def: Option<serde_json::Value> = match provider_id {
         "zai" => {
-            // Z.AI has two billing endpoints:
-            //   - /api/paas/v4          → pay-per-use balance
-            //   - /api/coding/paas/v4   → coding subscription quota
-            // Default to the coding subscription endpoint since that is the most
-            // common paid plan.  Users can override via ZAI_BASE_URL env var.
             let base_url = std::env::var("ZAI_BASE_URL")
                 .unwrap_or_else(|_| "https://api.z.ai/api/coding/paas/v4".to_string());
-            // GLM-5 (and newer GLM models) support "Deep Thinking" mode which
-            // sends reasoning tokens via the `reasoning_content` field in
-            // streaming deltas (OpenAI-compatible format).  We must declare this
-            // capability so the AI-SDK adapter maps `reasoning_content` to
-            // `part.type = "reasoning"` in the SSE events.
-            let model_def = if model_id.starts_with("glm-5") || model_id.starts_with("glm-6") {
-                serde_json::json!({
-                    "name": model_id,
-                    "capabilities": {
-                        "interleaved": { "field": "reasoning_content" }
-                    }
-                })
-            } else {
-                serde_json::json!({ "name": model_id })
-            };
             Some(serde_json::json!({
                 "models": {
-                    model_id: model_def
+                    model_id: model_entry.clone()
                 },
                 "options": {
                     "baseURL": base_url
@@ -4262,14 +4286,14 @@ fn ensure_opencode_provider_for_model(opencode_config_dir: &std::path::Path, mod
             "npm": "@ai-sdk/cerebras",
             "name": "Cerebras",
             "models": {
-                model_id: { "name": model_id }
+                model_id: model_entry.clone()
             }
         })),
         "xai" => Some(serde_json::json!({
             "npm": "@ai-sdk/xai",
             "name": "xAI",
             "models": {
-                model_id: { "name": model_id }
+                model_id: model_entry.clone()
             }
         })),
         _ => None,
@@ -4304,20 +4328,6 @@ fn ensure_opencode_provider_for_model(opencode_config_dir: &std::path::Path, mod
     let providers_map = match providers.as_object_mut() {
         Some(map) => map,
         None => return,
-    };
-
-    // Build the model definition — include capabilities for reasoning models.
-    let model_entry = if provider_id == "zai"
-        && (model_id.starts_with("glm-5") || model_id.starts_with("glm-6"))
-    {
-        serde_json::json!({
-            "name": model_id,
-            "capabilities": {
-                "interleaved": { "field": "reasoning_content" }
-            }
-        })
-    } else {
-        serde_json::json!({ "name": model_id })
     };
 
     if let Some(existing) = providers_map.get_mut(provider_id) {
@@ -6757,7 +6767,7 @@ pub async fn run_opencode_turn(
                     .await;
 
                 // Exponential backoff: 50ms, 100ms, 200ms, 400ms, ...
-                let backoff_ms = 50u64 * (1u64 << attempts.min(6));
+                let backoff_ms = 50u64 * (1u64 << (attempts - 1).min(6));
 
                 let mut child = match child {
                     Ok(child) => child,
