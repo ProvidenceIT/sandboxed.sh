@@ -92,14 +92,16 @@ function SystemHealthCard() {
   }, [connected, connect]);
 
   return (
-    <div
-      className="rounded-xl bg-white/[0.02] border border-white/[0.04] p-4"
+    <Link
+      href="/inspect/system"
+      className="rounded-xl bg-white/[0.02] border border-white/[0.04] p-4 hover:bg-white/[0.04] transition-colors group"
     >
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center gap-2">
           <Activity className="h-4 w-4 text-white/40" />
           <span className="text-xs font-medium text-white/70">System Health</span>
         </div>
+        <ArrowRight className="h-3.5 w-3.5 text-white/20 group-hover:text-white/40 transition-colors" />
       </div>
 
       {!metrics ? (
@@ -135,7 +137,7 @@ function SystemHealthCard() {
           </div>
         </div>
       )}
-    </div>
+    </Link>
   );
 }
 

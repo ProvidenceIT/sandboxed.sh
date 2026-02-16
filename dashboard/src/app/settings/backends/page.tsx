@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import useSWR from 'swr';
 import { toast } from '@/components/toast';
 import {
@@ -10,100 +10,49 @@ import {
   getProviderForBackend,
   getHealth,
   BackendProviderResponse,
-  type HealthResponse,
 } from '@/lib/api';
-import { Server, Save, Loader, Key, Check, Wifi, WifiOff, Zap, Code, Clock } from 'lucide-react';
+import { Server, Save, Loader, Key, Check } from 'lucide-react';
 import { cn } from '@/lib/utils';
-
-function ServerConnectionCard() {
-  const { data: health, isLoading } = useSWR<HealthResponse>('backend-health', getHealth, {
-    refreshInterval: 5000,
-    revalidateOnFocus: false,
-  });
-  const [latency, setLatency] = useState<number | null>(null);
-
-  useEffect(() => {
-    const measure = async () => {
-      const start = Date.now();
-      try {
-        await getHealth();
-        setLatency(Date.now() - start);
-      } catch { /* ignore */ }
-    };
-    measure();
-    const interval = setInterval(measure, 5000);
-    return () => clearInterval(interval);
-  }, []);
-
-  const isConnected = !!health;
-
-  return (
-    <div className="rounded-xl bg-white/[0.02] border border-white/[0.04] p-4 mb-6">
-      <div className="flex items-center justify-between mb-3">
-        <div className="flex items-center gap-2">
-          {isConnected ? (
-            <Wifi className="h-4 w-4 text-emerald-400" />
-          ) : (
-            <WifiOff className="h-4 w-4 text-red-400" />
-          )}
-          <span className="text-xs font-medium text-white/70">Server Connection</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <span className={cn(
-            'h-2 w-2 rounded-full',
-            isConnected ? 'bg-emerald-400' : isLoading ? 'bg-amber-400 animate-pulse' : 'bg-red-400'
-          )} />
-          <span className={cn(
-            'text-xs font-medium',
-            isConnected ? 'text-emerald-400' : isLoading ? 'text-amber-400' : 'text-red-400'
-          )}>
-            {isConnected ? 'Online' : isLoading ? 'Checking' : 'Offline'}
-          </span>
-        </div>
-      </div>
-
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-        <div className="flex items-center gap-2">
-          <Zap className="h-3.5 w-3.5 text-white/30" />
-          <span className="text-xs text-white/50">Latency</span>
-          <span className="text-xs font-medium text-white/80 tabular-nums ml-auto">
-            {latency !== null ? `${latency}ms` : '—'}
-          </span>
-        </div>
-        <div className="flex items-center gap-2">
-          <Code className="h-3.5 w-3.5 text-white/30" />
-          <span className="text-xs text-white/50">Version</span>
-          <span className="text-xs font-medium text-white/80 ml-auto">
-            {health?.version ?? '—'}
-          </span>
-        </div>
-        <div className="flex items-center gap-2">
-          <Code className="h-3.5 w-3.5 text-white/30" />
-          <span className="text-xs text-white/50">Mode</span>
-          <span className={cn(
-            'text-xs font-medium px-1.5 py-0.5 rounded ml-auto',
-            health?.dev_mode
-              ? 'bg-amber-500/10 text-amber-400'
-              : 'bg-emerald-500/10 text-emerald-400'
-          )}>
-            {health ? (health.dev_mode ? 'Dev' : 'Prod') : '—'}
-          </span>
-        </div>
-        <div className="flex items-center gap-2">
-          <Clock className="h-3.5 w-3.5 text-white/30" />
-          <span className="text-xs text-white/50">Max Iter</span>
-          <span className="text-xs font-medium text-white/80 tabular-nums ml-auto">
-            {health?.max_iterations ?? '—'}
-          </span>
-        </div>
-      </div>
-    </div>
-  );
-}
+import { getRuntimeApiBase, writeSavedSettings } from '@/lib/settings';
+import { ServerConnectionCard } from '@/components/server-connection-card';
 
 export default function BackendsPage() {
   const [activeBackendTab, setActiveBackendTab] = useState<'opencode' | 'claudecode' | 'amp'>('opencode');
   const [savingBackend, setSavingBackend] = useState(false);
+  const [testingConnection, setTestingConnection] = useState(false);
+
+  // Server connection state
+  const [apiUrl, setApiUrl] = useState(() => getRuntimeApiBase());
+  const [originalApiUrl, setOriginalApiUrl] = useState(() => getRuntimeApiBase());
+  const [urlError, setUrlError] = useState<string | null>(null);
+
+  const { data: health, isLoading: healthLoading, mutate: mutateHealth } = useSWR(
+    'health',
+    getHealth,
+    { revalidateOnFocus: false }
+  );
+
+  const hasUnsavedUrlChanges = apiUrl !== originalApiUrl;
+
+  const validateUrl = useCallback((url: string) => {
+    if (!url.trim()) { setUrlError('API URL is required'); return false; }
+    try { new URL(url); setUrlError(null); return true; } catch { setUrlError('Invalid URL format'); return false; }
+  }, []);
+
+  const testApiConnection = async () => {
+    if (!validateUrl(apiUrl)) return;
+    setTestingConnection(true);
+    try { await mutateHealth(); toast.success('Connection successful!'); } catch { toast.error('Failed to connect to server'); } finally { setTestingConnection(false); }
+  };
+
+  const handleSaveUrl = useCallback(() => {
+    if (!validateUrl(apiUrl)) return;
+    const prev = originalApiUrl;
+    writeSavedSettings({ apiUrl });
+    setOriginalApiUrl(apiUrl);
+    toast.success('API URL saved!');
+    if (prev !== apiUrl) window.dispatchEvent(new CustomEvent('openagent:api:url-changed'));
+  }, [apiUrl, originalApiUrl, validateUrl]);
   const [opencodeForm, setOpencodeForm] = useState({
     base_url: '',
     default_agent: '',
@@ -276,7 +225,31 @@ export default function BackendsPage() {
         </div>
 
         {/* Server Connection */}
-        <ServerConnectionCard />
+        <ServerConnectionCard
+          apiUrl={apiUrl}
+          setApiUrl={setApiUrl}
+          urlError={urlError}
+          validateUrl={validateUrl}
+          health={health ?? null}
+          healthLoading={healthLoading}
+          testingConnection={testingConnection}
+          testApiConnection={testApiConnection}
+        />
+
+        {/* Save URL button */}
+        {hasUnsavedUrlChanges && (
+          <div className="flex items-center justify-end gap-3 -mt-4 mb-6">
+            <span className="text-xs text-amber-400">Unsaved changes</span>
+            <button
+              onClick={handleSaveUrl}
+              disabled={!!urlError}
+              className="flex items-center gap-2 rounded-lg bg-indigo-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-indigo-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <Save className="h-3.5 w-3.5" />
+              Save URL
+            </button>
+          </div>
+        )}
 
         {/* Backends */}
         <div className="rounded-xl bg-white/[0.02] border border-white/[0.04] p-5">
