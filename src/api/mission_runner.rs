@@ -7345,10 +7345,17 @@ pub async fn run_opencode_turn(
                 let mut data_lines: Vec<String> = Vec::new();
                 let mut state = OpencodeSseState::default();
                 let mut saw_complete = false;
-                // Reset tool depth on reconnect so stale counts from a
-                // lost connection don't permanently disable the inactivity
-                // timeout.
+                // Reset SSE state on reconnect so stale values from a lost
+                // connection don't cause incorrect behavior:
+                // - tool depth: stale counts would permanently disable the
+                //   inactivity timeout
+                // - session_idle: a stale `true` would trigger the 10s kill
+                //   timer after reconnect, prematurely terminating the mission
+                // - retry counter: stale counts from a previous connection
+                //   should not accumulate across reconnects
                 sse_tool_depth_tx.send_modify(|v| *v = 0);
+                let _ = sse_session_idle_tx.send(false);
+                sse_retry_tx.send_modify(|v| *v = 0);
 
                 loop {
                     if sse_cancel.is_cancelled() {
@@ -7720,22 +7727,39 @@ pub async fn run_opencode_turn(
                 }
             }
             changed = sse_session_idle_rx.changed() => {
-                if changed.is_ok()
-                    && *sse_session_idle_rx.borrow()
-                    && !session_idle_seen
-                {
-                    session_idle_seen = true;
-                    session_idle_at = Some(std::time::Instant::now());
-                    tracing::debug!(
-                        mission_id = %mission_id,
-                        had_meaningful_work = had_meaningful_work,
-                        "Session idle signal received from SSE"
-                    );
+                if changed.is_ok() {
+                    if *sse_session_idle_rx.borrow() && !session_idle_seen {
+                        session_idle_seen = true;
+                        session_idle_at = Some(std::time::Instant::now());
+                        tracing::debug!(
+                            mission_id = %mission_id,
+                            had_meaningful_work = had_meaningful_work,
+                            "Session idle signal received from SSE"
+                        );
+                    } else if !*sse_session_idle_rx.borrow() && session_idle_seen {
+                        // SSE reconnected — the sender reset to false.  Clear
+                        // the stale idle state so the 10s kill timer doesn't
+                        // fire based on a pre-reconnect timestamp.
+                        session_idle_seen = false;
+                        session_idle_at = None;
+                        tracing::debug!(
+                            mission_id = %mission_id,
+                            "Session idle state reset (SSE reconnect)"
+                        );
+                    }
                 }
             }
             changed = sse_retry_rx.changed() => {
                 if changed.is_ok() {
                     let new_total = *sse_retry_rx.borrow();
+                    // On SSE reconnect the sender resets to 0; clear local
+                    // tracking so stale counts don't accumulate across
+                    // connections.
+                    if new_total == 0 && last_seen_total_retries > 0 {
+                        last_seen_total_retries = 0;
+                        consecutive_retries = 0;
+                        continue;
+                    }
                     let delta = new_total.saturating_sub(last_seen_total_retries);
                     last_seen_total_retries = new_total;
                     consecutive_retries += delta;
