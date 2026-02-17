@@ -7353,9 +7353,17 @@ pub async fn run_opencode_turn(
                 //   timer after reconnect, prematurely terminating the mission
                 // - retry counter: stale counts from a previous connection
                 //   should not accumulate across reconnects
+                // - last_activity: reset so the 120s global and 30s text idle
+                //   timers count from the reconnect, not from the last event
+                //   on the dead connection (the depth reset to 0 disables the
+                //   tools_active guard, so last_activity is the only remaining
+                //   protection against premature timeout during reconnect)
                 sse_tool_depth_tx.send_modify(|v| *v = 0);
                 let _ = sse_session_idle_tx.send(false);
                 sse_retry_tx.send_modify(|v| *v = 0);
+                if let Ok(mut guard) = last_activity.lock() {
+                    *guard = std::time::Instant::now();
+                }
 
                 loop {
                     if sse_cancel.is_cancelled() {
@@ -7710,12 +7718,21 @@ pub async fn run_opencode_turn(
             _ = cancel.cancelled() => {
                 tracing::info!(mission_id = %mission_id, "OpenCode execution cancelled, killing process");
                 let _ = child.kill().await;
-                if let Some(handle) = stderr_handle {
-                    handle.abort();
+                // Await background tasks so in-flight mutex writes complete
+                // before we return.  Use the same teardown discipline as the
+                // normal exit path to avoid data races on shared state.
+                if let Some(mut handle) = stderr_handle {
+                    tokio::select! {
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {
+                            handle.abort();
+                        }
+                        _ = &mut handle => {}
+                    }
                 }
                 sse_cancel.cancel();
                 if let Some(handle) = sse_handle {
                     handle.abort();
+                    let _ = handle.await;
                 }
                 return AgentResult::failure("Cancelled".to_string(), 0)
                     .with_terminal_reason(TerminalReason::Cancelled);
