@@ -4637,6 +4637,7 @@ async fn update_store_provider(
         "opencode".to_string()
     };
     let now = chrono::Utc::now();
+    let has_credentials = result.api_key.is_some() || result.base_url.is_some();
     let response = ProviderResponse {
         id: result.id.to_string(),
         provider_type: pt,
@@ -4655,7 +4656,7 @@ async fn update_store_provider(
         is_default: result.is_default,
         uses_oauth: false,
         auth_methods: vec![],
-        status: if result.api_key.is_some() {
+        status: if has_credentials {
             ProviderStatusResponse::Connected
         } else {
             ProviderStatusResponse::NeedsAuth { auth_url: None }
@@ -4736,11 +4737,12 @@ async fn authenticate_provider(
             .await
             .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Provider {} not found", id)))?;
 
-        // Store-based providers use API key auth
-        let has_key = provider.api_key.as_ref().map_or(false, |k| !k.is_empty());
+        // Store-based providers: connected if they have an API key or a base URL
+        let has_credentials = provider.api_key.as_ref().map_or(false, |k| !k.is_empty())
+            || provider.base_url.is_some();
         return Ok(Json(AuthResponse {
-            success: has_key,
-            message: if has_key {
+            success: has_credentials,
+            message: if has_credentials {
                 "Provider is authenticated".to_string()
             } else {
                 "API key is required for this provider".to_string()
@@ -4815,6 +4817,7 @@ async fn set_default(
             "opencode".to_string()
         };
         let now = chrono::Utc::now();
+        let has_credentials = provider.api_key.is_some() || provider.base_url.is_some();
         let response = ProviderResponse {
             id: provider.id.to_string(),
             provider_type: pt,
@@ -4833,7 +4836,7 @@ async fn set_default(
             is_default: true,
             uses_oauth: false,
             auth_methods: vec![],
-            status: if provider.api_key.is_some() {
+            status: if has_credentials {
                 ProviderStatusResponse::Connected
             } else {
                 ProviderStatusResponse::NeedsAuth { auth_url: None }
