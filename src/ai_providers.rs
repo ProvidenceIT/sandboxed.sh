@@ -498,15 +498,6 @@ impl AIProviderStore {
         matched
     }
 
-    /// Count how many accounts exist for a given provider type.
-    pub async fn count_by_type(&self, provider_type: ProviderType) -> usize {
-        let providers = self.providers.read().await;
-        providers
-            .values()
-            .filter(|p| p.provider_type == provider_type)
-            .count()
-    }
-
     pub async fn add(&self, provider: AIProvider) -> Uuid {
         let id = provider.id;
         {

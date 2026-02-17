@@ -63,10 +63,6 @@ export async function listModelChains(): Promise<ModelChain[]> {
   return apiGet("/api/model-routing/chains", "Failed to list model chains");
 }
 
-export async function getModelChain(id: string): Promise<ModelChain> {
-  return apiGet(`/api/model-routing/chains/${encodeURIComponent(id)}`, "Failed to get model chain");
-}
-
 export async function createModelChain(data: {
   id: string;
   name: string;
@@ -111,13 +107,6 @@ export async function resolveModelChain(id: string): Promise<ResolvedEntry[]> {
 
 export async function listAccountHealth(): Promise<AccountHealthSnapshot[]> {
   return apiGet("/api/model-routing/health", "Failed to list account health");
-}
-
-export async function getAccountHealth(accountId: string): Promise<AccountHealthSnapshot> {
-  return apiGet(
-    `/api/model-routing/health/${accountId}`,
-    "Failed to get account health"
-  );
 }
 
 export async function clearAccountCooldown(accountId: string): Promise<{ cleared: boolean }> {

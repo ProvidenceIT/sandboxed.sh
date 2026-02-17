@@ -3266,12 +3266,11 @@ pub fn run_claudecode_turn<'a>(
         let mut result = if had_error {
             // Detect rate limit / overloaded errors for account rotation.
             //
-            // The error_message() parser may have extracted the human-readable
-            // message (e.g. "Overloaded") or passed through raw JSON containing
-            // type fields (e.g. "overloaded_error"), so we check both forms.
-            // Case-insensitive comparison catches all variants.
+            // We check for specific Anthropic error types and HTTP status codes.
+            // Using "overloaded_error" rather than bare "overloaded" to avoid
+            // false positives from tool output or user content.
             let lower = final_result.to_lowercase();
-            let is_rate_limited = lower.contains("overloaded")
+            let is_rate_limited = lower.contains("overloaded_error")
                 || lower.contains("rate limit")
                 || lower.contains("rate_limit")
                 || lower.contains("resource_exhausted")
@@ -8697,7 +8696,7 @@ pub async fn run_amp_turn(
     } else {
         // Detect rate limit / overloaded errors for account rotation.
         let lower = final_result.to_lowercase();
-        let is_rate_limited = lower.contains("overloaded")
+        let is_rate_limited = lower.contains("overloaded_error")
             || lower.contains("rate limit")
             || lower.contains("rate_limit")
             || lower.contains("resource_exhausted")
@@ -8992,7 +8991,7 @@ pub async fn run_codex_turn(
     } else {
         // Detect rate limit / overloaded errors for account rotation.
         let lower = final_message.to_lowercase();
-        let is_rate_limited = lower.contains("overloaded")
+        let is_rate_limited = lower.contains("overloaded_error")
             || lower.contains("rate limit")
             || lower.contains("rate_limit")
             || lower.contains("resource_exhausted")

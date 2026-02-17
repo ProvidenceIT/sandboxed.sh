@@ -112,13 +112,11 @@ export {
   type ResolvedEntry,
   type AccountHealthSnapshot,
   listModelChains,
-  getModelChain,
   createModelChain,
   updateModelChain,
   deleteModelChain,
   resolveModelChain,
   listAccountHealth,
-  getAccountHealth,
   clearAccountCooldown,
 } from "./model-routing";
 

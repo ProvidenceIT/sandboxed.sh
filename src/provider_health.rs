@@ -455,9 +455,22 @@ impl ModelChainStore {
             storage_path,
         };
 
-        if let Ok(loaded) = store.load_from_disk() {
-            let mut chains = store.chains.write().await;
-            *chains = loaded;
+        match store.load_from_disk() {
+            Ok(loaded) => {
+                let mut chains = store.chains.write().await;
+                *chains = loaded;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // No file yet — will be created on first write.
+            }
+            Err(e) => {
+                tracing::error!(
+                    "Failed to load model chains from {}: {}. Starting with empty chain store — \
+                     user-defined chains may have been lost.",
+                    store.storage_path.display(),
+                    e
+                );
+            }
         }
 
         // Ensure default chain exists (check + insert under write lock)
@@ -507,9 +520,6 @@ impl ModelChainStore {
     }
 
     fn load_from_disk(&self) -> Result<Vec<ModelChain>, std::io::Error> {
-        if !self.storage_path.exists() {
-            return Ok(Vec::new());
-        }
         let contents = std::fs::read_to_string(&self.storage_path)?;
         serde_json::from_str(&contents)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
