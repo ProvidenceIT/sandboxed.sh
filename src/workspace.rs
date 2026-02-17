@@ -1269,7 +1269,224 @@ async fn write_opencode_config(
         write_commands_as_opencode_skills(workspace_dir, commands).await?;
     }
 
+    // Write RTK PreToolUse hook for Claude Code (which oh-my-opencode wraps).
+    // This enables RTK compression for the native Bash tool used by the agent.
+    // Since OpenCode wraps Claude Code, we need to write a minimal
+    // `.claude/settings.local.json` containing the hooks config so the
+    // underlying Claude Code process discovers the hook.
+    if let Some(hooks) =
+        write_rtk_hook_if_enabled(workspace_dir, workspace_root, workspace_type).await?
+    {
+        let claude_dir = workspace_dir.join(".claude");
+        tokio::fs::create_dir_all(&claude_dir).await?;
+        let settings = json!({ "hooks": hooks });
+        let settings_content = serde_json::to_string_pretty(&settings)?;
+        let settings_path = claude_dir.join("settings.local.json");
+        tokio::fs::write(&settings_path, &settings_content).await?;
+        tracing::info!("RTK hooks written to .claude/settings.local.json for OpenCode backend");
+    }
+
     Ok(())
+}
+
+/// If `SANDBOXED_SH_RTK_ENABLED` is set, write a Claude Code `PreToolUse`
+/// hook that prefixes eligible Bash commands with the `rtk` binary.
+/// Returns the `hooks` JSON value to embed in `.claude/settings.local.json`,
+/// or `None` when RTK is disabled / the binary is absent.
+///
+/// For container workspaces, the RTK binary is copied from the host into
+/// the container's `/usr/local/bin/`, and paths in the hook config are
+/// translated to container-relative paths.
+///
+/// For the OpenCode backend this is also called so that the underlying Claude
+/// Code process (wrapped by oh-my-opencode) picks up the hook.
+async fn write_rtk_hook_if_enabled(
+    workspace_dir: &Path,
+    workspace_root: &Path,
+    workspace_type: WorkspaceType,
+) -> anyhow::Result<Option<serde_json::Value>> {
+    let rtk_enabled = std::env::var("SANDBOXED_SH_RTK_ENABLED")
+        .map(|v| {
+            matches!(
+                v.trim().to_lowercase().as_str(),
+                "1" | "true" | "yes" | "y" | "on"
+            )
+        })
+        .unwrap_or(false);
+
+    if !rtk_enabled {
+        return Ok(None);
+    }
+
+    // For container workspaces, copy the RTK binary from host into the container
+    let is_container =
+        workspace_type == WorkspaceType::Container && nspawn::nspawn_available();
+    if is_container {
+        if let Some(host_rtk) = rtk_binary_path_on_host() {
+            let dest_dir = workspace_root.join("usr").join("local").join("bin");
+            std::fs::create_dir_all(&dest_dir).ok();
+            let dest = dest_dir.join("rtk");
+            if !dest.exists() {
+                if let Err(e) = std::fs::copy(&host_rtk, &dest) {
+                    tracing::warn!(
+                        src = %host_rtk.display(),
+                        dest = %dest.display(),
+                        "Failed to copy RTK binary into container: {}", e
+                    );
+                } else {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        let _ = std::fs::set_permissions(
+                            &dest,
+                            std::fs::Permissions::from_mode(0o755),
+                        );
+                    }
+                    tracing::info!(
+                        dest = %dest.display(),
+                        "Copied RTK binary into container"
+                    );
+                }
+            }
+        } else {
+            tracing::warn!("RTK enabled but binary not found on host");
+            return Ok(None);
+        }
+    }
+
+    // Write the hook script to .claude/hooks/rtk-wrap.sh
+    let hooks_dir = workspace_dir.join(".claude").join("hooks");
+    tokio::fs::create_dir_all(&hooks_dir).await?;
+    let rtk_hook_path = hooks_dir.join("rtk-wrap.sh");
+    let rtk_hook_script = r#"#!/bin/bash
+# RTK PreToolUse hook: rewrites eligible bash commands to use RTK subcommands.
+# This reduces token consumption by 60-90% on common CLI output.
+# RTK has specific subcommands — we map the first word of the command to the
+# corresponding RTK subcommand and pass the rest as arguments after --.
+set -euo pipefail
+
+INPUT=$(cat)
+COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command // empty')
+
+# Skip if empty or already wrapped
+if [ -z "$COMMAND" ]; then exit 0; fi
+case "$COMMAND" in
+  rtk\ *|/*/rtk\ *) exit 0 ;;
+esac
+# Skip compound commands (pipes, chains, heredocs, subshells, semicolons)
+case "$COMMAND" in
+  *"&&"*|*"||"*|*"|"*|*"<<"*|*"("*|*";"*|*'`'*|*'$('*) exit 0 ;;
+esac
+
+# Find rtk binary
+RTK_PATH=""
+for p in /usr/local/bin/rtk /usr/bin/rtk; do
+  if [ -x "$p" ]; then RTK_PATH="$p"; break; fi
+done
+if [ -z "$RTK_PATH" ]; then exit 0; fi
+
+# Extract the base command (first word, ignoring path prefix)
+FIRST_WORD=$(echo "$COMMAND" | awk '{print $1}')
+BASE_CMD=$(basename "$FIRST_WORD")
+REST=$(echo "$COMMAND" | sed "s|^[^ ]* *||")
+
+# Map base commands to RTK subcommands (only commands RTK natively supports)
+RTK_SUB=""
+case "$BASE_CMD" in
+  ls)        RTK_SUB="ls" ;;
+  tree)      RTK_SUB="tree" ;;
+  git)       RTK_SUB="git" ;;
+  gh)        RTK_SUB="gh" ;;
+  grep|rg)   RTK_SUB="grep" ;;
+  cargo)     RTK_SUB="cargo" ;;
+  npm)       RTK_SUB="npm" ;;
+  npx)       RTK_SUB="npx" ;;
+  pnpm)      RTK_SUB="pnpm" ;;
+  docker)    RTK_SUB="docker" ;;
+  kubectl)   RTK_SUB="kubectl" ;;
+  vitest)    RTK_SUB="vitest" ;;
+  pytest)    RTK_SUB="pytest" ;;
+  go)        RTK_SUB="go" ;;
+  tsc)       RTK_SUB="tsc" ;;
+  eslint)    RTK_SUB="lint" ;;
+  ruff)      RTK_SUB="ruff" ;;
+  curl)      RTK_SUB="curl" ;;
+  pip|uv)    RTK_SUB="pip" ;;
+  diff)      RTK_SUB="diff" ;;
+esac
+
+if [ -z "$RTK_SUB" ]; then exit 0; fi
+
+# Build the rewritten command: rtk <sub> -- <original args>
+if [ -n "$REST" ]; then
+  NEW_CMD="$RTK_PATH $RTK_SUB -- $REST"
+else
+  NEW_CMD="$RTK_PATH $RTK_SUB"
+fi
+
+# Rewrite the command to use RTK
+jq -n --arg cmd "$NEW_CMD" '{
+  hookSpecificOutput: {
+    hookEventName: "PreToolUse",
+    permissionDecision: "allow",
+    updatedInput: { command: $cmd }
+  }
+}'
+"#;
+    tokio::fs::write(&rtk_hook_path, rtk_hook_script).await?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o755);
+        std::fs::set_permissions(&rtk_hook_path, perms)?;
+    }
+
+    // For container workspaces, translate the hook path from host to container-relative
+    let hook_command = if is_container {
+        if let Ok(rel) = rtk_hook_path.strip_prefix(workspace_root) {
+            format!("/{}", rel.to_string_lossy())
+        } else {
+            rtk_hook_path.to_string_lossy().to_string()
+        }
+    } else {
+        rtk_hook_path.to_string_lossy().to_string()
+    };
+    tracing::info!(
+        hook_path = %hook_command,
+        is_container = is_container,
+        "RTK PreToolUse hook written"
+    );
+
+    Ok(Some(json!({
+        "PreToolUse": [{
+            "matcher": "Bash",
+            "hooks": [{
+                "type": "command",
+                "command": hook_command
+            }]
+        }]
+    })))
+}
+
+/// Find the RTK binary on the host system (not inside a container).
+fn rtk_binary_path_on_host() -> Option<PathBuf> {
+    let candidates = ["/usr/local/bin/rtk", "/usr/bin/rtk"];
+    for p in &candidates {
+        let path = PathBuf::from(p);
+        if path.exists() {
+            return Some(path);
+        }
+    }
+    // Also check PATH
+    if let Ok(path_var) = std::env::var("PATH") {
+        for dir in path_var.split(':') {
+            let candidate = PathBuf::from(dir).join("rtk");
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
 }
 
 /// Write Claude Code configuration to the workspace.
@@ -1339,12 +1556,24 @@ async fn write_claudecode_config(
         WorkspaceType::Container => vec!["Bash", "Edit", "Write", "Read", "mcp__*"],
         WorkspaceType::Host => vec!["Bash", "Edit", "Write", "Read", "mcp__*"],
     };
-    let settings = json!({
+    let mut settings = json!({
         "mcpServers": mcp_servers,
         "permissions": {
             "allow": permissions
         }
     });
+
+    // Add RTK PreToolUse hook if enabled — rewrites eligible Bash commands
+    // to prefix them with `rtk` for token compression.
+    if let Some(hooks) =
+        write_rtk_hook_if_enabled(workspace_dir, workspace_root, workspace_type).await?
+    {
+        settings
+            .as_object_mut()
+            .unwrap()
+            .insert("hooks".to_string(), hooks);
+    }
+
     let settings_path = claude_dir.join("settings.local.json");
     let settings_content = serde_json::to_string_pretty(&settings)?;
     tokio::fs::write(&settings_path, &settings_content).await?;

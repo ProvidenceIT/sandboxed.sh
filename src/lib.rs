@@ -46,7 +46,6 @@ pub mod nspawn;
 pub mod opencode;
 pub mod opencode_config;
 pub mod provider_health;
-pub mod rtk_stats;
 pub mod secrets;
 pub mod settings;
 pub mod skills_registry;

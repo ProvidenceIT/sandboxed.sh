@@ -27,16 +27,38 @@ use tokio::process::Command;
 use super::{resolve_path_simple as resolve_path, Tool};
 use crate::nspawn;
 
-static RTK_ORIGINAL_CHARS: AtomicU64 = AtomicU64::new(0);
-static RTK_COMPRESSED_CHARS: AtomicU64 = AtomicU64::new(0);
 static RTK_COMMANDS_PROCESSED: AtomicU64 = AtomicU64::new(0);
 
+/// Return RTK stats: (commands_processed, original_tokens, compressed_tokens).
+///
+/// Token counts come from `rtk gain -f json` which reads RTK's own SQLite
+/// database with accurate pre- and post-compression measurements.  The
+/// process-local command counter tracks how many commands we wrapped.
 pub fn rtk_stats() -> (u64, u64, u64) {
-    (
-        RTK_COMMANDS_PROCESSED.load(Ordering::Relaxed),
-        RTK_ORIGINAL_CHARS.load(Ordering::Relaxed),
-        RTK_COMPRESSED_CHARS.load(Ordering::Relaxed),
-    )
+    let commands = RTK_COMMANDS_PROCESSED.load(Ordering::Relaxed);
+    let (original, compressed) = rtk_gain_stats().unwrap_or((0, 0));
+    (commands, original, compressed)
+}
+
+/// Query RTK's builtin stats via `rtk gain -f json`.
+/// Returns (total_input_tokens, total_output_tokens) on success.
+fn rtk_gain_stats() -> Option<(u64, u64)> {
+    let rtk_path = rtk_binary_path()?;
+    let output = std::process::Command::new(rtk_path)
+        .args(["gain", "-f", "json"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    let summary = json.get("summary")?;
+    let input = summary.get("total_input")?.as_u64()?;
+    let output_tokens = summary.get("total_output")?.as_u64()?;
+    Some((input, output_tokens))
 }
 
 fn rtk_enabled() -> bool {
@@ -62,8 +84,14 @@ fn rtk_binary_path() -> Option<PathBuf> {
             return Some(path);
         }
     }
-    if let Ok(path) = which::which("rtk") {
-        return Some(path);
+    // Fallback: search PATH
+    if let Ok(path_var) = env::var("PATH") {
+        for dir in path_var.split(':') {
+            let candidate = PathBuf::from(dir).join("rtk");
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
     }
     None
 }
@@ -1042,7 +1070,6 @@ impl Tool for RunCommand {
             None => run_host_command(&cwd, &final_command, &options).await?,
         };
 
-        let original_stdout_len = output.stdout.len();
         let stdout = sanitize_output(&output.stdout);
         let stderr = sanitize_output(&output.stderr);
         let exit_code = output.status.code().unwrap_or(-1);
@@ -1054,26 +1081,13 @@ impl Tool for RunCommand {
             stderr.len()
         );
 
-        if rtk_used && original_stdout_len > 0 {
-            let compressed_len = stdout.len();
+        if rtk_used {
             RTK_COMMANDS_PROCESSED.fetch_add(1, Ordering::Relaxed);
-            RTK_ORIGINAL_CHARS.fetch_add(original_stdout_len as u64, Ordering::Relaxed);
-            RTK_COMPRESSED_CHARS.fetch_add(compressed_len as u64, Ordering::Relaxed);
-            tracing::info!(
-                original_len = original_stdout_len,
-                compressed_len = compressed_len,
-                savings_pct = if original_stdout_len > 0 {
-                    ((original_stdout_len - compressed_len) * 100 / original_stdout_len) as i32
-                } else {
-                    0
-                },
-                "RTK token savings"
+            tracing::debug!(
+                compressed_stdout_len = stdout.len(),
+                "RTK-wrapped command completed"
             );
         }
-            exit_code,
-            stdout.len(),
-            stderr.len()
-        );
 
         let result = if options.raw_output {
             let mut raw = String::new();
