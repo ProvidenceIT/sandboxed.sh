@@ -19,7 +19,7 @@ mod file_ops;
 mod index;
 pub mod mission;
 mod search;
-mod terminal;
+pub mod terminal;
 mod ui;
 mod web;
 
