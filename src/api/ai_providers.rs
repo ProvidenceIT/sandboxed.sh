@@ -185,7 +185,7 @@ async fn refresh_openai_oauth_tokens(
 /// return an error.  The caller should fall back to `auth_mode: "chatgpt"` using
 /// the OAuth access_token directly.
 pub async fn ensure_openai_api_key_for_codex(working_dir: &Path) -> Result<(), String> {
-    if get_openai_api_key_for_codex(working_dir).is_some() {
+    if get_openai_api_key_for_codex_default(working_dir).is_some() {
         return Ok(());
     }
 
@@ -1038,7 +1038,7 @@ fn get_all_openai_keys_from_ai_providers(working_dir: &Path) -> Vec<String> {
 ///
 /// Used for account rotation: when one account hits a rate limit, the mission
 /// runner can try the next key in the list.
-pub fn get_all_amp_api_keys(working_dir: &Path) -> Vec<String> {
+pub fn get_all_amp_api_keys(_working_dir: &Path) -> Vec<String> {
     let mut all_keys = Vec::new();
     let mut seen = std::collections::HashSet::new();
 
@@ -1060,43 +1060,10 @@ pub fn get_all_amp_api_keys(working_dir: &Path) -> Vec<String> {
         }
     }
 
-    // 3. ai_providers.json (multi-account, sorted by priority)
-    let ai_providers_path = working_dir.join(".sandboxed-sh/ai_providers.json");
-    if let Ok(contents) = std::fs::read_to_string(&ai_providers_path) {
-        if let Ok(providers) = serde_json::from_str::<Vec<serde_json::Value>>(&contents) {
-            let mut entries: Vec<(u32, usize, String)> = Vec::new();
-            for (idx, provider) in providers.iter().enumerate() {
-                // Amp doesn't have a ProviderType in the enum yet, so we check
-                // for custom providers with "amp" in the name/label as a convention.
-                let provider_type = provider.get("provider_type").and_then(|v| v.as_str());
-                // Check for explicit "amp" type or custom providers labeled as amp
-                let is_amp = provider_type == Some("amp");
-                if !is_amp {
-                    continue;
-                }
-                let enabled = provider
-                    .get("enabled")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(true);
-                if !enabled {
-                    continue;
-                }
-                let priority = provider
-                    .get("priority")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as u32;
-                if let Some(api_key) = provider.get("api_key").and_then(|v| v.as_str()) {
-                    if !api_key.is_empty() {
-                        entries.push((priority, idx, api_key.to_string()));
-                    }
-                }
-            }
-            entries.sort_by_key(|(p, i, _)| (*p, *i));
-            for (_, _, key) in entries {
-                push_unique(key);
-            }
-        }
-    }
+    // Note: ai_providers.json is not checked here because ProviderType has no Amp
+    // variant, so no "amp" entries can be created through the provider management UI.
+    // If an Amp ProviderType is added in the future, this function should be extended
+    // to read from ai_providers.json (same pattern as get_all_openai_keys_from_ai_providers).
 
     all_keys
 }
@@ -1301,7 +1268,9 @@ fn upsert_openai_api_key_in_ai_providers(working_dir: &Path, api_key: &str) -> R
     Ok(())
 }
 
-fn get_openai_api_key_for_codex(working_dir: &Path) -> Option<String> {
+/// Returns the default OpenAI API key for Codex (env var > auth.json > ai_providers.json).
+/// Public so the mission runner can determine which key was already used on the initial attempt.
+pub fn get_openai_api_key_for_codex_default(working_dir: &Path) -> Option<String> {
     if let Ok(value) = std::env::var("OPENAI_API_KEY") {
         if !value.trim().is_empty() {
             return Some(value);
@@ -1534,6 +1503,7 @@ pub fn read_openai_oauth_access_token() -> Option<String> {
 pub fn write_codex_credentials_for_workspace(
     workspace: &crate::workspace::Workspace,
     working_dir: &Path,
+    override_api_key: Option<&str>,
 ) -> Result<(), String> {
     use crate::workspace::WorkspaceType;
 
@@ -1549,8 +1519,13 @@ pub fn write_codex_credentials_for_workspace(
         }
     };
 
+    // Priority 0: Use the override key if provided (used during account rotation
+    // to avoid mutating the process-global OPENAI_API_KEY env var).
     // Priority 1: Use a minted API key if available.
-    if let Some(api_key) = get_openai_api_key_for_codex(working_dir) {
+    if let Some(api_key) = override_api_key
+        .map(|s| s.to_string())
+        .or_else(|| get_openai_api_key_for_codex_default(working_dir))
+    {
         write_codex_auth_json_apikey(&codex_dir, &api_key)?;
         tracing::info!(
             workspace_id = %workspace.id,

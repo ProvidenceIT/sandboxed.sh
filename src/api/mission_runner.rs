@@ -1739,12 +1739,14 @@ async fn run_mission_turn(
                 cancel.clone(),
                 &config.working_dir,
                 session_id.as_deref(),
+                None,
             )
             .await;
 
             // Account rotation: if rate-limited, try alternate OpenAI API keys.
-            // Codex uses OPENAI_API_KEY env var, which is picked up by the
-            // credential writer (write_codex_credentials_for_workspace) on each turn.
+            // The override key is passed directly to write_codex_credentials_for_workspace
+            // to avoid mutating the process-global OPENAI_API_KEY env var (which would
+            // race with concurrent missions).
             if result.terminal_reason == Some(TerminalReason::RateLimited) {
                 let alt_keys =
                     super::ai_providers::get_all_openai_keys_for_codex(&config.working_dir);
@@ -1754,13 +1756,17 @@ async fn run_mission_turn(
                         total_keys = alt_keys.len(),
                         "Codex rate limited; trying alternate OpenAI API keys"
                     );
-                    let original_key = std::env::var("OPENAI_API_KEY").ok();
+                    // The first key in alt_keys is typically the default (from env var
+                    // or auth.json), which we already tried above.
+                    let already_tried = super::ai_providers::get_openai_api_key_for_codex_default(
+                        &config.working_dir,
+                    );
                     for (idx, alt_key) in alt_keys.into_iter().enumerate() {
                         if cancel.is_cancelled() {
                             break;
                         }
-                        // Skip the key we already tried (likely the first one)
-                        if Some(&alt_key) == original_key.as_ref() {
+                        // Skip the key we already tried
+                        if Some(&alt_key) == already_tried.as_ref() {
                             continue;
                         }
                         tracing::info!(
@@ -1768,8 +1774,6 @@ async fn run_mission_turn(
                             attempt = idx + 2,
                             "Rotating to alternate OpenAI API key for Codex"
                         );
-                        // Set the env var so credential writer picks it up
-                        std::env::set_var("OPENAI_API_KEY", &alt_key);
                         result = run_codex_turn(
                             &workspace,
                             &mission_work_dir,
@@ -1781,6 +1785,7 @@ async fn run_mission_turn(
                             cancel.clone(),
                             &config.working_dir,
                             session_id.as_deref(),
+                            Some(&alt_key),
                         )
                         .await;
                         match result.terminal_reason {
@@ -1794,10 +1799,6 @@ async fn run_mission_turn(
                             }
                             _ => break,
                         }
-                    }
-                    // Restore original key
-                    if let Some(key) = original_key {
-                        std::env::set_var("OPENAI_API_KEY", &key);
                     }
                 }
             }
@@ -8770,6 +8771,7 @@ pub async fn run_codex_turn(
     cancel: CancellationToken,
     app_working_dir: &std::path::Path,
     _session_id: Option<&str>,
+    override_api_key: Option<&str>,
 ) -> AgentResult {
     use crate::backend::codex::CodexBackend;
     use crate::backend::events::ExecutionEvent;
@@ -8794,9 +8796,11 @@ pub async fn run_codex_turn(
     }
 
     // Ensure Codex auth.json is present in the workspace context (host or container).
-    if let Err(e) =
-        crate::api::ai_providers::write_codex_credentials_for_workspace(workspace, app_working_dir)
-    {
+    if let Err(e) = crate::api::ai_providers::write_codex_credentials_for_workspace(
+        workspace,
+        app_working_dir,
+        override_api_key,
+    ) {
         tracing::error!("Failed to write Codex credentials: {}", e);
         return AgentResult::failure(
             format!("Failed to configure Codex authentication: {}", e),

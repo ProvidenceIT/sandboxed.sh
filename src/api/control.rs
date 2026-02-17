@@ -5752,6 +5752,7 @@ async fn run_single_control_turn(
                 cancel,
                 &config.working_dir,
                 session_id.as_deref(),
+                None,
             ))
             .await
         }
