@@ -396,9 +396,53 @@ async fn chat_completions(
         }
 
         // Stream the response back to the client.
-        // For streaming, record success on 2xx immediately — we can't wait
-        // for the full stream to complete since it's returned to the caller.
         if is_stream && status.is_success() {
+            // Peek at the first SSE data line to detect in-stream errors.
+            // Some providers (e.g. MiniMax) return HTTP 200 but send an error
+            // payload as the first SSE event.
+            let mut byte_stream = Box::pin(upstream_resp.bytes_stream());
+            let mut peek_buf = Vec::new();
+            let mut is_stream_error = false;
+
+            // Read enough of the stream to find the first data line
+            'peek: while peek_buf.len() < 4096 {
+                match byte_stream.next().await {
+                    Some(Ok(chunk)) => {
+                        peek_buf.extend_from_slice(&chunk);
+                        // Check if we have a complete data line
+                        if let Ok(text) = std::str::from_utf8(&peek_buf) {
+                            for line in text.lines() {
+                                if let Some(json_str) = line.strip_prefix("data: ") {
+                                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_str) {
+                                        if v.get("type").and_then(|t| t.as_str()) == Some("error")
+                                            || v.get("error").is_some()
+                                        {
+                                            is_stream_error = true;
+                                        }
+                                    }
+                                    break 'peek;
+                                }
+                            }
+                        }
+                    }
+                    Some(Err(_)) | None => break,
+                }
+            }
+
+            if is_stream_error {
+                tracing::warn!(
+                    provider = %entry.provider_id,
+                    account_id = %entry.account_id,
+                    model = %entry.model_id,
+                    "Upstream returned in-stream error, trying next entry"
+                );
+                state
+                    .health_tracker
+                    .record_failure(entry.account_id, CooldownReason::RateLimit, None)
+                    .await;
+                continue;
+            }
+
             state
                 .health_tracker
                 .record_success(entry.account_id)
@@ -414,7 +458,11 @@ async fn chat_completions(
                 "no-cache".parse().unwrap(),
             );
 
-            let byte_stream = normalize_sse_stream(upstream_resp.bytes_stream());
+            // Prepend the peeked bytes, then stream the rest
+            let peek_stream =
+                futures::stream::once(async { Ok::<_, reqwest::Error>(bytes::Bytes::from(peek_buf)) });
+            let combined = peek_stream.chain(byte_stream);
+            let byte_stream = normalize_sse_stream(combined);
 
             return (
                 status,
@@ -429,7 +477,30 @@ async fn chat_completions(
         let response_headers = upstream_resp.headers().clone();
         match upstream_resp.bytes().await {
             Ok(resp_body) => {
+                // Check for in-body errors (some providers return 200 with
+                // an error payload in the JSON body).
                 if status.is_success() {
+                    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&resp_body) {
+                        if v.get("type").and_then(|t| t.as_str()) == Some("error")
+                            || v.get("error").is_some()
+                        {
+                            tracing::warn!(
+                                provider = %entry.provider_id,
+                                account_id = %entry.account_id,
+                                model = %entry.model_id,
+                                "Upstream returned 200 with error body, trying next entry"
+                            );
+                            state
+                                .health_tracker
+                                .record_failure(
+                                    entry.account_id,
+                                    CooldownReason::RateLimit,
+                                    None,
+                                )
+                                .await;
+                            continue;
+                        }
+                    }
                     state
                         .health_tracker
                         .record_success(entry.account_id)
