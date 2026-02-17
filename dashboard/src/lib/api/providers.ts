@@ -19,6 +19,7 @@ export type AIProviderType =
   | "perplexity"
   | "zai"
   | "minimax"
+  | "amp"
   | "custom";
 
 export interface AIProviderTypeInfo {

@@ -27,6 +27,7 @@ const providerIcons: Record<string, string> = {
   perplexity: '🔍',
   zai: '⚡',
   minimax: 'M',
+  amp: 'A',
   custom: '🔧',
 };
 
@@ -164,6 +165,8 @@ export function AddProviderModal({ open, onClose, onSuccess, providerTypes }: Ad
       setSelectedBackends(['opencode']);
     } else if (providerType === 'openai') {
       setSelectedBackends(['opencode', 'codex']);
+    } else if (providerType === 'amp') {
+      setSelectedBackends(['amp']);
     } else {
       setSelectedBackends(['opencode']);
     }

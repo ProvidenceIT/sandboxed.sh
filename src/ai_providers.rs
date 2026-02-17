@@ -104,6 +104,7 @@ pub enum ProviderType {
     GithubCopilot,
     Zai,
     Minimax,
+    Amp,
     Custom,
 }
 
@@ -127,6 +128,7 @@ impl ProviderType {
             Self::GithubCopilot => "GitHub Copilot",
             Self::Zai => "Z.AI",
             Self::Minimax => "Minimax",
+            Self::Amp => "Amp",
             Self::Custom => "Custom",
         }
     }
@@ -150,6 +152,7 @@ impl ProviderType {
             Self::GithubCopilot => "github-copilot",
             Self::Zai => "zai",
             Self::Minimax => "minimax",
+            Self::Amp => "amp",
             Self::Custom => "custom",
         }
     }
@@ -174,6 +177,7 @@ impl ProviderType {
             "github-copilot" => Some(Self::GithubCopilot),
             "zai" => Some(Self::Zai),
             "minimax" => Some(Self::Minimax),
+            "amp" => Some(Self::Amp),
             "custom" => Some(Self::Custom),
             _ => None,
         }
@@ -198,6 +202,7 @@ impl ProviderType {
             Self::GithubCopilot => None, // Uses OAuth
             Self::Zai => Some("ZHIPU_API_KEY"),
             Self::Minimax => Some("MINIMAX_API_KEY"),
+            Self::Amp => Some("AMP_API_KEY"),
             Self::Custom => None,
         }
     }

@@ -76,9 +76,10 @@ function EntryEditor({
   const updateEntry = (index: number, field: keyof ChainEntry, value: string) => {
     const updated = entries.map((e, i) => {
       if (i !== index) return e;
-      if (field === 'provider_id') {
-        // Reset model when provider changes
-        return { ...e, provider_id: value, model_id: '' };
+      if (field === 'provider_id' && value !== e.provider_id) {
+        // Reset model only when provider actually changes to a different known provider
+        const isKnownProvider = providers.some((p) => p.id === value);
+        return { ...e, provider_id: value, model_id: isKnownProvider ? '' : e.model_id };
       }
       return { ...e, [field]: value };
     });
@@ -114,8 +115,8 @@ function EntryEditor({
       </div>
       {entries.map((entry, i) => {
         const models = getModelsForProvider(entry.provider_id);
-        const providerKnown = providers.some((p) => p.id === entry.provider_id);
-        const modelKnown = models.some((m) => m.id === entry.model_id);
+        const providerListId = `provider-list-${i}`;
+        const modelListId = `model-list-${i}`;
 
         return (
           <div
@@ -126,77 +127,33 @@ function EntryEditor({
             <span className="text-[10px] text-white/30 w-4 flex-shrink-0">
               {i + 1}.
             </span>
-            {/* Provider selector */}
-            {providers.length > 0 ? (
-              <select
-                value={providerKnown ? entry.provider_id : '__custom__'}
-                onChange={(e) => {
-                  const val = e.target.value;
-                  if (val === '__custom__') {
-                    updateEntry(i, 'provider_id', entry.provider_id || '');
-                  } else {
-                    updateEntry(i, 'provider_id', val);
-                  }
-                }}
-                className="flex-1 min-w-0 rounded border border-white/[0.06] bg-white/[0.02] px-2 py-1 text-xs text-white focus:outline-none focus:border-indigo-500/50 appearance-none cursor-pointer"
-              >
-                <option value="" className="bg-zinc-900 text-white/40">Select provider...</option>
-                {providers.map((p) => (
-                  <option key={p.id} value={p.id} className="bg-zinc-900 text-white">
-                    {p.name}
-                  </option>
-                ))}
-                {entry.provider_id && !providerKnown && (
-                  <option value="__custom__" className="bg-zinc-900 text-white/60">
-                    {entry.provider_id} (custom)
-                  </option>
-                )}
-              </select>
-            ) : (
-              <input
-                type="text"
-                value={entry.provider_id}
-                onChange={(e) => updateEntry(i, 'provider_id', e.target.value)}
-                placeholder="provider (e.g. zai)"
-                className="flex-1 min-w-0 rounded border border-white/[0.06] bg-white/[0.02] px-2 py-1 text-xs text-white focus:outline-none focus:border-indigo-500/50"
-              />
-            )}
+            <input
+              type="text"
+              list={providerListId}
+              value={entry.provider_id}
+              onChange={(e) => updateEntry(i, 'provider_id', e.target.value)}
+              placeholder="provider (e.g. zai)"
+              className="flex-1 min-w-0 rounded border border-white/[0.06] bg-white/[0.02] px-2 py-1 text-xs text-white focus:outline-none focus:border-indigo-500/50"
+            />
+            <datalist id={providerListId}>
+              {providers.map((p) => (
+                <option key={p.id} value={p.id}>{p.name}</option>
+              ))}
+            </datalist>
             <span className="text-white/20">/</span>
-            {/* Model selector */}
-            {models.length > 0 ? (
-              <select
-                value={modelKnown ? entry.model_id : '__custom__'}
-                onChange={(e) => {
-                  const val = e.target.value;
-                  if (val === '__custom__') {
-                    updateEntry(i, 'model_id', entry.model_id || '');
-                  } else {
-                    updateEntry(i, 'model_id', val);
-                  }
-                }}
-                className="flex-1 min-w-0 rounded border border-white/[0.06] bg-white/[0.02] px-2 py-1 text-xs text-white focus:outline-none focus:border-indigo-500/50 appearance-none cursor-pointer"
-              >
-                <option value="" className="bg-zinc-900 text-white/40">Select model...</option>
-                {models.map((m) => (
-                  <option key={m.id} value={m.id} className="bg-zinc-900 text-white">
-                    {m.name || m.id}
-                  </option>
-                ))}
-                {entry.model_id && !modelKnown && (
-                  <option value="__custom__" className="bg-zinc-900 text-white/60">
-                    {entry.model_id} (custom)
-                  </option>
-                )}
-              </select>
-            ) : (
-              <input
-                type="text"
-                value={entry.model_id}
-                onChange={(e) => updateEntry(i, 'model_id', e.target.value)}
-                placeholder={entry.provider_id ? 'model id' : 'select provider first'}
-                className="flex-1 min-w-0 rounded border border-white/[0.06] bg-white/[0.02] px-2 py-1 text-xs text-white focus:outline-none focus:border-indigo-500/50"
-              />
-            )}
+            <input
+              type="text"
+              list={modelListId}
+              value={entry.model_id}
+              onChange={(e) => updateEntry(i, 'model_id', e.target.value)}
+              placeholder={entry.provider_id ? 'model id' : 'select provider first'}
+              className="flex-1 min-w-0 rounded border border-white/[0.06] bg-white/[0.02] px-2 py-1 text-xs text-white focus:outline-none focus:border-indigo-500/50"
+            />
+            <datalist id={modelListId}>
+              {models.map((m) => (
+                <option key={m.id} value={m.id}>{m.name || m.id}</option>
+              ))}
+            </datalist>
             <div className="flex items-center gap-0.5 flex-shrink-0">
               <button
                 onClick={() => moveEntry(i, 'up')}

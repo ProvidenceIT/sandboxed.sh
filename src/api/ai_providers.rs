@@ -336,8 +336,8 @@ pub fn read_standard_accounts(working_dir: &Path) -> Vec<crate::provider_health:
         let Some(provider_type) = ProviderType::from_id(key.as_str()) else {
             continue;
         };
-        // Skip custom providers — they live in AIProviderStore
-        if provider_type == ProviderType::Custom {
+        // Skip custom/amp providers — they live in AIProviderStore / backend config
+        if provider_type == ProviderType::Custom || provider_type == ProviderType::Amp {
             continue;
         }
         // Extract actual API key from the auth entry.
@@ -1038,7 +1038,7 @@ fn get_all_openai_keys_from_ai_providers(working_dir: &Path) -> Vec<String> {
 ///
 /// Used for account rotation: when one account hits a rate limit, the mission
 /// runner can try the next key in the list.
-pub fn get_all_amp_api_keys(_working_dir: &Path) -> Vec<String> {
+pub fn get_all_amp_api_keys(working_dir: &Path) -> Vec<String> {
     let mut all_keys = Vec::new();
     let mut seen = std::collections::HashSet::new();
 
@@ -1060,12 +1060,54 @@ pub fn get_all_amp_api_keys(_working_dir: &Path) -> Vec<String> {
         }
     }
 
-    // Note: ai_providers.json is not checked here because ProviderType has no Amp
-    // variant, so no "amp" entries can be created through the provider management UI.
-    // If an Amp ProviderType is added in the future, this function should be extended
-    // to read from ai_providers.json (same pattern as get_all_openai_keys_from_ai_providers).
+    // 3. ai_providers.json (Amp provider entries, sorted by priority)
+    for key in get_all_amp_keys_from_ai_providers(working_dir) {
+        push_unique(key);
+    }
 
     all_keys
+}
+
+/// Get all Amp API keys from ai_providers.json, sorted by priority.
+fn get_all_amp_keys_from_ai_providers(working_dir: &Path) -> Vec<String> {
+    let ai_providers_path = working_dir.join(".sandboxed-sh/ai_providers.json");
+    let contents = match std::fs::read_to_string(&ai_providers_path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    let providers: Vec<serde_json::Value> = match serde_json::from_str(&contents) {
+        Ok(p) => p,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut entries: Vec<(u32, usize, String)> = Vec::new();
+
+    for (idx, provider) in providers.iter().enumerate() {
+        let provider_type = provider.get("provider_type").and_then(|v| v.as_str());
+        if provider_type != Some("amp") {
+            continue;
+        }
+        let enabled = provider
+            .get("enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        if !enabled {
+            continue;
+        }
+        let priority = provider
+            .get("priority")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
+
+        if let Some(api_key) = provider.get("api_key").and_then(|v| v.as_str()) {
+            if !api_key.is_empty() {
+                entries.push((priority, idx, api_key.to_string()));
+            }
+        }
+    }
+
+    entries.sort_by_key(|(p, i, _)| (*p, *i));
+    entries.into_iter().map(|(_, _, key)| key).collect()
 }
 
 /// Get Anthropic auth from Claude CLI's own credentials file.
@@ -3210,7 +3252,7 @@ fn write_opencode_provider_auth_file(
 
 fn opencode_auth_keys(provider_type: ProviderType) -> Vec<&'static str> {
     match provider_type {
-        ProviderType::Custom => Vec::new(),
+        ProviderType::Custom | ProviderType::Amp => Vec::new(),
         ProviderType::OpenAI => vec!["openai", "codex"],
         _ => vec![provider_type.id()],
     }
@@ -3814,6 +3856,12 @@ async fn list_provider_types() -> Json<Vec<ProviderTypeInfo>> {
             name: "GitHub Copilot".to_string(),
             uses_oauth: true,
             env_var: None,
+        },
+        ProviderTypeInfo {
+            id: "amp".to_string(),
+            name: "Amp".to_string(),
+            uses_oauth: false,
+            env_var: Some("AMP_API_KEY".to_string()),
         },
     ];
     Json(types)
