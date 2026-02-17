@@ -450,7 +450,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         )
         // WebSocket system monitoring uses subprotocol-based auth
         .route("/api/monitoring/ws", get(monitoring::monitoring_ws))
-        // OpenAI-compatible proxy endpoint (no auth — internal use from workspaces)
+        // OpenAI-compatible proxy endpoint (bearer token auth via SANDBOXED_PROXY_SECRET)
         .nest("/v1", proxy_api::routes());
 
     // File upload routes with increased body limit (10GB)

@@ -452,9 +452,8 @@ impl ModelChainStore {
 
         let mut chains = self.chains.write().await;
         chains.push(default_chain);
-        drop(chains);
-
-        if let Err(e) = self.save_to_disk().await {
+        // Serialize while still holding the write lock to avoid TOCTOU races.
+        if let Err(e) = self.save_chains_to_disk(&chains) {
             tracing::error!("Failed to save default model chain: {}", e);
         }
     }
