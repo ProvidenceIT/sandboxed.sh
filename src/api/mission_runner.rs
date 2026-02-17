@@ -3607,6 +3607,60 @@ fn opencode_output_needs_fallback(output: &str) -> bool {
     true
 }
 
+/// Returns true if the output looks like a raw tool-call JSON fragment rather
+/// than a genuine assistant text response. This catches the case (issue #148)
+/// where the model emitted a tool call but no final text response, and the
+/// tool-call JSON ended up in `final_result` via a TextDelta or stdout path.
+///
+/// We check each non-empty, non-banner line: if every such line parses as a
+/// JSON object containing tool-call markers (`name` + `arguments`/`input`,
+/// or `type` == `function_call`/`tool_use`/`tool-call`), the output is
+/// considered tool-call-only and should not be returned as assistant text.
+fn is_tool_call_only_output(output: &str) -> bool {
+    let cleaned = strip_ansi_codes(output);
+    let lines: Vec<String> = cleaned
+        .lines()
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty() && !is_opencode_banner_line(line))
+        .collect();
+
+    if lines.is_empty() {
+        return false; // empty/banner-only is handled by opencode_output_needs_fallback
+    }
+
+    for line in &lines {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(line) {
+            if let Some(obj) = json.as_object() {
+                // Check for tool-call type markers
+                let is_type_tool = obj
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .map(|t| {
+                        t == "function_call"
+                            || t == "tool_use"
+                            || t == "tool-call"
+                            || t == "tool_call"
+                    })
+                    .unwrap_or(false);
+
+                // Check for name + arguments/input pattern (common in all tool-call formats)
+                let has_name = obj.contains_key("name");
+                let has_args =
+                    obj.contains_key("arguments") || obj.contains_key("input");
+                let is_tool_shape = has_name && has_args;
+
+                if is_type_tool || is_tool_shape {
+                    continue; // this line is a tool-call fragment
+                }
+            }
+        }
+        // Line is not a tool-call JSON fragment — real text exists
+        return false;
+    }
+
+    true // every non-banner line was a tool-call JSON fragment
+}
+
 fn allocate_opencode_server_port() -> Option<u16> {
     std::net::TcpListener::bind("127.0.0.1:0")
         .ok()
@@ -8192,6 +8246,20 @@ pub async fn run_opencode_turn(
         had_error = true;
         final_result =
             "OpenCode produced no assistant output (only runner status lines or empty). The model may not have responded.".to_string();
+    }
+
+    // Detect tool-call-only output: the model emitted tool calls but never
+    // produced a final text response. The JSON fragment should not be returned
+    // as assistant text — surface a clear error instead (fixes #148).
+    if !had_error && is_tool_call_only_output(&final_result) {
+        tracing::warn!(
+            mission_id = %mission_id,
+            result_preview = %final_result.chars().take(200).collect::<String>(),
+            "OpenCode output contains only tool-call JSON fragments with no assistant text"
+        );
+        had_error = true;
+        final_result =
+            "The model attempted tool calls but produced no final text response. This can happen when the model routing chain doesn't support tool execution.".to_string();
     }
 
     tracing::info!(
