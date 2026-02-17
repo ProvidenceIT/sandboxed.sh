@@ -256,11 +256,7 @@ export function AddProviderModal({ open, onClose, onSuccess, providerTypes }: Ad
           ? `${selectedTypeInfo?.name || selectedProvider} (${accountLabel.trim()})`
           : selectedTypeInfo?.name || selectedProvider,
         api_key: apiKey,
-        // Include backend targeting for supported providers
-        use_for_backends:
-          selectedProvider === 'anthropic' || selectedProvider === 'openai'
-            ? selectedBackends
-            : undefined,
+        use_for_backends: selectedBackends,
       });
       toast.success('Provider added');
       onSuccess();

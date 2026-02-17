@@ -3892,15 +3892,21 @@ async fn list_providers(
         })
         .collect();
 
-    // Also include custom providers from AIProviderStore
-    let custom_providers = state.ai_providers.list().await;
-    for provider in custom_providers {
-        if provider.provider_type == ProviderType::Custom && provider.enabled {
+    // Also include providers from AIProviderStore (Custom and Amp)
+    let store_providers = state.ai_providers.list().await;
+    for provider in store_providers {
+        let pt = provider.provider_type;
+        if (pt == ProviderType::Custom || pt == ProviderType::Amp) && provider.enabled {
             let now = chrono::Utc::now();
+            let default_backend = if pt == ProviderType::Amp {
+                "amp".to_string()
+            } else {
+                "opencode".to_string()
+            };
             providers.push(ProviderResponse {
                 id: provider.id.to_string(),
-                provider_type: ProviderType::Custom,
-                provider_type_name: "Custom".to_string(),
+                provider_type: pt,
+                provider_type_name: pt.display_name().to_string(),
                 name: provider.name.clone(),
                 label: provider.label.clone(),
                 priority: provider.priority,
@@ -3915,12 +3921,12 @@ async fn list_providers(
                 is_default: provider.is_default,
                 uses_oauth: false,
                 auth_methods: vec![],
-                status: if provider.base_url.is_some() {
+                status: if provider.api_key.is_some() || provider.base_url.is_some() {
                     ProviderStatusResponse::Connected
                 } else {
                     ProviderStatusResponse::NeedsAuth { auth_url: None }
                 },
-                use_for_backends: vec!["opencode".to_string()], // Custom providers work with OpenCode
+                use_for_backends: vec![default_backend],
                 created_at: now,
                 updated_at: now,
             });
@@ -4309,26 +4315,29 @@ async fn create_provider(
 
     let provider_type = req.provider_type;
 
-    // label and priority are only supported for custom providers (stored in AIProviderStore).
-    // Standard providers are stored in OpenCode's config which doesn't support these fields.
-    if provider_type != ProviderType::Custom {
+    // label and priority are only supported for providers stored in AIProviderStore
+    // (Custom and Amp). Standard providers are stored in OpenCode's config which
+    // doesn't support these fields.
+    if provider_type != ProviderType::Custom && provider_type != ProviderType::Amp {
         if req.label.is_some() {
             return Err((
                 StatusCode::BAD_REQUEST,
-                "label is only supported for custom providers".to_string(),
+                "label is only supported for custom/amp providers".to_string(),
             ));
         }
         if req.priority.is_some() && req.priority != Some(0) {
             return Err((
                 StatusCode::BAD_REQUEST,
-                "priority is only supported for custom providers".to_string(),
+                "priority is only supported for custom/amp providers".to_string(),
             ));
         }
     }
 
-    // For custom providers, store in AIProviderStore (ai_providers.json)
-    // so that workspace preparation can read custom models and base URL
-    if provider_type == ProviderType::Custom {
+    // For custom providers and Amp, store in AIProviderStore (ai_providers.json).
+    // Custom: workspace preparation reads custom models and base URL from here.
+    // Amp: keys are read by get_all_amp_keys_from_ai_providers() for rotation.
+    //       Amp doesn't use OpenCode's auth.json (opencode_auth_keys returns []).
+    if provider_type == ProviderType::Custom || provider_type == ProviderType::Amp {
         let mut provider = crate::ai_providers::AIProvider::new(provider_type, req.name.clone());
         provider.label = req.label.clone();
         provider.priority = req.priority.unwrap_or(0);
@@ -4342,17 +4351,22 @@ async fn create_provider(
         state.ai_providers.add(provider.clone()).await;
 
         tracing::info!(
-            "Created custom AI provider: {} with {} models",
+            "Created {} AI provider: {} ({})",
+            provider_type.display_name(),
             req.name,
-            req.custom_models.as_ref().map(|m| m.len()).unwrap_or(0)
+            provider.id
         );
 
-        // Return a response for custom provider
         let now = chrono::Utc::now();
+        let default_backend = if provider_type == ProviderType::Amp {
+            "amp".to_string()
+        } else {
+            "opencode".to_string()
+        };
         return Ok(Json(ProviderResponse {
             id: provider.id.to_string(),
-            provider_type: ProviderType::Custom,
-            provider_type_name: "Custom".to_string(),
+            provider_type,
+            provider_type_name: provider_type.display_name().to_string(),
             name: req.name,
             label: req.label,
             priority: req.priority.unwrap_or(0),
@@ -4372,7 +4386,7 @@ async fn create_provider(
             } else {
                 ProviderStatusResponse::NeedsAuth { auth_url: None }
             },
-            use_for_backends: vec!["opencode".to_string()], // Custom providers work with OpenCode
+            use_for_backends: req.use_for_backends.unwrap_or_else(|| vec![default_backend]),
             created_at: now,
             updated_at: now,
         }));
@@ -4490,18 +4504,18 @@ async fn update_provider(
         }
     }
 
-    // label and priority are only supported for custom providers
-    if provider_type != ProviderType::Custom {
+    // label and priority are only supported for providers stored in AIProviderStore
+    if provider_type != ProviderType::Custom && provider_type != ProviderType::Amp {
         if req.label.is_some() {
             return Err((
                 StatusCode::BAD_REQUEST,
-                "label is only supported for custom providers".to_string(),
+                "label is only supported for custom/amp providers".to_string(),
             ));
         }
         if req.priority.is_some() && req.priority != Some(0) {
             return Err((
                 StatusCode::BAD_REQUEST,
-                "priority is only supported for custom providers".to_string(),
+                "priority is only supported for custom/amp providers".to_string(),
             ));
         }
     }
@@ -4535,15 +4549,23 @@ async fn update_provider(
     }
 
     if let Some(api_key_update) = req.api_key {
-        match api_key_update {
-            Some(api_key) => {
-                if let Err(e) = sync_api_key_to_opencode_auth(provider_type, &api_key) {
-                    tracing::error!("Failed to sync API key to OpenCode: {}", e);
+        if provider_type == ProviderType::Amp {
+            // Amp keys live in ai_providers.json, not opencode auth.json
+            state
+                .ai_providers
+                .update_api_key_by_type(provider_type, api_key_update.as_deref())
+                .await;
+        } else {
+            match api_key_update {
+                Some(api_key) => {
+                    if let Err(e) = sync_api_key_to_opencode_auth(provider_type, &api_key) {
+                        tracing::error!("Failed to sync API key to OpenCode: {}", e);
+                    }
                 }
-            }
-            None => {
-                if let Err(e) = remove_opencode_auth_entry(provider_type) {
-                    tracing::error!("Failed to remove OpenCode auth entry: {}", e);
+                None => {
+                    if let Err(e) = remove_opencode_auth_entry(provider_type) {
+                        tracing::error!("Failed to remove OpenCode auth entry: {}", e);
+                    }
                 }
             }
         }
