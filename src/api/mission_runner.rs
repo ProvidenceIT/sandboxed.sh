@@ -7403,6 +7403,7 @@ pub async fn run_opencode_turn(
     let stderr_text_output_tx = text_output_tx.clone();
     let stderr_last_activity = last_activity.clone();
     let stderr_rate_limit = rate_limit_detected.clone();
+    let stderr_events_tx = events_tx.clone();
     let stderr_handle = stderr.map(|stderr| {
         tokio::spawn(async move {
             let stderr_reader = BufReader::new(stderr);
@@ -7455,18 +7456,75 @@ pub async fn run_opencode_turn(
                         }
                     }
 
-                    // Detect session errors from stderr
+                    // Detect session/provider errors from stderr and surface
+                    // them as AgentEvent::Error so the frontend shows the
+                    // reason a mission failed (issue #146).
                     let lower = clean.to_lowercase();
-                    if lower.contains("session.error") || lower.contains("session ended with error")
+                    let detected_error = if lower.contains("session.error")
+                        || lower.contains("session ended with error")
                     {
-                        if let Some(pos) = clean.find(": ") {
-                            let err_part = clean[pos + 2..].trim();
-                            if !err_part.is_empty() {
-                                let mut guard = stderr_error_capture.lock().unwrap();
-                                if guard.is_none() {
-                                    *guard = Some(err_part.to_string());
-                                }
+                        // Standard session error format:
+                        //   [MAIN] session.error: Requested entity was not found
+                        clean.find(": ").map(|pos| clean[pos + 2..].trim().to_string())
+                    } else if lower.contains("response.error") {
+                        // Provider response error:
+                        //   [MAIN] response.error: 404 Not Found
+                        clean.find(": ").map(|pos| clean[pos + 2..].trim().to_string())
+                    } else if (lower.contains("error") || lower.contains("failed"))
+                        && clean.contains('{')
+                    {
+                        // JSON error payload on stderr — try to extract a
+                        // meaningful message from common fields.
+                        if let Some(start) = clean.find('{') {
+                            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&clean[start..]) {
+                                let msg = json.get("message")
+                                    .or(json.get("error"))
+                                    .and_then(|v| v.as_str().map(|s| s.to_string())
+                                        .or_else(|| v.get("message").and_then(|m| m.as_str()).map(|s| s.to_string()))
+                                    )
+                                    .or_else(|| {
+                                        // Nested error object: {"error": {"message": "...", "status": "..."}}
+                                        json.get("error")
+                                            .and_then(|e| e.as_object())
+                                            .and_then(|obj| {
+                                                let msg = obj.get("message").and_then(|m| m.as_str())?;
+                                                let status = obj.get("status").and_then(|s| s.as_str());
+                                                Some(if let Some(st) = status {
+                                                    format!("{} ({})", msg, st)
+                                                } else {
+                                                    msg.to_string()
+                                                })
+                                            })
+                                    });
+                                msg
+                            } else {
+                                None
                             }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+
+                    if let Some(err_msg) = detected_error {
+                        if !err_msg.is_empty() {
+                            tracing::warn!(
+                                mission_id = %mission_id_clone,
+                                error = %err_msg,
+                                "OpenCode provider error detected on stderr"
+                            );
+                            let mut guard = stderr_error_capture.lock().unwrap();
+                            if guard.is_none() {
+                                *guard = Some(err_msg.clone());
+                            }
+                            // Emit a real-time error event so the frontend
+                            // shows the error immediately, not just at the end.
+                            let _ = stderr_events_tx.send(AgentEvent::Error {
+                                message: err_msg,
+                                mission_id: Some(mission_id_clone),
+                                resumable: true,
+                            });
                         }
                     }
 
