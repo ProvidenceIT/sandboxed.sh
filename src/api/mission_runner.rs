@@ -1303,6 +1303,10 @@ async fn run_mission_turn(
         // clear the global default so the profile's oh-my-opencode agent
         // models take precedence instead of being overridden.
         config.default_model = None;
+    } else if backend_id == "codex" && model_override.is_none() {
+        // The global DEFAULT_MODEL (e.g. claude-opus-4-6) is not valid for
+        // Codex.  Clear it so Codex uses its own CLI default.
+        config.default_model = None;
     }
     tracing::info!(
         mission_id = %mission_id,
@@ -8885,6 +8889,7 @@ pub async fn run_codex_turn(
         mission_id = %mission_id,
         workspace_type = ?workspace.workspace_type,
         cli_path = %cli_path,
+        model = ?model,
         "Starting Codex execution via WorkspaceExec"
     );
 
