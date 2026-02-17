@@ -243,7 +243,10 @@ async fn chat_completions(
     if entries.is_empty() {
         return error_response(
             StatusCode::TOO_MANY_REQUESTS,
-            "All providers in the chain are currently in cooldown or unconfigured".to_string(),
+            format!(
+                "All providers in chain '{}' are currently in cooldown or unconfigured",
+                chain_id
+            ),
             "rate_limit_exceeded",
         );
     }
@@ -557,7 +560,22 @@ async fn chat_completions(
         "All chain entries exhausted"
     );
 
-    if client_error_count > 0 && rate_limit_count == 0 && server_error_count == 0 {
+    let attempted = rate_limit_count + client_error_count + server_error_count;
+
+    if attempted == 0 {
+        // No upstream requests were made — every entry was skipped due to
+        // missing credentials, unknown provider type, or incompatible API.
+        // This is a configuration error, not a rate limit.
+        error_response(
+            StatusCode::BAD_GATEWAY,
+            format!(
+                "All {} providers in chain '{}' were skipped (missing credentials or incompatible)",
+                entries.len(),
+                chain_id
+            ),
+            "provider_configuration_error",
+        )
+    } else if client_error_count > 0 && rate_limit_count == 0 && server_error_count == 0 {
         // All failures were client errors (4xx / auth) — likely a configuration
         // or credentials issue, not a transient rate limit.
         error_response(

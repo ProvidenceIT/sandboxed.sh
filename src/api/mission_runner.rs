@@ -2034,6 +2034,10 @@ pub fn run_claudecode_turn<'a>(
             tracing::warn!("Failed to refresh Anthropic OAuth token: {}", e);
         }
 
+        // Keep a clone of the override credential so recursive continuation
+        // calls (tool-result → next turn) keep using the same rotated account.
+        let override_auth_for_continuation = override_auth.clone();
+
         // If an override credential was provided (account rotation), use it directly.
         let api_auth = if let Some(auth) = override_auth {
             tracing::info!(
@@ -2974,7 +2978,7 @@ pub fn run_claudecode_turn<'a>(
                                                             true,
                                                             tool_hub,
                                                             status,
-                                                            None, // override_auth
+                                                            override_auth_for_continuation,
                                                         ).await;
                                                     }
                                                 }
