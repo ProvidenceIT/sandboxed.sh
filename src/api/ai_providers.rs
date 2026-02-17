@@ -1245,26 +1245,9 @@ fn get_openai_api_key_from_opencode_auth() -> Option<String> {
 }
 
 fn get_openai_api_key_from_ai_providers(working_dir: &Path) -> Option<String> {
-    let ai_providers_path = working_dir.join(".sandboxed-sh/ai_providers.json");
-    if !ai_providers_path.exists() {
-        return None;
-    }
-
-    let contents = std::fs::read_to_string(&ai_providers_path).ok()?;
-    let providers: Vec<serde_json::Value> = serde_json::from_str(&contents).ok()?;
-
-    for provider in providers {
-        if provider.get("provider_type").and_then(|v| v.as_str()) != Some("openai") {
-            continue;
-        }
-        let api_key = provider.get("api_key").and_then(|v| v.as_str())?;
-        if api_key.trim().is_empty() {
-            continue;
-        }
-        return Some(api_key.to_string());
-    }
-
-    None
+    get_all_openai_keys_from_ai_providers(working_dir)
+        .into_iter()
+        .next()
 }
 
 fn upsert_openai_api_key_in_ai_providers(working_dir: &Path, api_key: &str) -> Result<(), String> {
