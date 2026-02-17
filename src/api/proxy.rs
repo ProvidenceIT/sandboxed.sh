@@ -330,6 +330,7 @@ async fn chat_completions(
                     .health_tracker
                     .record_failure(entry.account_id, reason, None)
                     .await;
+                server_error_count += 1;
                 continue;
             }
         };
@@ -540,6 +541,7 @@ async fn chat_completions(
                     error = %e,
                     "Failed to read upstream response body"
                 );
+                server_error_count += 1;
                 continue;
             }
         }
@@ -566,6 +568,17 @@ async fn chat_completions(
                 chain_id
             ),
             "upstream_error",
+        )
+    } else if server_error_count > 0 && rate_limit_count == 0 {
+        // All failures were server/network errors — upstream outage, not throttling.
+        error_response(
+            StatusCode::BAD_GATEWAY,
+            format!(
+                "All {} providers in chain '{}' are unavailable (server/network errors)",
+                entries.len(),
+                chain_id
+            ),
+            "upstream_unavailable",
         )
     } else {
         error_response(

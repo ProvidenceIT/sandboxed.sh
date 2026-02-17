@@ -534,32 +534,38 @@ impl ModelChainStore {
         }
     }
 
-    /// Delete a chain by ID. Cannot delete the last chain.
-    /// If the deleted chain was the default, the first remaining chain
-    /// is promoted to default.
-    pub async fn delete(&self, id: &str) -> bool {
+    /// Delete a chain by ID.
+    ///
+    /// Returns:
+    /// - `Ok(true)` if deleted successfully
+    /// - `Ok(false)` if chain not found
+    /// - `Err(msg)` if deletion is not allowed (e.g., last chain)
+    pub async fn delete(&self, id: &str) -> Result<bool, &'static str> {
         let mut chains = self.chains.write().await;
-        if chains.len() <= 1 {
-            return false;
+
+        if !chains.iter().any(|c| c.id == id) {
+            return Ok(false);
         }
+
+        if chains.len() <= 1 {
+            return Err("Cannot delete the last remaining chain");
+        }
+
         let was_default = chains.iter().any(|c| c.id == id && c.is_default);
-        let len_before = chains.len();
         chains.retain(|c| c.id != id);
-        let deleted = chains.len() < len_before;
+
         // If we deleted the default chain, promote the first remaining chain.
-        if deleted && was_default {
+        if was_default {
             if let Some(first) = chains.first_mut() {
                 first.is_default = true;
             }
         }
 
         // Serialize while still holding the write lock to avoid TOCTOU races.
-        if deleted {
-            if let Err(e) = self.save_chains_to_disk(&chains) {
-                tracing::error!("Failed to save model chains after delete: {}", e);
-            }
+        if let Err(e) = self.save_chains_to_disk(&chains) {
+            tracing::error!("Failed to save model chains after delete: {}", e);
         }
-        deleted
+        Ok(true)
     }
 
     // ─────────────────────────────────────────────────────────────────────

@@ -238,10 +238,10 @@ async fn delete_chain(
         ));
     }
 
-    if state.chain_store.delete(&id).await {
-        Ok(Json(serde_json::json!({ "deleted": true })))
-    } else {
-        Err((StatusCode::NOT_FOUND, format!("Chain '{}' not found", id)))
+    match state.chain_store.delete(&id).await {
+        Ok(true) => Ok(Json(serde_json::json!({ "deleted": true }))),
+        Ok(false) => Err((StatusCode::NOT_FOUND, format!("Chain '{}' not found", id))),
+        Err(msg) => Err((StatusCode::CONFLICT, msg.to_string())),
     }
 }
 
