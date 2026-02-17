@@ -347,7 +347,7 @@ async fn chat_completions(
 
         // Pre-stream error handling: 429, 529, 5xx → cooldown + try next
         if status == StatusCode::TOO_MANY_REQUESTS || status.as_u16() == 529 {
-            let retry_after = parse_retry_after(upstream_resp.headers());
+            let retry_after = parse_rate_limit_headers(upstream_resp.headers(), provider_type);
             let reason = if status.as_u16() == 529 {
                 CooldownReason::Overloaded
             } else {
@@ -677,12 +677,125 @@ fn rewrite_model(body: &[u8], new_model: &str) -> Result<bytes::Bytes, String> {
         .map_err(|e| format!("Failed to serialize: {}", e))
 }
 
-/// Parse `Retry-After` header into a Duration (numeric seconds only).
-fn parse_retry_after(headers: &HeaderMap) -> Option<std::time::Duration> {
+/// Extract the best cooldown duration from provider-specific rate limit headers.
+///
+/// Different providers include different headers in their 429 responses:
+///
+/// - **OpenAI / xAI / Groq**: `x-ratelimit-reset-requests` and
+///   `x-ratelimit-reset-tokens` (e.g. "2s", "1m30s", "200ms"), plus
+///   standard `retry-after` (seconds).
+/// - **Anthropic**: `retry-after` (seconds).
+/// - **Minimax / Cerebras / Others**: `retry-after` (seconds).
+///
+/// We pick the *shortest* of the provider-specific reset durations (since
+/// that's when the first limit clears and the request can be retried),
+/// falling back to the generic `Retry-After` header.
+fn parse_rate_limit_headers(
+    headers: &HeaderMap,
+    provider_type: ProviderType,
+) -> Option<std::time::Duration> {
+    match provider_type {
+        // Providers that send x-ratelimit-reset-* duration strings
+        ProviderType::OpenAI
+        | ProviderType::Xai
+        | ProviderType::Groq
+        | ProviderType::OpenRouter => {
+            let mut best: Option<std::time::Duration> = None;
+            for key in &[
+                "x-ratelimit-reset-requests",
+                "x-ratelimit-reset-tokens",
+                "x-ratelimit-reset",
+            ] {
+                if let Some(d) = headers
+                    .get(*key)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(parse_duration_string)
+                {
+                    best = Some(best.map_or(d, |b: std::time::Duration| b.min(d)));
+                }
+            }
+            best.or_else(|| parse_retry_after_secs(headers))
+        }
+        // All other providers: use standard Retry-After only
+        _ => parse_retry_after_secs(headers),
+    }
+}
+
+/// Parse a standard `Retry-After` header as numeric seconds.
+fn parse_retry_after_secs(headers: &HeaderMap) -> Option<std::time::Duration> {
     let value = headers.get("retry-after")?.to_str().ok()?;
     let secs: f64 = value.parse().ok()?;
     if secs > 0.0 {
         Some(std::time::Duration::from_secs_f64(secs))
+    } else {
+        None
+    }
+}
+
+/// Parse a human-friendly duration string like "2s", "1m30s", "200ms", "0.5s".
+///
+/// Supports the formats returned by OpenAI-family rate limit headers:
+///   `Xh`, `Xm`, `Xs`, `Xms` and combinations like `1m30s`.
+fn parse_duration_string(s: &str) -> Option<std::time::Duration> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+
+    // Try plain numeric seconds first (some providers send "60" instead of "60s")
+    if let Ok(secs) = s.parse::<f64>() {
+        return if secs > 0.0 {
+            Some(std::time::Duration::from_secs_f64(secs))
+        } else {
+            None
+        };
+    }
+
+    let mut total_ms: f64 = 0.0;
+    let mut num_buf = String::new();
+    let mut chars = s.chars().peekable();
+
+    while chars.peek().is_some() {
+        // Collect digits and decimal point
+        num_buf.clear();
+        while let Some(&c) = chars.peek() {
+            if c.is_ascii_digit() || c == '.' {
+                num_buf.push(c);
+                chars.next();
+            } else {
+                break;
+            }
+        }
+
+        if num_buf.is_empty() {
+            return None; // unexpected non-numeric character
+        }
+
+        let num: f64 = num_buf.parse().ok()?;
+
+        // Collect unit suffix
+        let mut unit = String::new();
+        while let Some(&c) = chars.peek() {
+            if c.is_ascii_alphabetic() {
+                unit.push(c);
+                chars.next();
+            } else {
+                break;
+            }
+        }
+
+        total_ms += match unit.as_str() {
+            "h" => num * 3_600_000.0,
+            "m" => num * 60_000.0,
+            "s" => num * 1_000.0,
+            "ms" => num,
+            "" => num * 1_000.0, // bare number = seconds
+            _ => return None,    // unknown unit
+        };
+    }
+
+    if total_ms > 0.0 {
+        Some(std::time::Duration::from_secs_f64(total_ms / 1000.0))
     } else {
         None
     }
@@ -856,5 +969,105 @@ fn track_stream_health(
         } else {
             health_tracker.record_success(account_id).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_duration_simple_seconds() {
+        assert_eq!(
+            parse_duration_string("2s"),
+            Some(std::time::Duration::from_secs(2))
+        );
+        assert_eq!(
+            parse_duration_string("0.5s"),
+            Some(std::time::Duration::from_millis(500))
+        );
+    }
+
+    #[test]
+    fn parse_duration_milliseconds() {
+        assert_eq!(
+            parse_duration_string("200ms"),
+            Some(std::time::Duration::from_millis(200))
+        );
+    }
+
+    #[test]
+    fn parse_duration_minutes_seconds() {
+        assert_eq!(
+            parse_duration_string("1m30s"),
+            Some(std::time::Duration::from_secs(90))
+        );
+    }
+
+    #[test]
+    fn parse_duration_hours() {
+        assert_eq!(
+            parse_duration_string("1h"),
+            Some(std::time::Duration::from_secs(3600))
+        );
+    }
+
+    #[test]
+    fn parse_duration_plain_numeric() {
+        // Plain number treated as seconds (Retry-After format)
+        assert_eq!(
+            parse_duration_string("60"),
+            Some(std::time::Duration::from_secs(60))
+        );
+    }
+
+    #[test]
+    fn parse_duration_empty_and_zero() {
+        assert_eq!(parse_duration_string(""), None);
+        assert_eq!(parse_duration_string("0"), None);
+        assert_eq!(parse_duration_string("0s"), None);
+    }
+
+    #[test]
+    fn parse_duration_whitespace() {
+        assert_eq!(
+            parse_duration_string("  2s  "),
+            Some(std::time::Duration::from_secs(2))
+        );
+    }
+
+    #[test]
+    fn parse_rate_limit_headers_openai() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-ratelimit-reset-requests", "2s".parse().unwrap());
+        headers.insert("x-ratelimit-reset-tokens", "30s".parse().unwrap());
+        // Should pick the shortest (2s)
+        let d = parse_rate_limit_headers(&headers, ProviderType::OpenAI);
+        assert_eq!(d, Some(std::time::Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn parse_rate_limit_headers_fallback_to_retry_after() {
+        let mut headers = HeaderMap::new();
+        headers.insert("retry-after", "10".parse().unwrap());
+        // Non-OpenAI provider should use Retry-After
+        let d = parse_rate_limit_headers(&headers, ProviderType::Minimax);
+        assert_eq!(d, Some(std::time::Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn parse_rate_limit_headers_openai_falls_back_to_retry_after() {
+        let mut headers = HeaderMap::new();
+        // No x-ratelimit-reset-* headers, only Retry-After
+        headers.insert("retry-after", "5".parse().unwrap());
+        let d = parse_rate_limit_headers(&headers, ProviderType::OpenAI);
+        assert_eq!(d, Some(std::time::Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn parse_rate_limit_headers_no_headers() {
+        let headers = HeaderMap::new();
+        assert_eq!(parse_rate_limit_headers(&headers, ProviderType::OpenAI), None);
+        assert_eq!(parse_rate_limit_headers(&headers, ProviderType::Zai), None);
     }
 }
