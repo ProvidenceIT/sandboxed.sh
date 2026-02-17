@@ -38,6 +38,11 @@ const providerConfig: Record<string, { color: string; icon: string }> = {
   zai: { color: 'bg-cyan-500/10 text-cyan-400', icon: 'Z' },
   minimax: { color: 'bg-teal-500/10 text-teal-400', icon: 'M' },
   'github-copilot': { color: 'bg-gray-500/10 text-gray-400', icon: '🐙' },
+  'deep-infra': { color: 'bg-blue-500/10 text-blue-400', icon: '🔗' },
+  cerebras: { color: 'bg-lime-500/10 text-lime-400', icon: 'C' },
+  'together-ai': { color: 'bg-orange-500/10 text-orange-400', icon: '🤝' },
+  perplexity: { color: 'bg-cyan-500/10 text-cyan-400', icon: '🔍' },
+  cohere: { color: 'bg-rose-500/10 text-rose-400', icon: '💬' },
   amp: { color: 'bg-violet-500/10 text-violet-400', icon: 'A' },
   custom: { color: 'bg-white/10 text-white/60', icon: '🔧' },
 };

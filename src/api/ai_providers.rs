@@ -3835,6 +3835,36 @@ async fn list_provider_types() -> Json<Vec<ProviderTypeInfo>> {
             env_var: Some("MINIMAX_API_KEY".to_string()),
         },
         ProviderTypeInfo {
+            id: "deep-infra".to_string(),
+            name: "DeepInfra".to_string(),
+            uses_oauth: false,
+            env_var: Some("DEEPINFRA_API_KEY".to_string()),
+        },
+        ProviderTypeInfo {
+            id: "cerebras".to_string(),
+            name: "Cerebras".to_string(),
+            uses_oauth: false,
+            env_var: Some("CEREBRAS_API_KEY".to_string()),
+        },
+        ProviderTypeInfo {
+            id: "together-ai".to_string(),
+            name: "Together AI".to_string(),
+            uses_oauth: false,
+            env_var: Some("TOGETHER_API_KEY".to_string()),
+        },
+        ProviderTypeInfo {
+            id: "perplexity".to_string(),
+            name: "Perplexity".to_string(),
+            uses_oauth: false,
+            env_var: Some("PERPLEXITY_API_KEY".to_string()),
+        },
+        ProviderTypeInfo {
+            id: "cohere".to_string(),
+            name: "Cohere".to_string(),
+            uses_oauth: false,
+            env_var: Some("COHERE_API_KEY".to_string()),
+        },
+        ProviderTypeInfo {
             id: "github-copilot".to_string(),
             name: "GitHub Copilot".to_string(),
             uses_oauth: true,

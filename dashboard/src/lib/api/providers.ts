@@ -12,6 +12,12 @@ export type AIProviderType =
   | "anthropic"
   | "openai"
   | "google"
+  | "amazon-bedrock"
+  | "azure"
+  | "open-router"
+  | "mistral"
+  | "groq"
+  | "xai"
   | "deep-infra"
   | "cerebras"
   | "cohere"
@@ -19,6 +25,7 @@ export type AIProviderType =
   | "perplexity"
   | "zai"
   | "minimax"
+  | "github-copilot"
   | "amp"
   | "custom";
 
