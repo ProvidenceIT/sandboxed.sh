@@ -285,6 +285,7 @@ async fn chat_completions(
             Ok(b) => b,
             Err(e) => {
                 tracing::error!("Failed to rewrite model in request body: {}", e);
+                server_error_count += 1;
                 continue;
             }
         };
@@ -430,10 +431,13 @@ async fn chat_completions(
                 match byte_stream.next().await {
                     Some(Ok(chunk)) => {
                         peek_buf.extend_from_slice(&chunk);
-                        // Check if we have a complete data line
+                        // Check if we have a complete data line with valid JSON
                         if let Ok(text) = std::str::from_utf8(&peek_buf) {
                             for line in text.lines() {
                                 if let Some(json_str) = line.strip_prefix("data: ") {
+                                    // Only break when the JSON parses successfully.
+                                    // A partial JSON (split across chunks) will fail
+                                    // to parse, and we'll keep reading more data.
                                     if let Ok(v) =
                                         serde_json::from_str::<serde_json::Value>(json_str)
                                     {
@@ -442,8 +446,8 @@ async fn chat_completions(
                                         {
                                             is_stream_error = true;
                                         }
+                                        break 'peek;
                                     }
-                                    break 'peek;
                                 }
                             }
                         }
