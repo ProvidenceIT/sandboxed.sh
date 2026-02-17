@@ -14,6 +14,11 @@ use super::Tool;
 #[derive(Debug, Clone)]
 pub enum MissionControlCommand {
     SetStatus {
+        /// The mission ID captured at send time (from the runner's own
+        /// `current_mission_id` Arc).  This ensures the handler applies the
+        /// status change to the correct mission even if the user switched
+        /// `current_mission` in the meantime.
+        mission_id: uuid::Uuid,
         status: MissionStatusValue,
         summary: Option<String>,
     },
@@ -150,11 +155,12 @@ IMPORTANT: Use 'blocked' or 'not_feasible' instead of producing fake/placeholder
             return Ok("Mission control not available in this context. The mission status was not changed.".to_string());
         };
 
-        // Check if there's a current mission
-        let mission_id = *control.current_mission_id.read().await;
-        if mission_id.is_none() {
+        // Check if there's a current mission — capture the ID now so that the
+        // handler receives the mission this runner is actually working on, not
+        // whatever `current_mission` might be changed to later.
+        let Some(mission_id) = *control.current_mission_id.read().await else {
             return Ok("No active mission to complete. Start a mission first.".to_string());
-        }
+        };
 
         // For blocked/not_feasible, require a summary explaining why
         if (matches!(
@@ -233,10 +239,12 @@ IMPORTANT: Use 'blocked' or 'not_feasible' instead of producing fake/placeholder
             );
         }
 
-        // Send the command
+        // Send the command with the captured mission_id so the handler targets
+        // the correct mission even if the user created a new one in the meantime.
         control
             .cmd_tx
             .send(MissionControlCommand::SetStatus {
+                mission_id,
                 status,
                 summary: enhanced_summary.clone(),
             })

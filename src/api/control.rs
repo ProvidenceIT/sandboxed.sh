@@ -4483,66 +4483,63 @@ async fn control_actor_loop(
             mission_cmd = mission_cmd_rx.recv() => {
                 if let Some(cmd) = mission_cmd {
                     match cmd {
-                        crate::tools::mission::MissionControlCommand::SetStatus { status, summary } => {
-                            let mission_id = *current_mission.read().await;
-                            if let Some(id) = mission_id {
-                                let new_status = match status {
-                                    crate::tools::mission::MissionStatusValue::Completed => MissionStatus::Completed,
-                                    crate::tools::mission::MissionStatusValue::Failed => MissionStatus::Failed,
-                                    crate::tools::mission::MissionStatusValue::Blocked => MissionStatus::Blocked,
-                                    crate::tools::mission::MissionStatusValue::NotFeasible => MissionStatus::NotFeasible,
-                                };
-                                let success = matches!(status, crate::tools::mission::MissionStatusValue::Completed);
-                                if new_status == MissionStatus::Completed
-                                    && mission_has_active_automation(&mission_store, id).await
-                                {
-                                    tracing::info!(
-                                        "Skipping completion for mission {} because active automations are enabled",
-                                        id
-                                    );
-                                    continue;
+                        crate::tools::mission::MissionControlCommand::SetStatus { mission_id: id, status, summary } => {
+                            let new_status = match status {
+                                crate::tools::mission::MissionStatusValue::Completed => MissionStatus::Completed,
+                                crate::tools::mission::MissionStatusValue::Failed => MissionStatus::Failed,
+                                crate::tools::mission::MissionStatusValue::Blocked => MissionStatus::Blocked,
+                                crate::tools::mission::MissionStatusValue::NotFeasible => MissionStatus::NotFeasible,
+                            };
+                            let success = matches!(status, crate::tools::mission::MissionStatusValue::Completed);
+                            if new_status == MissionStatus::Completed
+                                && mission_has_active_automation(&mission_store, id).await
+                            {
+                                tracing::info!(
+                                    "Skipping completion for mission {} because active automations are enabled",
+                                    id
+                                );
+                                continue;
+                            }
+                            // Save the final tree before updating status
+                            if let Some(tree) = current_tree.read().await.clone() {
+                                if let Err(e) = mission_store.update_mission_tree(id, &tree).await {
+                                    tracing::warn!("Failed to save mission tree: {}", e);
+                                } else {
+                                    tracing::info!("Saved final tree for mission {}", id);
                                 }
-                                // Save the final tree before updating status
-                                if let Some(tree) = current_tree.read().await.clone() {
-                                    if let Err(e) = mission_store.update_mission_tree(id, &tree).await {
-                                        tracing::warn!("Failed to save mission tree: {}", e);
+                            }
+
+                            if mission_store
+                                .update_mission_status(id, new_status)
+                                .await
+                                .is_ok()
+                            {
+                                // Generate and store mission summary
+                                if let Some(ref summary_text) = summary {
+                                    // Extract key files from conversation (look for paths in assistant messages)
+                                    let key_files: Vec<String> = history
+                                        .iter()
+                                        .filter(|(role, _)| role == "assistant")
+                                        .flat_map(|(_, content)| extract_file_paths(content))
+                                        .take(10)
+                                        .collect();
+
+                                    if let Err(e) = mission_store
+                                        .insert_mission_summary(id, summary_text, &key_files, success)
+                                        .await
+                                    {
+                                        tracing::warn!("Failed to store mission summary: {}", e);
                                     } else {
-                                        tracing::info!("Saved final tree for mission {}", id);
+                                        tracing::info!("Stored mission summary for {}", id);
                                     }
                                 }
 
-                                if mission_store
-                                    .update_mission_status(id, new_status)
-                                    .await
-                                    .is_ok()
-                                {
-                                    // Generate and store mission summary
-                                    if let Some(ref summary_text) = summary {
-                                        // Extract key files from conversation (look for paths in assistant messages)
-                                        let key_files: Vec<String> = history
-                                            .iter()
-                                            .filter(|(role, _)| role == "assistant")
-                                            .flat_map(|(_, content)| extract_file_paths(content))
-                                            .take(10)
-                                            .collect();
-
-                                        if let Err(e) = mission_store
-                                            .insert_mission_summary(id, summary_text, &key_files, success)
-                                            .await
-                                        {
-                                            tracing::warn!("Failed to store mission summary: {}", e);
-                                        } else {
-                                            tracing::info!("Stored mission summary for {}", id);
-                                        }
-                                    }
-
-                                    let _ = events_tx.send(AgentEvent::MissionStatusChanged {
-                                        mission_id: id,
-                                        status: new_status,
-                                        summary,
-                                    });
-                                    tracing::info!("Mission {} marked as {} by agent", id, new_status);
-                                }
+                                let _ = events_tx.send(AgentEvent::MissionStatusChanged {
+                                    mission_id: id,
+                                    status: new_status,
+                                    summary,
+                                });
+                                tracing::info!("Mission {} marked as {} by agent", id, new_status);
                             }
                         }
                     }
@@ -4655,6 +4652,7 @@ async fn control_actor_loop(
                                             if matches!(mission.status, MissionStatus::Active | MissionStatus::Interrupted) {
                                                 let new_status = match agent_result.terminal_reason {
                                                     Some(TerminalReason::Completed) => MissionStatus::Completed,
+                                                    Some(TerminalReason::Cancelled) => MissionStatus::Interrupted,
                                                     Some(TerminalReason::MaxIterations) => MissionStatus::Blocked,
                                                     _ if agent_result.success => MissionStatus::Completed,
                                                     _ => MissionStatus::Failed,
@@ -5103,9 +5101,15 @@ async fn control_actor_loop(
                     }
                 }
 
-                // Remove completed runners
+                // Remove completed runners and clean up their desktop sessions
                 for mid in completed_missions {
                     parallel_runners.remove(&mid);
+                    close_mission_desktop_sessions(
+                        &mission_store,
+                        mid,
+                        &config.working_dir,
+                    )
+                    .await;
                     tracing::info!("Parallel mission {} removed from runners", mid);
                 }
             }
