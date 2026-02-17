@@ -1635,15 +1635,16 @@ async fn run_mission_turn(
                             Some(alt_auth),
                         )
                         .await;
-                        // Continue rotating only on rate-limit or auth errors;
-                        // stop on success or non-retryable failures.
+                        // Only continue rotating on rate-limit errors.
+                        // Non-rate-limit LLM errors (model errors, context
+                        // limit, etc.) would fail on every account, so stop
+                        // early to avoid masking the real failure.
                         match result.terminal_reason {
-                            Some(TerminalReason::RateLimited) => continue,
-                            Some(TerminalReason::LlmError) => {
-                                tracing::warn!(
+                            Some(TerminalReason::RateLimited) => {
+                                tracing::info!(
                                     mission_id = %mission_id,
                                     attempt = idx + 2,
-                                    "LLM error (possibly auth failure); trying next account"
+                                    "Rate limited; rotating to next account"
                                 );
                                 continue;
                             }

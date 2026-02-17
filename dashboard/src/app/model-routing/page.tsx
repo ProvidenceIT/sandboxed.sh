@@ -174,7 +174,14 @@ function ChainCard({
   };
 
   const handleSave = async () => {
-    await onUpdate(chain.id, { name: editName, entries: editEntries });
+    const validEntries = editEntries.filter(
+      (e) => e.provider_id.trim() && e.model_id.trim()
+    );
+    if (validEntries.length === 0) {
+      toast.error('At least one valid entry is required');
+      return;
+    }
+    await onUpdate(chain.id, { name: editName, entries: validEntries });
     setEditing(false);
   };
 

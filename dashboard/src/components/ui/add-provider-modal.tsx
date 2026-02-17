@@ -252,7 +252,6 @@ export function AddProviderModal({ open, onClose, onSuccess, providerTypes }: Ad
         name: accountLabel.trim()
           ? `${selectedTypeInfo?.name || selectedProvider} (${accountLabel.trim()})`
           : selectedTypeInfo?.name || selectedProvider,
-        label: accountLabel.trim() || undefined,
         api_key: apiKey,
         // Include backend targeting for supported providers
         use_for_backends:

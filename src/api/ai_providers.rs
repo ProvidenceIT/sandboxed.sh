@@ -861,10 +861,11 @@ fn get_all_anthropic_auth_from_ai_providers(working_dir: &Path) -> Vec<ClaudeCod
         Err(_) => return Vec::new(),
     };
 
-    // Collect (priority, auth) pairs for sorting
-    let mut entries: Vec<(u32, ClaudeCodeAuth)> = Vec::new();
+    // Collect (priority, insertion_index, auth) for deterministic sorting.
+    // The insertion index breaks ties when multiple accounts share the same priority.
+    let mut entries: Vec<(u32, usize, ClaudeCodeAuth)> = Vec::new();
 
-    for provider in providers {
+    for (idx, provider) in providers.iter().enumerate() {
         let provider_type = provider.get("provider_type").and_then(|v| v.as_str());
         if provider_type != Some("anthropic") {
             continue;
@@ -884,7 +885,7 @@ fn get_all_anthropic_auth_from_ai_providers(working_dir: &Path) -> Vec<ClaudeCod
         // Check for API key first
         if let Some(api_key) = provider.get("api_key").and_then(|v| v.as_str()) {
             if !api_key.is_empty() {
-                entries.push((priority, ClaudeCodeAuth::ApiKey(api_key.to_string())));
+                entries.push((priority, idx, ClaudeCodeAuth::ApiKey(api_key.to_string())));
                 continue;
             }
         }
@@ -895,6 +896,7 @@ fn get_all_anthropic_auth_from_ai_providers(working_dir: &Path) -> Vec<ClaudeCod
                 if !access_token.is_empty() {
                     entries.push((
                         priority,
+                        idx,
                         ClaudeCodeAuth::OAuthToken(access_token.to_string()),
                     ));
                 }
@@ -902,8 +904,8 @@ fn get_all_anthropic_auth_from_ai_providers(working_dir: &Path) -> Vec<ClaudeCod
         }
     }
 
-    entries.sort_by_key(|(p, _)| *p);
-    entries.into_iter().map(|(_, auth)| auth).collect()
+    entries.sort_by_key(|(p, i, _)| (*p, *i));
+    entries.into_iter().map(|(_, _, auth)| auth).collect()
 }
 
 /// Get all available Anthropic credentials for Claude Code, in priority order.

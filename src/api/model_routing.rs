@@ -128,6 +128,15 @@ async fn create_chain(
             "At least one entry is required".to_string(),
         ));
     }
+    // Reject entries with empty provider_id or model_id
+    for e in &req.entries {
+        if e.provider_id.trim().is_empty() || e.model_id.trim().is_empty() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Each entry must have a non-empty provider_id and model_id".to_string(),
+            ));
+        }
+    }
 
     // Don't allow overwriting existing chains via create
     if state.chain_store.get(&req.id).await.is_some() {
@@ -190,6 +199,15 @@ async fn update_chain(
                 StatusCode::BAD_REQUEST,
                 "At least one entry is required".to_string(),
             ));
+        }
+        // Reject entries with empty provider_id or model_id
+        for e in &entries {
+            if e.provider_id.trim().is_empty() || e.model_id.trim().is_empty() {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "Each entry must have a non-empty provider_id and model_id".to_string(),
+                ));
+            }
         }
         chain.entries = entries
             .into_iter()
