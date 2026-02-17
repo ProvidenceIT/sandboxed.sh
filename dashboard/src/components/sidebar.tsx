@@ -28,6 +28,7 @@ import {
   Activity,
   Cpu,
   Lock,
+  GitBranch,
 } from 'lucide-react';
 
 type NavItem = {
@@ -42,6 +43,7 @@ const navigation: NavItem[] = [
   { name: 'Mission', href: '/control', icon: MessageSquare },
   { name: 'Workspaces', href: '/workspaces', icon: Server },
   { name: 'Console', href: '/console', icon: Terminal },
+  { name: 'Routing', href: '/model-routing', icon: GitBranch },
   {
     name: 'Library',
     href: '/config',
