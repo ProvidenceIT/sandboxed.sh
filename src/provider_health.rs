@@ -248,9 +248,7 @@ impl ProviderHealthTracker {
             Some(health) => AccountHealthSnapshot {
                 account_id,
                 is_healthy: !health.is_in_cooldown(),
-                cooldown_remaining_secs: health
-                    .remaining_cooldown()
-                    .map(|d| d.as_secs_f64()),
+                cooldown_remaining_secs: health.remaining_cooldown().map(|d| d.as_secs_f64()),
                 consecutive_failures: health.consecutive_failures,
                 last_failure_reason: health.last_failure_reason.as_ref().map(|r| r.to_string()),
                 last_failure_at: health.last_failure_at,
@@ -282,9 +280,7 @@ impl ProviderHealthTracker {
             .map(|(&id, health)| AccountHealthSnapshot {
                 account_id: id,
                 is_healthy: !health.is_in_cooldown(),
-                cooldown_remaining_secs: health
-                    .remaining_cooldown()
-                    .map(|d| d.as_secs_f64()),
+                cooldown_remaining_secs: health.remaining_cooldown().map(|d| d.as_secs_f64()),
                 consecutive_failures: health.consecutive_failures,
                 last_failure_reason: health.last_failure_reason.as_ref().map(|r| r.to_string()),
                 last_failure_at: health.last_failure_at,

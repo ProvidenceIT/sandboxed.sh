@@ -484,10 +484,10 @@ async fn chat_completions(
                 continue;
             }
 
-            state
-                .health_tracker
-                .record_success(entry.account_id)
-                .await;
+            // Don't record success yet — defer until the stream finishes
+            // so that mid-stream failures don't incorrectly clear cooldown.
+            let account_id = entry.account_id;
+            let health_tracker = state.health_tracker.clone();
 
             let mut response_headers = HeaderMap::new();
             response_headers.insert(
@@ -505,10 +505,13 @@ async fn chat_completions(
             let combined = peek_stream.chain(byte_stream);
             let byte_stream = normalize_sse_stream(combined);
 
+            // Wrap the stream to record success/failure on completion.
+            let tracked_stream = track_stream_health(byte_stream, health_tracker, account_id);
+
             return (
                 status,
                 response_headers,
-                Body::from_stream(byte_stream),
+                Body::from_stream(tracked_stream),
             )
                 .into_response();
         }
@@ -797,4 +800,32 @@ fn normalize_sse_line(line: &[u8]) -> Vec<u8> {
     let _ = serde_json::to_writer(&mut out, &chunk);
     out.extend_from_slice(suffix);
     out
+}
+
+/// Wrap a streaming response to defer health tracking until the stream finishes.
+///
+/// Records `record_success` when the stream ends cleanly, or `record_failure`
+/// if the stream terminates with an I/O error mid-flight.
+fn track_stream_health(
+    inner: impl futures::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send + 'static,
+    health_tracker: crate::provider_health::SharedProviderHealthTracker,
+    account_id: uuid::Uuid,
+) -> impl futures::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send + 'static {
+    async_stream::stream! {
+        let mut stream = std::pin::pin!(inner);
+        let mut errored = false;
+        while let Some(item) = stream.next().await {
+            if item.is_err() {
+                errored = true;
+            }
+            yield item;
+        }
+        if errored {
+            health_tracker
+                .record_failure(account_id, CooldownReason::ServerError, None)
+                .await;
+        } else {
+            health_tracker.record_success(account_id).await;
+        }
+    }
 }
