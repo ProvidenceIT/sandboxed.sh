@@ -259,9 +259,11 @@ async fn chat_completions(
             None => continue,
         };
 
-        let Some(api_key) = &entry.api_key else {
+        // Custom providers may work without an API key (base_url only),
+        // but standard providers always require one.
+        if entry.api_key.is_none() && provider_type != ProviderType::Custom {
             continue;
-        };
+        }
 
         let Some(url) = completions_url(provider_type, entry.base_url.as_deref()) else {
             tracing::debug!(
@@ -289,8 +291,10 @@ async fn chat_completions(
             .http_client
             .post(&url)
             .header("Content-Type", "application/json")
-            .header("Authorization", format!("Bearer {}", api_key))
             .body(upstream_body);
+        if let Some(api_key) = &entry.api_key {
+            upstream_req = upstream_req.header("Authorization", format!("Bearer {}", api_key));
+        }
         if !is_stream {
             upstream_req = upstream_req.timeout(std::time::Duration::from_secs(300));
         }

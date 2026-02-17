@@ -413,20 +413,23 @@ impl ModelChainStore {
             *chains = loaded;
         }
 
-        // Ensure default chain exists
-        {
-            let chains = store.chains.read().await;
-            if chains.is_empty() {
-                drop(chains);
-                store.ensure_default_chain().await;
-            }
-        }
+        // Ensure default chain exists (check + insert under write lock)
+        store.ensure_default_chain().await;
 
         store
     }
 
     /// Ensure the builtin/smart default chain exists.
+    ///
+    /// Idempotent: does nothing if `builtin/smart` is already present.
+    /// Checks and inserts under a single write lock to avoid TOCTOU races.
     async fn ensure_default_chain(&self) {
+        let mut chains = self.chains.write().await;
+
+        if chains.iter().any(|c| c.id == "builtin/smart") {
+            return;
+        }
+
         let now = chrono::Utc::now();
         let default_chain = ModelChain {
             id: "builtin/smart".to_string(),
@@ -450,9 +453,7 @@ impl ModelChainStore {
             updated_at: now,
         };
 
-        let mut chains = self.chains.write().await;
         chains.push(default_chain);
-        // Serialize while still holding the write lock to avoid TOCTOU races.
         if let Err(e) = self.save_chains_to_disk(&chains) {
             tracing::error!("Failed to save default model chain: {}", e);
         }
