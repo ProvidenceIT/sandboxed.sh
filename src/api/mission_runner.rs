@@ -188,38 +188,12 @@ async fn set_control_state_for_mission(
     });
 }
 
-/// Patterns that identify OpenCode status/debug lines to be filtered
-const OPENCODE_STATUS_PATTERNS: &[&str] = &[
-    "starting opencode server",
-    "opencode server started",
-    "sending prompt",
-    "waiting for completion",
-    "all tasks completed",
-    "session ended with error",
-    "[session.error]",
-    "session: ses_",
-    "session id: ses_",
-];
-
 fn is_opencode_status_line(line: &str) -> bool {
-    let trimmed = line.trim();
-    if trimmed.is_empty() {
-        return true;
-    }
-
-    let lower = trimmed.to_lowercase();
-    OPENCODE_STATUS_PATTERNS
-        .iter()
-        .any(|pattern| lower.starts_with(pattern) || lower.contains(pattern))
+    is_opencode_banner_line(line)
 }
 
 fn strip_opencode_status_lines(text: &str) -> String {
-    text.lines()
-        .filter(|line| !is_opencode_status_line(line))
-        .collect::<Vec<_>>()
-        .join("\n")
-        .trim()
-        .to_string()
+    strip_opencode_banner_lines(text)
 }
 
 fn handle_tool_part_update(
@@ -3602,6 +3576,15 @@ fn is_opencode_banner_line(line: &str) -> bool {
 
     // [run]-prefixed runner status lines
         || lower.starts_with("[run]")
+}
+
+fn strip_opencode_banner_lines(output: &str) -> String {
+    let cleaned = strip_ansi_codes(output);
+    cleaned
+        .lines()
+        .filter(|line| !is_opencode_banner_line(line.trim()))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn opencode_output_needs_fallback(output: &str) -> bool {
@@ -8294,6 +8277,13 @@ pub async fn run_opencode_turn(
     // Strip inline <think>...</think> tags from final output (Minimax, DeepSeek, etc.)
     final_result = strip_think_tags(&final_result);
 
+    // Final safeguard: strip any remaining banner lines that may have leaked through
+    // (fixes #151 - runner logs appearing in assistant message)
+    let stripped_result = strip_opencode_banner_lines(&final_result);
+    if !stripped_result.trim().is_empty() {
+        final_result = stripped_result;
+    }
+
     let mut emitted_thinking = false;
     let sse_emitted = sse_emitted_thinking.load(std::sync::atomic::Ordering::SeqCst);
     if let Some(message) = stored_message.as_ref() {
@@ -8333,15 +8323,8 @@ pub async fn run_opencode_turn(
         });
     }
 
-    if !sse_emitted_text.load(std::sync::atomic::Ordering::SeqCst)
-        && !final_result.trim().is_empty()
-    {
-        let _ = events_tx.send(AgentEvent::TextDelta {
-            content: final_result.clone(),
-            mission_id: Some(mission_id),
-        });
-    }
-
+    // Check for banner-only output BEFORE emitting TextDelta to avoid
+    // sending runner logs as model response (fixes #151).
     if !had_error && opencode_output_needs_fallback(&final_result) {
         had_error = true;
         final_result =
@@ -8360,6 +8343,18 @@ pub async fn run_opencode_turn(
         had_error = true;
         final_result =
             "The model attempted tool calls but produced no final text response. This can happen when the model routing chain doesn't support tool execution.".to_string();
+    }
+
+    // Only emit TextDelta if we have actual (non-banner) content and no SSE text was emitted.
+    // This avoids sending runner logs as model response.
+    if !sse_emitted_text.load(std::sync::atomic::Ordering::SeqCst)
+        && !final_result.trim().is_empty()
+        && !had_error
+    {
+        let _ = events_tx.send(AgentEvent::TextDelta {
+            content: final_result.clone(),
+            mission_id: Some(mission_id),
+        });
     }
 
     tracing::info!(
@@ -9706,5 +9701,117 @@ mod tests {
             Some("gpt-5-codex".to_string())
         );
         assert_eq!(remap_legacy_codex_model(None), None);
+    }
+
+    #[test]
+    fn is_opencode_banner_line_detects_runner_status() {
+        use super::is_opencode_banner_line;
+
+        // Runner lifecycle banners
+        assert!(is_opencode_banner_line("Starting opencode server"));
+        assert!(is_opencode_banner_line(
+            "Starting OpenCode server (auto port selection enabled)..."
+        ));
+        assert!(is_opencode_banner_line("opencode server started"));
+        assert!(is_opencode_banner_line(
+            "OpenCode server started on port 4096"
+        ));
+
+        // Port selection
+        assert!(is_opencode_banner_line("auto-selected port 44563"));
+        assert!(is_opencode_banner_line("Using port 44563"));
+        assert!(is_opencode_banner_line("using port 4096"));
+
+        // Server status
+        assert!(is_opencode_banner_line(
+            "server listening on 127.0.0.1:4096"
+        ));
+        assert!(is_opencode_banner_line("Server listening..."));
+
+        // Prompt/completion status
+        assert!(is_opencode_banner_line("Sending prompt..."));
+        assert!(is_opencode_banner_line("Waiting for completion..."));
+        assert!(is_opencode_banner_line("All tasks completed."));
+
+        // Session identification
+        assert!(is_opencode_banner_line("Session ID: ses_abc123"));
+        assert!(is_opencode_banner_line("Session: ses_abc123"));
+
+        // [run]-prefixed lines
+        assert!(is_opencode_banner_line("[run] Starting execution"));
+        assert!(is_opencode_banner_line("[RUN] task started"));
+    }
+
+    #[test]
+    fn is_opencode_banner_line_rejects_model_text() {
+        use super::is_opencode_banner_line;
+
+        // Model responses should NOT be detected as banner lines
+        assert!(!is_opencode_banner_line("Hello, I am the assistant."));
+        assert!(!is_opencode_banner_line("Let me help you with that."));
+        assert!(!is_opencode_banner_line("Here's the code you requested:"));
+        assert!(!is_opencode_banner_line(
+            "The file has been modified successfully."
+        ));
+        assert!(!is_opencode_banner_line("I found 3 issues in your code."));
+    }
+
+    #[test]
+    fn strip_opencode_banner_lines_removes_runner_status() {
+        use super::strip_opencode_banner_lines;
+
+        // Pure banner output should become empty
+        let input = "Starting opencode server (auto port selection enabled)...\nUsing port 44563\nSession: ses_abc\nSending prompt...\nWaiting for completion...\nAll tasks completed.";
+        let result = strip_opencode_banner_lines(input);
+        assert!(result.trim().is_empty());
+
+        // Mixed output should keep only non-banner lines
+        let mixed = "Starting opencode server...\nHello, I am the model.\nAll tasks completed.";
+        let result = strip_opencode_banner_lines(mixed);
+        assert_eq!(result.trim(), "Hello, I am the model.");
+
+        // Non-banner output should be preserved
+        let model_output = "Here's the solution:\n\n```python\nprint('hello')\n```";
+        let result = strip_opencode_banner_lines(model_output);
+        assert_eq!(result, model_output);
+    }
+
+    #[test]
+    fn opencode_output_needs_fallback_detects_banner_only() {
+        use super::opencode_output_needs_fallback;
+
+        // Empty output needs fallback
+        assert!(opencode_output_needs_fallback(""));
+        assert!(opencode_output_needs_fallback("   "));
+        assert!(opencode_output_needs_fallback("\n\n"));
+
+        // Banner-only output needs fallback
+        let banner_only = "Starting opencode server...\nAll tasks completed.";
+        assert!(opencode_output_needs_fallback(banner_only));
+
+        // Output with real content does NOT need fallback
+        let with_content =
+            "Starting opencode server...\nHello, I am the model.\nAll tasks completed.";
+        assert!(!opencode_output_needs_fallback(with_content));
+
+        // Pure model output does NOT need fallback
+        let model_only = "Here is your answer: 42";
+        assert!(!opencode_output_needs_fallback(model_only));
+    }
+
+    #[test]
+    fn strip_opencode_banner_lines_handles_ansi_codes() {
+        use super::strip_opencode_banner_lines;
+
+        // ANSI-prefixed banner lines should be stripped too
+        let input_with_ansi = "\x1b[32mStarting opencode server\x1b[0m\n\x1b[33mUsing port 44563\x1b[0m\nHello, I am the model.";
+        let result = strip_opencode_banner_lines(input_with_ansi);
+        assert_eq!(result.trim(), "Hello, I am the model.");
+
+        // Pure ANSI-wrapped banners should become empty
+        let ansi_only =
+            "\x1b[32mStarting opencode server\x1b[0m\n\x1b[33mAll tasks completed.\x1b[0m";
+        let result = strip_opencode_banner_lines(ansi_only);
+        assert!(result.trim().is_empty());
     }
 }
