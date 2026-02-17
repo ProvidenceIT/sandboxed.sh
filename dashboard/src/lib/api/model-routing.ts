@@ -44,6 +44,7 @@ export interface AccountHealthSnapshot {
   avg_latency_ms: number | null;
   total_input_tokens: number;
   total_output_tokens: number;
+  is_degraded: boolean;
 }
 
 export interface FallbackEvent {

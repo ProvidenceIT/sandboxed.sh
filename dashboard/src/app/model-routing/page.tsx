@@ -449,7 +449,11 @@ function HealthDashboard({
           <span
             className={cn(
               'h-2 w-2 rounded-full flex-shrink-0',
-              h.is_healthy ? 'bg-emerald-400' : 'bg-red-400'
+              h.is_degraded
+                ? 'bg-amber-400'
+                : h.is_healthy
+                  ? 'bg-emerald-400'
+                  : 'bg-red-400'
             )}
           />
           <span className="text-xs text-white/50 font-mono flex-shrink-0">
@@ -462,6 +466,9 @@ function HealthDashboard({
                 ? `${Math.round((h.total_successes / h.total_requests) * 100)}%`
                 : '—'}
             </span>
+            {h.is_degraded && (
+              <span className="text-amber-400/80 font-medium">degraded</span>
+            )}
             {h.total_rate_limits > 0 && (
               <span className="text-amber-400/60">{h.total_rate_limits} rate-limited</span>
             )}

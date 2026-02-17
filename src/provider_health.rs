@@ -104,6 +104,11 @@ pub struct BackoffConfig {
     pub max_delay: std::time::Duration,
     /// Multiplier per consecutive failure (typically 2.0).
     pub multiplier: f64,
+    /// After this many consecutive failures, the account is "degraded" and
+    /// gets a much longer cooldown (max_delay × degraded_multiplier).
+    pub circuit_breaker_threshold: u32,
+    /// Multiplier applied to max_delay when circuit breaker trips.
+    pub degraded_multiplier: f64,
 }
 
 impl Default for BackoffConfig {
@@ -112,16 +117,28 @@ impl Default for BackoffConfig {
             base_delay: std::time::Duration::from_secs(5),
             max_delay: std::time::Duration::from_secs(300), // 5 minutes
             multiplier: 2.0,
+            circuit_breaker_threshold: 5,
+            degraded_multiplier: 6.0, // 5 min × 6 = 30 min when degraded
         }
     }
 }
 
 impl BackoffConfig {
     /// Calculate the cooldown duration for a given number of consecutive failures.
+    ///
+    /// Uses exponential backoff capped at `max_delay`. Once the circuit breaker
+    /// threshold is reached, the cap is raised to `max_delay × degraded_multiplier`
+    /// to avoid wasting requests on persistently failing accounts (e.g. quota
+    /// exhaustion).
     pub fn cooldown_for(&self, consecutive_failures: u32) -> std::time::Duration {
         let delay_secs =
             self.base_delay.as_secs_f64() * self.multiplier.powi(consecutive_failures as i32);
-        let capped = delay_secs.min(self.max_delay.as_secs_f64());
+        let cap = if consecutive_failures >= self.circuit_breaker_threshold {
+            self.max_delay.as_secs_f64() * self.degraded_multiplier
+        } else {
+            self.max_delay.as_secs_f64()
+        };
+        let capped = delay_secs.min(cap);
         std::time::Duration::from_secs_f64(capped)
     }
 }
@@ -180,6 +197,8 @@ pub struct AccountHealthSnapshot {
     pub avg_latency_ms: Option<f64>,
     pub total_input_tokens: u64,
     pub total_output_tokens: u64,
+    /// Whether the circuit breaker has tripped (consecutive failures exceeded threshold).
+    pub is_degraded: bool,
 }
 
 impl Default for ProviderHealthTracker {
@@ -264,12 +283,23 @@ impl ProviderHealthTracker {
 
         health.cooldown_until = Some(std::time::Instant::now() + cooldown);
 
-        tracing::info!(
-            account_id = %account_id,
-            consecutive_failures = health.consecutive_failures,
-            cooldown_secs = cooldown.as_secs_f64(),
-            "Account placed in cooldown"
-        );
+        let is_degraded =
+            health.consecutive_failures >= self.backoff_config.circuit_breaker_threshold;
+        if is_degraded {
+            tracing::warn!(
+                account_id = %account_id,
+                consecutive_failures = health.consecutive_failures,
+                cooldown_secs = cooldown.as_secs_f64(),
+                "Circuit breaker tripped — account degraded with extended cooldown"
+            );
+        } else {
+            tracing::info!(
+                account_id = %account_id,
+                consecutive_failures = health.consecutive_failures,
+                cooldown_secs = cooldown.as_secs_f64(),
+                "Account placed in cooldown"
+            );
+        }
     }
 
     /// Record a latency sample for an account (in milliseconds).
@@ -312,7 +342,11 @@ impl ProviderHealthTracker {
     }
 
     /// Helper to build an `AccountHealthSnapshot` from an `AccountHealth`.
-    fn snapshot(account_id: Uuid, health: &AccountHealth) -> AccountHealthSnapshot {
+    fn snapshot(
+        account_id: Uuid,
+        health: &AccountHealth,
+        backoff_config: &BackoffConfig,
+    ) -> AccountHealthSnapshot {
         AccountHealthSnapshot {
             account_id,
             is_healthy: !health.is_in_cooldown(),
@@ -331,6 +365,7 @@ impl ProviderHealthTracker {
             },
             total_input_tokens: health.total_input_tokens,
             total_output_tokens: health.total_output_tokens,
+            is_degraded: health.consecutive_failures >= backoff_config.circuit_breaker_threshold,
         }
     }
 
@@ -338,7 +373,7 @@ impl ProviderHealthTracker {
     pub async fn get_health(&self, account_id: Uuid) -> AccountHealthSnapshot {
         let accounts = self.accounts.read().await;
         match accounts.get(&account_id) {
-            Some(health) => Self::snapshot(account_id, health),
+            Some(health) => Self::snapshot(account_id, health, &self.backoff_config),
             None => AccountHealthSnapshot {
                 account_id,
                 is_healthy: true,
@@ -353,6 +388,7 @@ impl ProviderHealthTracker {
                 avg_latency_ms: None,
                 total_input_tokens: 0,
                 total_output_tokens: 0,
+                is_degraded: false,
             },
         }
     }
@@ -362,7 +398,7 @@ impl ProviderHealthTracker {
         let accounts = self.accounts.read().await;
         accounts
             .iter()
-            .map(|(&id, health)| Self::snapshot(id, health))
+            .map(|(&id, health)| Self::snapshot(id, health, &self.backoff_config))
             .collect()
     }
 
