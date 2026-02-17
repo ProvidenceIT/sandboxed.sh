@@ -1067,7 +1067,10 @@ mod tests {
     #[test]
     fn parse_rate_limit_headers_no_headers() {
         let headers = HeaderMap::new();
-        assert_eq!(parse_rate_limit_headers(&headers, ProviderType::OpenAI), None);
+        assert_eq!(
+            parse_rate_limit_headers(&headers, ProviderType::OpenAI),
+            None
+        );
         assert_eq!(parse_rate_limit_headers(&headers, ProviderType::Zai), None);
     }
 }
