@@ -1681,13 +1681,11 @@ async fn run_mission_turn(
                         "Amp rate limited; trying alternate API keys"
                     );
                     // Skip the key we already tried (explicit config key or env var fallback)
-                    let already_tried = api_key
-                        .map(|s| s.to_string())
-                        .or_else(|| {
-                            std::env::var("AMP_API_KEY")
-                                .ok()
-                                .filter(|s| !s.trim().is_empty())
-                        });
+                    let already_tried = api_key.map(|s| s.to_string()).or_else(|| {
+                        std::env::var("AMP_API_KEY")
+                            .ok()
+                            .filter(|s| !s.trim().is_empty())
+                    });
                     for (idx, alt_key) in alt_keys.into_iter().enumerate() {
                         if cancel.is_cancelled() {
                             break;

@@ -4416,7 +4416,9 @@ async fn create_provider(
             } else {
                 ProviderStatusResponse::NeedsAuth { auth_url: None }
             },
-            use_for_backends: req.use_for_backends.unwrap_or_else(|| vec![default_backend]),
+            use_for_backends: req
+                .use_for_backends
+                .unwrap_or_else(|| vec![default_backend]),
             created_at: now,
             updated_at: now,
         }));
@@ -4627,7 +4629,12 @@ async fn update_store_provider(
     let existing = providers
         .into_iter()
         .find(|p| p.id == uuid)
-        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Provider {} not found", uuid)))?;
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                format!("Provider {} not found", uuid),
+            )
+        })?;
 
     let mut updated = existing.clone();
     if let Some(name) = req.name {
@@ -4717,7 +4724,10 @@ async fn delete_provider(
     // Try UUID first (store-based providers: Amp, Custom)
     if let Ok(uuid) = uuid::Uuid::parse_str(&id) {
         if state.ai_providers.delete(uuid).await {
-            return Ok((StatusCode::OK, format!("Provider {} deleted successfully", id)));
+            return Ok((
+                StatusCode::OK,
+                format!("Provider {} deleted successfully", id),
+            ));
         }
         return Err((StatusCode::NOT_FOUND, format!("Provider {} not found", id)));
     }

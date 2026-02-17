@@ -234,9 +234,7 @@ impl ProviderHealthTracker {
 
         health.total_requests += 1;
         match &reason {
-            CooldownReason::RateLimit | CooldownReason::Overloaded => {
-                health.total_rate_limits += 1
-            }
+            CooldownReason::RateLimit | CooldownReason::Overloaded => health.total_rate_limits += 1,
             _ => health.total_errors += 1,
         }
 
