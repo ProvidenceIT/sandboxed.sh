@@ -7311,7 +7311,7 @@ pub async fn run_opencode_turn(
                                             let _ = sse_session_idle_tx.send(true);
                                         }
                                         if parsed.session_retry {
-                                            let _ = sse_retry_tx.send_modify(|v| *v += 1);
+                                            sse_retry_tx.send_modify(|v| *v += 1);
                                         }
                                     }
                                 }
@@ -7498,16 +7498,17 @@ pub async fn run_opencode_turn(
                 }
             }
             changed = sse_session_idle_rx.changed() => {
-                if changed.is_ok() && *sse_session_idle_rx.borrow() {
-                    if !session_idle_seen {
-                        session_idle_seen = true;
-                        session_idle_at = Some(std::time::Instant::now());
-                        tracing::debug!(
-                            mission_id = %mission_id,
-                            had_meaningful_work = had_meaningful_work,
-                            "Session idle signal received from SSE"
-                        );
-                    }
+                if changed.is_ok()
+                    && *sse_session_idle_rx.borrow()
+                    && !session_idle_seen
+                {
+                    session_idle_seen = true;
+                    session_idle_at = Some(std::time::Instant::now());
+                    tracing::debug!(
+                        mission_id = %mission_id,
+                        had_meaningful_work = had_meaningful_work,
+                        "Session idle signal received from SSE"
+                    );
                 }
             }
             changed = sse_retry_rx.changed() => {
@@ -7763,7 +7764,7 @@ pub async fn run_opencode_turn(
                                     let _ = sse_session_idle_tx.send(true);
                                 }
                                 if parsed.session_retry {
-                                    let _ = sse_retry_tx.send_modify(|v| *v += 1);
+                                    sse_retry_tx.send_modify(|v| *v += 1);
                                 }
                             }
                         } else {

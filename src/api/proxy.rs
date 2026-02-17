@@ -978,33 +978,52 @@ fn parse_duration_string(s: &str) -> Option<std::time::Duration> {
 /// inspects the parsed JSON to determine the appropriate cooldown reason
 /// instead of blindly treating every such error as a rate limit.
 fn classify_embedded_error(v: &serde_json::Value) -> CooldownReason {
-    // Look for an error type string in common locations:
+    let error_obj = v.get("error");
+
+    // Try string-based classification first:
     //   {"error": {"type": "rate_limit_error"}}          (Anthropic)
     //   {"type": "error", "error": {"type": "..."}}      (Anthropic streaming)
     //   {"error": {"code": "rate_limit_exceeded"}}        (OpenAI-compat)
-    //   {"error": {"message": "...", "type": "..."}}      (various)
-    let error_type = v
-        .get("error")
+    //   {"error": {"status": "RESOURCE_EXHAUSTED"}}       (Google)
+    let error_type = error_obj
         .and_then(|e| {
             e.get("type")
                 .or_else(|| e.get("code"))
+                .or_else(|| e.get("status"))
                 .and_then(|t| t.as_str())
         })
         .unwrap_or("");
 
     let error_type_lower = error_type.to_ascii_lowercase();
 
-    if error_type_lower.contains("rate_limit") || error_type_lower.contains("rate-limit") {
-        CooldownReason::RateLimit
+    if error_type_lower.contains("rate_limit")
+        || error_type_lower.contains("rate-limit")
+        || error_type_lower.contains("resource_exhausted")
+    {
+        return CooldownReason::RateLimit;
     } else if error_type_lower.contains("overload") {
-        CooldownReason::Overloaded
+        return CooldownReason::Overloaded;
     } else if error_type_lower.contains("auth") || error_type_lower.contains("permission") {
-        CooldownReason::AuthError
-    } else {
-        // Unknown embedded error — treat as a server error so it doesn't
-        // inflate rate_limit_count and mislead the exhausted-chain classifier.
-        CooldownReason::ServerError
+        return CooldownReason::AuthError;
     }
+
+    // Handle numeric error codes (e.g. Google: {"error": {"code": 429}})
+    if let Some(code) = error_obj
+        .and_then(|e| e.get("code"))
+        .and_then(|c| c.as_i64())
+    {
+        return match code {
+            429 => CooldownReason::RateLimit,
+            529 => CooldownReason::Overloaded,
+            401 | 403 => CooldownReason::AuthError,
+            500..=599 => CooldownReason::ServerError,
+            _ => CooldownReason::ServerError,
+        };
+    }
+
+    // Unknown embedded error — treat as a server error so it doesn't
+    // inflate rate_limit_count and mislead the exhausted-chain classifier.
+    CooldownReason::ServerError
 }
 
 /// Normalize an SSE byte stream to fix provider-specific quirks.
@@ -1031,13 +1050,7 @@ fn normalize_sse_stream(
                         buf.extend_from_slice(&chunk);
                     }
                     Some(Err(e)) => {
-                        return Some((
-                            Err(std::io::Error::new(
-                                std::io::ErrorKind::Other,
-                                e.to_string(),
-                            )),
-                            (stream, buf),
-                        ));
+                        return Some((Err(std::io::Error::other(e.to_string())), (stream, buf)));
                     }
                     None => {
                         // Stream ended — flush remaining buffer

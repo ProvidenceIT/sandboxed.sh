@@ -4778,8 +4778,8 @@ async fn authenticate_provider(
             .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Provider {} not found", id)))?;
 
         // Store-based providers: connected if they have an API key or a base URL
-        let has_credentials = provider.api_key.as_ref().map_or(false, |k| !k.is_empty())
-            || provider.base_url.is_some();
+        let has_credentials =
+            provider.api_key.as_ref().is_some_and(|k| !k.is_empty()) || provider.base_url.is_some();
         return Ok(Json(AuthResponse {
             success: has_credentials,
             message: if has_credentials {
