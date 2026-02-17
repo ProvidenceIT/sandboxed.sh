@@ -387,8 +387,12 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
             .build()
             .unwrap_or_default(),
         proxy_secret: std::env::var("SANDBOXED_PROXY_SECRET")
-            .unwrap_or_else(|_| {
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| {
                 let secret = uuid::Uuid::new_v4().to_string();
+                tracing::info!("No SANDBOXED_PROXY_SECRET set; generated ephemeral proxy secret");
+                // Also set in env so mission_runner can read it for OpenCode config.
                 std::env::set_var("SANDBOXED_PROXY_SECRET", &secret);
                 secret
             }),

@@ -134,6 +134,15 @@ struct ModelObject {
 
 /// Verify the proxy bearer token from the Authorization header.
 fn verify_proxy_auth(headers: &HeaderMap, expected: &str) -> Result<(), Response> {
+    // Reject if the expected secret is empty — this should never happen since
+    // the initialization code generates a UUID fallback, but guard anyway.
+    if expected.is_empty() {
+        return Err(error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Proxy secret is not configured".to_string(),
+            "configuration_error",
+        ));
+    }
     let token = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())

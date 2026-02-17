@@ -4569,7 +4569,9 @@ fn ensure_opencode_provider_for_model(opencode_config_dir: &std::path::Path, mod
             // and is accessible from shared-network workspaces.
             let port = std::env::var("PORT").unwrap_or_else(|_| "3000".to_string());
             let proxy_key = std::env::var("SANDBOXED_PROXY_SECRET")
-                .unwrap_or_else(|_| "builtin".to_string());
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| "builtin".to_string());
             Some(serde_json::json!({
                 "npm": "@ai-sdk/openai-compatible",
                 "name": "Builtin",
