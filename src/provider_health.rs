@@ -152,6 +152,8 @@ pub struct FallbackEvent {
     pub chain_id: String,
     /// Provider that failed.
     pub from_provider: String,
+    /// Model that was being requested.
+    pub from_model: String,
     /// Account that failed.
     pub from_account_id: Uuid,
     /// Why it failed.
@@ -162,6 +164,10 @@ pub struct FallbackEvent {
     pub to_provider: Option<String>,
     /// Request latency in milliseconds until the failure was detected.
     pub latency_ms: Option<u64>,
+    /// 1-indexed position of this entry in the chain.
+    pub attempt_number: u32,
+    /// Total number of entries in the chain.
+    pub chain_length: u32,
 }
 
 /// Maximum number of fallback events to keep in the ring buffer.

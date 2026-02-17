@@ -51,11 +51,14 @@ export interface FallbackEvent {
   timestamp: string;
   chain_id: string;
   from_provider: string;
+  from_model: string;
   from_account_id: string;
   reason: string;
   cooldown_secs: number | null;
   to_provider: string | null;
   latency_ms: number | null;
+  attempt_number: number;
+  chain_length: number;
 }
 
 // ---------------------------------------------------------------------------

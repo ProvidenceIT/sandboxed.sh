@@ -281,7 +281,8 @@ async fn chat_completions(
     let mut server_error_count: u32 = 0;
     let mut pending_fallback_events: Vec<crate::provider_health::FallbackEvent> = Vec::new();
 
-    for entry in &entries {
+    let chain_length = entries.len() as u32;
+    for (entry_idx, entry) in entries.iter().enumerate() {
         let provider_type = match ProviderType::from_id(&entry.provider_id) {
             Some(pt) => pt,
             None => continue,
@@ -366,11 +367,14 @@ async fn chat_completions(
                     timestamp: chrono::Utc::now(),
                     chain_id: chain_id.clone(),
                     from_provider: entry.provider_id.clone(),
+                    from_model: entry.model_id.clone(),
                     from_account_id: entry.account_id,
                     reason,
                     cooldown_secs: None,
                     to_provider: None,
                     latency_ms: Some(elapsed_ms),
+                    attempt_number: (entry_idx + 1) as u32,
+                    chain_length,
                 });
                 server_error_count += 1;
                 continue;
@@ -403,11 +407,14 @@ async fn chat_completions(
                 timestamp: chrono::Utc::now(),
                 chain_id: chain_id.clone(),
                 from_provider: entry.provider_id.clone(),
+                from_model: entry.model_id.clone(),
                 from_account_id: entry.account_id,
                 reason,
                 cooldown_secs: retry_after.map(|d| d.as_secs_f64()),
                 to_provider: None,
                 latency_ms: Some(elapsed_ms),
+                attempt_number: (entry_idx + 1) as u32,
+                chain_length,
             });
             rate_limit_count += 1;
             continue;
@@ -429,11 +436,14 @@ async fn chat_completions(
                 timestamp: chrono::Utc::now(),
                 chain_id: chain_id.clone(),
                 from_provider: entry.provider_id.clone(),
+                from_model: entry.model_id.clone(),
                 from_account_id: entry.account_id,
                 reason: CooldownReason::ServerError,
                 cooldown_secs: None,
                 to_provider: None,
                 latency_ms: Some(elapsed_ms),
+                attempt_number: (entry_idx + 1) as u32,
+                chain_length,
             });
             server_error_count += 1;
             continue;
@@ -456,11 +466,14 @@ async fn chat_completions(
                 timestamp: chrono::Utc::now(),
                 chain_id: chain_id.clone(),
                 from_provider: entry.provider_id.clone(),
+                from_model: entry.model_id.clone(),
                 from_account_id: entry.account_id,
                 reason: CooldownReason::AuthError,
                 cooldown_secs: None,
                 to_provider: None,
                 latency_ms: Some(elapsed_ms),
+                attempt_number: (entry_idx + 1) as u32,
+                chain_length,
             });
             client_error_count += 1;
             continue;
@@ -551,11 +564,14 @@ async fn chat_completions(
                     timestamp: chrono::Utc::now(),
                     chain_id: chain_id.clone(),
                     from_provider: entry.provider_id.clone(),
+                    from_model: entry.model_id.clone(),
                     from_account_id: entry.account_id,
                     reason: CooldownReason::ServerError,
                     cooldown_secs: None,
                     to_provider: None,
                     latency_ms: Some(elapsed_ms),
+                    attempt_number: (entry_idx + 1) as u32,
+                    chain_length,
                 });
                 server_error_count += 1;
                 continue;
@@ -590,11 +606,14 @@ async fn chat_completions(
                     timestamp: chrono::Utc::now(),
                     chain_id: chain_id.clone(),
                     from_provider: entry.provider_id.clone(),
+                    from_model: entry.model_id.clone(),
                     from_account_id: entry.account_id,
                     reason,
                     cooldown_secs: None,
                     to_provider: None,
                     latency_ms: Some(elapsed_ms),
+                    attempt_number: (entry_idx + 1) as u32,
+                    chain_length,
                 });
                 match reason {
                     CooldownReason::RateLimit | CooldownReason::Overloaded => rate_limit_count += 1,
@@ -673,11 +692,14 @@ async fn chat_completions(
                                 timestamp: chrono::Utc::now(),
                                 chain_id: chain_id.clone(),
                                 from_provider: entry.provider_id.clone(),
+                                from_model: entry.model_id.clone(),
                                 from_account_id: entry.account_id,
                                 reason,
                                 cooldown_secs: None,
                                 to_provider: None,
                                 latency_ms: Some(elapsed_ms),
+                                attempt_number: (entry_idx + 1) as u32,
+                                chain_length,
                             });
                             match reason {
                                 CooldownReason::RateLimit | CooldownReason::Overloaded => {
@@ -756,11 +778,14 @@ async fn chat_completions(
                     timestamp: chrono::Utc::now(),
                     chain_id: chain_id.clone(),
                     from_provider: entry.provider_id.clone(),
+                    from_model: entry.model_id.clone(),
                     from_account_id: entry.account_id,
                     reason: CooldownReason::ServerError,
                     cooldown_secs: None,
                     to_provider: None,
                     latency_ms: Some(elapsed_ms),
+                    attempt_number: (entry_idx + 1) as u32,
+                    chain_length,
                 });
                 server_error_count += 1;
                 continue;

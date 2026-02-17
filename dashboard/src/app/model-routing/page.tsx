@@ -901,8 +901,11 @@ export default function ModelRoutingPage() {
                   <span className="text-white/40 flex-shrink-0 w-16">
                     {new Date(evt.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
                   </span>
+                  <span className="text-white/20 flex-shrink-0">
+                    {evt.attempt_number}/{evt.chain_length}
+                  </span>
                   <span className="text-white/60 font-mono">
-                    {evt.from_provider}
+                    {evt.from_provider}/{evt.from_model}
                   </span>
                   {evt.to_provider && (
                     <>
