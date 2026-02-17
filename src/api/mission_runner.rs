@@ -197,8 +197,8 @@ const OPENCODE_STATUS_PATTERNS: &[&str] = &[
     "all tasks completed",
     "session ended with error",
     "[session.error]",
-    "session:",
     "session: ses_",
+    "session id: ses_",
 ];
 
 fn is_opencode_status_line(line: &str) -> bool {
@@ -3583,7 +3583,7 @@ fn is_opencode_banner_line(line: &str) -> bool {
     // Session identification lines — match the "Session: ses_" / "Session ID: ses_"
     // prefix, not bare "session:" which would match model text discussing sessions.
         || lower.starts_with("session id:")
-        || lower.starts_with("session:")
+        || lower.starts_with("session: ses_")
 
     // Shutdown / cleanup banners
         || lower.contains("event stream did not close")

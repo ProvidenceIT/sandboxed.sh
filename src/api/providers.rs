@@ -1190,7 +1190,7 @@ pub async fn validate_model_override(
                     Ok(())
                 } else {
                     Err(format!(
-                        "OpenAI provider not configured. Expected an OpenAI model ID (e.g., 'gpt-4'), got '{}'",
+                        "OpenAI provider not configured. Expected an OpenAI model ID (e.g., 'gpt-4', 'o1-*', or 'codex-*'), got '{}'",
                         model_override
                     ))
                 }
