@@ -225,6 +225,42 @@ mod tests {
 
         assert!(result.is_ok());
     }
+
+    #[test]
+    fn should_wrap_with_rtk_matches_exact_commands() {
+        assert!(should_wrap_with_rtk("ls"));
+        assert!(should_wrap_with_rtk("git status"));
+        assert!(should_wrap_with_rtk("cargo test"));
+    }
+
+    #[test]
+    fn should_wrap_with_rtk_matches_with_args() {
+        assert!(should_wrap_with_rtk("ls -la"));
+        assert!(should_wrap_with_rtk("git status --short"));
+        assert!(should_wrap_with_rtk("cargo test --release"));
+    }
+
+    #[test]
+    fn should_wrap_with_rtk_rejects_false_prefix_matches() {
+        assert!(!should_wrap_with_rtk("lsof"));
+        assert!(!should_wrap_with_rtk("lsof -i"));
+        assert!(!should_wrap_with_rtk("catkin_make"));
+        assert!(!should_wrap_with_rtk("headless-chrome"));
+    }
+
+    #[test]
+    fn should_wrap_with_rtk_rejects_compound_commands() {
+        assert!(!should_wrap_with_rtk("ls && echo done"));
+        assert!(!should_wrap_with_rtk("ls || echo failed"));
+        assert!(!should_wrap_with_rtk("ls | grep foo"));
+        assert!(!should_wrap_with_rtk("cat <<EOF"));
+    }
+
+    #[test]
+    fn should_wrap_with_rtk_rejects_already_wrapped() {
+        assert!(!should_wrap_with_rtk("rtk ls"));
+        assert!(!should_wrap_with_rtk("rtk git status"));
+    }
 }
 
 /// Read context information from the local context file or fall back to env vars.
