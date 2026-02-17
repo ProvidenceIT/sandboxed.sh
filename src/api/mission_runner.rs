@@ -1577,18 +1577,23 @@ async fn run_mission_turn(
             }
 
             // Account rotation: if rate-limited, try alternate Anthropic credentials.
+            // We try ALL accounts via override_auth (the dedup in
+            // get_all_anthropic_auth_for_claudecode prevents true duplicates).
+            // The default resolution may have used CLI creds, OpenCode auth.json,
+            // or ai_providers.json — we don't know which, so we just try every
+            // account. If one matches what was already tried, it'll quickly
+            // rate-limit again and we move to the next.
             if result.terminal_reason == Some(TerminalReason::RateLimited) {
                 let alt_accounts = super::ai_providers::get_all_anthropic_auth_for_claudecode(
                     &config.working_dir,
                 );
-                if alt_accounts.len() > 1 {
+                if !alt_accounts.is_empty() {
                     tracing::info!(
                         mission_id = %mission_id,
                         total_accounts = alt_accounts.len(),
                         "Rate limited on primary account; trying alternate credentials"
                     );
-                    // Skip the first account (already tried via default resolution).
-                    for (idx, alt_auth) in alt_accounts.into_iter().skip(1).enumerate() {
+                    for (idx, alt_auth) in alt_accounts.into_iter().enumerate() {
                         if cancel.is_cancelled() {
                             break;
                         }
@@ -1619,8 +1624,19 @@ async fn run_mission_turn(
                             Some(alt_auth),
                         )
                         .await;
-                        if result.terminal_reason != Some(TerminalReason::RateLimited) {
-                            break;
+                        // Continue rotating only on rate-limit or auth errors;
+                        // stop on success or non-retryable failures.
+                        match result.terminal_reason {
+                            Some(TerminalReason::RateLimited) => continue,
+                            Some(TerminalReason::LlmError) => {
+                                tracing::warn!(
+                                    mission_id = %mission_id,
+                                    attempt = idx + 2,
+                                    "LLM error (possibly auth failure); trying next account"
+                                );
+                                continue;
+                            }
+                            _ => break,
                         }
                     }
                 }

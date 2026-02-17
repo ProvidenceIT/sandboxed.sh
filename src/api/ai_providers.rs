@@ -347,9 +347,10 @@ pub fn read_standard_accounts(
             .get("key")
             .or_else(|| value.get("api_key"))
             .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
             .map(|s| s.to_string());
 
-        // Only include accounts that have an API key
+        // Only include accounts that have a non-empty API key
         if api_key.is_none() {
             continue;
         }
