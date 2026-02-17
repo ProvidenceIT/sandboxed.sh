@@ -323,10 +323,15 @@ fn handle_part_update(
     let message_id = extract_str(part, &["messageID", "messageId", "message_id"])
         .or_else(|| extract_str(props, &["messageID", "messageId", "message_id"]));
     if let Some(message_id) = message_id {
-        if let Some(role) = state.message_roles.get(message_id) {
-            if role != "assistant" {
+        match state.message_roles.get(message_id) {
+            Some(role) if role != "assistant" => return None,
+            None => {
+                // Role not yet recorded (message.updated hasn't arrived).
+                // Skip to avoid emitting user-message text as a TextDelta,
+                // which would trigger the text-idle timeout prematurely.
                 return None;
             }
+            _ => {} // assistant — continue processing
         }
     }
 
@@ -7712,11 +7717,11 @@ pub async fn run_opencode_turn(
                                                 .or_else(|| props.get("messageId"))
                                                 .or_else(|| props.get("message_id"))
                                                 .and_then(|v| v.as_str());
-                                            let is_user = msg_id
+                                            let is_assistant = msg_id
                                                 .and_then(|id| state.message_roles.get(id))
-                                                .map(|role| role == "user")
+                                                .map(|role| role == "assistant")
                                                 .unwrap_or(false);
-                                            if !is_user {
+                                            if is_assistant {
                                                 if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
                                                     final_result = text.to_string();
                                                     let _ = text_output_tx.send(true);
