@@ -3476,10 +3476,20 @@ async fn control_actor_loop(
 
                                 if total_running >= max_parallel {
                                     tracing::warn!(
-                                        "Cannot start parallel mission {}: max {} reached",
+                                        "Cannot start parallel mission {}: max {} reached. \
+                                         Dropping targeted message to avoid sending to wrong mission.",
                                         tid, max_parallel
                                     );
-                                    // Fall through to queue on main as fallback
+                                    let _ = events_tx.send(AgentEvent::Error {
+                                        message: format!(
+                                            "Cannot start mission {}: max parallel missions ({}) reached",
+                                            tid, max_parallel
+                                        ),
+                                        mission_id: Some(tid),
+                                        resumable: true,
+                                    });
+                                    let _ = respond.send(false);
+                                    continue;
                                 } else {
                                     // Load mission and start in parallel
                                     match load_mission_record(&mission_store, tid).await {
@@ -3549,8 +3559,21 @@ async fn control_actor_loop(
                                             continue;
                                         }
                                         Err(e) => {
-                                            tracing::error!("Failed to load mission {} for parallel: {}", tid, e);
-                                            // Fall through to queue on main as fallback
+                                            tracing::error!(
+                                                "Failed to load mission {} for parallel: {}. \
+                                                 Dropping targeted message to avoid sending to wrong mission.",
+                                                tid, e
+                                            );
+                                            let _ = events_tx.send(AgentEvent::Error {
+                                                message: format!(
+                                                    "Failed to load mission {}: {}",
+                                                    tid, e
+                                                ),
+                                                mission_id: Some(tid),
+                                                resumable: true,
+                                            });
+                                            let _ = respond.send(false);
+                                            continue;
                                         }
                                     }
                                 }
