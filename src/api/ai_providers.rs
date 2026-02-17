@@ -342,10 +342,12 @@ pub fn read_standard_accounts(
         if provider_type == ProviderType::Custom {
             continue;
         }
-        // Extract actual API key from the auth entry
+        // Extract actual API key from the auth entry.
+        // Check all field name variants for consistency with get_api_key_for_provider.
         let api_key = value
             .get("key")
             .or_else(|| value.get("api_key"))
+            .or_else(|| value.get("apiKey"))
             .and_then(|v| v.as_str())
             .filter(|s| !s.trim().is_empty())
             .map(|s| s.to_string());

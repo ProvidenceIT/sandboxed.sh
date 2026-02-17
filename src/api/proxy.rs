@@ -206,7 +206,8 @@ async fn chat_completions(
     //    a model override "builtin/smart" arrives as just "smart".  We try:
     //      1. Exact match (e.g. "builtin/smart")
     //      2. "builtin/{model}" prefix (e.g. "smart" → "builtin/smart")
-    //      3. Default chain fallback
+    //    Unknown models return an error — no silent fallback to the default
+    //    chain, so typos and misconfigurations surface immediately.
     let chain_id = if state.chain_store.get(&requested_model).await.is_some() {
         requested_model.clone()
     } else {
@@ -214,26 +215,14 @@ async fn chat_completions(
         if state.chain_store.get(&prefixed).await.is_some() {
             prefixed
         } else {
-            match state.chain_store.get_default().await {
-                Some(chain) => {
-                    tracing::warn!(
-                        requested_model = %requested_model,
-                        default_chain = %chain.id,
-                        "Unknown model requested; falling back to default chain"
-                    );
-                    chain.id
-                }
-                None => {
-                    return error_response(
-                        StatusCode::BAD_REQUEST,
-                        format!(
-                            "Model '{}' is not a known chain. Available chains can be listed at /api/model-routing/chains",
-                            requested_model
-                        ),
-                        "model_not_found",
-                    );
-                }
-            }
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "Model '{}' is not a known chain. Available chains can be listed at /api/model-routing/chains",
+                    requested_model
+                ),
+                "model_not_found",
+            );
         }
     };
 
