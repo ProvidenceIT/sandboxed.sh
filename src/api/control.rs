@@ -4269,6 +4269,8 @@ async fn control_actor_loop(
                                         running_cancel = Some(cancel.clone());
                                         // Capture which mission this task is working on (the resumed mission)
                                         running_mission_id = Some(mission_id);
+                                        // Reset activity tracking so stall detection starts fresh
+                                        main_runner_last_activity = std::time::Instant::now();
                                         main_runner_activity = None;
                                         main_runner_subtasks.clear();
                                         running = Some(tokio::spawn(async move {
@@ -4795,6 +4797,20 @@ async fn control_actor_loop(
                                 resumable: completed_mission_id.is_some(), // Can resume if mission exists
                             });
                             if let Some(mission_id) = completed_mission_id {
+                                // Update mission status so it doesn't stay Active forever.
+                                // Mark as Failed (resumable) so the user can retry.
+                                if let Err(e) = mission_store
+                                    .update_mission_status(mission_id, MissionStatus::Failed)
+                                    .await
+                                {
+                                    tracing::warn!("Failed to update mission status after join error: {}", e);
+                                } else {
+                                    let _ = events_tx.send(AgentEvent::MissionStatusChanged {
+                                        mission_id,
+                                        status: MissionStatus::Failed,
+                                        summary: Some("Task execution failed unexpectedly".to_string()),
+                                    });
+                                }
                                 close_mission_desktop_sessions(
                                     &mission_store,
                                     mission_id,
@@ -5058,11 +5074,13 @@ async fn control_actor_loop(
 
                                 // If no queued messages, update status and mark for cleanup
                                 if !started {
-                                    // Only update status if agent hasn't already set a terminal status
+                                    // Only update status if agent hasn't already set a terminal status.
+                                    // Include Interrupted: missions started via StartParallel may still
+                                    // have Interrupted status if they were previously cancelled.
                                     if let Ok(Some(mission)) = mission_store.get_mission(*mission_id).await {
                                         let should_update = matches!(
                                             mission.status,
-                                            MissionStatus::Pending | MissionStatus::Active
+                                            MissionStatus::Pending | MissionStatus::Active | MissionStatus::Interrupted
                                         );
                                         if should_update {
                                             let new_status = if result.success {
