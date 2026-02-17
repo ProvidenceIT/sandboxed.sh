@@ -7159,9 +7159,8 @@ pub async fn run_opencode_turn(
     let last_activity = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
     let (text_output_tx, mut text_output_rx) = tokio::sync::watch::channel(false);
     // Track active tool call depth: incremented on ToolCall, decremented on ToolResult.
-    // Used to (a) skip inactivity timeout during long tool runs, and (b) release the
-    // provider concurrency permit while tools execute (no LLM call in flight).
-    let (sse_tool_depth_tx, mut sse_tool_depth_rx) = tokio::sync::watch::channel(0u32);
+    // Used to skip inactivity timeouts during long tool runs (builds, tests, etc.).
+    let (sse_tool_depth_tx, sse_tool_depth_rx) = tokio::sync::watch::channel(0u32);
 
     // oh-my-opencode doesn't support --format json, so use SSE curl for events.
     let use_json_stdout = false;
@@ -7375,6 +7374,10 @@ pub async fn run_opencode_turn(
     } else {
         None
     };
+    // Drop the original sender so the channel closes when the SSE handler exits.
+    // This prevents a stale `tools_active == true` from permanently disabling
+    // the inactivity timeout if the SSE handler dies mid-tool-execution.
+    drop(sse_tool_depth_tx);
 
     // Spawn a task to read stderr (just log in JSON mode, events come on stdout)
     let mission_id_clone = mission_id;
@@ -7643,15 +7646,20 @@ pub async fn run_opencode_turn(
                 }
                 if let Some(last_text) = text_output_at {
                     if last_text.elapsed() >= std::time::Duration::from_secs(30) {
-                        // Only kill if there's also no recent SSE/stderr activity.
-                        // The model may be actively doing tool calls without
-                        // producing text output.
+                        // Only kill if there's also no recent SSE/stderr activity
+                        // AND no tools are actively running.  A long tool execution
+                        // (build, test, sleep) may produce no text output for >30s;
+                        // killing the process mid-tool would be wrong.
+                        // If the SSE handler has exited, the depth value may be
+                        // stale (stuck > 0), so treat that as "no tools active".
+                        let sse_alive = sse_handle.as_ref().map(|h| !h.is_finished()).unwrap_or(false);
+                        let tools_active = sse_alive && *sse_tool_depth_rx.borrow() > 0;
                         let recent_activity = last_activity
                             .lock()
                             .ok()
                             .map(|g| g.elapsed() < std::time::Duration::from_secs(30))
                             .unwrap_or(false);
-                        if !recent_activity {
+                        if !recent_activity && !tools_active {
                             tracing::info!(
                                 mission_id = %mission_id,
                                 "OpenCode output idle timeout reached; terminating CLI process"
@@ -7668,7 +7676,10 @@ pub async fn run_opencode_turn(
                 // Skip this check while tools are actively running — long
                 // commands (builds, tests) may produce no SSE events for
                 // extended periods and heartbeats are intentionally filtered.
-                let tools_active = *sse_tool_depth_rx.borrow() > 0;
+                // If the SSE handler has exited, the depth value may be stale,
+                // so treat that as "no tools active".
+                let sse_alive = sse_handle.as_ref().map(|h| !h.is_finished()).unwrap_or(false);
+                let tools_active = sse_alive && *sse_tool_depth_rx.borrow() > 0;
                 let inactive_too_long = !tools_active
                     && last_activity
                         .lock()
@@ -7721,11 +7732,17 @@ pub async fn run_opencode_turn(
                                                 .or_else(|| props.get("messageId"))
                                                 .or_else(|| props.get("message_id"))
                                                 .and_then(|v| v.as_str());
-                                            let is_assistant = msg_id
+                                            // Skip known non-assistant messages.
+                                            // When msg_id is None (no ID in the event),
+                                            // allow text through — consistent with the
+                                            // SSE path in handle_part_update which also
+                                            // bypasses the role check when message_id is
+                                            // absent.
+                                            let is_non_assistant = msg_id
                                                 .and_then(|id| state.message_roles.get(id))
-                                                .map(|role| role == "assistant")
+                                                .map(|role| role != "assistant")
                                                 .unwrap_or(false);
-                                            if is_assistant {
+                                            if !is_non_assistant {
                                                 if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
                                                     final_result = text.to_string();
                                                     let _ = text_output_tx.send(true);
