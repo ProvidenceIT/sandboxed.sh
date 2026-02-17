@@ -18,7 +18,7 @@ use uuid::Uuid;
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Reason an account was placed into cooldown.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CooldownReason {
     /// HTTP 429 rate limit

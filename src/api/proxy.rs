@@ -446,17 +446,32 @@ async fn chat_completions(
             }
 
             if is_stream_error {
+                // Parse the peeked data to classify the error type.
+                let reason = std::str::from_utf8(&peek_buf)
+                    .ok()
+                    .and_then(|text| {
+                        text.lines()
+                            .find_map(|line| line.strip_prefix("data: "))
+                            .and_then(|json_str| serde_json::from_str::<serde_json::Value>(json_str).ok())
+                    })
+                    .map(|v| classify_embedded_error(&v))
+                    .unwrap_or(CooldownReason::ServerError);
                 tracing::warn!(
                     provider = %entry.provider_id,
                     account_id = %entry.account_id,
                     model = %entry.model_id,
+                    reason = %reason,
                     "Upstream returned in-stream error, trying next entry"
                 );
                 state
                     .health_tracker
-                    .record_failure(entry.account_id, CooldownReason::RateLimit, None)
+                    .record_failure(entry.account_id, reason, None)
                     .await;
-                rate_limit_count += 1;
+                match reason {
+                    CooldownReason::RateLimit | CooldownReason::Overloaded => rate_limit_count += 1,
+                    CooldownReason::AuthError => client_error_count += 1,
+                    _ => server_error_count += 1,
+                }
                 continue;
             }
 
@@ -501,21 +516,23 @@ async fn chat_completions(
                         if v.get("type").and_then(|t| t.as_str()) == Some("error")
                             || v.get("error").is_some()
                         {
+                            let reason = classify_embedded_error(&v);
                             tracing::warn!(
                                 provider = %entry.provider_id,
                                 account_id = %entry.account_id,
                                 model = %entry.model_id,
+                                reason = %reason,
                                 "Upstream returned 200 with error body, trying next entry"
                             );
                             state
                                 .health_tracker
-                                .record_failure(
-                                    entry.account_id,
-                                    CooldownReason::RateLimit,
-                                    None,
-                                )
+                                .record_failure(entry.account_id, reason, None)
                                 .await;
-                            rate_limit_count += 1;
+                            match reason {
+                                CooldownReason::RateLimit | CooldownReason::Overloaded => rate_limit_count += 1,
+                                CooldownReason::AuthError => client_error_count += 1,
+                                _ => server_error_count += 1,
+                            }
                             continue;
                         }
                     }
@@ -633,6 +650,41 @@ fn parse_retry_after(headers: &HeaderMap) -> Option<std::time::Duration> {
         Some(std::time::Duration::from_secs_f64(secs))
     } else {
         None
+    }
+}
+
+/// Classify an error embedded in a JSON response body.
+///
+/// Providers sometimes return HTTP 200 with an error payload.  This function
+/// inspects the parsed JSON to determine the appropriate cooldown reason
+/// instead of blindly treating every such error as a rate limit.
+fn classify_embedded_error(v: &serde_json::Value) -> CooldownReason {
+    // Look for an error type string in common locations:
+    //   {"error": {"type": "rate_limit_error"}}          (Anthropic)
+    //   {"type": "error", "error": {"type": "..."}}      (Anthropic streaming)
+    //   {"error": {"code": "rate_limit_exceeded"}}        (OpenAI-compat)
+    //   {"error": {"message": "...", "type": "..."}}      (various)
+    let error_type = v
+        .get("error")
+        .and_then(|e| {
+            e.get("type")
+                .or_else(|| e.get("code"))
+                .and_then(|t| t.as_str())
+        })
+        .unwrap_or("");
+
+    let error_type_lower = error_type.to_ascii_lowercase();
+
+    if error_type_lower.contains("rate_limit") || error_type_lower.contains("rate-limit") {
+        CooldownReason::RateLimit
+    } else if error_type_lower.contains("overload") {
+        CooldownReason::Overloaded
+    } else if error_type_lower.contains("auth") || error_type_lower.contains("permission") {
+        CooldownReason::AuthError
+    } else {
+        // Unknown embedded error — treat as a server error so it doesn't
+        // inflate rate_limit_count and mislead the exhausted-chain classifier.
+        CooldownReason::ServerError
     }
 }
 
