@@ -948,6 +948,159 @@ pub fn get_all_anthropic_auth_for_claudecode(working_dir: &Path) -> Vec<ClaudeCo
     all_auth
 }
 
+/// Get all available OpenAI API keys for Codex account rotation, in priority order.
+///
+/// Collects keys from all sources:
+/// 1. OPENAI_API_KEY environment variable
+/// 2. OpenCode auth.json (openai entry)
+/// 3. ai_providers.json (potentially multiple OpenAI accounts, sorted by priority)
+///
+/// Used for account rotation: when one account hits a rate limit, the mission
+/// runner can try the next key in the list.
+pub fn get_all_openai_keys_for_codex(working_dir: &Path) -> Vec<String> {
+    let mut all_keys = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    let mut push_unique = |key: String| {
+        if seen.insert(key.clone()) {
+            all_keys.push(key);
+        }
+    };
+
+    // 1. OPENAI_API_KEY env var (highest priority — it's the "default" credential)
+    if let Ok(value) = std::env::var("OPENAI_API_KEY") {
+        if !value.trim().is_empty() {
+            push_unique(value);
+        }
+    }
+
+    // 2. OpenCode auth.json
+    if let Some(key) = get_openai_api_key_from_opencode_auth() {
+        push_unique(key);
+    }
+
+    // 3. ai_providers.json (multi-account, sorted by priority)
+    for key in get_all_openai_keys_from_ai_providers(working_dir) {
+        push_unique(key);
+    }
+
+    all_keys
+}
+
+/// Get all OpenAI API keys from ai_providers.json, sorted by priority.
+fn get_all_openai_keys_from_ai_providers(working_dir: &Path) -> Vec<String> {
+    let ai_providers_path = working_dir.join(".sandboxed-sh/ai_providers.json");
+    let contents = match std::fs::read_to_string(&ai_providers_path) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    let providers: Vec<serde_json::Value> = match serde_json::from_str(&contents) {
+        Ok(p) => p,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut entries: Vec<(u32, usize, String)> = Vec::new();
+
+    for (idx, provider) in providers.iter().enumerate() {
+        let provider_type = provider.get("provider_type").and_then(|v| v.as_str());
+        if provider_type != Some("openai") {
+            continue;
+        }
+        let enabled = provider
+            .get("enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        if !enabled {
+            continue;
+        }
+        let priority = provider
+            .get("priority")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
+
+        if let Some(api_key) = provider.get("api_key").and_then(|v| v.as_str()) {
+            if !api_key.is_empty() {
+                entries.push((priority, idx, api_key.to_string()));
+            }
+        }
+    }
+
+    entries.sort_by_key(|(p, i, _)| (*p, *i));
+    entries.into_iter().map(|(_, _, key)| key).collect()
+}
+
+/// Get all available Amp API keys for account rotation, in priority order.
+///
+/// Collects keys from all sources:
+/// 1. Backend config (backend_config.json amp.settings.api_key)
+/// 2. AMP_API_KEY environment variable
+/// 3. ai_providers.json (Amp provider entries, sorted by priority)
+///
+/// Used for account rotation: when one account hits a rate limit, the mission
+/// runner can try the next key in the list.
+pub fn get_all_amp_api_keys(working_dir: &Path) -> Vec<String> {
+    let mut all_keys = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    let mut push_unique = |key: String| {
+        if seen.insert(key.clone()) {
+            all_keys.push(key);
+        }
+    };
+
+    // 1. Backend config (highest priority — user-configured in UI)
+    if let Some(key) = super::mission_runner::get_amp_api_key_from_config() {
+        push_unique(key);
+    }
+
+    // 2. AMP_API_KEY env var
+    if let Ok(value) = std::env::var("AMP_API_KEY") {
+        if !value.trim().is_empty() {
+            push_unique(value);
+        }
+    }
+
+    // 3. ai_providers.json (multi-account, sorted by priority)
+    let ai_providers_path = working_dir.join(".sandboxed-sh/ai_providers.json");
+    if let Ok(contents) = std::fs::read_to_string(&ai_providers_path) {
+        if let Ok(providers) = serde_json::from_str::<Vec<serde_json::Value>>(&contents) {
+            let mut entries: Vec<(u32, usize, String)> = Vec::new();
+            for (idx, provider) in providers.iter().enumerate() {
+                // Amp doesn't have a ProviderType in the enum yet, so we check
+                // for custom providers with "amp" in the name/label as a convention.
+                let provider_type = provider.get("provider_type").and_then(|v| v.as_str());
+                // Check for explicit "amp" type or custom providers labeled as amp
+                let is_amp = provider_type == Some("amp");
+                if !is_amp {
+                    continue;
+                }
+                let enabled = provider
+                    .get("enabled")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
+                if !enabled {
+                    continue;
+                }
+                let priority = provider
+                    .get("priority")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as u32;
+                if let Some(api_key) = provider.get("api_key").and_then(|v| v.as_str()) {
+                    if !api_key.is_empty() {
+                        entries.push((priority, idx, api_key.to_string()));
+                    }
+                }
+            }
+            entries.sort_by_key(|(p, i, _)| (*p, *i));
+            for (_, _, key) in entries {
+                push_unique(key);
+            }
+        }
+    }
+
+    all_keys
+}
+
 /// Get Anthropic auth from Claude CLI's own credentials file.
 ///
 /// The Claude CLI stores OAuth credentials in `~/.claude/.credentials.json` with format:

@@ -11,27 +11,12 @@
 //! - Working directory (isolated per mission)
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 use std::time::Instant;
 
-use tokio::sync::{broadcast, mpsc, RwLock, Semaphore};
+use tokio::sync::{broadcast, mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
-
-/// Per-provider concurrency semaphores.
-/// ZAI's coding subscription endpoint rate-limits concurrent requests (typically
-/// 1 at a time). The semaphore serializes missions targeting the same provider
-/// so we don't trigger 429s.
-static PROVIDER_SEMAPHORES: LazyLock<HashMap<&'static str, Semaphore>> = LazyLock::new(|| {
-    let zai_max: usize = std::env::var("ZAI_MAX_CONCURRENT")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(1)
-        .max(1);
-    let mut m = HashMap::new();
-    m.insert("zai", Semaphore::new(zai_max));
-    m
-});
 
 use crate::agents::{AgentRef, AgentResult, TerminalReason};
 use crate::backend::claudecode::client::{ClaudeEvent, ContentBlock, StreamEvent};
@@ -1673,23 +1658,78 @@ async fn run_mission_turn(
         }
         "amp" => {
             let api_key = get_amp_api_key_from_config();
-            run_amp_turn(
+            let mut result = run_amp_turn(
                 &workspace,
                 &mission_work_dir,
                 &user_message,
                 effective_agent.as_deref(), // Used as mode (smart/rush)
                 mission_id,
                 events_tx.clone(),
-                cancel,
+                cancel.clone(),
                 &config.working_dir,
                 session_id.as_deref(),
                 is_continuation,
                 api_key.as_deref(),
             )
-            .await
+            .await;
+
+            // Account rotation: if rate-limited, try alternate Amp API keys.
+            if result.terminal_reason == Some(TerminalReason::RateLimited) {
+                let alt_keys =
+                    super::ai_providers::get_all_amp_api_keys(&config.working_dir);
+                if alt_keys.len() > 1 {
+                    tracing::info!(
+                        mission_id = %mission_id,
+                        total_keys = alt_keys.len(),
+                        "Amp rate limited; trying alternate API keys"
+                    );
+                    // Skip the first key if it matches the one we already tried
+                    let already_tried = api_key.map(|s| s.to_string());
+                    for (idx, alt_key) in alt_keys.into_iter().enumerate() {
+                        if cancel.is_cancelled() {
+                            break;
+                        }
+                        if Some(&alt_key) == already_tried.as_ref() {
+                            continue;
+                        }
+                        tracing::info!(
+                            mission_id = %mission_id,
+                            attempt = idx + 2,
+                            "Rotating to alternate Amp API key"
+                        );
+                        result = run_amp_turn(
+                            &workspace,
+                            &mission_work_dir,
+                            &user_message,
+                            effective_agent.as_deref(),
+                            mission_id,
+                            events_tx.clone(),
+                            cancel.clone(),
+                            &config.working_dir,
+                            session_id.as_deref(),
+                            is_continuation,
+                            Some(&alt_key),
+                        )
+                        .await;
+                        match result.terminal_reason {
+                            Some(TerminalReason::RateLimited) => {
+                                tracing::info!(
+                                    mission_id = %mission_id,
+                                    attempt = idx + 2,
+                                    "Amp rate limited; rotating to next key"
+                                );
+                                continue;
+                            }
+                            _ => break,
+                        }
+                    }
+                }
+            }
+
+            result
         }
         "codex" => {
-            run_codex_turn(
+            let mut result = run_codex_turn(
                 &workspace,
                 &mission_work_dir,
                 &convo,
@@ -1697,11 +1737,73 @@ async fn run_mission_turn(
                 effective_agent.as_deref(),
                 mission_id,
                 events_tx.clone(),
-                cancel,
+                cancel.clone(),
                 &config.working_dir,
                 session_id.as_deref(),
             )
-            .await
+            .await;
+
+            // Account rotation: if rate-limited, try alternate OpenAI API keys.
+            // Codex uses OPENAI_API_KEY env var, which is picked up by the
+            // credential writer (write_codex_credentials_for_workspace) on each turn.
+            if result.terminal_reason == Some(TerminalReason::RateLimited) {
+                let alt_keys =
+                    super::ai_providers::get_all_openai_keys_for_codex(&config.working_dir);
+                if alt_keys.len() > 1 {
+                    tracing::info!(
+                        mission_id = %mission_id,
+                        total_keys = alt_keys.len(),
+                        "Codex rate limited; trying alternate OpenAI API keys"
+                    );
+                    let original_key = std::env::var("OPENAI_API_KEY").ok();
+                    for (idx, alt_key) in alt_keys.into_iter().enumerate() {
+                        if cancel.is_cancelled() {
+                            break;
+                        }
+                        // Skip the key we already tried (likely the first one)
+                        if Some(&alt_key) == original_key.as_ref() {
+                            continue;
+                        }
+                        tracing::info!(
+                            mission_id = %mission_id,
+                            attempt = idx + 2,
+                            "Rotating to alternate OpenAI API key for Codex"
+                        );
+                        // Set the env var so credential writer picks it up
+                        std::env::set_var("OPENAI_API_KEY", &alt_key);
+                        result = run_codex_turn(
+                            &workspace,
+                            &mission_work_dir,
+                            &convo,
+                            config.default_model.as_deref(),
+                            effective_agent.as_deref(),
+                            mission_id,
+                            events_tx.clone(),
+                            cancel.clone(),
+                            &config.working_dir,
+                            session_id.as_deref(),
+                        )
+                        .await;
+                        match result.terminal_reason {
+                            Some(TerminalReason::RateLimited) => {
+                                tracing::info!(
+                                    mission_id = %mission_id,
+                                    attempt = idx + 2,
+                                    "Codex rate limited; rotating to next key"
+                                );
+                                continue;
+                            }
+                            _ => break,
+                        }
+                    }
+                    // Restore original key
+                    if let Some(key) = original_key {
+                        std::env::set_var("OPENAI_API_KEY", &key);
+                    }
+                }
+            }
+
+            result
         }
         _ => {
             // Don't send Error event - the failure will be emitted as an AssistantMessage
@@ -6707,62 +6809,9 @@ pub async fn run_opencode_turn(
         return AgentResult::failure(err_msg, 0).with_terminal_reason(TerminalReason::LlmError);
     }
 
-    // Acquire provider concurrency permit (e.g. ZAI coding subscription allows ~1 concurrent request).
-    // The permit is held for the entire CLI process lifetime via RAII.
-    let _provider_permit = if let Some(semaphore) = provider_hint
-        .as_deref()
-        .and_then(|p| PROVIDER_SEMAPHORES.get(p))
-    {
-        let provider_name = provider_hint.as_deref().unwrap_or("unknown");
-        let semaphore_timeout_secs: u64 = std::env::var("ZAI_SEMAPHORE_TIMEOUT_SECS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(300);
-        tracing::info!(
-            mission_id = %mission_id,
-            provider = %provider_name,
-            timeout_secs = semaphore_timeout_secs,
-            "Waiting for provider concurrency permit"
-        );
-        let permit = tokio::select! {
-            _ = cancel.cancelled() => {
-                tracing::info!(mission_id = %mission_id, "Cancelled while waiting for provider permit");
-                return AgentResult::failure("Cancelled".to_string(), 0)
-                    .with_terminal_reason(TerminalReason::Cancelled);
-            }
-            result = tokio::time::timeout(
-                std::time::Duration::from_secs(semaphore_timeout_secs),
-                semaphore.acquire(),
-            ) => {
-                match result {
-                    Ok(Ok(permit)) => permit,
-                    Ok(Err(_closed)) => {
-                        return AgentResult::failure(
-                            "Provider semaphore closed unexpectedly".to_string(), 0
-                        ).with_terminal_reason(TerminalReason::LlmError);
-                    }
-                    Err(_timeout) => {
-                        let msg = format!(
-                            "Timed out waiting for {} provider concurrency slot after {}s. \
-                             Another mission may be holding the slot.",
-                            provider_name, semaphore_timeout_secs
-                        );
-                        tracing::warn!(mission_id = %mission_id, "{}", msg);
-                        return AgentResult::failure(msg, 0)
-                            .with_terminal_reason(TerminalReason::RateLimited);
-                    }
-                }
-            }
-        };
-        tracing::info!(
-            mission_id = %mission_id,
-            provider = %provider_name,
-            "Acquired provider concurrency permit"
-        );
-        Some(permit)
-    } else {
-        None
-    };
+    // Note: Provider concurrency semaphores (previously used for ZAI) have been
+    // removed. Rate limit handling is now done by the proxy's waterfall failover
+    // and per-account health tracking in ProviderHealthTracker.
 
     let configured_runner = get_opencode_cli_path_from_config(app_working_dir)
         .or_else(|| std::env::var("OPENCODE_CLI_PATH").ok());
@@ -8642,8 +8691,23 @@ pub async fn run_amp_turn(
         AgentResult::success(final_result, cost_cents)
             .with_terminal_reason(TerminalReason::Completed)
     } else {
-        AgentResult::failure(final_result, cost_cents)
-            .with_terminal_reason(TerminalReason::LlmError)
+        // Detect rate limit / overloaded errors for account rotation.
+        let lower = final_result.to_lowercase();
+        let is_rate_limited = lower.contains("overloaded")
+            || lower.contains("rate limit")
+            || lower.contains("rate_limit")
+            || lower.contains("resource_exhausted")
+            || lower.contains("too many requests")
+            || lower.contains("error: 429")
+            || lower.contains("error: 529")
+            || lower.contains("status code: 429")
+            || lower.contains("status code: 529");
+        let reason = if is_rate_limited {
+            TerminalReason::RateLimited
+        } else {
+            TerminalReason::LlmError
+        };
+        AgentResult::failure(final_result, cost_cents).with_terminal_reason(reason)
     };
 
     if let Some(model) = model_used {
@@ -8919,7 +8983,23 @@ pub async fn run_codex_turn(
         AgentResult::success(final_message, 0) // TODO: Calculate cost from Codex usage
             .with_terminal_reason(TerminalReason::Completed)
     } else {
-        AgentResult::failure(final_message, 0).with_terminal_reason(TerminalReason::LlmError)
+        // Detect rate limit / overloaded errors for account rotation.
+        let lower = final_message.to_lowercase();
+        let is_rate_limited = lower.contains("overloaded")
+            || lower.contains("rate limit")
+            || lower.contains("rate_limit")
+            || lower.contains("resource_exhausted")
+            || lower.contains("too many requests")
+            || lower.contains("error: 429")
+            || lower.contains("error: 529")
+            || lower.contains("status code: 429")
+            || lower.contains("status code: 529");
+        let reason = if is_rate_limited {
+            TerminalReason::RateLimited
+        } else {
+            TerminalReason::LlmError
+        };
+        AgentResult::failure(final_message, 0).with_terminal_reason(reason)
     };
 
     if let Some(m) = model {
