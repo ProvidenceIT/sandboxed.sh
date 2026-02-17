@@ -364,7 +364,8 @@ impl ResultEvent {
     /// Parses embedded JSON error format (e.g. `402 {"type":"error",...}`)
     /// to extract a human-readable message.
     pub fn error_message(&self) -> String {
-        // Check `errors` array first (Claude Code puts session errors here).
+        // Extract from `errors` array (Claude Code puts session errors here).
+        // Used as a last-resort fallback after `result`, `error`, and `message`.
         let from_errors = self
             .errors
             .first()

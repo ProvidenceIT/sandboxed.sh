@@ -598,12 +598,10 @@ impl ModelChainStore {
             chains.push(ModelChain {
                 id: "builtin/cheap".to_string(),
                 name: "Cheap".to_string(),
-                entries: vec![
-                    ChainEntry {
-                        provider_id: "zai".to_string(),
-                        model_id: "glm-4.7".to_string(),
-                    },
-                ],
+                entries: vec![ChainEntry {
+                    provider_id: "zai".to_string(),
+                    model_id: "glm-4.7".to_string(),
+                }],
                 is_default: false,
                 created_at: now,
                 updated_at: now,

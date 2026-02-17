@@ -1167,7 +1167,7 @@ pub async fn validate_model_override(
                         Ok(())
                     } else {
                         Err(format!(
-                            "Model '{}' not found in OpenAI catalog. Available models: {}. For custom OpenAI models, use format 'gpt-*' or 'o1-*'",
+                            "Model '{}' not found in OpenAI catalog. Available models: {}. For custom OpenAI models, use format 'gpt-*', 'o1-*', or 'codex-*'",
                             model_override,
                             provider
                                 .models

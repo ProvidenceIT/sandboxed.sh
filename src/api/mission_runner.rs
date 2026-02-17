@@ -2777,7 +2777,8 @@ pub fn run_claudecode_turn<'a>(
         let mut thinking_buffer: HashMap<u32, String> = HashMap::new();
         let mut text_buffer: HashMap<u32, String> = HashMap::new();
         let mut active_thinking_index: Option<u32> = None; // Track which thinking block is active
-        let mut finalized_thinking_indices: std::collections::HashSet<u32> = std::collections::HashSet::new(); // Blocks already sent done:true during streaming
+        let mut finalized_thinking_indices: std::collections::HashSet<u32> =
+            std::collections::HashSet::new(); // Blocks already sent done:true during streaming
         let mut last_text_len: usize = 0; // Track last emitted text length for streaming text deltas
         let mut thinking_emitted = false;
 
@@ -7254,6 +7255,10 @@ pub async fn run_opencode_turn(
                 let mut data_lines: Vec<String> = Vec::new();
                 let mut state = OpencodeSseState::default();
                 let mut saw_complete = false;
+                // Reset tool depth on reconnect so stale counts from a
+                // lost connection don't permanently disable the inactivity
+                // timeout.
+                sse_tool_depth_tx.send_modify(|v| *v = 0);
 
                 loop {
                     if sse_cancel.is_cancelled() {
@@ -8374,7 +8379,8 @@ pub async fn run_amp_turn(
     let mut thinking_buffer: HashMap<u32, String> = HashMap::new();
     let mut text_buffer: HashMap<u32, String> = HashMap::new();
     let mut active_thinking_index: Option<u32> = None;
-    let mut finalized_thinking_indices: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut finalized_thinking_indices: std::collections::HashSet<u32> =
+        std::collections::HashSet::new();
     let mut last_text_len: usize = 0;
     let mut thinking_streamed = false; // Track if thinking was already streamed
 
