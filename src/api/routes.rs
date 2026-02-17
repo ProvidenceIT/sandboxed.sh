@@ -454,8 +454,13 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         )
         // WebSocket system monitoring uses subprotocol-based auth
         .route("/api/monitoring/ws", get(monitoring::monitoring_ws))
-        // OpenAI-compatible proxy endpoint (bearer token auth via SANDBOXED_PROXY_SECRET)
-        .nest("/v1", proxy_api::routes());
+        // OpenAI-compatible proxy endpoint (bearer token auth via SANDBOXED_PROXY_SECRET).
+        // LLM payloads with tool outputs and long contexts can exceed the default 2MB
+        // body limit, so set a generous 50MB limit for proxy routes.
+        .nest(
+            "/v1",
+            proxy_api::routes().layer(DefaultBodyLimit::max(50 * 1024 * 1024)),
+        );
 
     // File upload routes with increased body limit (10GB)
     let upload_route = Router::new()
