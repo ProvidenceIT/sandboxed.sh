@@ -3645,8 +3645,7 @@ fn is_tool_call_only_output(output: &str) -> bool {
 
                 // Check for name + arguments/input pattern (common in all tool-call formats)
                 let has_name = obj.contains_key("name");
-                let has_args =
-                    obj.contains_key("arguments") || obj.contains_key("input");
+                let has_args = obj.contains_key("arguments") || obj.contains_key("input");
                 let is_tool_shape = has_name && has_args;
 
                 if is_type_tool || is_tool_shape {
@@ -7388,7 +7387,8 @@ pub async fn run_opencode_turn(
                                                     std::sync::atomic::Ordering::SeqCst,
                                                 );
                                             }
-                                            if let AgentEvent::TextDelta { ref content, .. } = event {
+                                            if let AgentEvent::TextDelta { ref content, .. } = event
+                                            {
                                                 let _ = text_output_tx.send(true);
                                                 sse_emitted_text.store(
                                                     true,
@@ -8217,8 +8217,7 @@ pub async fn run_opencode_turn(
     // Only clear had_error from recovery if there is no real SSE error.
     // Without this guard, a session.error followed by partial text in the
     // SSE buffer would clear the error and return a truncated response.
-    if (recovered_from_sse || recovered_from_stderr)
-        && sse_error_message.lock().unwrap().is_none()
+    if (recovered_from_sse || recovered_from_stderr) && sse_error_message.lock().unwrap().is_none()
     {
         had_error = false;
     }
