@@ -7147,6 +7147,10 @@ pub async fn run_opencode_turn(
     let (sse_retry_tx, mut sse_retry_rx) = tokio::sync::watch::channel(0u32);
     let last_activity = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
     let (text_output_tx, mut text_output_rx) = tokio::sync::watch::channel(false);
+    // Track active tool call depth: incremented on ToolCall, decremented on ToolResult.
+    // Used to (a) skip inactivity timeout during long tool runs, and (b) release the
+    // provider concurrency permit while tools execute (no LLM call in flight).
+    let (sse_tool_depth_tx, mut sse_tool_depth_rx) = tokio::sync::watch::channel(0u32);
 
     // oh-my-opencode doesn't support --format json, so use SSE curl for events.
     let use_json_stdout = false;
@@ -7167,6 +7171,7 @@ pub async fn run_opencode_turn(
         let sse_retry_tx = sse_retry_tx.clone();
         let last_activity = last_activity.clone();
         let text_output_tx = text_output_tx.clone();
+        let sse_tool_depth_tx = sse_tool_depth_tx.clone();
         let events_tx = events_tx.clone();
         let opencode_port = opencode_port.clone();
         let sse_host = std::env::var("SANDBOXED_SH_OPENCODE_SERVER_HOSTNAME")
@@ -7284,6 +7289,18 @@ pub async fn run_opencode_turn(
                                                     std::sync::atomic::Ordering::SeqCst,
                                                 );
                                             }
+                                            // Track active tool depth for permit management.
+                                            match &event {
+                                                AgentEvent::ToolCall { .. } => {
+                                                    sse_tool_depth_tx
+                                                        .send_modify(|v| *v = v.saturating_add(1));
+                                                }
+                                                AgentEvent::ToolResult { .. } => {
+                                                    sse_tool_depth_tx
+                                                        .send_modify(|v| *v = v.saturating_sub(1));
+                                                }
+                                                _ => {}
+                                            }
                                             let _ = events_tx.send(event);
                                         }
                                         if parsed.message_complete {
@@ -7366,10 +7383,17 @@ pub async fn run_opencode_turn(
             while let Ok(Some(line)) = stderr_lines.next_line().await {
                 let clean = line.trim().to_string();
                 if !clean.is_empty() {
-                    // Refresh global inactivity timer so stderr-only progress
-                    // is not mistaken for a stuck process.
-                    if let Ok(mut guard) = stderr_last_activity.lock() {
-                        *guard = std::time::Instant::now();
+                    // Refresh global inactivity timer for lines that indicate
+                    // real work progress.  Heartbeats and server-internal status
+                    // lines are excluded — they fire every ~30s and would keep a
+                    // hung LLM call alive forever.
+                    let is_server_noise = clean.contains("server.heartbeat")
+                        || clean.contains("server.connected")
+                        || clean.contains("server.listening");
+                    if !is_server_noise {
+                        if let Ok(mut guard) = stderr_last_activity.lock() {
+                            *guard = std::time::Instant::now();
+                        }
                     }
                     tracing::debug!(mission_id = %mission_id_clone, line = %clean, "OpenCode CLI stderr");
 
@@ -7630,10 +7654,15 @@ pub async fn run_opencode_turn(
                 // for 120s (no SSE events, no stdout, no stderr), the process
                 // is likely stuck.  Kill it and let the fallback recovery
                 // logic read the result from OpenCode storage.
-                let inactive_too_long = last_activity
-                    .lock()
-                    .map(|g| g.elapsed() >= std::time::Duration::from_secs(120))
-                    .unwrap_or(false);
+                // Skip this check while tools are actively running — long
+                // commands (builds, tests) may produce no SSE events for
+                // extended periods and heartbeats are intentionally filtered.
+                let tools_active = *sse_tool_depth_rx.borrow() > 0;
+                let inactive_too_long = !tools_active
+                    && last_activity
+                        .lock()
+                        .map(|g| g.elapsed() >= std::time::Duration::from_secs(120))
+                        .unwrap_or(false);
                 if inactive_too_long {
                     tracing::warn!(
                         mission_id = %mission_id,
