@@ -181,8 +181,12 @@ function ChainCard({
       toast.error('At least one valid entry is required');
       return;
     }
-    await onUpdate(chain.id, { name: editName, entries: validEntries });
-    setEditing(false);
+    try {
+      await onUpdate(chain.id, { name: editName, entries: validEntries });
+      setEditing(false);
+    } catch {
+      // onUpdate already shows a toast; stay in edit mode so changes aren't lost
+    }
   };
 
   const handleStartEdit = () => {
@@ -499,6 +503,7 @@ export default function ModelRoutingPage() {
       mutateChains();
     } catch (err) {
       toast.error(`Failed to update: ${err instanceof Error ? err.message : 'Unknown error'}`);
+      throw err;
     }
   };
 
