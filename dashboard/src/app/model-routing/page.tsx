@@ -48,6 +48,7 @@ import {
   Key,
   Copy,
   Check,
+  Pencil,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -76,9 +77,7 @@ function EntryEditor({
     const updated = entries.map((e, i) => {
       if (i !== index) return e;
       if (field === 'provider_id' && value !== e.provider_id) {
-        // Reset model only when provider actually changes to a different known provider
-        const isKnownProvider = providers.some((p) => p.id === value);
-        return { ...e, provider_id: value, model_id: isKnownProvider ? '' : e.model_id };
+        return { ...e, provider_id: value, model_id: '' };
       }
       return { ...e, [field]: value };
     });
@@ -114,9 +113,6 @@ function EntryEditor({
       </div>
       {entries.map((entry, i) => {
         const models = getModelsForProvider(entry.provider_id);
-        const providerListId = `provider-list-${i}`;
-        const modelListId = `model-list-${i}`;
-
         return (
           <div
             key={i}
@@ -125,33 +121,42 @@ function EntryEditor({
             <span className="text-[10px] text-white/30 w-4 flex-shrink-0">
               {i + 1}.
             </span>
-            <input
-              type="text"
-              list={providerListId}
+            <select
               value={entry.provider_id}
               onChange={(e) => updateEntry(i, 'provider_id', e.target.value)}
-              placeholder="provider (e.g. zai)"
-              className="flex-1 min-w-0 rounded border border-white/[0.06] bg-white/[0.02] px-2 py-1 text-xs text-white focus:outline-none focus:border-indigo-500/50"
-            />
-            <datalist id={providerListId}>
+              className="flex-1 min-w-0 rounded border border-white/[0.06] bg-white/[0.02] px-2 py-1 text-xs text-white focus:outline-none focus:border-indigo-500/50 appearance-none cursor-pointer"
+              style={{
+                backgroundImage: "url(\"data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e\")",
+                backgroundPosition: 'right 0.25rem center',
+                backgroundRepeat: 'no-repeat',
+                backgroundSize: '1.2em 1.2em',
+                paddingRight: '1.5rem',
+              }}
+            >
+              <option value="" className="bg-[#1a1a1a]">Select provider</option>
               {providers.map((p) => (
-                <option key={p.id} value={p.id}>{p.name}</option>
+                <option key={p.id} value={p.id} className="bg-[#1a1a1a]">{p.name}</option>
               ))}
-            </datalist>
+            </select>
             <span className="text-white/20">/</span>
-            <input
-              type="text"
-              list={modelListId}
+            <select
               value={entry.model_id}
               onChange={(e) => updateEntry(i, 'model_id', e.target.value)}
-              placeholder={entry.provider_id ? 'model id' : 'select provider first'}
-              className="flex-1 min-w-0 rounded border border-white/[0.06] bg-white/[0.02] px-2 py-1 text-xs text-white focus:outline-none focus:border-indigo-500/50"
-            />
-            <datalist id={modelListId}>
+              disabled={!entry.provider_id}
+              className="flex-1 min-w-0 rounded border border-white/[0.06] bg-white/[0.02] px-2 py-1 text-xs text-white focus:outline-none focus:border-indigo-500/50 appearance-none cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+              style={{
+                backgroundImage: "url(\"data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e\")",
+                backgroundPosition: 'right 0.25rem center',
+                backgroundRepeat: 'no-repeat',
+                backgroundSize: '1.2em 1.2em',
+                paddingRight: '1.5rem',
+              }}
+            >
+              <option value="" className="bg-[#1a1a1a]">{entry.provider_id ? 'Select model' : 'Select provider first'}</option>
               {models.map((m) => (
-                <option key={m.id} value={m.id}>{m.name || m.id}</option>
+                <option key={m.id} value={m.id} className="bg-[#1a1a1a]">{m.name || m.id}</option>
               ))}
-            </datalist>
+            </select>
             <div className="flex items-center gap-0.5 flex-shrink-0">
               <button
                 onClick={() => moveEntry(i, 'up')}
@@ -285,7 +290,7 @@ function ChainCard({
             className="p-1.5 rounded-md text-white/20 hover:text-white/60 hover:bg-white/[0.04] transition-colors cursor-pointer"
             title="Edit"
           >
-            <GitBranch className="h-3.5 w-3.5" />
+            <Pencil className="h-3.5 w-3.5" />
           </button>
           <button
             onClick={() => onDelete(chain.id)}
@@ -972,10 +977,10 @@ export default function ModelRoutingPage() {
               </div>
               <button
                 onClick={() => handleCopyKey(proxyUrl)}
-                className="p-1.5 rounded-md text-white/20 hover:text-white/60 hover:bg-white/[0.04] transition-colors cursor-pointer"
+                className={`p-1.5 rounded-md transition-colors cursor-pointer ${copiedText === proxyUrl ? 'text-emerald-400' : 'text-white/20 hover:text-white/60 hover:bg-white/[0.04]'}`}
                 title="Copy endpoint URL"
               >
-                <Copy className="h-3.5 w-3.5" />
+                {copiedText === proxyUrl ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
               </button>
             </div>
           </div>

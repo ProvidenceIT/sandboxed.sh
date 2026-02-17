@@ -563,43 +563,58 @@ impl ModelChainStore {
         store
     }
 
-    /// Ensure the builtin/smart default chain exists.
+    /// Ensure the builtin default chains exist.
     ///
-    /// Idempotent: does nothing if `builtin/smart` is already present.
+    /// Idempotent: skips any chain whose ID is already present.
     /// Checks and inserts under a single write lock to avoid TOCTOU races.
     async fn ensure_default_chain(&self) {
         let mut chains = self.chains.write().await;
 
-        if chains.iter().any(|c| c.id == "builtin/smart") {
-            return;
+        let now = chrono::Utc::now();
+        let mut changed = false;
+
+        if !chains.iter().any(|c| c.id == "builtin/smart") {
+            chains.push(ModelChain {
+                id: "builtin/smart".to_string(),
+                name: "Smart (Default)".to_string(),
+                entries: vec![
+                    ChainEntry {
+                        provider_id: "zai".to_string(),
+                        model_id: "glm-5".to_string(),
+                    },
+                    ChainEntry {
+                        provider_id: "minimax".to_string(),
+                        model_id: "MiniMax-M2.5".to_string(),
+                    },
+                ],
+                is_default: true,
+                created_at: now,
+                updated_at: now,
+            });
+            changed = true;
         }
 
-        let now = chrono::Utc::now();
-        let default_chain = ModelChain {
-            id: "builtin/smart".to_string(),
-            name: "Smart (Default)".to_string(),
-            entries: vec![
-                ChainEntry {
-                    provider_id: "zai".to_string(),
-                    model_id: "glm-4-plus".to_string(),
-                },
-                ChainEntry {
-                    provider_id: "minimax".to_string(),
-                    model_id: "MiniMax-M1".to_string(),
-                },
-                ChainEntry {
-                    provider_id: "cerebras".to_string(),
-                    model_id: "llama3.1-8b".to_string(),
-                },
-            ],
-            is_default: true,
-            created_at: now,
-            updated_at: now,
-        };
+        if !chains.iter().any(|c| c.id == "builtin/cheap") {
+            chains.push(ModelChain {
+                id: "builtin/cheap".to_string(),
+                name: "Cheap".to_string(),
+                entries: vec![
+                    ChainEntry {
+                        provider_id: "zai".to_string(),
+                        model_id: "glm-4.7".to_string(),
+                    },
+                ],
+                is_default: false,
+                created_at: now,
+                updated_at: now,
+            });
+            changed = true;
+        }
 
-        chains.push(default_chain);
-        if let Err(e) = self.save_chains_to_disk(&chains) {
-            tracing::error!("Failed to save default model chain: {}", e);
+        if changed {
+            if let Err(e) = self.save_chains_to_disk(&chains) {
+                tracing::error!("Failed to save default model chains: {}", e);
+            }
         }
     }
 

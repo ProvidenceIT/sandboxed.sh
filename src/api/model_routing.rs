@@ -240,10 +240,10 @@ async fn delete_chain(
     State(state): State<Arc<super::routes::AppState>>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    if id == "builtin/smart" {
+    if id.starts_with("builtin/") {
         return Err((
             StatusCode::BAD_REQUEST,
-            "Cannot delete the builtin/smart chain".to_string(),
+            format!("Cannot delete builtin chain '{}'", id),
         ));
     }
 

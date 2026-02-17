@@ -995,6 +995,30 @@ pub async fn list_backend_model_options(
     push_options("opencode", None, true, None);
     backends.entry("amp".to_string()).or_default();
 
+    // Prepend model routing chains to opencode options so they appear first
+    let chains = state.chain_store.list().await;
+    if !chains.is_empty() {
+        let opencode_opts = backends.entry("opencode".to_string()).or_default();
+        let mut chain_options: Vec<BackendModelOption> = chains
+            .iter()
+            .map(|c| {
+                let entries_desc: Vec<String> = c
+                    .entries
+                    .iter()
+                    .map(|e| format!("{}/{}", e.provider_id, e.model_id))
+                    .collect();
+                BackendModelOption {
+                    value: c.id.clone(),
+                    label: format!("Routing — {}", c.name),
+                    description: Some(entries_desc.join(" → ")),
+                    provider_id: None,
+                }
+            })
+            .collect();
+        chain_options.append(opencode_opts);
+        *opencode_opts = chain_options;
+    }
+
     Json(BackendModelOptionsResponse { backends })
 }
 
