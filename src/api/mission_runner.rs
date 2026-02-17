@@ -7179,6 +7179,11 @@ pub async fn run_opencode_turn(
     let mut had_error = false;
     let session_id_capture: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let stderr_text_buffer: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+    // Accumulates the latest full-text snapshot from SSE TextDelta events.
+    // Used as a fallback when stdout JSON and session storage both fail —
+    // this buffer contains exactly what was streamed to the dashboard,
+    // unlike stderr which truncates long content (fixes #158).
+    let sse_text_buffer: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
     let sse_emitted_thinking = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let sse_emitted_text = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let sse_done_sent = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -7205,6 +7210,7 @@ pub async fn run_opencode_turn(
         let session_id_capture = session_id_capture.clone();
         let sse_emitted_thinking = sse_emitted_thinking.clone();
         let sse_emitted_text = sse_emitted_text.clone();
+        let sse_text_buffer = sse_text_buffer.clone();
         let sse_done_sent = sse_done_sent.clone();
         let sse_error_message = sse_error_message.clone();
         let sse_cancel = sse_cancel.clone();
@@ -7328,12 +7334,18 @@ pub async fn run_opencode_turn(
                                                     std::sync::atomic::Ordering::SeqCst,
                                                 );
                                             }
-                                            if matches!(event, AgentEvent::TextDelta { .. }) {
+                                            if let AgentEvent::TextDelta { ref content, .. } = event {
                                                 let _ = text_output_tx.send(true);
                                                 sse_emitted_text.store(
                                                     true,
                                                     std::sync::atomic::Ordering::SeqCst,
                                                 );
+                                                // Capture the latest full-text snapshot so
+                                                // it can serve as a fallback for final_result
+                                                // when stdout JSON and storage both fail.
+                                                if let Ok(mut buf) = sse_text_buffer.lock() {
+                                                    *buf = content.clone();
+                                                }
                                             }
                                             // Track active tool depth for permit management.
                                             match &event {
@@ -8084,6 +8096,25 @@ pub async fn run_opencode_turn(
         }
     }
 
+    // SSE text buffer fallback: use the accumulated text from SSE TextDelta
+    // events. This is the most reliable source after stdout JSON and session
+    // storage because it contains exactly what was streamed to the dashboard,
+    // unlike stderr which truncates long content with "..." (fixes #158).
+    let mut recovered_from_sse = false;
+    if opencode_output_needs_fallback(&final_result) {
+        if let Ok(buffer) = sse_text_buffer.lock() {
+            if !buffer.trim().is_empty() {
+                tracing::info!(
+                    mission_id = %mission_id,
+                    text_len = buffer.len(),
+                    "Recovered OpenCode assistant output from SSE text buffer"
+                );
+                final_result = buffer.clone();
+                recovered_from_sse = true;
+            }
+        }
+    }
+
     if opencode_output_needs_fallback(&final_result) {
         if let Ok(buffer) = stderr_text_buffer.lock() {
             if !buffer.trim().is_empty() {
@@ -8093,7 +8124,7 @@ pub async fn run_opencode_turn(
         }
     }
 
-    if recovered_from_stderr {
+    if recovered_from_sse || recovered_from_stderr {
         had_error = false;
     }
 
