@@ -1233,6 +1233,8 @@ pub fn is_session_corruption_error(result: &AgentResult) -> bool {
     || out.contains("tool_use block must have a corresponding tool_result")
     || out.contains("tool_result block must have a corresponding tool_use")
     || out.contains("must have a corresponding tool_use block")
+    // Session was lost (e.g. after service restart or session expiry)
+    || out.contains("No conversation found with session ID")
 }
 
 /// Execute a single turn for a mission.

@@ -353,6 +353,9 @@ pub struct ResultEvent {
     /// Amp extension: additional error context.
     #[serde(default)]
     pub message: Option<String>,
+    /// Claude Code puts errors in an array field.
+    #[serde(default)]
+    pub errors: Vec<String>,
 }
 
 impl ResultEvent {
@@ -361,12 +364,20 @@ impl ResultEvent {
     /// Parses embedded JSON error format (e.g. `402 {"type":"error",...}`)
     /// to extract a human-readable message.
     pub fn error_message(&self) -> String {
+        // Check `errors` array first (Claude Code puts session errors here).
+        let from_errors = self
+            .errors
+            .first()
+            .filter(|s| !s.is_empty())
+            .map(|s| s.as_str());
+
         let raw = self
             .result
             .as_deref()
             .filter(|s| !s.is_empty())
             .or(self.error.as_deref().filter(|s| !s.is_empty()))
             .or(self.message.as_deref().filter(|s| !s.is_empty()))
+            .or(from_errors)
             .unwrap_or("Unknown error");
 
         Self::parse_error_json(raw).unwrap_or_else(|| raw.to_string())
