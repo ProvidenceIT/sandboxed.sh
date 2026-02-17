@@ -7785,12 +7785,25 @@ pub async fn run_opencode_turn(
                 || sse_emitted_text.load(std::sync::atomic::Ordering::SeqCst)) => {
                 if let Some(idle_since) = session_idle_at {
                     if idle_since.elapsed() >= std::time::Duration::from_secs(10) {
-                        tracing::info!(
-                            mission_id = %mission_id,
-                            "Session idle for 10s after meaningful work; treating as completion"
-                        );
-                        let _ = child.kill().await;
-                        break;
+                        // Don't kill while tools are actively running — the model
+                        // may have sent session.idle prematurely before a long
+                        // tool execution (build, test) produces more output.
+                        let sse_alive = sse_handle.as_ref().map(|h| !h.is_finished()).unwrap_or(false);
+                        let tools_active = sse_alive && *sse_tool_depth_rx.borrow() > 0;
+                        if tools_active {
+                            tracing::debug!(
+                                mission_id = %mission_id,
+                                tool_depth = *sse_tool_depth_rx.borrow(),
+                                "Session idle but tools still active; deferring kill"
+                            );
+                        } else {
+                            tracing::info!(
+                                mission_id = %mission_id,
+                                "Session idle for 10s after meaningful work; treating as completion"
+                            );
+                            let _ = child.kill().await;
+                            break;
+                        }
                     }
                 }
             }
@@ -8089,6 +8102,9 @@ pub async fn run_opencode_turn(
     sse_cancel.cancel();
     if let Some(handle) = sse_handle {
         handle.abort();
+        // Await the abort so the SSE task finishes any in-flight writes to
+        // sse_text_buffer before we read it in the fallback chain below.
+        let _ = handle.await;
     }
 
     // Check exit status
@@ -8178,7 +8194,12 @@ pub async fn run_opencode_turn(
         }
     }
 
-    if recovered_from_sse || recovered_from_stderr {
+    // Only clear had_error from recovery if there is no real SSE error.
+    // Without this guard, a session.error followed by partial text in the
+    // SSE buffer would clear the error and return a truncated response.
+    if (recovered_from_sse || recovered_from_stderr)
+        && sse_error_message.lock().unwrap().is_none()
+    {
         had_error = false;
     }
 
