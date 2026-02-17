@@ -79,6 +79,7 @@ export function AddProviderModal({ open, onClose, onSuccess, providerTypes }: Ad
   const [selectedProvider, setSelectedProvider] = useState<AIProviderType | null>(null);
   const [selectedMethodIndex, setSelectedMethodIndex] = useState<number | null>(null);
   const [apiKey, setApiKey] = useState('');
+  const [accountLabel, setAccountLabel] = useState('');
   const [oauthResponse, setOauthResponse] = useState<OAuthAuthorizeResponse | null>(null);
   const [oauthCode, setOauthCode] = useState('');
   const [loading, setLoading] = useState(false);
@@ -104,6 +105,7 @@ export function AddProviderModal({ open, onClose, onSuccess, providerTypes }: Ad
       setSelectedProvider(null);
       setSelectedMethodIndex(null);
       setApiKey('');
+      setAccountLabel('');
       setOauthResponse(null);
       setOauthCode('');
       setLoading(false);
@@ -247,7 +249,10 @@ export function AddProviderModal({ open, onClose, onSuccess, providerTypes }: Ad
     try {
       await createAIProvider({
         provider_type: selectedProvider,
-        name: selectedTypeInfo?.name || selectedProvider,
+        name: accountLabel.trim()
+          ? `${selectedTypeInfo?.name || selectedProvider} (${accountLabel.trim()})`
+          : selectedTypeInfo?.name || selectedProvider,
+        label: accountLabel.trim() || undefined,
         api_key: apiKey,
         // Include backend targeting for supported providers
         use_for_backends:
@@ -360,6 +365,7 @@ export function AddProviderModal({ open, onClose, onSuccess, providerTypes }: Ad
         setSelectedProvider(null);
       }
       setApiKey('');
+      setAccountLabel('');
     } else if (step === 'custom-provider') {
       setStep('select-provider');
       setSelectedProvider(null);
@@ -592,6 +598,17 @@ export function AddProviderModal({ open, onClose, onSuccess, providerTypes }: Ad
           {/* Step 3: Enter API Key */}
           {step === 'enter-api-key' && (
             <div className="space-y-4">
+              <div>
+                <label className="block text-xs text-white/50 mb-1.5">Account label (optional)</label>
+                <input
+                  type="text"
+                  value={accountLabel}
+                  onChange={(e) => setAccountLabel(e.target.value)}
+                  placeholder="e.g. Team, Personal, Ben"
+                  className="w-full rounded-xl border border-white/[0.06] bg-white/[0.02] px-4 py-2.5 text-sm text-white placeholder-white/30 focus:outline-none focus:border-indigo-500/50"
+                />
+                <p className="text-xs text-white/30 mt-1">Distinguish multiple accounts of the same provider</p>
+              </div>
               <input
                 type="password"
                 value={apiKey}

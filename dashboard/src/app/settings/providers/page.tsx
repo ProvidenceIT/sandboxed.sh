@@ -64,6 +64,7 @@ export default function ProvidersPage() {
   const [editingProvider, setEditingProvider] = useState<string | null>(null);
   const [editForm, setEditForm] = useState<{
     name?: string;
+    label?: string;
     google_project_id?: string;
     api_key?: string;
     base_url?: string;
@@ -134,6 +135,7 @@ export default function ProvidersPage() {
     setEditingProvider(provider.id);
     setEditForm({
       name: provider.name,
+      label: provider.label || '',
       google_project_id: provider.google_project_id ?? '',
       api_key: '',
       base_url: provider.base_url || '',
@@ -147,6 +149,7 @@ export default function ProvidersPage() {
     try {
       await updateAIProvider(editingProvider, {
         name: editForm.name,
+        label: editForm.label?.trim() || null,
         google_project_id:
           editForm.google_project_id === ''
             ? null
@@ -249,6 +252,15 @@ export default function ProvidersPage() {
                             setEditForm({ ...editForm, name: e.target.value })
                           }
                           placeholder="Name"
+                          className="w-full rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500/50"
+                        />
+                        <input
+                          type="text"
+                          value={editForm.label ?? ''}
+                          onChange={(e) =>
+                            setEditForm({ ...editForm, label: e.target.value })
+                          }
+                          placeholder="Account label (e.g. Team, Personal)"
                           className="w-full rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500/50"
                         />
                         <input
