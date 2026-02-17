@@ -4056,10 +4056,26 @@ async fn control_actor_loop(
                         // First check parallel runners
                         if let Some(runner) = parallel_runners.get_mut(&mission_id) {
                             runner.cancel();
+                            // Update status to Interrupted so the mission can be
+                            // resumed later (fixes #149: cancel left status as pending).
+                            if let Err(e) = mission_store
+                                .update_mission_status(mission_id, MissionStatus::Interrupted)
+                                .await
+                            {
+                                tracing::warn!(
+                                    "Failed to update cancelled parallel mission status: {}",
+                                    e
+                                );
+                            }
                             let _ = events_tx.send(AgentEvent::Error {
                                 message: format!("Parallel mission {} cancelled", mission_id),
                                 mission_id: Some(mission_id),
                                 resumable: true, // Cancelled missions can be resumed
+                            });
+                            let _ = events_tx.send(AgentEvent::MissionStatusChanged {
+                                mission_id,
+                                status: MissionStatus::Interrupted,
+                                summary: None,
                             });
                             parallel_runners.remove(&mission_id);
                             close_mission_desktop_sessions(

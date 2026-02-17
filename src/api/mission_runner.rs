@@ -7477,13 +7477,18 @@ pub async fn run_opencode_turn(
                         // meaningful message from common fields.
                         if let Some(start) = clean.find('{') {
                             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&clean[start..]) {
-                                let msg = json.get("message")
-                                    .or(json.get("error"))
-                                    .and_then(|v| v.as_str().map(|s| s.to_string())
-                                        .or_else(|| v.get("message").and_then(|m| m.as_str()).map(|s| s.to_string()))
-                                    )
+                                let msg = // 1. Top-level "message" string
+                                    json.get("message")
+                                        .and_then(|v| v.as_str())
+                                        .map(|s| s.to_string())
+                                    // 2. "error" as a plain string (e.g. {"error": "Rate limited"})
                                     .or_else(|| {
-                                        // Nested error object: {"error": {"message": "...", "status": "..."}}
+                                        json.get("error")
+                                            .and_then(|v| v.as_str())
+                                            .map(|s| s.to_string())
+                                    })
+                                    // 3. Nested error object: {"error": {"message": "...", "status": "..."}}
+                                    .or_else(|| {
                                         json.get("error")
                                             .and_then(|e| e.as_object())
                                             .and_then(|obj| {
@@ -7495,6 +7500,10 @@ pub async fn run_opencode_turn(
                                                     msg.to_string()
                                                 })
                                             })
+                                    })
+                                    // 4. Last resort: stringify the raw "error" value
+                                    .or_else(|| {
+                                        json.get("error").map(|v| v.to_string())
                                     });
                                 msg
                             } else {
