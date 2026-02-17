@@ -5646,6 +5646,15 @@ export default function ControlClient() {
     ? missionStatusLabel(activeMission.status)
     : null;
 
+  // Derive the last resolved model from assistant messages (for the debug dropdown)
+  const lastResolvedModel = useMemo(() => {
+    for (let i = items.length - 1; i >= 0; i--) {
+      const it = items[i];
+      if (it.kind === "assistant" && it.model) return it.model;
+    }
+    return null;
+  }, [items]);
+
   // Determine if we should show the resume UI for interrupted/blocked/failed missions
   // Don't show resume UI if:
   // - Mission is running
@@ -6059,31 +6068,53 @@ export default function ControlClient() {
               {showStreamDiagnostics && (
                 <div className="absolute right-0 top-full z-50 mt-2 w-[280px] rounded-lg border border-white/[0.08] bg-[#121214] p-2.5 shadow-xl">
                   {/* Mission Info */}
-                  {(viewingMission ?? currentMission) && (
+                  {activeMission && (
                     <div className="space-y-0.5 text-xs">
                       <div className="flex items-center justify-between gap-2">
                         <span className="text-white/40">Mission</span>
                         <span className="font-mono text-[11px] text-white/60 select-all">
-                          {(viewingMission ?? currentMission)?.id.slice(0, 8)}
+                          {activeMission.id.slice(0, 8)}
                         </span>
                       </div>
-                      {(viewingMission ?? currentMission)?.workspace_name && (
+                      {activeMission.workspace_name && (
                         <div className="flex items-center justify-between gap-2">
                           <span className="text-white/40">Workspace</span>
-                          <span className="font-mono text-white/80">{(viewingMission ?? currentMission)?.workspace_name}</span>
+                          <span className="font-mono text-white/80">{activeMission.workspace_name}</span>
                         </div>
                       )}
-                      {(viewingMission ?? currentMission)?.agent && (
+                      {activeMission.agent && (
                         <div className="flex items-center justify-between gap-2">
                           <span className="text-white/40">Agent</span>
-                          <span className="font-mono text-white/80">{(viewingMission ?? currentMission)?.agent}</span>
+                          <span className="font-mono text-white/80">{activeMission.agent}</span>
+                        </div>
+                      )}
+                      {activeMission.backend && (
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-white/40">Backend</span>
+                          <span className="font-mono text-white/80">{activeMission.backend}</span>
+                        </div>
+                      )}
+                      {activeMission.model_override && (
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-white/40">Model override</span>
+                          <span className="font-mono text-[11px] text-indigo-400 truncate max-w-[160px]" title={activeMission.model_override}>
+                            {activeMission.model_override}
+                          </span>
+                        </div>
+                      )}
+                      {lastResolvedModel && (
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-white/40">Resolved model</span>
+                          <span className="font-mono text-[11px] text-emerald-400 truncate max-w-[160px]" title={lastResolvedModel}>
+                            {lastResolvedModel}
+                          </span>
                         </div>
                       )}
                     </div>
                   )}
 
                   {/* Stream Status */}
-                  <div className={cn("space-y-0.5 text-xs", (viewingMission ?? currentMission) && "mt-2 pt-2 border-t border-white/[0.06]")}>
+                  <div className={cn("space-y-0.5 text-xs", activeMission && "mt-2 pt-2 border-t border-white/[0.06]")}>
                     <div className="flex items-center justify-between gap-2">
                       <span className="text-white/40">Stream</span>
                       <span className="flex items-center gap-1.5 font-mono text-white/80">

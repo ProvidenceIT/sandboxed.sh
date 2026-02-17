@@ -2777,6 +2777,7 @@ pub fn run_claudecode_turn<'a>(
         let mut thinking_buffer: HashMap<u32, String> = HashMap::new();
         let mut text_buffer: HashMap<u32, String> = HashMap::new();
         let mut active_thinking_index: Option<u32> = None; // Track which thinking block is active
+        let mut finalized_thinking_indices: std::collections::HashSet<u32> = std::collections::HashSet::new(); // Blocks already sent done:true during streaming
         let mut last_text_len: usize = 0; // Track last emitted text length for streaming text deltas
         let mut thinking_emitted = false;
 
@@ -2918,12 +2919,15 @@ pub fn run_claudecode_turn<'a>(
                                                 if let Some(thinking_content) = thinking_text {
                                                     if !thinking_content.is_empty() {
                                                         // If a new thinking block started, finalize the previous one
-                                                        if active_thinking_index.is_some() && active_thinking_index != Some(index) {
-                                                            let _ = events_tx.send(AgentEvent::Thinking {
-                                                                content: String::new(),
-                                                                done: true,
-                                                                mission_id: Some(mission_id),
-                                                            });
+                                                        if let Some(prev_idx) = active_thinking_index {
+                                                            if prev_idx != index {
+                                                                let _ = events_tx.send(AgentEvent::Thinking {
+                                                                    content: String::new(),
+                                                                    done: true,
+                                                                    mission_id: Some(mission_id),
+                                                                });
+                                                                finalized_thinking_indices.insert(prev_idx);
+                                                            }
                                                         }
                                                         active_thinking_index = Some(index);
 
@@ -2979,7 +2983,8 @@ pub fn run_claudecode_turn<'a>(
                                     }
                                 }
                                 ClaudeEvent::Assistant(evt) => {
-                                    for block in evt.message.content {
+                                    for (content_idx, block) in evt.message.content.into_iter().enumerate() {
+                                        let content_idx = content_idx as u32;
                                         match block {
                                             ContentBlock::Text { text } => {
                                                 // Text content is the final assistant response
@@ -3098,13 +3103,14 @@ pub fn run_claudecode_turn<'a>(
                                                 }
                                             }
                                             ContentBlock::Thinking { thinking } => {
-                                                // Only send if this is new content not already streamed
-                                                // The streaming deltas already accumulated this, so this is
-                                                // typically the final complete thinking block
-                                                if !thinking.is_empty() {
+                                                // Only send done:true for the last active thinking block.
+                                                // Earlier blocks were already finalized during streaming
+                                                // (via the block-transition mechanism) and re-sending them
+                                                // causes duplicate items in the frontend thinking panel.
+                                                if !thinking.is_empty() && !finalized_thinking_indices.contains(&content_idx) {
                                                     let _ = events_tx.send(AgentEvent::Thinking {
                                                         content: thinking,
-                                                        done: true, // Mark as done since this is the final block
+                                                        done: true,
                                                         mission_id: Some(mission_id),
                                                     });
                                                     thinking_emitted = true;
@@ -3118,6 +3124,7 @@ pub fn run_claudecode_turn<'a>(
                                     thinking_buffer.clear();
                                     text_buffer.clear();
                                     active_thinking_index = None;
+                                    finalized_thinking_indices.clear();
                                     last_text_len = 0;
                                     block_types.clear();
                                     thinking_emitted = false;
@@ -8367,6 +8374,7 @@ pub async fn run_amp_turn(
     let mut thinking_buffer: HashMap<u32, String> = HashMap::new();
     let mut text_buffer: HashMap<u32, String> = HashMap::new();
     let mut active_thinking_index: Option<u32> = None;
+    let mut finalized_thinking_indices: std::collections::HashSet<u32> = std::collections::HashSet::new();
     let mut last_text_len: usize = 0;
     let mut thinking_streamed = false; // Track if thinking was already streamed
 
@@ -8439,12 +8447,15 @@ pub async fn run_amp_turn(
                                             if let Some(thinking_text) = thinking_text {
                                                 if !thinking_text.is_empty() {
                                                     // If a new thinking block started, finalize the previous one
-                                                    if active_thinking_index.is_some() && active_thinking_index != Some(index) {
-                                                        let _ = events_tx.send(AgentEvent::Thinking {
-                                                            content: String::new(),
-                                                            done: true,
-                                                            mission_id: Some(mission_id),
-                                                        });
+                                                    if let Some(prev_idx) = active_thinking_index {
+                                                        if prev_idx != index {
+                                                            let _ = events_tx.send(AgentEvent::Thinking {
+                                                                content: String::new(),
+                                                                done: true,
+                                                                mission_id: Some(mission_id),
+                                                            });
+                                                            finalized_thinking_indices.insert(prev_idx);
+                                                        }
                                                     }
                                                     active_thinking_index = Some(index);
 
@@ -8506,7 +8517,8 @@ pub async fn run_amp_turn(
                                     total_cache_read_tokens += usage.cache_read_input_tokens.unwrap_or(0);
                                 }
 
-                                for block in evt.message.content {
+                                for (content_idx, block) in evt.message.content.into_iter().enumerate() {
+                                    let content_idx = content_idx as u32;
                                     match block {
                                         ContentBlock::Text { text } => {
                                             if !text.is_empty() {
@@ -8541,8 +8553,10 @@ pub async fn run_amp_turn(
                                             });
                                         }
                                         ContentBlock::Thinking { thinking } => {
-                                            // Only emit thinking from Assistant event if it wasn't already streamed
-                                            // via ContentBlockDelta events. This prevents duplicate thinking content.
+                                            // Skip blocks already finalized during streaming
+                                            if finalized_thinking_indices.contains(&content_idx) {
+                                                continue;
+                                            }
                                             if !thinking.is_empty() && !thinking_streamed {
                                                 let _ = events_tx.send(AgentEvent::Thinking {
                                                     content: thinking,
@@ -8566,6 +8580,7 @@ pub async fn run_amp_turn(
                                 thinking_buffer.clear();
                                 text_buffer.clear();
                                 active_thinking_index = None;
+                                finalized_thinking_indices.clear();
                                 last_text_len = 0;
                                 block_types.clear();
                                 thinking_streamed = false;
