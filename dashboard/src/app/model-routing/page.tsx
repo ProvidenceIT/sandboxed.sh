@@ -645,7 +645,7 @@ export default function ModelRoutingPage() {
   const [newKeyName, setNewKeyName] = useState('');
   const [createdKey, setCreatedKey] = useState<string | null>(null);
   const [creatingKey, setCreatingKey] = useState(false);
-  const [copiedKey, setCopiedKey] = useState(false);
+  const [copiedText, setCopiedText] = useState<string | null>(null);
 
   const handleCreateKey = async () => {
     if (!newKeyName.trim()) {
@@ -680,8 +680,8 @@ export default function ModelRoutingPage() {
   const handleCopyKey = async (text: string) => {
     try {
       await navigator.clipboard.writeText(text);
-      setCopiedKey(true);
-      setTimeout(() => setCopiedKey(false), 2000);
+      setCopiedText(text);
+      setTimeout(() => setCopiedText(null), 2000);
     } catch {
       toast.error('Failed to copy to clipboard');
     }
@@ -922,7 +922,7 @@ export default function ModelRoutingPage() {
                     evt.reason === 'auth_error' ? 'text-red-400/60' :
                     'text-white/30'
                   )}>
-                    {evt.reason.replace('_', ' ')}
+                    {evt.reason.replaceAll('_', ' ')}
                   </span>
                   {evt.latency_ms != null && (
                     <span className="text-blue-400/50 flex-shrink-0">
@@ -1004,7 +1004,7 @@ export default function ModelRoutingPage() {
                       onClick={() => handleCopyKey(createdKey)}
                       className="flex-shrink-0 p-1.5 rounded-md text-emerald-400/60 hover:text-emerald-300 hover:bg-white/[0.04] transition-colors cursor-pointer"
                     >
-                      {copiedKey ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                      {copiedText === createdKey ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
                     </button>
                   </div>
                 </div>

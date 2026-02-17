@@ -267,12 +267,14 @@ impl ProviderHealthTracker {
     ///
     /// If `retry_after` is provided (from response headers), use that as the
     /// cooldown duration instead of exponential backoff.
+    ///
+    /// Returns the actual cooldown duration applied.
     pub async fn record_failure(
         &self,
         account_id: Uuid,
         reason: CooldownReason,
         retry_after: Option<std::time::Duration>,
-    ) {
+    ) -> std::time::Duration {
         let mut accounts = self.accounts.write().await;
         let health = accounts.entry(account_id).or_default();
 
@@ -282,7 +284,7 @@ impl ProviderHealthTracker {
             _ => health.total_errors += 1,
         }
 
-        health.consecutive_failures += 1;
+        health.consecutive_failures = health.consecutive_failures.saturating_add(1);
         let is_auth_error = matches!(reason, CooldownReason::AuthError);
         health.last_failure_reason = Some(reason);
         health.last_failure_at = Some(chrono::Utc::now());
@@ -319,6 +321,8 @@ impl ProviderHealthTracker {
                 "Account placed in cooldown"
             );
         }
+
+        cooldown
     }
 
     /// Record a latency sample for an account (in milliseconds).

@@ -365,7 +365,7 @@ async fn chat_completions(
                 } else {
                     CooldownReason::ServerError
                 };
-                state
+                let cooldown = state
                     .health_tracker
                     .record_failure(entry.account_id, reason, None)
                     .await;
@@ -376,7 +376,7 @@ async fn chat_completions(
                     from_model: entry.model_id.clone(),
                     from_account_id: entry.account_id,
                     reason,
-                    cooldown_secs: None,
+                    cooldown_secs: Some(cooldown.as_secs_f64()),
                     to_provider: None,
                     latency_ms: Some(elapsed_ms),
                     attempt_number: (entry_idx + 1) as u32,
@@ -405,7 +405,7 @@ async fn chat_completions(
                 retry_after_secs = ?retry_after.map(|d| d.as_secs_f64()),
                 "Upstream rate limited, trying next entry"
             );
-            state
+            let cooldown = state
                 .health_tracker
                 .record_failure(entry.account_id, reason, retry_after)
                 .await;
@@ -416,7 +416,7 @@ async fn chat_completions(
                 from_model: entry.model_id.clone(),
                 from_account_id: entry.account_id,
                 reason,
-                cooldown_secs: retry_after.map(|d| d.as_secs_f64()),
+                cooldown_secs: Some(cooldown.as_secs_f64()),
                 to_provider: None,
                 latency_ms: Some(elapsed_ms),
                 attempt_number: (entry_idx + 1) as u32,
@@ -434,7 +434,7 @@ async fn chat_completions(
                 status = %status,
                 "Upstream server error, trying next entry"
             );
-            state
+            let cooldown = state
                 .health_tracker
                 .record_failure(entry.account_id, CooldownReason::ServerError, None)
                 .await;
@@ -445,7 +445,7 @@ async fn chat_completions(
                 from_model: entry.model_id.clone(),
                 from_account_id: entry.account_id,
                 reason: CooldownReason::ServerError,
-                cooldown_secs: None,
+                cooldown_secs: Some(cooldown.as_secs_f64()),
                 to_provider: None,
                 latency_ms: Some(elapsed_ms),
                 attempt_number: (entry_idx + 1) as u32,
@@ -464,7 +464,7 @@ async fn chat_completions(
                 status = %status,
                 "Upstream auth error, trying next entry"
             );
-            state
+            let cooldown = state
                 .health_tracker
                 .record_failure(entry.account_id, CooldownReason::AuthError, None)
                 .await;
@@ -475,7 +475,7 @@ async fn chat_completions(
                 from_model: entry.model_id.clone(),
                 from_account_id: entry.account_id,
                 reason: CooldownReason::AuthError,
-                cooldown_secs: None,
+                cooldown_secs: Some(cooldown.as_secs_f64()),
                 to_provider: None,
                 latency_ms: Some(elapsed_ms),
                 attempt_number: (entry_idx + 1) as u32,
@@ -562,7 +562,7 @@ async fn chat_completions(
 
             if peek_failed {
                 let elapsed_ms = request_start.elapsed().as_millis() as u64;
-                state
+                let cooldown = state
                     .health_tracker
                     .record_failure(entry.account_id, CooldownReason::ServerError, None)
                     .await;
@@ -573,7 +573,7 @@ async fn chat_completions(
                     from_model: entry.model_id.clone(),
                     from_account_id: entry.account_id,
                     reason: CooldownReason::ServerError,
-                    cooldown_secs: None,
+                    cooldown_secs: Some(cooldown.as_secs_f64()),
                     to_provider: None,
                     latency_ms: Some(elapsed_ms),
                     attempt_number: (entry_idx + 1) as u32,
@@ -604,7 +604,7 @@ async fn chat_completions(
                     reason = %reason,
                     "Upstream returned in-stream error, trying next entry"
                 );
-                state
+                let cooldown = state
                     .health_tracker
                     .record_failure(entry.account_id, reason, None)
                     .await;
@@ -615,7 +615,7 @@ async fn chat_completions(
                     from_model: entry.model_id.clone(),
                     from_account_id: entry.account_id,
                     reason,
-                    cooldown_secs: None,
+                    cooldown_secs: Some(cooldown.as_secs_f64()),
                     to_provider: None,
                     latency_ms: Some(elapsed_ms),
                     attempt_number: (entry_idx + 1) as u32,
@@ -690,7 +690,7 @@ async fn chat_completions(
                                 reason = %reason,
                                 "Upstream returned 200 with error body, trying next entry"
                             );
-                            state
+                            let cooldown = state
                                 .health_tracker
                                 .record_failure(entry.account_id, reason, None)
                                 .await;
@@ -701,7 +701,7 @@ async fn chat_completions(
                                 from_model: entry.model_id.clone(),
                                 from_account_id: entry.account_id,
                                 reason,
-                                cooldown_secs: None,
+                                cooldown_secs: Some(cooldown.as_secs_f64()),
                                 to_provider: None,
                                 latency_ms: Some(elapsed_ms),
                                 attempt_number: (entry_idx + 1) as u32,
@@ -776,7 +776,7 @@ async fn chat_completions(
                     error = %e,
                     "Failed to read upstream response body"
                 );
-                state
+                let cooldown = state
                     .health_tracker
                     .record_failure(entry.account_id, CooldownReason::ServerError, None)
                     .await;
@@ -787,7 +787,7 @@ async fn chat_completions(
                     from_model: entry.model_id.clone(),
                     from_account_id: entry.account_id,
                     reason: CooldownReason::ServerError,
-                    cooldown_secs: None,
+                    cooldown_secs: Some(cooldown.as_secs_f64()),
                     to_provider: None,
                     latency_ms: Some(elapsed_ms),
                     attempt_number: (entry_idx + 1) as u32,
