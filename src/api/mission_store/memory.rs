@@ -53,6 +53,7 @@ impl MissionStore for InMemoryMissionStore {
         workspace_id: Option<Uuid>,
         agent: Option<&str>,
         model_override: Option<&str>,
+        model_effort: Option<&str>,
         backend: Option<&str>,
         config_profile: Option<&str>,
     ) -> Result<Mission, String> {
@@ -65,6 +66,7 @@ impl MissionStore for InMemoryMissionStore {
             workspace_name: None,
             agent: agent.map(|s| s.to_string()),
             model_override: model_override.map(|s| s.to_string()),
+            model_effort: model_effort.map(|s| s.to_string()),
             backend: backend.unwrap_or("claudecode").to_string(),
             config_profile: config_profile.map(|s| s.to_string()),
             history: vec![],

@@ -4,8 +4,10 @@
 //! Only returns providers that are actually configured and authenticated.
 
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 use axum::{
     extract::{Query, State},
@@ -20,6 +22,17 @@ use crate::ai_providers::{AIProviderStore, ProviderType};
 /// Cached model lists fetched from provider APIs at startup.
 /// Maps provider ID (e.g. "anthropic") -> Vec<ProviderModel>
 pub type ModelCatalog = Arc<RwLock<HashMap<String, Vec<ProviderModel>>>>;
+
+#[derive(Debug, Clone)]
+struct CodexProbeCacheEntry {
+    visible_models: HashSet<String>,
+    expires_at: Instant,
+}
+
+static CODEX_MODEL_PROBE_CACHE: OnceLock<RwLock<HashMap<String, CodexProbeCacheEntry>>> =
+    OnceLock::new();
+
+const CODEX_MODEL_PROBE_TTL: Duration = Duration::from_secs(10 * 60);
 
 /// Provider IDs that are part of the default catalog and should not be duplicated
 /// from the AIProviderStore.
@@ -139,6 +152,154 @@ fn sanitize_custom_provider_id(name: &str) -> String {
         .replace('-', "_")
 }
 
+fn codex_model_probe_cache() -> &'static RwLock<HashMap<String, CodexProbeCacheEntry>> {
+    CODEX_MODEL_PROBE_CACHE.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+fn hash_u64(value: &str) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn codex_probe_signature(api_keys: &[String], candidates: &[String]) -> String {
+    let mut key_hashes: Vec<u64> = api_keys.iter().map(|k| hash_u64(k)).collect();
+    key_hashes.sort_unstable();
+    let mut models = candidates.to_vec();
+    models.sort_unstable();
+    format!(
+        "keys:{}|models:{}",
+        key_hashes
+            .iter()
+            .map(|h| h.to_string())
+            .collect::<Vec<_>>()
+            .join(","),
+        models.join(",")
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CodexProbeOutcome {
+    Supported,
+    Unsupported,
+    Inconclusive,
+}
+
+async fn probe_codex_model_access(
+    client: &reqwest::Client,
+    api_key: &str,
+    model_id: &str,
+) -> CodexProbeOutcome {
+    let response = match client
+        .post("https://api.openai.com/v1/responses")
+        .bearer_auth(api_key)
+        .json(&serde_json::json!({
+            "model": model_id,
+            "input": "Ping",
+            "max_output_tokens": 1
+        }))
+        .send()
+        .await
+    {
+        Ok(resp) => resp,
+        Err(err) => {
+            tracing::debug!(
+                model = %model_id,
+                error = %err,
+                "Codex model probe failed to reach OpenAI"
+            );
+            return CodexProbeOutcome::Inconclusive;
+        }
+    };
+
+    if response.status().is_success() {
+        return CodexProbeOutcome::Supported;
+    }
+
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    let lower = body.to_lowercase();
+    let definitive_model_error = lower.contains("does not exist or you do not have access")
+        || lower.contains("model_not_found")
+        || lower.contains("does_not_exist")
+        || lower.contains("unknown model");
+
+    if definitive_model_error || status.as_u16() == 404 {
+        CodexProbeOutcome::Unsupported
+    } else {
+        tracing::debug!(
+            model = %model_id,
+            status = %status,
+            body_preview = %body.chars().take(240).collect::<String>(),
+            "Codex model probe was inconclusive"
+        );
+        CodexProbeOutcome::Inconclusive
+    }
+}
+
+async fn resolve_visible_codex_models(
+    state: &AppState,
+    candidates: &[String],
+) -> Option<HashSet<String>> {
+    let api_keys =
+        crate::api::ai_providers::get_all_openai_keys_for_codex(state.config.working_dir.as_path());
+    if api_keys.is_empty() {
+        return None;
+    }
+
+    let signature = codex_probe_signature(&api_keys, candidates);
+    let now = Instant::now();
+    if let Some(entry) = codex_model_probe_cache()
+        .read()
+        .await
+        .get(&signature)
+        .cloned()
+    {
+        if entry.expires_at > now {
+            return Some(entry.visible_models);
+        }
+    }
+
+    let mut visible_models = HashSet::new();
+    for model_id in candidates {
+        let mut is_supported = false;
+        let mut saw_inconclusive = false;
+
+        for api_key in &api_keys {
+            match probe_codex_model_access(&state.http_client, api_key, model_id).await {
+                CodexProbeOutcome::Supported => {
+                    is_supported = true;
+                    break;
+                }
+                CodexProbeOutcome::Unsupported => {}
+                CodexProbeOutcome::Inconclusive => {
+                    saw_inconclusive = true;
+                }
+            }
+        }
+
+        if is_supported || saw_inconclusive {
+            visible_models.insert(model_id.clone());
+        }
+    }
+
+    codex_model_probe_cache().write().await.insert(
+        signature,
+        CodexProbeCacheEntry {
+            visible_models: visible_models.clone(),
+            expires_at: now + CODEX_MODEL_PROBE_TTL,
+        },
+    );
+
+    tracing::info!(
+        total_candidates = candidates.len(),
+        visible = visible_models.len(),
+        "Resolved account-specific Codex model visibility"
+    );
+
+    Some(visible_models)
+}
+
 /// Default provider configuration.
 fn default_providers_config() -> ProvidersConfig {
     ProvidersConfig {
@@ -193,21 +354,14 @@ fn default_providers_config() -> ProvidersConfig {
                 models: vec![
                     // Codex-optimized models (for Codex CLI)
                     ProviderModel {
-                        id: "gpt-5.3-codex".to_string(),
-                        name: "GPT-5.3 Codex".to_string(),
-                        description: Some(
-                            "Latest Codex model — strongest agentic coding".to_string(),
-                        ),
+                        id: "gpt-5-codex".to_string(),
+                        name: "GPT-5 Codex".to_string(),
+                        description: Some("Purpose-built for agentic coding".to_string()),
                     },
                     ProviderModel {
-                        id: "gpt-5.3-codex-spark".to_string(),
-                        name: "GPT-5.3 Codex Spark".to_string(),
-                        description: Some("Real-time coding, >1000 tok/s (Pro only)".to_string()),
-                    },
-                    ProviderModel {
-                        id: "gpt-5.2-codex".to_string(),
-                        name: "GPT-5.2 Codex".to_string(),
-                        description: Some("Smart and precise coding agent".to_string()),
+                        id: "gpt-5-codex-mini".to_string(),
+                        name: "GPT-5 Codex Mini".to_string(),
+                        description: Some("Smaller, cost-effective variant".to_string()),
                     },
                     ProviderModel {
                         id: "gpt-5.1-codex".to_string(),
@@ -225,14 +379,9 @@ fn default_providers_config() -> ProvidersConfig {
                         description: Some("Fast and economical".to_string()),
                     },
                     ProviderModel {
-                        id: "gpt-5-codex".to_string(),
-                        name: "GPT-5 Codex".to_string(),
-                        description: Some("Purpose-built for agentic coding".to_string()),
-                    },
-                    ProviderModel {
-                        id: "gpt-5-codex-mini".to_string(),
-                        name: "GPT-5 Codex Mini".to_string(),
-                        description: Some("Smaller, cost-effective variant".to_string()),
+                        id: "gpt-5.2-codex".to_string(),
+                        name: "GPT-5.2 Codex".to_string(),
+                        description: Some("Smart and precise coding agent".to_string()),
                     },
                     // General-purpose models (API key only)
                     ProviderModel {
@@ -994,6 +1143,25 @@ pub async fn list_backend_model_options(
     push_options("codex", Some(&["openai"]), false, Some(codex_filter));
     push_options("opencode", None, true, None);
     backends.entry("amp".to_string()).or_default();
+
+    let codex_candidates: Vec<String> = backends
+        .get("codex")
+        .map(|opts| opts.iter().map(|o| o.value.clone()).collect())
+        .unwrap_or_default();
+    if !codex_candidates.is_empty() {
+        if let Some(visible_models) = resolve_visible_codex_models(&state, &codex_candidates).await
+        {
+            if let Some(options) = backends.get_mut("codex") {
+                let before = options.len();
+                options.retain(|opt| visible_models.contains(&opt.value));
+                tracing::info!(
+                    before,
+                    after = options.len(),
+                    "Filtered Codex model options to account-supported models"
+                );
+            }
+        }
+    }
 
     // Prepend model routing chains to opencode options so they appear first
     let chains = state.chain_store.list().await;

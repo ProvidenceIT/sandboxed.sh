@@ -32,11 +32,13 @@ POST /api/control/missions
   "title": "My Mission",
   "workspace_id": "uuid",
   "agent": "code-reviewer",
-  "model_override": "anthropic/claude-sonnet-4-20250514"
+  "model_override": "gpt-5-codex",
+  "model_effort": "medium"
 }
 ```
 
 All fields optional. Returns `Mission` object.
+`model_effort` currently supports: `low`, `medium`, `high` (Codex backend).
 
 ### Load Mission
 
@@ -127,6 +129,7 @@ Server-Sent Events for real-time updates:
   "workspace_name": "my-workspace",
   "agent": "code-reviewer",
   "model_override": null,
+  "model_effort": null,
   "created_at": "2025-01-13T10:00:00Z",
   "updated_at": "2025-01-13T10:05:00Z"
 }

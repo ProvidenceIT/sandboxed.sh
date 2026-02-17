@@ -33,6 +33,7 @@ export interface Mission {
   workspace_name?: string;
   agent?: string;
   model_override?: string;
+  model_effort?: "low" | "medium" | "high";
   backend?: string;
   history: MissionHistoryEntry[];
   desktop_sessions?: DesktopSessionInfo[];
@@ -60,6 +61,7 @@ export interface CreateMissionOptions {
   workspaceId?: string;
   agent?: string;
   modelOverride?: string;
+  modelEffort?: "low" | "medium" | "high";
   configProfile?: string;
   backend?: string;
 }
@@ -123,6 +125,7 @@ export async function createMission(
     workspace_id?: string;
     agent?: string;
     model_override?: string;
+    model_effort?: "low" | "medium" | "high";
     config_profile?: string;
     backend?: string;
   } = {};
@@ -131,6 +134,7 @@ export async function createMission(
   if (options?.workspaceId) body.workspace_id = options.workspaceId;
   if (options?.agent) body.agent = options.agent;
   if (options?.modelOverride) body.model_override = options.modelOverride;
+  if (options?.modelEffort) body.model_effort = options.modelEffort;
   if (options?.configProfile) body.config_profile = options.configProfile;
   if (options?.backend) body.backend = options.backend;
 

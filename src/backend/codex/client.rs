@@ -20,6 +20,7 @@ pub struct CodexConfig {
     pub cli_path: String,
     pub oauth_token: Option<String>,
     pub default_model: Option<String>,
+    pub model_effort: Option<String>,
 }
 
 impl Default for CodexConfig {
@@ -28,6 +29,7 @@ impl Default for CodexConfig {
             cli_path: std::env::var("CODEX_CLI_PATH").unwrap_or_else(|_| "codex".to_string()),
             oauth_token: std::env::var("OPENAI_OAUTH_TOKEN").ok(),
             default_model: None,
+            model_effort: None,
         }
     }
 }
@@ -85,14 +87,18 @@ impl CodexClient {
             args.push("--model".to_string());
             args.push(m.to_string());
         }
+        if let Some(effort) = self.config.model_effort.as_deref() {
+            args.push("-c".to_string());
+            args.push(format!("reasoning.effort=\"{}\"", effort));
+        }
 
         // Add the message as a positional arg (guard prompts starting with '-')
         args.push("--".to_string());
         args.push(message.to_string());
 
         info!(
-            "Spawning Codex CLI: directory={}, model={:?}",
-            directory, effective_model
+            "Spawning Codex CLI: directory={}, model={:?}, effort={:?}",
+            directory, effective_model, self.config.model_effort
         );
 
         let (program, full_args) = if self.config.cli_path.contains(' ') {
