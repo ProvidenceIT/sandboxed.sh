@@ -4489,9 +4489,6 @@ async fn update_provider(
     AxumPath(id): AxumPath<String>,
     Json(req): Json<UpdateProviderRequest>,
 ) -> Result<Json<ProviderResponse>, (StatusCode, String)> {
-    let provider_type = ProviderType::from_id(&id)
-        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Provider {} not found", id)))?;
-
     if let Some(ref name) = req.name {
         if name.is_empty() {
             return Err((StatusCode::BAD_REQUEST, "Name cannot be empty".to_string()));
@@ -4504,20 +4501,27 @@ async fn update_provider(
         }
     }
 
+    // Try UUID first (store-based providers: Amp, Custom)
+    if let Ok(uuid) = uuid::Uuid::parse_str(&id) {
+        return update_store_provider(&state, uuid, req).await;
+    }
+
+    // Otherwise, treat as provider type ID (standard providers)
+    let provider_type = ProviderType::from_id(&id)
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Provider {} not found", id)))?;
+
     // label and priority are only supported for providers stored in AIProviderStore
-    if provider_type != ProviderType::Custom && provider_type != ProviderType::Amp {
-        if req.label.is_some() {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "label is only supported for custom/amp providers".to_string(),
-            ));
-        }
-        if req.priority.is_some() && req.priority != Some(0) {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "priority is only supported for custom/amp providers".to_string(),
-            ));
-        }
+    if req.label.is_some() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "label is only supported for custom/amp providers".to_string(),
+        ));
+    }
+    if req.priority.is_some() && req.priority != Some(0) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "priority is only supported for custom/amp providers".to_string(),
+        ));
     }
 
     let config_path = get_opencode_config_path(&state.config.working_dir);
@@ -4549,23 +4553,15 @@ async fn update_provider(
     }
 
     if let Some(api_key_update) = req.api_key {
-        if provider_type == ProviderType::Amp {
-            // Amp keys live in ai_providers.json, not opencode auth.json
-            state
-                .ai_providers
-                .update_api_key_by_type(provider_type, api_key_update.as_deref())
-                .await;
-        } else {
-            match api_key_update {
-                Some(api_key) => {
-                    if let Err(e) = sync_api_key_to_opencode_auth(provider_type, &api_key) {
-                        tracing::error!("Failed to sync API key to OpenCode: {}", e);
-                    }
+        match api_key_update {
+            Some(api_key) => {
+                if let Err(e) = sync_api_key_to_opencode_auth(provider_type, &api_key) {
+                    tracing::error!("Failed to sync API key to OpenCode: {}", e);
                 }
-                None => {
-                    if let Err(e) = remove_opencode_auth_entry(provider_type) {
-                        tracing::error!("Failed to remove OpenCode auth entry: {}", e);
-                    }
+            }
+            None => {
+                if let Err(e) = remove_opencode_auth_entry(provider_type) {
+                    tracing::error!("Failed to remove OpenCode auth entry: {}", e);
                 }
             }
         }
@@ -4591,11 +4587,111 @@ async fn update_provider(
     Ok(Json(response))
 }
 
+/// Update a store-based provider (Amp, Custom) by UUID.
+async fn update_store_provider(
+    state: &Arc<super::routes::AppState>,
+    uuid: uuid::Uuid,
+    req: UpdateProviderRequest,
+) -> Result<Json<ProviderResponse>, (StatusCode, String)> {
+    let providers = state.ai_providers.list().await;
+    let existing = providers
+        .into_iter()
+        .find(|p| p.id == uuid)
+        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Provider {} not found", uuid)))?;
+
+    let mut updated = existing.clone();
+    if let Some(name) = req.name {
+        updated.name = name;
+    }
+    if let Some(label) = req.label {
+        updated.label = label;
+    }
+    if let Some(priority) = req.priority {
+        updated.priority = priority;
+    }
+    if let Some(base_url) = req.base_url {
+        updated.base_url = base_url;
+    }
+    if let Some(enabled) = req.enabled {
+        updated.enabled = enabled;
+    }
+    if let Some(api_key_update) = req.api_key {
+        updated.api_key = api_key_update;
+    }
+
+    let result = state
+        .ai_providers
+        .update(uuid, updated.clone())
+        .await
+        .ok_or_else(|| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to update provider".to_string(),
+            )
+        })?;
+
+    let pt = result.provider_type;
+    let default_backend = if pt == ProviderType::Amp {
+        "amp".to_string()
+    } else {
+        "opencode".to_string()
+    };
+    let now = chrono::Utc::now();
+    let response = ProviderResponse {
+        id: result.id.to_string(),
+        provider_type: pt,
+        provider_type_name: pt.display_name().to_string(),
+        name: result.name,
+        label: result.label,
+        priority: result.priority,
+        google_project_id: None,
+        has_api_key: result.api_key.is_some(),
+        has_oauth: false,
+        base_url: result.base_url,
+        custom_models: result.custom_models,
+        custom_env_var: result.custom_env_var,
+        npm_package: result.npm_package,
+        enabled: result.enabled,
+        is_default: result.is_default,
+        uses_oauth: false,
+        auth_methods: vec![],
+        status: if result.api_key.is_some() {
+            ProviderStatusResponse::Connected
+        } else {
+            ProviderStatusResponse::NeedsAuth { auth_url: None }
+        },
+        use_for_backends: vec![default_backend],
+        created_at: now,
+        updated_at: result.updated_at,
+    };
+
+    tracing::info!(
+        "Updated {} provider: {} ({})",
+        pt.display_name(),
+        response.name,
+        uuid
+    );
+
+    Ok(Json(response))
+}
+
 /// DELETE /api/ai/providers/:id - Delete a provider.
+///
+/// The `:id` param can be either a provider type ID (e.g. "anthropic") for
+/// standard providers, or a UUID for store-based providers (Amp, Custom).
 async fn delete_provider(
     State(state): State<Arc<super::routes::AppState>>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<(StatusCode, String), (StatusCode, String)> {
+    // Try UUID first (store-based providers: Amp, Custom)
+    if let Ok(uuid) = uuid::Uuid::parse_str(&id) {
+        if state.ai_providers.delete(uuid).await {
+            return Ok((StatusCode::OK, format!("Provider {} deleted successfully", id)));
+        }
+        return Err((StatusCode::NOT_FOUND, format!("Provider {} not found", id)));
+    }
+
+    // Otherwise, treat as provider type ID (standard providers)
     let provider_type = ProviderType::from_id(&id)
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Provider {} not found", id)))?;
     let config_path = get_opencode_config_path(&state.config.working_dir);
