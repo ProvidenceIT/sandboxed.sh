@@ -442,7 +442,7 @@ impl ModelChainStore {
                 },
                 ChainEntry {
                     provider_id: "cerebras".to_string(),
-                    model_id: "llama-4-scout-17b-16e-instruct".to_string(),
+                    model_id: "llama3.1-8b".to_string(),
                 },
             ],
             is_default: true,

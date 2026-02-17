@@ -379,6 +379,22 @@ async fn chat_completions(
             continue;
         }
 
+        // Other 4xx errors (404 model not found, 422 invalid params, etc.)
+        // are provider-specific issues — the next entry may use a different
+        // model that works.  Don't set cooldown since this isn't a transient
+        // failure, and don't return the upstream error to avoid leaking
+        // internal provider details.
+        if status.is_client_error() {
+            tracing::warn!(
+                provider = %entry.provider_id,
+                account_id = %entry.account_id,
+                model = %entry.model_id,
+                status = %status,
+                "Upstream client error (possibly wrong model), trying next entry"
+            );
+            continue;
+        }
+
         // Stream the response back to the client.
         // For streaming, record success on 2xx immediately — we can't wait
         // for the full stream to complete since it's returned to the caller.
