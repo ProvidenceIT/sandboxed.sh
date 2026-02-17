@@ -584,6 +584,7 @@ export default function ModelRoutingPage() {
   };
 
   const handleDelete = async (id: string) => {
+    if (!confirm(`Delete chain "${id}"? This cannot be undone.`)) return;
     try {
       await deleteModelChain(id);
       toast.success('Chain deleted');
@@ -646,6 +647,7 @@ export default function ModelRoutingPage() {
   };
 
   const handleDeleteKey = async (id: string) => {
+    if (!confirm('Revoke this API key? External tools using it will stop working.')) return;
     try {
       await deleteProxyApiKey(id);
       toast.success('API key deleted');

@@ -4671,7 +4671,10 @@ fn ensure_opencode_provider_for_model(opencode_config_dir: &std::path::Path, mod
             let proxy_key = std::env::var("SANDBOXED_PROXY_SECRET")
                 .ok()
                 .filter(|s| !s.trim().is_empty())
-                .unwrap_or_else(|| "builtin".to_string());
+                .unwrap_or_else(|| {
+                    tracing::error!("SANDBOXED_PROXY_SECRET not set; builtin proxy auth will fail");
+                    String::new()
+                });
             Some(serde_json::json!({
                 "npm": "@ai-sdk/openai-compatible",
                 "name": "Builtin",
