@@ -379,18 +379,15 @@ async fn chat_completions(
             continue;
         }
 
-        // Only record health-tracker success on actual 2xx responses.
-        // 4xx client errors (400, 422, etc.) are the caller's fault and should
-        // not reset failure counters or clear cooldowns for this account.
-        if status.is_success() {
+        // Stream the response back to the client.
+        // For streaming, record success on 2xx immediately — we can't wait
+        // for the full stream to complete since it's returned to the caller.
+        if is_stream && status.is_success() {
             state
                 .health_tracker
                 .record_success(entry.account_id)
                 .await;
-        }
 
-        // Stream the response back to the client
-        if is_stream && status.is_success() {
             let mut response_headers = HeaderMap::new();
             response_headers.insert(
                 header::CONTENT_TYPE,
@@ -411,10 +408,17 @@ async fn chat_completions(
                 .into_response();
         }
 
-        // Non-streaming: read full body and forward
+        // Non-streaming: read full body before recording success, so a
+        // body-read failure doesn't incorrectly clear cooldown state.
         let response_headers = upstream_resp.headers().clone();
         match upstream_resp.bytes().await {
             Ok(resp_body) => {
+                if status.is_success() {
+                    state
+                        .health_tracker
+                        .record_success(entry.account_id)
+                        .await;
+                }
                 let mut builder = Response::builder().status(status);
                 if let Some(ct) = response_headers.get(header::CONTENT_TYPE) {
                     builder = builder.header(header::CONTENT_TYPE, ct);
