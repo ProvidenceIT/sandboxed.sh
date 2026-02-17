@@ -3926,7 +3926,7 @@ async fn list_providers(
     let store_providers = state.ai_providers.list().await;
     for provider in store_providers {
         let pt = provider.provider_type;
-        if (pt == ProviderType::Custom || pt == ProviderType::Amp) && provider.enabled {
+        if pt == ProviderType::Custom || pt == ProviderType::Amp {
             let now = chrono::Utc::now();
             let default_backend = if pt == ProviderType::Amp {
                 "amp".to_string()
