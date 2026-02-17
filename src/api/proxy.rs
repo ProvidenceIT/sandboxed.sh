@@ -1107,13 +1107,15 @@ fn track_stream_health(
     async_stream::stream! {
         let mut stream = std::pin::pin!(inner);
         let mut errored = false;
+        let mut received_any = false;
         while let Some(item) = stream.next().await {
+            received_any = true;
             if item.is_err() {
                 errored = true;
             }
             yield item;
         }
-        if errored {
+        if errored || !received_any {
             health_tracker
                 .record_failure(account_id, CooldownReason::ServerError, None)
                 .await;

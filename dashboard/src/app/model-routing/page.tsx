@@ -752,7 +752,10 @@ export default function ModelRoutingPage() {
                 </label>
                 <div className="flex items-center gap-2">
                   <button
-                    onClick={() => setShowCreate(false)}
+                    onClick={() => {
+                      setShowCreate(false);
+                      setCreateForm({ id: '', name: '', entries: [{ provider_id: '', model_id: '' }], is_default: false });
+                    }}
                     className="rounded-lg px-3 py-1.5 text-xs text-white/60 hover:text-white/80 transition-colors cursor-pointer"
                   >
                     Cancel

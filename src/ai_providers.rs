@@ -444,7 +444,10 @@ impl AIProviderStore {
         let contents = serde_json::to_string_pretty(&providers_vec)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
-        std::fs::write(&self.storage_path, contents)?;
+        // Write-then-rename for crash safety (atomic on POSIX)
+        let tmp_path = self.storage_path.with_extension("tmp");
+        std::fs::write(&tmp_path, contents)?;
+        std::fs::rename(&tmp_path, &self.storage_path)?;
         Ok(())
     }
 

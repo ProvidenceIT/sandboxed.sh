@@ -89,6 +89,7 @@ export {
   type ProvidersResponse,
   type BackendModelOption,
   type BackendModelOptionsResponse,
+  type CustomModel,
   listAIProviders,
   listAIProviderTypes,
   getAIProvider,
@@ -111,6 +112,7 @@ export {
   type ModelChain,
   type ResolvedEntry,
   type AccountHealthSnapshot,
+  type FallbackEvent,
   listModelChains,
   createModelChain,
   updateModelChain,
@@ -118,6 +120,7 @@ export {
   resolveModelChain,
   listAccountHealth,
   clearAccountCooldown,
+  listFallbackEvents,
 } from "./model-routing";
 
 // Automations

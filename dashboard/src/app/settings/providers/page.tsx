@@ -122,6 +122,7 @@ export default function ProvidersPage() {
   };
 
   const handleDeleteProvider = async (id: string) => {
+    if (!confirm('Are you sure you want to delete this provider?')) return;
     try {
       await deleteAIProvider(id);
       toast.success('Provider removed');
