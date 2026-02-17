@@ -214,13 +214,21 @@ impl ProviderHealthTracker {
         }
 
         health.consecutive_failures += 1;
+        let is_auth_error = matches!(reason, CooldownReason::AuthError);
         health.last_failure_reason = Some(reason);
         health.last_failure_at = Some(chrono::Utc::now());
 
-        // Use retry_after from headers if available, else exponential backoff
+        // Use retry_after from headers if available, else exponential backoff.
+        // Auth errors (401/403) are almost always permanent (bad API key,
+        // revoked credentials), so use a long fixed cooldown instead of
+        // short exponential backoff that implies eventual recovery.
         let cooldown = retry_after.unwrap_or_else(|| {
-            self.backoff_config
-                .cooldown_for(health.consecutive_failures.saturating_sub(1))
+            if is_auth_error {
+                std::time::Duration::from_secs(3600) // 1 hour
+            } else {
+                self.backoff_config
+                    .cooldown_for(health.consecutive_failures.saturating_sub(1))
+            }
         });
 
         health.cooldown_until = Some(std::time::Instant::now() + cooldown);
@@ -517,14 +525,23 @@ impl ModelChainStore {
     }
 
     /// Delete a chain by ID. Cannot delete the last chain.
+    /// If the deleted chain was the default, the first remaining chain
+    /// is promoted to default.
     pub async fn delete(&self, id: &str) -> bool {
         let mut chains = self.chains.write().await;
         if chains.len() <= 1 {
             return false;
         }
+        let was_default = chains.iter().any(|c| c.id == id && c.is_default);
         let len_before = chains.len();
         chains.retain(|c| c.id != id);
         let deleted = chains.len() < len_before;
+        // If we deleted the default chain, promote the first remaining chain.
+        if deleted && was_default {
+            if let Some(first) = chains.first_mut() {
+                first.is_default = true;
+            }
+        }
         drop(chains);
 
         if deleted {

@@ -379,11 +379,15 @@ async fn chat_completions(
             continue;
         }
 
-        // Success (or other client error like 400 which we pass through)
-        state
-            .health_tracker
-            .record_success(entry.account_id)
-            .await;
+        // Only record health-tracker success on actual 2xx responses.
+        // 4xx client errors (400, 422, etc.) are the caller's fault and should
+        // not reset failure counters or clear cooldowns for this account.
+        if status.is_success() {
+            state
+                .health_tracker
+                .record_success(entry.account_id)
+                .await;
+        }
 
         // Stream the response back to the client
         if is_stream && status.is_success() {
