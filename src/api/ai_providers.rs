@@ -4725,9 +4725,30 @@ async fn delete_provider(
 
 /// POST /api/ai/providers/:id/auth - Initiate authentication for a provider.
 async fn authenticate_provider(
-    State(_state): State<Arc<super::routes::AppState>>,
+    State(state): State<Arc<super::routes::AppState>>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<AuthResponse>, (StatusCode, String)> {
+    // Try UUID first (store-based providers: Amp, Custom)
+    if let Ok(uuid) = uuid::Uuid::parse_str(&id) {
+        let provider = state
+            .ai_providers
+            .get(uuid)
+            .await
+            .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Provider {} not found", id)))?;
+
+        // Store-based providers use API key auth
+        let has_key = provider.api_key.as_ref().map_or(false, |k| !k.is_empty());
+        return Ok(Json(AuthResponse {
+            success: has_key,
+            message: if has_key {
+                "Provider is authenticated".to_string()
+            } else {
+                "API key is required for this provider".to_string()
+            },
+            auth_url: None,
+        }));
+    }
+
     let provider_type = ProviderType::from_id(&id)
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Provider {} not found", id)))?;
     let auth_map = read_opencode_auth_map().map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
@@ -4778,6 +4799,54 @@ async fn set_default(
     State(state): State<Arc<super::routes::AppState>>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<Json<ProviderResponse>, (StatusCode, String)> {
+    // Try UUID first (store-based providers: Amp, Custom)
+    if let Ok(uuid) = uuid::Uuid::parse_str(&id) {
+        let provider = state
+            .ai_providers
+            .get(uuid)
+            .await
+            .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Provider {} not found", id)))?;
+        state.ai_providers.set_default(uuid).await;
+
+        let pt = provider.provider_type;
+        let default_backend = if pt == ProviderType::Amp {
+            "amp".to_string()
+        } else {
+            "opencode".to_string()
+        };
+        let now = chrono::Utc::now();
+        let response = ProviderResponse {
+            id: provider.id.to_string(),
+            provider_type: pt,
+            provider_type_name: pt.display_name().to_string(),
+            name: provider.name,
+            label: provider.label,
+            priority: provider.priority,
+            google_project_id: None,
+            has_api_key: provider.api_key.is_some(),
+            has_oauth: false,
+            base_url: provider.base_url,
+            custom_models: provider.custom_models,
+            custom_env_var: provider.custom_env_var,
+            npm_package: provider.npm_package,
+            enabled: provider.enabled,
+            is_default: true,
+            uses_oauth: false,
+            auth_methods: vec![],
+            status: if provider.api_key.is_some() {
+                ProviderStatusResponse::Connected
+            } else {
+                ProviderStatusResponse::NeedsAuth { auth_url: None }
+            },
+            use_for_backends: vec![default_backend],
+            created_at: now,
+            updated_at: provider.updated_at,
+        };
+        tracing::info!("Set default AI provider: {} ({})", response.name, id);
+        return Ok(Json(response));
+    }
+
+    // Standard providers: by type ID
     let provider_type = ProviderType::from_id(&id)
         .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Provider {} not found", id)))?;
     write_default_provider_state(&state.config.working_dir, provider_type)

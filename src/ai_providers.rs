@@ -567,26 +567,6 @@ impl AIProviderStore {
         existed
     }
 
-    /// Update the API key for the first provider matching a given type.
-    pub async fn update_api_key_by_type(
-        &self,
-        provider_type: ProviderType,
-        api_key: Option<&str>,
-    ) {
-        let mut providers = self.providers.write().await;
-        if let Some(provider) = providers
-            .values_mut()
-            .find(|p| p.provider_type == provider_type)
-        {
-            provider.api_key = api_key.map(|s| s.to_string());
-            provider.updated_at = chrono::Utc::now();
-        }
-        drop(providers);
-        if let Err(e) = self.save_to_disk().await {
-            tracing::error!("Failed to save AI providers to disk: {}", e);
-        }
-    }
-
     /// Set a provider as the default.
     pub async fn set_default(&self, id: Uuid) -> bool {
         let mut providers = self.providers.write().await;
