@@ -3549,21 +3549,40 @@ fn extract_opencode_session_id(output: &str) -> Option<String> {
 }
 
 /// Returns true if the line is an OpenCode runner/status banner (not model output).
+///
+/// oh-my-opencode writes a fixed set of status lines to stdout. We filter these
+/// so they don't pollute `final_result` (which should only contain model text).
+///
+/// The patterns below are deliberately tight — each matches a known runner status
+/// line prefix rather than a bare English word. Using broad substrings like
+/// `contains("completed")` would silently drop model responses that happen to
+/// contain that word (e.g. "Task completed successfully"), which is a critical
+/// correctness bug when the SSE path is unavailable and stdout is the only source.
 fn is_opencode_banner_line(line: &str) -> bool {
     let lower = line.to_lowercase();
+
+    // Runner lifecycle banners (exact prefix matches)
     lower.contains("starting opencode server")
         || lower.contains("opencode server started")
         || lower.contains("auto-selected port")
-        || lower.contains("using port")
+        || lower.starts_with("using port")
         || lower.contains("server listening")
-        || lower.contains("sending prompt")
-        || lower.contains("waiting for completion")
-        || lower.contains("all tasks completed")
-        || lower.contains("completed")
-        || lower.contains("session id:")
-        || lower.contains("session:")
+
+    // Prompt / completion status
+        || lower.starts_with("sending prompt")
+        || lower.starts_with("waiting for completion")
+        || lower.starts_with("all tasks completed")
+
+    // Session identification lines — match the "Session: ses_" / "Session ID: ses_"
+    // prefix, not bare "session:" which would match model text discussing sessions.
+        || lower.starts_with("session id:")
+        || lower.starts_with("session:")
+
+    // Shutdown / cleanup banners
         || lower.contains("event stream did not close")
         || lower.contains("continuing shutdown")
+
+    // [run]-prefixed runner status lines
         || lower.starts_with("[run]")
 }
 
