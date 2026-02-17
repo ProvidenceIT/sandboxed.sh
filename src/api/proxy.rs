@@ -697,6 +697,26 @@ async fn chat_completions(
                         .await;
                     state.health_tracker.record_success(entry.account_id).await;
 
+                    // Extract token usage from the response
+                    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&resp_body) {
+                        if let Some(usage) = v.get("usage") {
+                            let input = usage
+                                .get("prompt_tokens")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0);
+                            let output = usage
+                                .get("completion_tokens")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0);
+                            if input > 0 || output > 0 {
+                                state
+                                    .health_tracker
+                                    .record_token_usage(entry.account_id, input, output)
+                                    .await;
+                            }
+                        }
+                    }
+
                     // Set to_provider on any pending fallback events
                     let success_provider = entry.provider_id.clone();
                     for evt in &mut pending_fallback_events {
@@ -1108,10 +1128,33 @@ fn track_stream_health(
         let mut stream = std::pin::pin!(inner);
         let mut errored = false;
         let mut received_any = false;
+        let mut input_tokens: u64 = 0;
+        let mut output_tokens: u64 = 0;
         while let Some(item) = stream.next().await {
             received_any = true;
-            if item.is_err() {
-                errored = true;
+            match &item {
+                Ok(chunk) => {
+                    // Scan SSE data lines for usage in the final chunk.
+                    // OpenAI-compatible providers include a `usage` object
+                    // in the last `data:` event of the stream.
+                    if let Ok(text) = std::str::from_utf8(chunk) {
+                        for line in text.lines() {
+                            if let Some(json_str) = line.strip_prefix("data: ") {
+                                if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_str) {
+                                    if let Some(usage) = v.get("usage") {
+                                        if let Some(pt) = usage.get("prompt_tokens").and_then(|v| v.as_u64()) {
+                                            input_tokens = pt;
+                                        }
+                                        if let Some(ct) = usage.get("completion_tokens").and_then(|v| v.as_u64()) {
+                                            output_tokens = ct;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(_) => errored = true,
             }
             yield item;
         }
@@ -1121,6 +1164,9 @@ fn track_stream_health(
                 .await;
         } else {
             health_tracker.record_success(account_id).await;
+            if input_tokens > 0 || output_tokens > 0 {
+                health_tracker.record_token_usage(account_id, input_tokens, output_tokens).await;
+            }
         }
     }
 }

@@ -68,6 +68,10 @@ pub struct AccountHealth {
     pub total_latency_ms: u64,
     /// Number of latency samples recorded.
     pub latency_samples: u64,
+    /// Total input (prompt) tokens consumed.
+    pub total_input_tokens: u64,
+    /// Total output (completion) tokens consumed.
+    pub total_output_tokens: u64,
 }
 
 impl AccountHealth {
@@ -174,6 +178,8 @@ pub struct AccountHealthSnapshot {
     pub total_errors: u64,
     /// Average latency in milliseconds (None if no samples).
     pub avg_latency_ms: Option<f64>,
+    pub total_input_tokens: u64,
+    pub total_output_tokens: u64,
 }
 
 impl Default for ProviderHealthTracker {
@@ -274,6 +280,19 @@ impl ProviderHealthTracker {
         health.latency_samples += 1;
     }
 
+    /// Record token usage for an account.
+    pub async fn record_token_usage(
+        &self,
+        account_id: Uuid,
+        input_tokens: u64,
+        output_tokens: u64,
+    ) {
+        let mut accounts = self.accounts.write().await;
+        let health = accounts.entry(account_id).or_default();
+        health.total_input_tokens += input_tokens;
+        health.total_output_tokens += output_tokens;
+    }
+
     /// Record a fallback event (provider failover).
     pub async fn record_fallback_event(&self, event: FallbackEvent) {
         let mut events = self.fallback_events.write().await;
@@ -310,6 +329,8 @@ impl ProviderHealthTracker {
             } else {
                 None
             },
+            total_input_tokens: health.total_input_tokens,
+            total_output_tokens: health.total_output_tokens,
         }
     }
 
@@ -330,6 +351,8 @@ impl ProviderHealthTracker {
                 total_rate_limits: 0,
                 total_errors: 0,
                 avg_latency_ms: None,
+                total_input_tokens: 0,
+                total_output_tokens: 0,
             },
         }
     }

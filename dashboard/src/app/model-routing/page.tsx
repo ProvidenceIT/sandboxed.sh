@@ -399,6 +399,16 @@ function ChainCard({
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+function formatTokenCount(tokens: number): string {
+  if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}M`;
+  if (tokens >= 1_000) return `${(tokens / 1_000).toFixed(1)}k`;
+  return `${tokens}`;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Health Dashboard
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -460,6 +470,11 @@ function HealthDashboard({
             )}
             {h.avg_latency_ms != null && (
               <span className="text-blue-400/60">{Math.round(h.avg_latency_ms)}ms</span>
+            )}
+            {(h.total_input_tokens > 0 || h.total_output_tokens > 0) && (
+              <span className="text-purple-400/60">
+                {formatTokenCount(h.total_input_tokens)}↑ {formatTokenCount(h.total_output_tokens)}↓
+              </span>
             )}
           </div>
           {!h.is_healthy && (

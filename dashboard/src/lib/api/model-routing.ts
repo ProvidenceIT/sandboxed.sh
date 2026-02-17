@@ -42,6 +42,8 @@ export interface AccountHealthSnapshot {
   total_rate_limits: number;
   total_errors: number;
   avg_latency_ms: number | null;
+  total_input_tokens: number;
+  total_output_tokens: number;
 }
 
 export interface FallbackEvent {
