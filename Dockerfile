@@ -113,6 +113,13 @@ RUN npm install -g @sourcegraph/amp@latest \
     && echo "[docker] Amp CLI installed: $(amp --version 2>/dev/null || echo 'unknown')" \
     || echo "[docker] WARNING: Amp CLI install failed (will be installed on first mission)"
 
+# -- RTK (CLI output compressor for token savings) --
+RUN curl -fsSL https://github.com/rtk-ai/rtk/releases/latest/download/rtk-x86_64-unknown-linux-gnu.tar.gz \
+    | tar xz -C /usr/local/bin rtk \
+    && chmod +x /usr/local/bin/rtk \
+    && echo "[docker] RTK installed: $(rtk --version 2>/dev/null || echo 'unknown')" \
+    || echo "[docker] WARNING: RTK install failed (token savings will not be available)"
+
 # -- i3 config (from install_desktop.sh) -------------------------------------
 RUN mkdir -p /root/.config/i3
 COPY docker/i3config /root/.config/i3/config

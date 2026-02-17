@@ -12,11 +12,13 @@ import {
   listAccountHealth,
   clearAccountCooldown,
   listFallbackEvents,
+  getRtkStats,
   type ModelChain,
   type ChainEntry,
   type ResolvedEntry,
   type AccountHealthSnapshot,
   type FallbackEvent,
+  type RtkStats,
 } from '@/lib/api/model-routing';
 import {
   listProxyApiKeys,
@@ -49,6 +51,7 @@ import {
   Copy,
   Check,
   Pencil,
+  Zap,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -561,6 +564,14 @@ export default function ModelRoutingPage() {
     refreshInterval: 10000, // Poll events every 10s
   });
 
+  const {
+    data: rtkStats,
+    isLoading: rtkStatsLoading,
+  } = useSWR('rtk-stats', getRtkStats, {
+    revalidateOnFocus: false,
+    refreshInterval: 10000, // Poll RTK stats every 10s
+  });
+
   const handleCreate = async () => {
     if (!createForm.id.trim() || !createForm.name.trim()) {
       toast.error('Chain ID and name are required');
@@ -856,6 +867,59 @@ export default function ModelRoutingPage() {
             onClear={handleClearCooldown}
             isLoading={healthLoading}
           />
+        </div>
+
+        {/* ── RTK Token Savings Section ── */}
+        <div className="rounded-xl bg-white/[0.02] border border-white/[0.04] p-5 mt-6">
+          <div className="flex items-center gap-3 mb-4">
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-purple-500/10">
+              <Zap className="h-5 w-5 text-purple-400" />
+            </div>
+            <div>
+              <h2 className="text-sm font-medium text-white">RTK Token Savings</h2>
+              <p className="text-xs text-white/40">
+                CLI output compression reduces LLM token consumption
+              </p>
+            </div>
+            {rtkStats && rtkStats.commands_processed > 0 && (
+              <span className="ml-auto text-xs text-emerald-400">
+                {rtkStats.savings_percent.toFixed(1)}% saved
+              </span>
+            )}
+          </div>
+
+          {rtkStatsLoading ? (
+            <div className="flex items-center justify-center py-6">
+              <Loader className="h-4 w-4 animate-spin text-white/30" />
+            </div>
+          ) : !rtkStats || rtkStats.commands_processed === 0 ? (
+            <div className="text-center py-4">
+              <p className="text-xs text-white/30">
+                No RTK data yet. Enable with <code className="text-white/50">SANDBOXED_SH_RTK_ENABLED=1</code>
+              </p>
+            </div>
+          ) : (
+            <div className="grid grid-cols-4 gap-3">
+              <div className="rounded-lg border border-white/[0.06] bg-white/[0.01] px-3 py-2">
+                <div className="text-[10px] text-white/30 uppercase tracking-wider mb-1">Commands</div>
+                <div className="text-lg font-medium text-white">{rtkStats.commands_processed.toLocaleString()}</div>
+              </div>
+              <div className="rounded-lg border border-white/[0.06] bg-white/[0.01] px-3 py-2">
+                <div className="text-[10px] text-white/30 uppercase tracking-wider mb-1">Original</div>
+                <div className="text-lg font-medium text-white">{formatTokenCount(rtkStats.original_chars)}</div>
+              </div>
+              <div className="rounded-lg border border-white/[0.06] bg-white/[0.01] px-3 py-2">
+                <div className="text-[10px] text-white/30 uppercase tracking-wider mb-1">Compressed</div>
+                <div className="text-lg font-medium text-white">{formatTokenCount(rtkStats.compressed_chars)}</div>
+              </div>
+              <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-3 py-2">
+                <div className="text-[10px] text-emerald-400/60 uppercase tracking-wider mb-1">Saved</div>
+                <div className="text-lg font-medium text-emerald-400">
+                  {formatTokenCount(rtkStats.chars_saved)} ({rtkStats.savings_percent.toFixed(0)}%)
+                </div>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* ── Fallback Events Section ── */}

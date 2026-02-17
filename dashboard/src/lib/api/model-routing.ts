@@ -62,6 +62,14 @@ export interface FallbackEvent {
   chain_length: number;
 }
 
+export interface RtkStats {
+  commands_processed: number;
+  original_chars: number;
+  compressed_chars: number;
+  chars_saved: number;
+  savings_percent: number;
+}
+
 // ---------------------------------------------------------------------------
 // Chain Management
 // ---------------------------------------------------------------------------
@@ -130,4 +138,12 @@ export async function clearAccountCooldown(accountId: string): Promise<{ cleared
 
 export async function listFallbackEvents(): Promise<FallbackEvent[]> {
   return apiGet("/api/model-routing/events", "Failed to list fallback events");
+}
+
+// ---------------------------------------------------------------------------
+// RTK Stats
+// ---------------------------------------------------------------------------
+
+export async function getRtkStats(): Promise<RtkStats> {
+  return apiGet("/api/model-routing/rtk-stats", "Failed to get RTK stats");
 }

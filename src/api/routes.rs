@@ -109,6 +109,8 @@ pub struct AppState {
     pub proxy_secret: String,
     /// User-generated proxy API keys for external tools
     pub proxy_api_keys: super::proxy_keys::SharedProxyApiKeyStore,
+    /// RTK (CLI output compressor) stats tracker
+    pub rtk_stats: crate::rtk_stats::RtkStatsTracker,
 }
 
 /// Start the HTTP server.
@@ -168,6 +170,14 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         )
         .await,
     );
+
+    // Initialize RTK stats tracker
+    let rtk_stats = crate::rtk_stats::RtkStatsTracker::new();
+    if rtk_stats.is_enabled() {
+        tracing::info!("RTK (CLI output compressor) is available - token savings tracking enabled");
+    } else {
+        tracing::info!("RTK not available - token savings tracking disabled");
+    }
 
     // Initialize secrets store
     let secrets = match crate::secrets::SecretsStore::new(&config.working_dir).await {
@@ -408,6 +418,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
                 secret
             }),
         proxy_api_keys,
+        rtk_stats,
     });
 
     // Start background desktop session cleanup task

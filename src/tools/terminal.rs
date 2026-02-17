@@ -5,11 +5,18 @@
 //! Commands run in the workspace by default:
 //! - `run_command("ls")` → lists workspace contents
 //! - `run_command("cat output/report.md")` → reads workspace file
+//!
+//! ## RTK Integration
+//!
+//! When RTK is enabled (SANDBOXED_SH_RTK_ENABLED=1), commands are wrapped with
+//! `rtk` to compress output before returning to the LLM, reducing token consumption
+//! by 60-90% on common dev commands.
 
 use std::collections::HashMap;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -19,6 +26,129 @@ use tokio::process::Command;
 
 use super::{resolve_path_simple as resolve_path, Tool};
 use crate::nspawn;
+
+static RTK_ORIGINAL_CHARS: AtomicU64 = AtomicU64::new(0);
+static RTK_COMPRESSED_CHARS: AtomicU64 = AtomicU64::new(0);
+static RTK_COMMANDS_PROCESSED: AtomicU64 = AtomicU64::new(0);
+
+pub fn rtk_stats() -> (u64, u64, u64) {
+    (
+        RTK_COMMANDS_PROCESSED.load(Ordering::Relaxed),
+        RTK_ORIGINAL_CHARS.load(Ordering::Relaxed),
+        RTK_COMPRESSED_CHARS.load(Ordering::Relaxed),
+    )
+}
+
+fn rtk_enabled() -> bool {
+    env::var("SANDBOXED_SH_RTK_ENABLED")
+        .map(|v| {
+            matches!(
+                v.trim().to_lowercase().as_str(),
+                "1" | "true" | "yes" | "y" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn rtk_binary_path() -> Option<PathBuf> {
+    let candidates = [
+        PathBuf::from("/usr/local/bin/rtk"),
+        PathBuf::from("/usr/bin/rtk"),
+        PathBuf::from("/root/.local/bin/rtk"),
+        PathBuf::from("/home/opencode/.local/bin/rtk"),
+    ];
+    for path in candidates {
+        if path.exists() {
+            return Some(path);
+        }
+    }
+    if let Ok(path) = which::which("rtk") {
+        return Some(path);
+    }
+    None
+}
+
+const RTK_WRAPPED_COMMANDS: &[&str] = &[
+    "git status",
+    "git diff",
+    "git log",
+    "git add",
+    "git commit",
+    "git push",
+    "git pull",
+    "git branch",
+    "git fetch",
+    "git stash",
+    "git show",
+    "git blame",
+    "gh pr",
+    "gh issue",
+    "gh run",
+    "gh repo",
+    "ls",
+    "ls -la",
+    "ls -lah",
+    "tree",
+    "cat",
+    "head",
+    "tail",
+    "grep",
+    "rg",
+    "ag",
+    "find",
+    "cargo test",
+    "cargo build",
+    "cargo clippy",
+    "cargo check",
+    "cargo run",
+    "npm test",
+    "npm run",
+    "pnpm test",
+    "pnpm run",
+    "yarn test",
+    "yarn run",
+    "vitest",
+    "jest",
+    "pytest",
+    "go test",
+    "go build",
+    "go vet",
+    "eslint",
+    "ruff",
+    "mypy",
+    "pylint",
+    "tsc",
+    "biome",
+    "docker ps",
+    "docker images",
+    "docker logs",
+    "kubectl get",
+    "kubectl logs",
+    "kubectl describe",
+];
+
+fn should_wrap_with_rtk(command: &str) -> bool {
+    let cmd_lower = command.trim().to_lowercase();
+    if cmd_lower.starts_with("rtk ") {
+        return false;
+    }
+    if cmd_lower.contains("&&") || cmd_lower.contains("||") || cmd_lower.contains("|") {
+        return false;
+    }
+    if cmd_lower.starts_with("cat <<") || cmd_lower.contains("<<") {
+        return false;
+    }
+    for pattern in RTK_WRAPPED_COMMANDS {
+        if cmd_lower.starts_with(pattern) || cmd_lower == *pattern {
+            return true;
+        }
+    }
+    false
+}
+
+fn wrap_with_rtk(command: &str, rtk_path: &Path) -> String {
+    format!("{} {}", rtk_path.display(), command)
+}
 
 /// Context information read from the local context file.
 /// This is re-read before each container command to handle timing issues
@@ -872,21 +1002,74 @@ impl Tool for RunCommand {
             .unwrap_or_else(|| working_dir.to_path_buf());
         let options = parse_command_options(&args);
 
-        tracing::info!("Executing command in {:?}: {}", cwd, command);
+        let (final_command, rtk_used) = if rtk_enabled() {
+            if let Some(rtk_path) = rtk_binary_path() {
+                if should_wrap_with_rtk(command) {
+                    tracing::info!(
+                        command = %command,
+                        rtk_path = %rtk_path.display(),
+                        "Wrapping command with RTK for token reduction"
+                    );
+                    (wrap_with_rtk(command, &rtk_path), true)
+                } else {
+                    tracing::debug!(
+                        command = %command,
+                        "Command not in RTK allowlist, running as-is"
+                    );
+                    (command.to_string(), false)
+                }
+            } else {
+                tracing::debug!(
+                    command = %command,
+                    "RTK binary not found, running command as-is"
+                );
+                (command.to_string(), false)
+            }
+        } else {
+            tracing::debug!(
+                command = %command,
+                "RTK is disabled, running command as-is"
+            );
+            (command.to_string(), false)
+        };
+
+        tracing::info!("Executing command in {:?}: {}", cwd, final_command);
 
         let output = match container_root {
             Some(container_root) => {
-                run_container_command(&container_root, &cwd, command, &options).await?
+                run_container_command(&container_root, &cwd, &final_command, &options).await?
             }
-            None => run_host_command(&cwd, command, &options).await?,
+            None => run_host_command(&cwd, &final_command, &options).await?,
         };
 
+        let original_stdout_len = output.stdout.len();
         let stdout = sanitize_output(&output.stdout);
         let stderr = sanitize_output(&output.stderr);
         let exit_code = output.status.code().unwrap_or(-1);
 
         tracing::debug!(
             "Command completed: exit={}, stdout_len={}, stderr_len={}",
+            exit_code,
+            stdout.len(),
+            stderr.len()
+        );
+
+        if rtk_used && original_stdout_len > 0 {
+            let compressed_len = stdout.len();
+            RTK_COMMANDS_PROCESSED.fetch_add(1, Ordering::Relaxed);
+            RTK_ORIGINAL_CHARS.fetch_add(original_stdout_len as u64, Ordering::Relaxed);
+            RTK_COMPRESSED_CHARS.fetch_add(compressed_len as u64, Ordering::Relaxed);
+            tracing::info!(
+                original_len = original_stdout_len,
+                compressed_len = compressed_len,
+                savings_pct = if original_stdout_len > 0 {
+                    ((original_stdout_len - compressed_len) * 100 / original_stdout_len) as i32
+                } else {
+                    0
+                },
+                "RTK token savings"
+            );
+        }
             exit_code,
             stdout.len(),
             stderr.len()
