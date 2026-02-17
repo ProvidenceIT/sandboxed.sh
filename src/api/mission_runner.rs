@@ -7835,17 +7835,24 @@ pub async fn run_opencode_turn(
                                                 .or_else(|| props.get("messageId"))
                                                 .or_else(|| props.get("message_id"))
                                                 .and_then(|v| v.as_str());
-                                            // Skip known non-assistant messages.
-                                            // When msg_id is None (no ID in the event),
-                                            // allow text through — consistent with the
-                                            // SSE path in handle_part_update which also
-                                            // bypasses the role check when message_id is
-                                            // absent.
-                                            let is_non_assistant = msg_id
-                                                .and_then(|id| state.message_roles.get(id))
-                                                .map(|role| role != "assistant")
-                                                .unwrap_or(false);
-                                            if !is_non_assistant {
+                                            // Skip non-assistant and unknown-role messages,
+                                            // consistent with the SSE path in handle_part_update
+                                            // (lines 325-336). Three cases when msg_id is present:
+                                            //   - role is known non-assistant → skip
+                                            //   - role is not yet recorded   → skip (avoids
+                                            //     emitting user-message echoes as model text,
+                                            //     which would set text_output_at and trigger
+                                            //     the premature 30s text-idle timeout)
+                                            //   - role is "assistant"        → process text
+                                            // When msg_id is None (no ID in the event), allow
+                                            // text through — same as the SSE path.
+                                            let is_confirmed_assistant = match msg_id {
+                                                Some(id) => state.message_roles.get(id)
+                                                    .map(|role| role == "assistant")
+                                                    .unwrap_or(false), // unknown role → skip
+                                                None => true, // no msg_id → allow through
+                                            };
+                                            if is_confirmed_assistant {
                                                 if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
                                                     final_result = text.to_string();
                                                     let _ = text_output_tx.send(true);
