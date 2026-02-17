@@ -178,6 +178,25 @@ Optional flags:
 Expected behavior per backend:
 - First message triggers tool calls + results
 - Second message is queued (`queued: true`)
+
+## Codex Model Effort Check
+
+To verify Codex `model_effort` end-to-end on dev:
+
+```bash
+# Create mission with Codex effort override
+curl -sS -X POST "https://agent-backend-dev.thomas.md/api/control/missions" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "Codex effort smoke",
+    "backend": "codex",
+    "model_override": "gpt-5-codex",
+    "model_effort": "high"
+  }'
+```
+
+Then load the mission in the dashboard and send a message. The mission metadata
+should show `model_effort: high`.
 - Stream includes `thinking`, `text_delta`, `tool_call`, `tool_result`, and `assistant_message`
 
 ## Troubleshooting

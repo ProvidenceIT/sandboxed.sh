@@ -833,6 +833,9 @@ pub struct MissionRunner {
     /// Model override for this mission (e.g. "zai/glm-5")
     pub model_override: Option<String>,
 
+    /// Model effort override for this mission (e.g. low/medium/high)
+    pub model_effort: Option<String>,
+
     /// Message queue for this mission
     pub queue: VecDeque<QueuedMessage>,
 
@@ -877,6 +880,7 @@ impl MissionRunner {
         session_id: Option<String>,
         config_profile: Option<String>,
         model_override: Option<String>,
+        model_effort: Option<String>,
     ) -> Self {
         Self {
             mission_id,
@@ -887,6 +891,7 @@ impl MissionRunner {
             state: MissionRunState::Queued,
             agent_override,
             model_override,
+            model_effort,
             queue: VecDeque::new(),
             history: Vec::new(),
             cancel_token: None,
@@ -1033,6 +1038,7 @@ impl MissionRunner {
         let workspace_id = self.workspace_id;
         let agent_override = self.agent_override.clone();
         let model_override = self.model_override.clone();
+        let model_effort = self.model_effort.clone();
         let backend_id = self.backend_id.clone();
         let session_id = self.session_id.clone();
         let config_profile = self.config_profile.clone();
@@ -1082,6 +1088,7 @@ impl MissionRunner {
                 backend_id,
                 agent_override,
                 model_override,
+                model_effort,
                 secrets,
                 session_id,
                 config_profile,
@@ -1271,6 +1278,7 @@ async fn run_mission_turn(
     backend_id: String,
     agent_override: Option<String>,
     model_override: Option<String>,
+    model_effort: Option<String>,
     secrets: Option<Arc<SecretsStore>>,
     session_id: Option<String>,
     mission_config_profile: Option<String>,
@@ -1664,6 +1672,7 @@ async fn run_mission_turn(
                 &mission_work_dir,
                 &convo,
                 config.default_model.as_deref(),
+                model_effort.as_deref(),
                 effective_agent.as_deref(),
                 mission_id,
                 events_tx.clone(),
@@ -1753,6 +1762,7 @@ async fn run_mission_turn(
                 &mission_work_dir,
                 &convo,
                 config.default_model.as_deref(),
+                model_effort.as_deref(),
                 effective_agent.as_deref(),
                 mission_id,
                 events_tx.clone(),
@@ -1799,6 +1809,7 @@ async fn run_mission_turn(
                             &mission_work_dir,
                             &convo,
                             config.default_model.as_deref(),
+                            model_effort.as_deref(),
                             effective_agent.as_deref(),
                             mission_id,
                             events_tx.clone(),
@@ -6791,6 +6802,7 @@ pub async fn run_opencode_turn(
     work_dir: &std::path::Path,
     message: &str,
     model: Option<&str>,
+    _model_effort: Option<&str>,
     agent: Option<&str>,
     mission_id: Uuid,
     events_tx: broadcast::Sender<AgentEvent>,
@@ -9162,6 +9174,7 @@ pub async fn run_codex_turn(
     mission_work_dir: &std::path::Path,
     user_message: &str,
     model: Option<&str>,
+    model_effort: Option<&str>,
     agent: Option<&str>,
     mission_id: Uuid,
     events_tx: broadcast::Sender<AgentEvent>,
@@ -9174,9 +9187,28 @@ pub async fn run_codex_turn(
     use crate::backend::events::ExecutionEvent;
     use crate::backend::{Backend, SessionConfig};
 
+    let model = model.map(str::trim).filter(|m| !m.is_empty());
+    let model_effort = model_effort.map(str::trim).filter(|m| !m.is_empty());
+    let resolved_model: Option<String> = match model {
+        // Keep older saved mission overrides working even if the account cannot access these.
+        Some("gpt-5.3-codex") | Some("gpt-5.3-codex-spark") => {
+            tracing::warn!(
+                mission_id = %mission_id,
+                requested_model = ?model,
+                fallback_model = "gpt-5-codex",
+                "Remapping unavailable Codex model to fallback"
+            );
+            Some("gpt-5-codex".to_string())
+        }
+        Some(m) => Some(m.to_string()),
+        None => None,
+    };
+
     tracing::info!(
         mission_id = %mission_id,
-        model = ?model,
+        requested_model = ?model,
+        resolved_model = ?resolved_model,
+        model_effort = ?model_effort,
         agent = ?agent,
         "Starting Codex turn"
     );
@@ -9230,6 +9262,7 @@ pub async fn run_codex_turn(
 
     let codex_config = crate::backend::codex::client::CodexConfig {
         cli_path,
+        model_effort: model_effort.map(|s| s.to_string()),
         ..Default::default()
     };
 
@@ -9241,7 +9274,7 @@ pub async fn run_codex_turn(
         .create_session(SessionConfig {
             directory: mission_work_dir.to_string_lossy().to_string(),
             title: Some(format!("Mission {}", mission_id)),
-            model: model.map(|s| s.to_string()),
+            model: resolved_model.clone(),
             agent: agent.map(|s| s.to_string()),
         })
         .await
@@ -9370,7 +9403,7 @@ pub async fn run_codex_turn(
         );
     }
 
-    let final_message = if let Some(err) = error_message {
+    let mut final_message = if let Some(err) = error_message {
         err
     } else if !assistant_message.is_empty() {
         assistant_message
@@ -9379,6 +9412,14 @@ pub async fn run_codex_turn(
     } else {
         "No response from Codex".to_string()
     };
+
+    let lower_final = final_message.to_lowercase();
+    if lower_final.contains("does not exist or you do not have access")
+        || lower_final.contains("model_not_found")
+    {
+        final_message
+            .push_str("\n\nTry model `gpt-5-codex` or `gpt-5.1-codex` for Codex missions.");
+    }
 
     let mut result = if success {
         AgentResult::success(final_message, 0) // TODO: Calculate cost from Codex usage
@@ -9403,7 +9444,7 @@ pub async fn run_codex_turn(
         AgentResult::failure(final_message, 0).with_terminal_reason(reason)
     };
 
-    if let Some(m) = model {
+    if let Some(m) = resolved_model.as_deref() {
         result = result.with_model(m.to_string());
     }
 

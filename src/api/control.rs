@@ -805,6 +805,8 @@ pub enum ControlCommand {
         agent: Option<String>,
         /// Optional model override (provider/model)
         model_override: Option<String>,
+        /// Optional model effort override (e.g. low/medium/high)
+        model_effort: Option<String>,
         /// Backend to use for this mission ("opencode" or "claudecode")
         backend: Option<String>,
         /// Config profile to use for this mission
@@ -1429,6 +1431,8 @@ pub struct CreateMissionRequest {
     pub agent: Option<String>,
     /// Optional model override (provider/model) - deprecated, use config_profile instead
     pub model_override: Option<String>,
+    /// Optional model effort override (supports: low, medium, high)
+    pub model_effort: Option<String>,
     /// Config profile to use for this mission (overrides workspace's default profile)
     pub config_profile: Option<String>,
     /// Backend to use for this mission ("opencode" or "claudecode")
@@ -1440,22 +1444,33 @@ pub async fn create_mission(
     Extension(user): Extension<AuthUser>,
     body: Option<Json<CreateMissionRequest>>,
 ) -> Result<Json<Mission>, (StatusCode, String)> {
+    fn normalize_model_effort(raw: &str) -> Option<String> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "low" => Some("low".to_string()),
+            "medium" => Some("medium".to_string()),
+            "high" => Some("high".to_string()),
+            _ => None,
+        }
+    }
+
     let (tx, rx) = oneshot::channel();
 
-    let (title, workspace_id, agent, model_override, config_profile, mut backend) = body
-        .map(|b| {
+    let (title, workspace_id, agent, model_override, model_effort, config_profile, mut backend) =
+        body.map(|b| {
             (
                 b.title.clone(),
                 b.workspace_id,
                 b.agent.clone(),
                 b.model_override.clone(),
+                b.model_effort.clone(),
                 b.config_profile.clone(),
                 b.backend.clone(),
             )
         })
-        .unwrap_or((None, None, None, None, None, None));
+        .unwrap_or((None, None, None, None, None, None, None));
 
     let mut model_override = model_override;
+    let mut model_effort = model_effort;
     if let Some(value) = backend.as_ref() {
         if value.trim().is_empty() {
             backend = None;
@@ -1466,12 +1481,30 @@ pub async fn create_mission(
             model_override = None;
         }
     }
+    if let Some(value) = model_effort.as_ref() {
+        if value.trim().is_empty() {
+            model_effort = None;
+        } else {
+            model_effort = normalize_model_effort(value);
+            if model_effort.is_none() {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "Invalid model_effort. Supported values: low, medium, high".to_string(),
+                ));
+            }
+        }
+    }
 
     // If no backend specified, use the default from registry
     // This needs to happen BEFORE agent validation so we validate against the correct backend
     if backend.is_none() {
         let registry = state.backend_registry.read().await;
         backend = Some(registry.default_id().to_string());
+    }
+
+    // Model effort is currently supported for Codex missions.
+    if backend.as_deref() != Some("codex") {
+        model_effort = None;
     }
 
     // Normalize model override based on backend expectations.
@@ -1560,6 +1593,7 @@ pub async fn create_mission(
             workspace_id,
             agent,
             model_override,
+            model_effort,
             backend,
             config_profile: effective_config_profile,
             respond: tx,
@@ -3198,7 +3232,7 @@ async fn control_actor_loop(
 
     // Helper to create a new mission
     async fn create_new_mission(mission_store: &Arc<dyn MissionStore>) -> Result<Mission, String> {
-        create_new_mission_with_title(mission_store, None, None, None, None, None, None).await
+        create_new_mission_with_title(mission_store, None, None, None, None, None, None, None).await
     }
 
     // Helper to create a new mission with title
@@ -3208,6 +3242,7 @@ async fn control_actor_loop(
         workspace_id: Option<Uuid>,
         agent: Option<&str>,
         model_override: Option<&str>,
+        model_effort: Option<&str>,
         backend: Option<&str>,
         config_profile: Option<&str>,
     ) -> Result<Mission, String> {
@@ -3217,6 +3252,7 @@ async fn control_actor_loop(
                 workspace_id,
                 agent,
                 model_override,
+                model_effort,
                 backend,
                 config_profile,
             )
@@ -3525,6 +3561,7 @@ async fn control_actor_loop(
                                                 mission.session_id.clone(),
                                                 mission.config_profile.clone(),
                                                 mission.model_override.clone(),
+                                                mission.model_effort.clone(),
                                             );
                                             // Load existing history
                                             for entry in &mission.history {
@@ -3772,7 +3809,7 @@ async fn control_actor_loop(
                                 // Use the mission ID that was captured when message was queued
                                 // This prevents race conditions where current_mission changes between queueing and execution
                                 let mission_id = msg_target_mid;
-                                let (workspace_id, model_override, mission_agent, backend_id, session_id, mission_config_profile) = if let Some(mid) = mission_id {
+                                let (workspace_id, model_override, model_effort, mission_agent, backend_id, session_id, mission_config_profile) = if let Some(mid) = mission_id {
                                     match mission_store.get_mission(mid).await {
                                         Ok(Some(mission)) => {
                                             // Activate mission: if pending, interrupted, blocked, completed, or failed, update status to active
@@ -3802,6 +3839,7 @@ async fn control_actor_loop(
                                             (
                                                 Some(mission.workspace_id),
                                                 mission.model_override.clone(),
+                                                mission.model_effort.clone(),
                                                 mission.agent.clone(),
                                                 Some(mission.backend.clone()),
                                                 mission.session_id.clone(),
@@ -3813,7 +3851,7 @@ async fn control_actor_loop(
                                                 "Mission {} not found while resolving workspace",
                                                 mid
                                             );
-                                            (None, None, None, None, None, None)
+                                            (None, None, None, None, None, None, None)
                                         }
                                         Err(e) => {
                                             tracing::warn!(
@@ -3821,11 +3859,11 @@ async fn control_actor_loop(
                                                 mid,
                                                 e
                                             );
-                                            (None, None, None, None, None, None)
+                                            (None, None, None, None, None, None, None)
                                         }
                                     }
                                 } else {
-                                    (None, None, None, None, None, None)
+                                    (None, None, None, None, None, None, None)
                                 };
                                 // Per-message agent overrides mission agent
                                 let agent_override = per_msg_agent.or(mission_agent);
@@ -3855,6 +3893,7 @@ async fn control_actor_loop(
                                         workspace_id,
                                         backend_id,
                                         model_override,
+                                        model_effort,
                                         agent_override,
                                         session_id,
                                         false, // force_session_resume: regular message, not a resume
@@ -3931,7 +3970,7 @@ async fn control_actor_loop(
                             }
                         }
                     }
-                    ControlCommand::CreateMission { title, workspace_id, agent, model_override, backend, config_profile, respond } => {
+                    ControlCommand::CreateMission { title, workspace_id, agent, model_override, model_effort, backend, config_profile, respond } => {
                         // First persist current mission history
                         persist_mission_history(
                             &mission_store,
@@ -3947,6 +3986,7 @@ async fn control_actor_loop(
                             workspace_id,
                             agent.as_deref(),
                             model_override.as_deref(),
+                            model_effort.as_deref(),
                             backend.as_deref(),
                             config_profile.as_deref(),
                         )
@@ -4036,6 +4076,7 @@ async fn control_actor_loop(
                                 mission.session_id.clone(),
                                 mission.config_profile.clone(),
                                 mission.model_override.clone(),
+                                mission.model_effort.clone(),
                             );
 
                             // Load existing history into runner to preserve conversation context
@@ -4262,6 +4303,7 @@ async fn control_actor_loop(
                                         let workspace_id = Some(mission.workspace_id);
                                         let backend_id = Some(mission.backend.clone());
                                         let model_override = mission.model_override.clone();
+                                        let model_effort = mission.model_effort.clone();
                                         // Resume uses mission agent (no per-message override for resumes)
                                         let agent_override = mission.agent.clone();
                                         let session_id = mission.session_id.clone();
@@ -4293,6 +4335,7 @@ async fn control_actor_loop(
                                                 workspace_id,
                                                 backend_id,
                                                 model_override,
+                                                model_effort,
                                                 agent_override,
                                                 session_id,
                                                 true, // force_session_resume: this is a resume operation
@@ -4880,11 +4923,12 @@ async fn control_actor_loop(
                     // Use the mission ID that was captured when message was queued
                     // This prevents race conditions where current_mission changes between queueing and execution
                     let mission_id = msg_target_mid;
-                    let (workspace_id, model_override, mission_agent, backend_id, session_id, mission_config_profile) = if let Some(mid) = mission_id {
+                    let (workspace_id, model_override, model_effort, mission_agent, backend_id, session_id, mission_config_profile) = if let Some(mid) = mission_id {
                         match mission_store.get_mission(mid).await {
                             Ok(Some(mission)) => (
                                 Some(mission.workspace_id),
                                 mission.model_override.clone(),
+                                mission.model_effort.clone(),
                                 mission.agent.clone(),
                                 Some(mission.backend.clone()),
                                 mission.session_id.clone(),
@@ -4895,7 +4939,7 @@ async fn control_actor_loop(
                                     "Mission {} not found while resolving workspace",
                                     mid
                                 );
-                                (None, None, None, None, None, None)
+                                (None, None, None, None, None, None, None)
                             }
                             Err(e) => {
                                 tracing::warn!(
@@ -4903,11 +4947,11 @@ async fn control_actor_loop(
                                     mid,
                                     e
                                 );
-                                (None, None, None, None, None, None)
+                                (None, None, None, None, None, None, None)
                             }
                         }
                     } else {
-                        (None, None, None, None, None, None)
+                        (None, None, None, None, None, None, None)
                     };
                     // Per-message agent overrides mission agent
                     let agent_override = per_msg_agent.or(mission_agent);
@@ -4936,6 +4980,7 @@ async fn control_actor_loop(
                             workspace_id,
                             backend_id,
                             model_override,
+                            model_effort,
                             agent_override,
                             session_id,
                             false, // force_session_resume: continuation turn, not a resume
@@ -5502,6 +5547,7 @@ async fn run_single_control_turn(
     workspace_id: Option<Uuid>,
     backend_id: Option<String>,
     model_override: Option<String>,
+    model_effort: Option<String>,
     agent_override: Option<String>,
     session_id: Option<String>,
     force_session_resume: bool,
@@ -5516,6 +5562,7 @@ async fn run_single_control_turn(
     };
     let effective_config_profile = mission_config_profile.or(workspace_config_profile);
     let requested_model = model_override;
+    let requested_model_effort = model_effort;
     if let Some(ref model) = requested_model {
         config.default_model = Some(model.clone());
     } else if is_claudecode && config.default_model.is_none() {
@@ -5807,6 +5854,7 @@ async fn run_single_control_turn(
                 requested_model
                     .as_deref()
                     .or(config.default_model.as_deref()),
+                requested_model_effort.as_deref(),
                 config.opencode_agent.as_deref(),
                 mid,
                 events_tx.clone(),
@@ -5834,6 +5882,7 @@ async fn run_single_control_turn(
                 &ctx.working_dir,
                 &user_message,
                 config.default_model.as_deref(),
+                requested_model_effort.as_deref(),
                 config.opencode_agent.as_deref(),
                 mid,
                 events_tx.clone(),

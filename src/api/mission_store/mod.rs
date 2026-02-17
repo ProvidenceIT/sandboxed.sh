@@ -39,6 +39,9 @@ pub struct Mission {
     /// Optional model override (provider/model)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_override: Option<String>,
+    /// Optional model effort override (e.g. low/medium/high)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_effort: Option<String>,
     /// Backend to use for this mission ("opencode" or "claudecode")
     #[serde(default = "default_backend")]
     pub backend: String,
@@ -270,6 +273,7 @@ pub trait MissionStore: Send + Sync {
         workspace_id: Option<Uuid>,
         agent: Option<&str>,
         model_override: Option<&str>,
+        model_effort: Option<&str>,
         backend: Option<&str>,
         config_profile: Option<&str>,
     ) -> Result<Mission, String>;
@@ -521,7 +525,7 @@ mod tests {
         let store = InMemoryMissionStore::new();
 
         let mission = store
-            .create_mission(Some("Test Mission"), None, None, None, None, None)
+            .create_mission(Some("Test Mission"), None, None, None, None, None, None)
             .await
             .expect("Failed to create mission");
 
@@ -541,7 +545,7 @@ mod tests {
 
         // Create a pending mission
         let mission = store
-            .create_mission(Some("Pending Mission"), None, None, None, None, None)
+            .create_mission(Some("Pending Mission"), None, None, None, None, None, None)
             .await
             .expect("Failed to create mission");
 
@@ -566,7 +570,7 @@ mod tests {
 
         // Create a pending mission
         let mission = store
-            .create_mission(Some("Test Mission"), None, None, None, None, None)
+            .create_mission(Some("Test Mission"), None, None, None, None, None, None)
             .await
             .expect("Failed to create mission");
 
@@ -613,12 +617,12 @@ mod tests {
 
         // Create two missions
         let pending_mission = store
-            .create_mission(Some("Pending"), None, None, None, None, None)
+            .create_mission(Some("Pending"), None, None, None, None, None, None)
             .await
             .expect("Failed to create pending mission");
 
         let active_mission = store
-            .create_mission(Some("Will be Active"), None, None, None, None, None)
+            .create_mission(Some("Will be Active"), None, None, None, None, None, None)
             .await
             .expect("Failed to create mission");
 

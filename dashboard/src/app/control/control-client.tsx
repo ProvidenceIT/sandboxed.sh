@@ -4235,6 +4235,7 @@ export default function ControlClient() {
     workspaceId?: string;
     agent?: string;
     modelOverride?: string;
+    modelEffort?: "low" | "medium" | "high";
     configProfile?: string;
     backend?: string;
     openInNewTab?: boolean;
@@ -4245,6 +4246,7 @@ export default function ControlClient() {
         workspaceId: options?.workspaceId,
         agent: options?.agent,
         modelOverride: options?.modelOverride,
+        modelEffort: options?.modelEffort,
         configProfile: options?.configProfile,
         backend: options?.backend,
       });
@@ -5769,6 +5771,7 @@ export default function ControlClient() {
               agent: activeMission.agent,
               backend: activeMission.backend,
               modelOverride: activeMission.model_override,
+              modelEffort: activeMission.model_effort,
             } : undefined}
           />
 
@@ -6099,6 +6102,14 @@ export default function ControlClient() {
                           <span className="text-white/40">Model override</span>
                           <span className="font-mono text-[11px] text-indigo-400 truncate max-w-[160px]" title={activeMission.model_override}>
                             {activeMission.model_override}
+                          </span>
+                        </div>
+                      )}
+                      {activeMission.model_effort && (
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-white/40">Model effort</span>
+                          <span className="font-mono text-[11px] text-amber-300 truncate max-w-[160px]" title={activeMission.model_effort}>
+                            {activeMission.model_effort}
                           </span>
                         </div>
                       )}

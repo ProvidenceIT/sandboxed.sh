@@ -13,6 +13,7 @@ export interface NewMissionDialogOptions {
   agent?: string;
   /** @deprecated Use workspace config profiles instead */
   modelOverride?: string;
+  modelEffort?: 'low' | 'medium' | 'high';
   configProfile?: string;
   backend?: string;
   /** Whether the mission will be opened in a new tab (skip local state updates) */
@@ -29,6 +30,7 @@ export interface InitialMissionValues {
   agent?: string;
   backend?: string;
   modelOverride?: string;
+  modelEffort?: 'low' | 'medium' | 'high';
 }
 
 interface NewMissionDialogProps {
@@ -107,6 +109,7 @@ export function NewMissionDialog({
   // Combined value: "backend:agent" or empty for default
   const [selectedAgentValue, setSelectedAgentValue] = useState('');
   const [modelOverride, setModelOverride] = useState('');
+  const [modelEffort, setModelEffort] = useState<'low' | 'medium' | 'high' | ''>('');
   const [submitting, setSubmitting] = useState(false);
   const [defaultSet, setDefaultSet] = useState(false);
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -389,6 +392,9 @@ export function NewMissionDialog({
     if (initialValues?.modelOverride) {
       setModelOverride(initialValues.modelOverride);
     }
+    if (initialValues?.modelEffort) {
+      setModelEffort(initialValues.modelEffort);
+    }
 
     // Try to use initialValues for agent (from current mission)
     if (initialValues?.backend && initialValues?.agent) {
@@ -454,6 +460,9 @@ export function NewMissionDialog({
     if (selectedBackend === 'amp' && modelOverride) {
       setModelOverride('');
     }
+    if (selectedBackend !== 'codex' && modelEffort) {
+      setModelEffort('');
+    }
     // When switching backends, clear model override if current value isn't valid for the new backend
     if (prevBackendRef.current !== null && prevBackendRef.current !== selectedBackend && modelOverride) {
       const isValidForNewBackend = modelOptions.some(opt => opt.value === modelOverride);
@@ -462,12 +471,13 @@ export function NewMissionDialog({
       }
     }
     prevBackendRef.current = selectedBackend;
-  }, [selectedBackend, modelOverride, modelOptions]);
+  }, [selectedBackend, modelOverride, modelEffort, modelOptions]);
 
   const resetForm = () => {
     setNewMissionWorkspace('');
     setSelectedAgentValue('');
     setModelOverride('');
+    setModelEffort('');
     setDefaultSet(false);
   };
 
@@ -500,11 +510,14 @@ export function NewMissionDialog({
           : trimmedModel;
     const modelOverrideValue =
       selectedBackend === 'amp' || !normalizedModel ? undefined : normalizedModel;
+    const modelEffortValue =
+      selectedBackend === 'codex' && modelEffort ? modelEffort : undefined;
     return {
       workspaceId: newMissionWorkspace || undefined,
       agent: parsed?.agent || undefined,
       backend: parsed?.backend || 'claudecode',
       modelOverride: modelOverrideValue,
+      modelEffort: modelEffortValue,
       configProfile: workspaceProfile || undefined,
     };
   };
@@ -703,10 +716,29 @@ export function NewMissionDialog({
                 {selectedBackend === 'amp'
                   ? 'Amp ignores model overrides.'
                   : selectedBackend === 'opencode'
-                    ? 'Use provider/model format (e.g., openai/gpt-5.3-codex).'
-                    : 'Use the raw model ID (e.g., gpt-5.3-codex or claude-opus-4-6).'}
+                    ? 'Use provider/model format (e.g., openai/gpt-5-codex).'
+                    : 'Use the raw model ID (e.g., gpt-5-codex or claude-opus-4-6).'}
               </p>
             </div>
+
+            {selectedBackend === 'codex' && (
+              <div>
+                <label className="block text-xs text-white/50 mb-1.5">Model effort (optional)</label>
+                <select
+                  value={modelEffort}
+                  onChange={(e) => setModelEffort(e.target.value as 'low' | 'medium' | 'high' | '')}
+                  className="w-full rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2.5 text-sm text-white focus:border-indigo-500/50 focus:outline-none [&>option]:bg-slate-800 [&>option]:text-white"
+                >
+                  <option value="">Default effort</option>
+                  <option value="low">Low</option>
+                  <option value="medium">Medium</option>
+                  <option value="high">High</option>
+                </select>
+                <p className="text-xs text-white/30 mt-1.5">
+                  Passed to Codex as reasoning effort.
+                </p>
+              </div>
+            )}
 
             {/* Action buttons */}
             <div className="flex gap-2 pt-1">

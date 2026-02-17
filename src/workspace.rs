@@ -1319,8 +1319,7 @@ async fn write_rtk_hook_if_enabled(
     }
 
     // For container workspaces, copy the RTK binary from host into the container
-    let is_container =
-        workspace_type == WorkspaceType::Container && nspawn::nspawn_available();
+    let is_container = workspace_type == WorkspaceType::Container && nspawn::nspawn_available();
     if is_container {
         if let Some(host_rtk) = rtk_binary_path_on_host() {
             let dest_dir = workspace_root.join("usr").join("local").join("bin");
@@ -1337,10 +1336,8 @@ async fn write_rtk_hook_if_enabled(
                     #[cfg(unix)]
                     {
                         use std::os::unix::fs::PermissionsExt;
-                        let _ = std::fs::set_permissions(
-                            &dest,
-                            std::fs::Permissions::from_mode(0o755),
-                        );
+                        let _ =
+                            std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755));
                     }
                     tracing::info!(
                         dest = %dest.display(),

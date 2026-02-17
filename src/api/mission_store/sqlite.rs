@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS missions (
     workspace_name TEXT,
     agent TEXT,
     model_override TEXT,
+    model_effort TEXT,
     backend TEXT NOT NULL DEFAULT 'opencode',
     config_profile TEXT,
     created_at TEXT NOT NULL,
@@ -416,6 +417,19 @@ impl SqliteMissionStore {
                 .map_err(|e| format!("Failed to add config_profile column: {}", e))?;
         }
 
+        // Check if 'model_effort' column exists in missions table
+        let has_model_effort_column: bool = conn
+            .prepare("SELECT 1 FROM pragma_table_info('missions') WHERE name = 'model_effort'")
+            .map_err(|e| format!("Failed to check for model_effort column: {}", e))?
+            .exists([])
+            .map_err(|e| format!("Failed to query table info: {}", e))?;
+
+        if !has_model_effort_column {
+            tracing::info!("Running migration: adding 'model_effort' column to missions table");
+            conn.execute("ALTER TABLE missions ADD COLUMN model_effort TEXT", [])
+                .map_err(|e| format!("Failed to add model_effort column: {}", e))?;
+        }
+
         // Migrate automations table to new schema
         Self::migrate_automations_table(conn)?;
         Self::ensure_automation_indexes(conn)?;
@@ -637,6 +651,7 @@ impl MissionStore for SqliteMissionStore {
             let mut stmt = conn
                 .prepare(
                     "SELECT id, status, title, workspace_id, workspace_name, agent, model_override,
+                            model_effort,
                             created_at, updated_at, interrupted_at, resumable, desktop_sessions,
                             COALESCE(backend, 'opencode') as backend, session_id, terminal_reason,
                             config_profile
@@ -651,11 +666,11 @@ impl MissionStore for SqliteMissionStore {
                     let id_str: String = row.get(0)?;
                     let status_str: String = row.get(1)?;
                     let workspace_id_str: String = row.get(3)?;
-                    let desktop_sessions_json: Option<String> = row.get(11)?;
-                    let backend: String = row.get(12)?;
-                    let session_id: Option<String> = row.get(13)?;
-                    let terminal_reason: Option<String> = row.get(14)?;
-                    let config_profile: Option<String> = row.get(15)?;
+                    let desktop_sessions_json: Option<String> = row.get(12)?;
+                    let backend: String = row.get(13)?;
+                    let session_id: Option<String> = row.get(14)?;
+                    let terminal_reason: Option<String> = row.get(15)?;
+                    let config_profile: Option<String> = row.get(16)?;
 
                     Ok(Mission {
                         id: Uuid::parse_str(&id_str).unwrap_or_default(),
@@ -666,13 +681,14 @@ impl MissionStore for SqliteMissionStore {
                         workspace_name: row.get(4)?,
                         agent: row.get(5)?,
                         model_override: row.get(6)?,
+                        model_effort: row.get(7)?,
                         backend,
                         config_profile,
                         history: vec![], // Loaded separately if needed
-                        created_at: row.get(7)?,
-                        updated_at: row.get(8)?,
-                        interrupted_at: row.get(9)?,
-                        resumable: row.get::<_, i32>(10)? != 0,
+                        created_at: row.get(8)?,
+                        updated_at: row.get(9)?,
+                        interrupted_at: row.get(10)?,
+                        resumable: row.get::<_, i32>(11)? != 0,
                         desktop_sessions: desktop_sessions_json
                             .and_then(|s| serde_json::from_str(&s).ok())
                             .unwrap_or_default(),
@@ -701,6 +717,7 @@ impl MissionStore for SqliteMissionStore {
             let mut stmt = conn
                 .prepare(
                     "SELECT id, status, title, workspace_id, workspace_name, agent, model_override,
+                            model_effort,
                             created_at, updated_at, interrupted_at, resumable, desktop_sessions,
                             COALESCE(backend, 'opencode') as backend, session_id, terminal_reason,
                             config_profile
@@ -713,11 +730,11 @@ impl MissionStore for SqliteMissionStore {
                     let id_str: String = row.get(0)?;
                     let status_str: String = row.get(1)?;
                     let workspace_id_str: String = row.get(3)?;
-                    let desktop_sessions_json: Option<String> = row.get(11)?;
-                    let backend: String = row.get(12)?;
-                    let session_id: Option<String> = row.get(13)?;
-                    let terminal_reason: Option<String> = row.get(14)?;
-                    let config_profile: Option<String> = row.get(15)?;
+                    let desktop_sessions_json: Option<String> = row.get(12)?;
+                    let backend: String = row.get(13)?;
+                    let session_id: Option<String> = row.get(14)?;
+                    let terminal_reason: Option<String> = row.get(15)?;
+                    let config_profile: Option<String> = row.get(16)?;
 
                     Ok(Mission {
                         id: Uuid::parse_str(&id_str).unwrap_or_default(),
@@ -728,13 +745,14 @@ impl MissionStore for SqliteMissionStore {
                         workspace_name: row.get(4)?,
                         agent: row.get(5)?,
                         model_override: row.get(6)?,
+                        model_effort: row.get(7)?,
                         backend,
                         config_profile,
                         history: vec![],
-                        created_at: row.get(7)?,
-                        updated_at: row.get(8)?,
-                        interrupted_at: row.get(9)?,
-                        resumable: row.get::<_, i32>(10)? != 0,
+                        created_at: row.get(8)?,
+                        updated_at: row.get(9)?,
+                        interrupted_at: row.get(10)?,
+                        resumable: row.get::<_, i32>(11)? != 0,
                         desktop_sessions: desktop_sessions_json
                             .and_then(|s| serde_json::from_str(&s).ok())
                             .unwrap_or_default(),
@@ -796,6 +814,7 @@ impl MissionStore for SqliteMissionStore {
         workspace_id: Option<Uuid>,
         agent: Option<&str>,
         model_override: Option<&str>,
+        model_effort: Option<&str>,
         backend: Option<&str>,
         config_profile: Option<&str>,
     ) -> Result<Mission, String> {
@@ -815,6 +834,7 @@ impl MissionStore for SqliteMissionStore {
             workspace_name: None,
             agent: agent.map(|s| s.to_string()),
             model_override: model_override.map(|s| s.to_string()),
+            model_effort: model_effort.map(|s| s.to_string()),
             backend: backend.clone(),
             config_profile: config_profile.map(|s| s.to_string()),
             history: vec![],
@@ -831,8 +851,8 @@ impl MissionStore for SqliteMissionStore {
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
             conn.execute(
-                "INSERT INTO missions (id, status, title, workspace_id, agent, model_override, backend, config_profile, created_at, updated_at, resumable, session_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                "INSERT INTO missions (id, status, title, workspace_id, agent, model_override, model_effort, backend, config_profile, created_at, updated_at, resumable, session_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 params![
                     m.id.to_string(),
                     status_to_string(m.status),
@@ -840,6 +860,7 @@ impl MissionStore for SqliteMissionStore {
                     m.workspace_id.to_string(),
                     m.agent,
                     m.model_override,
+                    m.model_effort,
                     m.backend,
                     m.config_profile,
                     m.created_at,
@@ -1128,6 +1149,7 @@ impl MissionStore for SqliteMissionStore {
                         workspace_name: row.get(4)?,
                         agent: row.get(5)?,
                         model_override: row.get(6)?,
+                        model_effort: None, // Not needed for stale mission checks
                         backend,
                         config_profile: None, // Not needed for stale mission checks
                         history: vec![],
@@ -1184,6 +1206,7 @@ impl MissionStore for SqliteMissionStore {
                         workspace_name: row.get(4)?,
                         agent: row.get(5)?,
                         model_override: row.get(6)?,
+                        model_effort: None, // Not needed for active mission checks
                         backend,
                         config_profile: None, // Not needed for active mission checks
                         history: vec![],
