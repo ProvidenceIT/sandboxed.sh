@@ -9168,6 +9168,14 @@ impl From<&MissionRunner> for RunningMissionInfo {
     }
 }
 
+fn remap_legacy_codex_model(model: Option<&str>) -> Option<String> {
+    match model {
+        Some("gpt-5.3-codex") | Some("gpt-5.3-codex-spark") => Some("gpt-5-codex".to_string()),
+        Some(m) => Some(m.to_string()),
+        None => None,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn run_codex_turn(
     workspace: &Workspace,
@@ -9189,20 +9197,15 @@ pub async fn run_codex_turn(
 
     let model = model.map(str::trim).filter(|m| !m.is_empty());
     let model_effort = model_effort.map(str::trim).filter(|m| !m.is_empty());
-    let resolved_model: Option<String> = match model {
-        // Keep older saved mission overrides working even if the account cannot access these.
-        Some("gpt-5.3-codex") | Some("gpt-5.3-codex-spark") => {
-            tracing::warn!(
-                mission_id = %mission_id,
-                requested_model = ?model,
-                fallback_model = "gpt-5-codex",
-                "Remapping unavailable Codex model to fallback"
-            );
-            Some("gpt-5-codex".to_string())
-        }
-        Some(m) => Some(m.to_string()),
-        None => None,
-    };
+    let resolved_model: Option<String> = remap_legacy_codex_model(model);
+    if resolved_model.as_deref() != model {
+        tracing::warn!(
+            mission_id = %mission_id,
+            requested_model = ?model,
+            fallback_model = "gpt-5-codex",
+            "Remapping unavailable Codex model to fallback"
+        );
+    }
 
     tracing::info!(
         mission_id = %mission_id,
@@ -9594,7 +9597,7 @@ fn cleanup_old_debug_files(
 
 #[cfg(test)]
 mod tests {
-    use super::sync_opencode_agent_config;
+    use super::{remap_legacy_codex_model, sync_opencode_agent_config};
     use std::fs;
 
     #[test]
@@ -9682,5 +9685,26 @@ mod tests {
 
         assert_eq!(prometheus_model, "openai/gpt-4o");
         assert_eq!(sisyphus_model, "openai/gpt-4o-mini");
+    }
+
+    #[test]
+    fn remap_legacy_codex_model_maps_deprecated_model_ids() {
+        assert_eq!(
+            remap_legacy_codex_model(Some("gpt-5.3-codex")),
+            Some("gpt-5-codex".to_string())
+        );
+        assert_eq!(
+            remap_legacy_codex_model(Some("gpt-5.3-codex-spark")),
+            Some("gpt-5-codex".to_string())
+        );
+    }
+
+    #[test]
+    fn remap_legacy_codex_model_keeps_supported_or_empty_model_ids() {
+        assert_eq!(
+            remap_legacy_codex_model(Some("gpt-5-codex")),
+            Some("gpt-5-codex".to_string())
+        );
+        assert_eq!(remap_legacy_codex_model(None), None);
     }
 }

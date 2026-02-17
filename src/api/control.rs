@@ -1439,20 +1439,33 @@ pub struct CreateMissionRequest {
     pub backend: Option<String>,
 }
 
+fn normalize_model_effort(raw: &str) -> Option<String> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "low" => Some("low".to_string()),
+        "medium" => Some("medium".to_string()),
+        "high" => Some("high".to_string()),
+        _ => None,
+    }
+}
+
+fn normalize_model_override_for_backend(backend: Option<&str>, raw_model: &str) -> Option<String> {
+    let trimmed = raw_model.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if backend != Some("opencode") {
+        if let Some((_, model_id)) = trimmed.split_once('/') {
+            return Some(model_id.to_string());
+        }
+    }
+    Some(trimmed.to_string())
+}
+
 pub async fn create_mission(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthUser>,
     body: Option<Json<CreateMissionRequest>>,
 ) -> Result<Json<Mission>, (StatusCode, String)> {
-    fn normalize_model_effort(raw: &str) -> Option<String> {
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "low" => Some("low".to_string()),
-            "medium" => Some("medium".to_string()),
-            "high" => Some("high".to_string()),
-            _ => None,
-        }
-    }
-
     let (tx, rx) = oneshot::channel();
 
     let (title, workspace_id, agent, model_override, model_effort, config_profile, mut backend) =
@@ -1510,18 +1523,7 @@ pub async fn create_mission(
     // Normalize model override based on backend expectations.
     // OpenCode expects provider/model; Claude Code and Codex expect raw model IDs.
     if let Some(ref raw_model) = model_override {
-        let trimmed = raw_model.trim();
-        if trimmed.is_empty() {
-            model_override = None;
-        } else if backend.as_deref() != Some("opencode") {
-            if let Some((_, model_id)) = trimmed.split_once('/') {
-                model_override = Some(model_id.to_string());
-            } else {
-                model_override = Some(trimmed.to_string());
-            }
-        } else {
-            model_override = Some(trimmed.to_string());
-        }
+        model_override = normalize_model_override_for_backend(backend.as_deref(), raw_model);
     }
 
     // Resolve the effective config profile:
@@ -6635,6 +6637,46 @@ And the report:
         // Missing path attribute
         let tags = parse_rich_tags(r#"<image alt="no path" />"#);
         assert!(tags.is_empty());
+    }
+
+    #[test]
+    fn test_normalize_model_effort_accepts_supported_values() {
+        assert_eq!(normalize_model_effort("low"), Some("low".to_string()));
+        assert_eq!(
+            normalize_model_effort(" Medium "),
+            Some("medium".to_string())
+        );
+        assert_eq!(normalize_model_effort("HIGH"), Some("high".to_string()));
+    }
+
+    #[test]
+    fn test_normalize_model_effort_rejects_invalid_values() {
+        assert_eq!(normalize_model_effort(""), None);
+        assert_eq!(normalize_model_effort("turbo"), None);
+    }
+
+    #[test]
+    fn test_normalize_model_override_for_backend_keeps_provider_prefix_for_opencode() {
+        assert_eq!(
+            normalize_model_override_for_backend(Some("opencode"), " openai/gpt-5-codex "),
+            Some("openai/gpt-5-codex".to_string())
+        );
+    }
+
+    #[test]
+    fn test_normalize_model_override_for_backend_strips_provider_prefix_for_non_opencode() {
+        assert_eq!(
+            normalize_model_override_for_backend(Some("codex"), "openai/gpt-5-codex"),
+            Some("gpt-5-codex".to_string())
+        );
+        assert_eq!(
+            normalize_model_override_for_backend(Some("claudecode"), "anthropic/claude-opus-4-6"),
+            Some("claude-opus-4-6".to_string())
+        );
+        assert_eq!(
+            normalize_model_override_for_backend(Some("codex"), "   "),
+            None
+        );
     }
 
     #[tokio::test]
