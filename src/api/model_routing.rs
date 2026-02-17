@@ -124,6 +124,13 @@ async fn create_chain(
         ));
     }
 
+    if req.id.starts_with("builtin/") {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Chain IDs starting with 'builtin/' are reserved".to_string(),
+        ));
+    }
+
     if req.entries.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
