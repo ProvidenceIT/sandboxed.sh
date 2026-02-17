@@ -525,3 +525,543 @@ pub fn convert_cli_event(
 
     results
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::collections::HashMap;
+
+    // ── ToolResultContent::to_string_lossy ─────────────────────────
+
+    #[test]
+    fn tool_result_content_text_returns_string() {
+        let content = ToolResultContent::Text("hello world".to_string());
+        assert_eq!(content.to_string_lossy(), "hello world");
+    }
+
+    #[test]
+    fn tool_result_content_structured_text_items_joined() {
+        let content = ToolResultContent::Structured(vec![
+            json!({"type": "text", "text": "line one"}),
+            json!({"type": "text", "text": "line two"}),
+        ]);
+        assert_eq!(content.to_string_lossy(), "line one\nline two");
+    }
+
+    #[test]
+    fn tool_result_content_structured_image_returns_placeholder() {
+        let content = ToolResultContent::Structured(vec![
+            json!({"type": "image", "source": {"data": "base64..."}}),
+        ]);
+        assert_eq!(content.to_string_lossy(), "[image]");
+    }
+
+    #[test]
+    fn tool_result_content_structured_mixed() {
+        let content = ToolResultContent::Structured(vec![
+            json!({"type": "text", "text": "before image"}),
+            json!({"type": "image", "source": {"data": "abc"}}),
+            json!({"type": "text", "text": "after image"}),
+        ]);
+        assert_eq!(
+            content.to_string_lossy(),
+            "before image\n[image]\nafter image"
+        );
+    }
+
+    #[test]
+    fn tool_result_content_structured_empty_vec_falls_back_to_json() {
+        let content = ToolResultContent::Structured(vec![]);
+        // Empty vec has no text/image items, so parts is empty -> JSON serialization
+        assert_eq!(content.to_string_lossy(), "[]");
+    }
+
+    // ── ToolUseResultInfo accessors ────────────────────────────────
+
+    #[test]
+    fn tool_use_result_info_structured_accessors() {
+        let info = ToolUseResultInfo::Structured {
+            stdout: Some("out".to_string()),
+            stderr: Some("err".to_string()),
+            interrupted: Some(true),
+            is_image: None,
+        };
+        assert_eq!(info.stdout(), Some("out"));
+        assert_eq!(info.stderr(), Some("err"));
+        assert_eq!(info.interrupted(), Some(true));
+    }
+
+    #[test]
+    fn tool_use_result_info_text_variant() {
+        let info = ToolUseResultInfo::Text("error msg".to_string());
+        assert_eq!(info.stdout(), None);
+        assert_eq!(info.stderr(), Some("error msg"));
+        assert_eq!(info.interrupted(), None);
+    }
+
+    #[test]
+    fn tool_use_result_info_raw_variant() {
+        let info = ToolUseResultInfo::Raw(json!({"something": "else"}));
+        assert_eq!(info.stdout(), None);
+        assert_eq!(info.stderr(), None);
+        assert_eq!(info.interrupted(), None);
+    }
+
+    // ── McpServerInfo::name ────────────────────────────────────────
+
+    #[test]
+    fn mcp_server_info_object_returns_name() {
+        let info = McpServerInfo::Object {
+            name: "my-server".to_string(),
+            status: "running".to_string(),
+        };
+        assert_eq!(info.name(), "my-server");
+    }
+
+    #[test]
+    fn mcp_server_info_string_returns_string() {
+        let info = McpServerInfo::String("legacy-server".to_string());
+        assert_eq!(info.name(), "legacy-server");
+    }
+
+    // ── ResultEvent::error_message ─────────────────────────────────
+
+    fn make_result_event(
+        result: Option<&str>,
+        error: Option<&str>,
+        message: Option<&str>,
+        errors: Vec<&str>,
+    ) -> ResultEvent {
+        ResultEvent {
+            subtype: "success".to_string(),
+            session_id: "s1".to_string(),
+            result: result.map(|s| s.to_string()),
+            is_error: false,
+            total_cost_usd: None,
+            duration_ms: None,
+            num_turns: None,
+            error: error.map(|s| s.to_string()),
+            message: message.map(|s| s.to_string()),
+            errors: errors.into_iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn error_message_prefers_result_field() {
+        let evt = make_result_event(Some("result text"), Some("error text"), Some("msg"), vec![]);
+        assert_eq!(evt.error_message(), "result text");
+    }
+
+    #[test]
+    fn error_message_falls_back_to_error_field() {
+        let evt = make_result_event(None, Some("error text"), Some("msg"), vec![]);
+        assert_eq!(evt.error_message(), "error text");
+    }
+
+    #[test]
+    fn error_message_falls_back_to_message_field() {
+        let evt = make_result_event(None, None, Some("msg text"), vec![]);
+        assert_eq!(evt.error_message(), "msg text");
+    }
+
+    #[test]
+    fn error_message_falls_back_to_errors_array() {
+        let evt = make_result_event(None, None, None, vec!["first error", "second error"]);
+        assert_eq!(evt.error_message(), "first error");
+    }
+
+    #[test]
+    fn error_message_returns_unknown_when_all_empty() {
+        let evt = make_result_event(None, None, None, vec![]);
+        assert_eq!(evt.error_message(), "Unknown error");
+    }
+
+    #[test]
+    fn error_message_parses_embedded_json() {
+        let evt = make_result_event(
+            Some(r#"402 {"error":{"message":"Payment required"}}"#),
+            None,
+            None,
+            vec![],
+        );
+        assert_eq!(evt.error_message(), "Payment required");
+    }
+
+    #[test]
+    fn error_message_skips_empty_strings_in_priority() {
+        // result is empty string -> skip; error is empty -> skip; message has content
+        let evt = make_result_event(Some(""), Some(""), Some("fallback msg"), vec![]);
+        assert_eq!(evt.error_message(), "fallback msg");
+    }
+
+    // ── convert_cli_event ──────────────────────────────────────────
+
+    #[test]
+    fn convert_system_event_produces_nothing() {
+        let event: CliEvent = serde_json::from_value(json!({
+            "type": "system",
+            "subtype": "init",
+            "session_id": "s1",
+            "tools": [],
+            "mcp_servers": []
+        }))
+        .unwrap();
+        let mut pending = HashMap::new();
+        let results = convert_cli_event(event, &mut pending);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn convert_stream_content_block_delta_text_produces_text_delta() {
+        let event: CliEvent = serde_json::from_value(json!({
+            "type": "stream_event",
+            "session_id": "s1",
+            "event": {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {
+                    "type": "text_delta",
+                    "text": "hello"
+                }
+            }
+        }))
+        .unwrap();
+        let mut pending = HashMap::new();
+        let results = convert_cli_event(event, &mut pending);
+        assert_eq!(results.len(), 1);
+        match &results[0] {
+            ExecutionEvent::TextDelta { content } => assert_eq!(content, "hello"),
+            other => panic!("Expected TextDelta, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn convert_stream_content_block_delta_thinking_produces_thinking() {
+        let event: CliEvent = serde_json::from_value(json!({
+            "type": "stream_event",
+            "session_id": "s1",
+            "event": {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {
+                    "type": "thinking_delta",
+                    "thinking": "I need to think"
+                }
+            }
+        }))
+        .unwrap();
+        let mut pending = HashMap::new();
+        let results = convert_cli_event(event, &mut pending);
+        assert_eq!(results.len(), 1);
+        match &results[0] {
+            ExecutionEvent::Thinking { content } => assert_eq!(content, "I need to think"),
+            other => panic!("Expected Thinking, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn convert_stream_content_block_delta_empty_text_produces_nothing() {
+        let event: CliEvent = serde_json::from_value(json!({
+            "type": "stream_event",
+            "session_id": "s1",
+            "event": {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {
+                    "type": "text_delta",
+                    "text": ""
+                }
+            }
+        }))
+        .unwrap();
+        let mut pending = HashMap::new();
+        let results = convert_cli_event(event, &mut pending);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn convert_stream_content_block_start_tool_use_tracks_pending() {
+        let event: CliEvent = serde_json::from_value(json!({
+            "type": "stream_event",
+            "session_id": "s1",
+            "event": {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": "tu_123",
+                    "name": "Bash"
+                }
+            }
+        }))
+        .unwrap();
+        let mut pending = HashMap::new();
+        let results = convert_cli_event(event, &mut pending);
+        assert!(results.is_empty());
+        assert_eq!(pending.get("tu_123").unwrap(), "Bash");
+    }
+
+    #[test]
+    fn convert_assistant_text_produces_thinking() {
+        let event: CliEvent = serde_json::from_value(json!({
+            "type": "assistant",
+            "session_id": "s1",
+            "message": {
+                "content": [
+                    {"type": "text", "text": "I will run a command"}
+                ]
+            }
+        }))
+        .unwrap();
+        let mut pending = HashMap::new();
+        let results = convert_cli_event(event, &mut pending);
+        assert_eq!(results.len(), 1);
+        match &results[0] {
+            ExecutionEvent::Thinking { content } => {
+                assert_eq!(content, "I will run a command")
+            }
+            other => panic!("Expected Thinking, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn convert_assistant_tool_use_produces_tool_call_and_tracks_pending() {
+        let event: CliEvent = serde_json::from_value(json!({
+            "type": "assistant",
+            "session_id": "s1",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "tu_456",
+                        "name": "Read",
+                        "input": {"path": "/tmp/foo"}
+                    }
+                ]
+            }
+        }))
+        .unwrap();
+        let mut pending = HashMap::new();
+        let results = convert_cli_event(event, &mut pending);
+        assert_eq!(results.len(), 1);
+        match &results[0] {
+            ExecutionEvent::ToolCall { id, name, args } => {
+                assert_eq!(id, "tu_456");
+                assert_eq!(name, "Read");
+                assert_eq!(args, &json!({"path": "/tmp/foo"}));
+            }
+            other => panic!("Expected ToolCall, got {:?}", other),
+        }
+        assert_eq!(pending.get("tu_456").unwrap(), "Read");
+    }
+
+    #[test]
+    fn convert_assistant_thinking_produces_thinking() {
+        let event: CliEvent = serde_json::from_value(json!({
+            "type": "assistant",
+            "session_id": "s1",
+            "message": {
+                "content": [
+                    {"type": "thinking", "thinking": "deep thought"}
+                ]
+            }
+        }))
+        .unwrap();
+        let mut pending = HashMap::new();
+        let results = convert_cli_event(event, &mut pending);
+        assert_eq!(results.len(), 1);
+        match &results[0] {
+            ExecutionEvent::Thinking { content } => assert_eq!(content, "deep thought"),
+            other => panic!("Expected Thinking, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn convert_user_tool_result_looks_up_pending_tool_name() {
+        let event: CliEvent = serde_json::from_value(json!({
+            "type": "user",
+            "session_id": "s1",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "tu_789",
+                        "content": "file contents here",
+                        "is_error": false
+                    }
+                ]
+            }
+        }))
+        .unwrap();
+        let mut pending = HashMap::new();
+        pending.insert("tu_789".to_string(), "Read".to_string());
+        let results = convert_cli_event(event, &mut pending);
+        assert_eq!(results.len(), 1);
+        match &results[0] {
+            ExecutionEvent::ToolResult { id, name, result } => {
+                assert_eq!(id, "tu_789");
+                assert_eq!(name, "Read");
+                assert_eq!(result, &json!("file contents here"));
+            }
+            other => panic!("Expected ToolResult, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn convert_user_tool_result_unknown_tool_use_id() {
+        let event: CliEvent = serde_json::from_value(json!({
+            "type": "user",
+            "session_id": "s1",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "tu_unknown",
+                        "content": "some output",
+                        "is_error": false
+                    }
+                ]
+            }
+        }))
+        .unwrap();
+        let mut pending = HashMap::new();
+        let results = convert_cli_event(event, &mut pending);
+        assert_eq!(results.len(), 1);
+        match &results[0] {
+            ExecutionEvent::ToolResult { name, .. } => assert_eq!(name, "unknown"),
+            other => panic!("Expected ToolResult, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn convert_user_tool_result_with_tool_use_result_builds_json() {
+        let event: CliEvent = serde_json::from_value(json!({
+            "type": "user",
+            "session_id": "s1",
+            "tool_use_result": {
+                "stdout": "standard out",
+                "stderr": "standard err",
+                "interrupted": false
+            },
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "tu_900",
+                        "content": "command output",
+                        "is_error": false
+                    }
+                ]
+            }
+        }))
+        .unwrap();
+        let mut pending = HashMap::new();
+        pending.insert("tu_900".to_string(), "Bash".to_string());
+        let results = convert_cli_event(event, &mut pending);
+        assert_eq!(results.len(), 1);
+        match &results[0] {
+            ExecutionEvent::ToolResult { id, name, result } => {
+                assert_eq!(id, "tu_900");
+                assert_eq!(name, "Bash");
+                assert_eq!(result["content"], "command output");
+                assert_eq!(result["stdout"], "standard out");
+                assert_eq!(result["stderr"], "standard err");
+                assert_eq!(result["is_error"], false);
+                assert_eq!(result["interrupted"], false);
+            }
+            other => panic!("Expected ToolResult, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn convert_result_with_is_error_produces_error() {
+        let event: CliEvent = serde_json::from_value(json!({
+            "type": "result",
+            "subtype": "success",
+            "session_id": "s1",
+            "is_error": true,
+            "result": "Something went wrong"
+        }))
+        .unwrap();
+        let mut pending = HashMap::new();
+        let results = convert_cli_event(event, &mut pending);
+        assert_eq!(results.len(), 1);
+        match &results[0] {
+            ExecutionEvent::Error { message } => assert_eq!(message, "Something went wrong"),
+            other => panic!("Expected Error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn convert_result_with_error_subtype_produces_error() {
+        let event: CliEvent = serde_json::from_value(json!({
+            "type": "result",
+            "subtype": "error",
+            "session_id": "s1",
+            "is_error": false,
+            "error": "bad things"
+        }))
+        .unwrap();
+        let mut pending = HashMap::new();
+        let results = convert_cli_event(event, &mut pending);
+        assert_eq!(results.len(), 1);
+        match &results[0] {
+            ExecutionEvent::Error { message } => assert_eq!(message, "bad things"),
+            other => panic!("Expected Error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn convert_result_with_api_error_in_result_text() {
+        let event: CliEvent = serde_json::from_value(json!({
+            "type": "result",
+            "subtype": "success",
+            "session_id": "s1",
+            "is_error": false,
+            "result": "API Error: rate limited"
+        }))
+        .unwrap();
+        let mut pending = HashMap::new();
+        let results = convert_cli_event(event, &mut pending);
+        assert_eq!(results.len(), 1);
+        match &results[0] {
+            ExecutionEvent::Error { message } => assert_eq!(message, "API Error: rate limited"),
+            other => panic!("Expected Error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn convert_result_with_overloaded_error() {
+        let event: CliEvent = serde_json::from_value(json!({
+            "type": "result",
+            "subtype": "success",
+            "session_id": "s1",
+            "is_error": false,
+            "result": "{\"type\":\"overloaded_error\",\"message\":\"overloaded\"}"
+        }))
+        .unwrap();
+        let mut pending = HashMap::new();
+        let results = convert_cli_event(event, &mut pending);
+        assert_eq!(results.len(), 1);
+        match &results[0] {
+            ExecutionEvent::Error { message } => assert_eq!(message, "overloaded"),
+            other => panic!("Expected Error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn convert_successful_result_produces_no_events() {
+        let event: CliEvent = serde_json::from_value(json!({
+            "type": "result",
+            "subtype": "success",
+            "session_id": "s1",
+            "is_error": false,
+            "result": "All done"
+        }))
+        .unwrap();
+        let mut pending = HashMap::new();
+        let results = convert_cli_event(event, &mut pending);
+        assert!(results.is_empty());
+    }
+}
