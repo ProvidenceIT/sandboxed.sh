@@ -584,9 +584,14 @@ async fn chat_completions(
             Err(e) => {
                 tracing::warn!(
                     provider = %entry.provider_id,
+                    account_id = %entry.account_id,
                     error = %e,
                     "Failed to read upstream response body"
                 );
+                state
+                    .health_tracker
+                    .record_failure(entry.account_id, CooldownReason::ServerError, None)
+                    .await;
                 server_error_count += 1;
                 continue;
             }
