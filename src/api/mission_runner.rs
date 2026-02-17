@@ -1112,10 +1112,15 @@ impl MissionRunner {
                         self.explicitly_completed = true;
                     }
 
-                    // Add to history
+                    // Add to history — only include assistant output when it's
+                    // a real model response.  Error messages (e.g. "Claude Code
+                    // produced no output", "OpenCode CLI exited with status: ...")
+                    // would contaminate context for future turns.
                     self.history.push(("user".to_string(), result.1.clone()));
-                    self.history
-                        .push(("assistant".to_string(), result.2.output.clone()));
+                    if result.2.success && !result.2.output.trim().is_empty() {
+                        self.history
+                            .push(("assistant".to_string(), result.2.output.clone()));
+                    }
 
                     // Log warning if deliverables are missing and task ended
                     if !self.explicitly_completed && !self.deliverables.deliverables.is_empty() {
@@ -1145,11 +1150,13 @@ impl MissionRunner {
     }
 
     /// Check if the running task is finished (non-blocking).
+    /// Returns false when no task handle exists (idle/unstarted runners)
+    /// to avoid unnecessary poll_completion calls every 100ms.
     pub fn check_finished(&self) -> bool {
         self.running_handle
             .as_ref()
             .map(|h| h.is_finished())
-            .unwrap_or(true)
+            .unwrap_or(false)
     }
 }
 
@@ -1575,7 +1582,7 @@ async fn run_mission_turn(
                     secrets.clone(),
                     &config.working_dir,
                     effective_sid.as_deref(),
-                    is_continuation,
+                    false, // Fresh session — don't pass is_continuation=true
                     Some(Arc::clone(&tool_hub)),
                     Some(Arc::clone(&status)),
                     None, // override_auth
