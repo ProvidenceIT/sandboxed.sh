@@ -32,6 +32,8 @@ pub fn routes() -> Router<Arc<super::routes::AppState>> {
         .route("/health", get(list_health))
         .route("/health/:account_id", get(get_account_health))
         .route("/health/:account_id/clear", post(clear_cooldown))
+        // Observability
+        .route("/events", get(list_fallback_events))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -330,4 +332,17 @@ async fn clear_cooldown(
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid UUID".to_string()))?;
     state.health_tracker.clear_cooldown(uuid).await;
     Ok(Json(serde_json::json!({ "cleared": true })))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Observability
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// GET /api/model-routing/events - List recent fallback events.
+///
+/// Returns the most recent fallback events (up to 50 by default).
+async fn list_fallback_events(
+    State(state): State<Arc<super::routes::AppState>>,
+) -> Json<Vec<crate::provider_health::FallbackEvent>> {
+    Json(state.health_tracker.get_recent_events(50).await)
 }

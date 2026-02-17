@@ -11,10 +11,12 @@ import {
   resolveModelChain,
   listAccountHealth,
   clearAccountCooldown,
+  listFallbackEvents,
   type ModelChain,
   type ChainEntry,
   type ResolvedEntry,
   type AccountHealthSnapshot,
+  type FallbackEvent,
 } from '@/lib/api/model-routing';
 import {
   GitBranch,
@@ -31,6 +33,8 @@ import {
   GripVertical,
   ArrowDown,
   ArrowUp,
+  Activity,
+  ArrowRight,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -396,12 +400,19 @@ function HealthDashboard({
           </span>
           <div className="flex-1 flex items-center gap-3 text-[10px] text-white/30">
             <span>{h.total_requests} req</span>
-            <span className="text-emerald-400/60">{h.total_successes} ok</span>
+            <span className="text-emerald-400/60">
+              {h.total_requests > 0
+                ? `${Math.round((h.total_successes / h.total_requests) * 100)}%`
+                : '—'}
+            </span>
             {h.total_rate_limits > 0 && (
               <span className="text-amber-400/60">{h.total_rate_limits} rate-limited</span>
             )}
             {h.total_errors > 0 && (
-              <span className="text-red-400/60">{h.total_errors} errors</span>
+              <span className="text-red-400/60">{h.total_errors} err</span>
+            )}
+            {h.avg_latency_ms != null && (
+              <span className="text-blue-400/60">{Math.round(h.avg_latency_ms)}ms</span>
             )}
           </div>
           {!h.is_healthy && (
@@ -458,6 +469,14 @@ export default function ModelRoutingPage() {
   } = useSWR('account-health', listAccountHealth, {
     revalidateOnFocus: false,
     refreshInterval: 10000, // Poll health every 10s
+  });
+
+  const {
+    data: events = [],
+    isLoading: eventsLoading,
+  } = useSWR('fallback-events', listFallbackEvents, {
+    revalidateOnFocus: false,
+    refreshInterval: 10000, // Poll events every 10s
   });
 
   const handleCreate = async () => {
@@ -694,6 +713,90 @@ export default function ModelRoutingPage() {
             onClear={handleClearCooldown}
             isLoading={healthLoading}
           />
+        </div>
+
+        {/* ── Fallback Events Section ── */}
+        <div className="rounded-xl bg-white/[0.02] border border-white/[0.04] p-5 mt-6">
+          <div className="flex items-center gap-3 mb-4">
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-blue-500/10">
+              <Activity className="h-5 w-5 text-blue-400" />
+            </div>
+            <div>
+              <h2 className="text-sm font-medium text-white">Recent Fallback Events</h2>
+              <p className="text-xs text-white/40">
+                Provider failovers during chain resolution
+              </p>
+            </div>
+            {events.length > 0 && (
+              <span className="ml-auto text-xs text-white/30">
+                {events.length} events
+              </span>
+            )}
+          </div>
+
+          {eventsLoading ? (
+            <div className="flex items-center justify-center py-8">
+              <Loader className="h-5 w-5 animate-spin text-white/40" />
+            </div>
+          ) : events.length === 0 ? (
+            <div className="text-center py-6">
+              <p className="text-xs text-white/30">
+                No fallback events yet. Events appear when the proxy fails over to the next provider.
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-1.5">
+              {[...events].reverse().map((evt, i) => (
+                <div
+                  key={i}
+                  className="flex items-center gap-2 rounded-lg border border-white/[0.06] bg-white/[0.01] px-3 py-1.5 text-[10px]"
+                >
+                  <span className={cn(
+                    'h-1.5 w-1.5 rounded-full flex-shrink-0',
+                    evt.reason === 'rate_limit' ? 'bg-amber-400' :
+                    evt.reason === 'auth_error' ? 'bg-red-400' :
+                    evt.reason === 'overloaded' ? 'bg-orange-400' :
+                    'bg-gray-400'
+                  )} />
+                  <span className="text-white/40 flex-shrink-0 w-16">
+                    {new Date(evt.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                  </span>
+                  <span className="text-white/60 font-mono">
+                    {evt.from_provider}
+                  </span>
+                  {evt.to_provider && (
+                    <>
+                      <ArrowRight className="h-2.5 w-2.5 text-white/20 flex-shrink-0" />
+                      <span className="text-emerald-400/80 font-mono">
+                        {evt.to_provider}
+                      </span>
+                    </>
+                  )}
+                  {!evt.to_provider && (
+                    <span className="text-red-400/60">exhausted</span>
+                  )}
+                  <span className={cn(
+                    'flex-shrink-0',
+                    evt.reason === 'rate_limit' ? 'text-amber-400/60' :
+                    evt.reason === 'auth_error' ? 'text-red-400/60' :
+                    'text-white/30'
+                  )}>
+                    {evt.reason.replace('_', ' ')}
+                  </span>
+                  {evt.latency_ms != null && (
+                    <span className="text-blue-400/50 flex-shrink-0">
+                      {evt.latency_ms}ms
+                    </span>
+                  )}
+                  {evt.cooldown_secs != null && (
+                    <span className="text-white/20 flex-shrink-0">
+                      cd {Math.round(evt.cooldown_secs)}s
+                    </span>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       </div>
     </div>

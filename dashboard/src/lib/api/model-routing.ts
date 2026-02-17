@@ -41,6 +41,18 @@ export interface AccountHealthSnapshot {
   total_successes: number;
   total_rate_limits: number;
   total_errors: number;
+  avg_latency_ms: number | null;
+}
+
+export interface FallbackEvent {
+  timestamp: string;
+  chain_id: string;
+  from_provider: string;
+  from_account_id: string;
+  reason: string;
+  cooldown_secs: number | null;
+  to_provider: string | null;
+  latency_ms: number | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -114,4 +126,12 @@ export async function clearAccountCooldown(accountId: string): Promise<{ cleared
     undefined,
     "Failed to clear account cooldown"
   );
+}
+
+// ---------------------------------------------------------------------------
+// Observability
+// ---------------------------------------------------------------------------
+
+export async function listFallbackEvents(): Promise<FallbackEvent[]> {
+  return apiGet("/api/model-routing/events", "Failed to list fallback events");
 }

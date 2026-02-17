@@ -259,6 +259,7 @@ async fn chat_completions(
     let mut rate_limit_count: u32 = 0;
     let mut client_error_count: u32 = 0;
     let mut server_error_count: u32 = 0;
+    let mut pending_fallback_events: Vec<crate::provider_health::FallbackEvent> = Vec::new();
 
     for entry in &entries {
         let provider_type = match ProviderType::from_id(&entry.provider_id) {
@@ -320,13 +321,16 @@ async fn chat_completions(
             "Trying upstream provider"
         );
 
+        let request_start = std::time::Instant::now();
         let upstream_resp = match upstream_req.send().await {
             Ok(resp) => resp,
             Err(e) => {
+                let elapsed_ms = request_start.elapsed().as_millis() as u64;
                 tracing::warn!(
                     provider = %entry.provider_id,
                     account_id = %entry.account_id,
                     error = %e,
+                    latency_ms = elapsed_ms,
                     "Upstream request failed (network error)"
                 );
                 let reason = if e.is_timeout() {
@@ -338,6 +342,16 @@ async fn chat_completions(
                     .health_tracker
                     .record_failure(entry.account_id, reason, None)
                     .await;
+                pending_fallback_events.push(crate::provider_health::FallbackEvent {
+                    timestamp: chrono::Utc::now(),
+                    chain_id: chain_id.clone(),
+                    from_provider: entry.provider_id.clone(),
+                    from_account_id: entry.account_id,
+                    reason,
+                    cooldown_secs: None,
+                    to_provider: None,
+                    latency_ms: Some(elapsed_ms),
+                });
                 server_error_count += 1;
                 continue;
             }
@@ -347,6 +361,7 @@ async fn chat_completions(
 
         // Pre-stream error handling: 429, 529, 5xx → cooldown + try next
         if status == StatusCode::TOO_MANY_REQUESTS || status.as_u16() == 529 {
+            let elapsed_ms = request_start.elapsed().as_millis() as u64;
             let retry_after = parse_rate_limit_headers(upstream_resp.headers(), provider_type);
             let reason = if status.as_u16() == 529 {
                 CooldownReason::Overloaded
@@ -364,11 +379,22 @@ async fn chat_completions(
                 .health_tracker
                 .record_failure(entry.account_id, reason, retry_after)
                 .await;
+            pending_fallback_events.push(crate::provider_health::FallbackEvent {
+                timestamp: chrono::Utc::now(),
+                chain_id: chain_id.clone(),
+                from_provider: entry.provider_id.clone(),
+                from_account_id: entry.account_id,
+                reason,
+                cooldown_secs: retry_after.map(|d| d.as_secs_f64()),
+                to_provider: None,
+                latency_ms: Some(elapsed_ms),
+            });
             rate_limit_count += 1;
             continue;
         }
 
         if status.is_server_error() {
+            let elapsed_ms = request_start.elapsed().as_millis() as u64;
             tracing::warn!(
                 provider = %entry.provider_id,
                 account_id = %entry.account_id,
@@ -379,12 +405,23 @@ async fn chat_completions(
                 .health_tracker
                 .record_failure(entry.account_id, CooldownReason::ServerError, None)
                 .await;
+            pending_fallback_events.push(crate::provider_health::FallbackEvent {
+                timestamp: chrono::Utc::now(),
+                chain_id: chain_id.clone(),
+                from_provider: entry.provider_id.clone(),
+                from_account_id: entry.account_id,
+                reason: CooldownReason::ServerError,
+                cooldown_secs: None,
+                to_provider: None,
+                latency_ms: Some(elapsed_ms),
+            });
             server_error_count += 1;
             continue;
         }
 
         // Auth errors (401/403) — bad credentials, try next account
         if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+            let elapsed_ms = request_start.elapsed().as_millis() as u64;
             tracing::warn!(
                 provider = %entry.provider_id,
                 account_id = %entry.account_id,
@@ -395,6 +432,16 @@ async fn chat_completions(
                 .health_tracker
                 .record_failure(entry.account_id, CooldownReason::AuthError, None)
                 .await;
+            pending_fallback_events.push(crate::provider_health::FallbackEvent {
+                timestamp: chrono::Utc::now(),
+                chain_id: chain_id.clone(),
+                from_provider: entry.provider_id.clone(),
+                from_account_id: entry.account_id,
+                reason: CooldownReason::AuthError,
+                cooldown_secs: None,
+                to_provider: None,
+                latency_ms: Some(elapsed_ms),
+            });
             client_error_count += 1;
             continue;
         }
@@ -475,15 +522,27 @@ async fn chat_completions(
             }
 
             if peek_failed {
+                let elapsed_ms = request_start.elapsed().as_millis() as u64;
                 state
                     .health_tracker
                     .record_failure(entry.account_id, CooldownReason::ServerError, None)
                     .await;
+                pending_fallback_events.push(crate::provider_health::FallbackEvent {
+                    timestamp: chrono::Utc::now(),
+                    chain_id: chain_id.clone(),
+                    from_provider: entry.provider_id.clone(),
+                    from_account_id: entry.account_id,
+                    reason: CooldownReason::ServerError,
+                    cooldown_secs: None,
+                    to_provider: None,
+                    latency_ms: Some(elapsed_ms),
+                });
                 server_error_count += 1;
                 continue;
             }
 
             if is_stream_error {
+                let elapsed_ms = request_start.elapsed().as_millis() as u64;
                 // Parse the peeked data to classify the error type.
                 let reason = std::str::from_utf8(&peek_buf)
                     .ok()
@@ -507,12 +566,40 @@ async fn chat_completions(
                     .health_tracker
                     .record_failure(entry.account_id, reason, None)
                     .await;
+                pending_fallback_events.push(crate::provider_health::FallbackEvent {
+                    timestamp: chrono::Utc::now(),
+                    chain_id: chain_id.clone(),
+                    from_provider: entry.provider_id.clone(),
+                    from_account_id: entry.account_id,
+                    reason,
+                    cooldown_secs: None,
+                    to_provider: None,
+                    latency_ms: Some(elapsed_ms),
+                });
                 match reason {
                     CooldownReason::RateLimit | CooldownReason::Overloaded => rate_limit_count += 1,
                     CooldownReason::AuthError => client_error_count += 1,
                     _ => server_error_count += 1,
                 }
                 continue;
+            }
+
+            // Record time-to-first-token latency (time until we confirmed a valid stream)
+            let ttft_ms = request_start.elapsed().as_millis() as u64;
+            state
+                .health_tracker
+                .record_latency(entry.account_id, ttft_ms)
+                .await;
+
+            // Set to_provider on any pending fallback events from this request
+            let success_provider = entry.provider_id.clone();
+            for evt in &mut pending_fallback_events {
+                if evt.to_provider.is_none() {
+                    evt.to_provider = Some(success_provider.clone());
+                }
+            }
+            for evt in pending_fallback_events {
+                state.health_tracker.record_fallback_event(evt).await;
             }
 
             // Don't record success yet — defer until the stream finishes
@@ -549,6 +636,7 @@ async fn chat_completions(
                         if v.get("type").and_then(|t| t.as_str()) == Some("error")
                             || v.get("error").is_some()
                         {
+                            let elapsed_ms = request_start.elapsed().as_millis() as u64;
                             let reason = classify_embedded_error(&v);
                             tracing::warn!(
                                 provider = %entry.provider_id,
@@ -561,6 +649,16 @@ async fn chat_completions(
                                 .health_tracker
                                 .record_failure(entry.account_id, reason, None)
                                 .await;
+                            pending_fallback_events.push(crate::provider_health::FallbackEvent {
+                                timestamp: chrono::Utc::now(),
+                                chain_id: chain_id.clone(),
+                                from_provider: entry.provider_id.clone(),
+                                from_account_id: entry.account_id,
+                                reason,
+                                cooldown_secs: None,
+                                to_provider: None,
+                                latency_ms: Some(elapsed_ms),
+                            });
                             match reason {
                                 CooldownReason::RateLimit | CooldownReason::Overloaded => {
                                     rate_limit_count += 1
@@ -571,7 +669,24 @@ async fn chat_completions(
                             continue;
                         }
                     }
+                    // Record latency and success
+                    let elapsed_ms = request_start.elapsed().as_millis() as u64;
+                    state
+                        .health_tracker
+                        .record_latency(entry.account_id, elapsed_ms)
+                        .await;
                     state.health_tracker.record_success(entry.account_id).await;
+
+                    // Set to_provider on any pending fallback events
+                    let success_provider = entry.provider_id.clone();
+                    for evt in &mut pending_fallback_events {
+                        if evt.to_provider.is_none() {
+                            evt.to_provider = Some(success_provider.clone());
+                        }
+                    }
+                    for evt in pending_fallback_events {
+                        state.health_tracker.record_fallback_event(evt).await;
+                    }
                 }
                 let mut builder = Response::builder().status(status);
                 if let Some(ct) = response_headers.get(header::CONTENT_TYPE) {
@@ -586,6 +701,7 @@ async fn chat_completions(
                 });
             }
             Err(e) => {
+                let elapsed_ms = request_start.elapsed().as_millis() as u64;
                 tracing::warn!(
                     provider = %entry.provider_id,
                     account_id = %entry.account_id,
@@ -596,13 +712,28 @@ async fn chat_completions(
                     .health_tracker
                     .record_failure(entry.account_id, CooldownReason::ServerError, None)
                     .await;
+                pending_fallback_events.push(crate::provider_health::FallbackEvent {
+                    timestamp: chrono::Utc::now(),
+                    chain_id: chain_id.clone(),
+                    from_provider: entry.provider_id.clone(),
+                    from_account_id: entry.account_id,
+                    reason: CooldownReason::ServerError,
+                    cooldown_secs: None,
+                    to_provider: None,
+                    latency_ms: Some(elapsed_ms),
+                });
                 server_error_count += 1;
                 continue;
             }
         }
     }
 
-    // All entries exhausted — choose status/message based on failure types
+    // All entries exhausted — record pending fallback events (to_provider stays None)
+    for evt in pending_fallback_events {
+        state.health_tracker.record_fallback_event(evt).await;
+    }
+
+    // Choose status/message based on failure types
     tracing::warn!(
         chain = %chain_id,
         total_entries = entries.len(),

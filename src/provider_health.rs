@@ -64,6 +64,10 @@ pub struct AccountHealth {
     pub total_rate_limits: u64,
     /// Total errors (non-rate-limit).
     pub total_errors: u64,
+    /// Sum of all recorded latencies in milliseconds (for computing averages).
+    pub total_latency_ms: u64,
+    /// Number of latency samples recorded.
+    pub latency_samples: u64,
 }
 
 impl Default for AccountHealth {
@@ -77,6 +81,8 @@ impl Default for AccountHealth {
             total_successes: 0,
             total_rate_limits: 0,
             total_errors: 0,
+            total_latency_ms: 0,
+            latency_samples: 0,
         }
     }
 }
@@ -133,6 +139,30 @@ impl BackoffConfig {
     }
 }
 
+/// A single fallback event: when the proxy failed over from one provider to the next.
+#[derive(Debug, Clone, Serialize)]
+pub struct FallbackEvent {
+    /// When this event occurred.
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    /// The chain being resolved.
+    pub chain_id: String,
+    /// Provider that failed.
+    pub from_provider: String,
+    /// Account that failed.
+    pub from_account_id: Uuid,
+    /// Why it failed.
+    pub reason: CooldownReason,
+    /// Cooldown duration set (seconds), if any.
+    pub cooldown_secs: Option<f64>,
+    /// The provider that ultimately succeeded (filled in after chain completes).
+    pub to_provider: Option<String>,
+    /// Request latency in milliseconds until the failure was detected.
+    pub latency_ms: Option<u64>,
+}
+
+/// Maximum number of fallback events to keep in the ring buffer.
+const MAX_FALLBACK_EVENTS: usize = 200;
+
 /// Global health tracker for all provider accounts.
 ///
 /// Thread-safe, shared across the proxy endpoint and all backend runners.
@@ -142,6 +172,8 @@ impl BackoffConfig {
 pub struct ProviderHealthTracker {
     accounts: Arc<RwLock<HashMap<Uuid, AccountHealth>>>,
     backoff_config: BackoffConfig,
+    /// Recent fallback events (ring buffer, newest last).
+    fallback_events: Arc<RwLock<Vec<FallbackEvent>>>,
 }
 
 /// Serializable snapshot of account health for API responses.
@@ -157,6 +189,8 @@ pub struct AccountHealthSnapshot {
     pub total_successes: u64,
     pub total_rate_limits: u64,
     pub total_errors: u64,
+    /// Average latency in milliseconds (None if no samples).
+    pub avg_latency_ms: Option<f64>,
 }
 
 impl ProviderHealthTracker {
@@ -164,6 +198,7 @@ impl ProviderHealthTracker {
         Self {
             accounts: Arc::new(RwLock::new(HashMap::new())),
             backoff_config: BackoffConfig::default(),
+            fallback_events: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
@@ -171,6 +206,7 @@ impl ProviderHealthTracker {
         Self {
             accounts: Arc::new(RwLock::new(HashMap::new())),
             backoff_config,
+            fallback_events: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
@@ -241,22 +277,58 @@ impl ProviderHealthTracker {
         );
     }
 
+    /// Record a latency sample for an account (in milliseconds).
+    pub async fn record_latency(&self, account_id: Uuid, latency_ms: u64) {
+        let mut accounts = self.accounts.write().await;
+        let health = accounts.entry(account_id).or_default();
+        health.total_latency_ms += latency_ms;
+        health.latency_samples += 1;
+    }
+
+    /// Record a fallback event (provider failover).
+    pub async fn record_fallback_event(&self, event: FallbackEvent) {
+        let mut events = self.fallback_events.write().await;
+        events.push(event);
+        // Trim to ring buffer size
+        if events.len() > MAX_FALLBACK_EVENTS {
+            let excess = events.len() - MAX_FALLBACK_EVENTS;
+            events.drain(..excess);
+        }
+    }
+
+    /// Get recent fallback events (newest last).
+    pub async fn get_recent_events(&self, limit: usize) -> Vec<FallbackEvent> {
+        let events = self.fallback_events.read().await;
+        let start = events.len().saturating_sub(limit);
+        events[start..].to_vec()
+    }
+
+    /// Helper to build an `AccountHealthSnapshot` from an `AccountHealth`.
+    fn snapshot(account_id: Uuid, health: &AccountHealth) -> AccountHealthSnapshot {
+        AccountHealthSnapshot {
+            account_id,
+            is_healthy: !health.is_in_cooldown(),
+            cooldown_remaining_secs: health.remaining_cooldown().map(|d| d.as_secs_f64()),
+            consecutive_failures: health.consecutive_failures,
+            last_failure_reason: health.last_failure_reason.as_ref().map(|r| r.to_string()),
+            last_failure_at: health.last_failure_at,
+            total_requests: health.total_requests,
+            total_successes: health.total_successes,
+            total_rate_limits: health.total_rate_limits,
+            total_errors: health.total_errors,
+            avg_latency_ms: if health.latency_samples > 0 {
+                Some(health.total_latency_ms as f64 / health.latency_samples as f64)
+            } else {
+                None
+            },
+        }
+    }
+
     /// Get a snapshot of health state for an account (for API responses).
     pub async fn get_health(&self, account_id: Uuid) -> AccountHealthSnapshot {
         let accounts = self.accounts.read().await;
         match accounts.get(&account_id) {
-            Some(health) => AccountHealthSnapshot {
-                account_id,
-                is_healthy: !health.is_in_cooldown(),
-                cooldown_remaining_secs: health.remaining_cooldown().map(|d| d.as_secs_f64()),
-                consecutive_failures: health.consecutive_failures,
-                last_failure_reason: health.last_failure_reason.as_ref().map(|r| r.to_string()),
-                last_failure_at: health.last_failure_at,
-                total_requests: health.total_requests,
-                total_successes: health.total_successes,
-                total_rate_limits: health.total_rate_limits,
-                total_errors: health.total_errors,
-            },
+            Some(health) => Self::snapshot(account_id, health),
             None => AccountHealthSnapshot {
                 account_id,
                 is_healthy: true,
@@ -268,6 +340,7 @@ impl ProviderHealthTracker {
                 total_successes: 0,
                 total_rate_limits: 0,
                 total_errors: 0,
+                avg_latency_ms: None,
             },
         }
     }
@@ -277,18 +350,7 @@ impl ProviderHealthTracker {
         let accounts = self.accounts.read().await;
         accounts
             .iter()
-            .map(|(&id, health)| AccountHealthSnapshot {
-                account_id: id,
-                is_healthy: !health.is_in_cooldown(),
-                cooldown_remaining_secs: health.remaining_cooldown().map(|d| d.as_secs_f64()),
-                consecutive_failures: health.consecutive_failures,
-                last_failure_reason: health.last_failure_reason.as_ref().map(|r| r.to_string()),
-                last_failure_at: health.last_failure_at,
-                total_requests: health.total_requests,
-                total_successes: health.total_successes,
-                total_rate_limits: health.total_rate_limits,
-                total_errors: health.total_errors,
-            })
+            .map(|(&id, health)| Self::snapshot(id, health))
             .collect()
     }
 
