@@ -3548,9 +3548,28 @@ fn extract_opencode_session_id(output: &str) -> Option<String> {
     None
 }
 
+/// Returns true if the line is an OpenCode runner/status banner (not model output).
+fn is_opencode_banner_line(line: &str) -> bool {
+    let lower = line.to_lowercase();
+    lower.contains("starting opencode server")
+        || lower.contains("opencode server started")
+        || lower.contains("auto-selected port")
+        || lower.contains("using port")
+        || lower.contains("server listening")
+        || lower.contains("sending prompt")
+        || lower.contains("waiting for completion")
+        || lower.contains("all tasks completed")
+        || lower.contains("completed")
+        || lower.contains("session id:")
+        || lower.contains("session:")
+        || lower.contains("event stream did not close")
+        || lower.contains("continuing shutdown")
+        || lower.starts_with("[run]")
+}
+
 fn opencode_output_needs_fallback(output: &str) -> bool {
     let cleaned = strip_ansi_codes(output);
-    let mut lines: Vec<String> = cleaned
+    let lines: Vec<String> = cleaned
         .lines()
         .map(|line| line.trim().to_string())
         .filter(|line| !line.is_empty())
@@ -3560,22 +3579,8 @@ fn opencode_output_needs_fallback(output: &str) -> bool {
         return true;
     }
 
-    for line in lines.drain(..) {
-        let lower = line.to_lowercase();
-        let is_banner = lower.contains("starting opencode server")
-            || lower.contains("opencode server started")
-            || lower.contains("auto-selected port")
-            || lower.contains("server listening")
-            || lower.contains("sending prompt")
-            || lower.contains("waiting for completion")
-            || lower.contains("all tasks completed")
-            || lower.contains("completed")
-            || lower.contains("session id:")
-            || lower.contains("session:")
-            || lower.contains("event stream did not close")
-            || lower.contains("continuing shutdown")
-            || lower.starts_with("[run]");
-        if !is_banner {
+    for line in lines {
+        if !is_opencode_banner_line(&line) {
             return false;
         }
     }
@@ -7870,6 +7875,13 @@ pub async fn run_opencode_turn(
                                 }
                             }
 
+                            // Skip runner banner/status lines so they don't
+                            // pollute the model response (issues #147, #151).
+                            if is_opencode_banner_line(trimmed) {
+                                tracing::debug!(mission_id = %mission_id, line = %trimmed, "Skipping OpenCode banner line");
+                                continue;
+                            }
+
                             final_result.push_str(trimmed);
                             final_result.push('\n');
                             let _ = text_output_tx.send(true);
@@ -7992,7 +8004,12 @@ pub async fn run_opencode_turn(
         had_error = false;
     }
 
-    if had_error && !final_result.trim().is_empty() && sse_error_message.lock().unwrap().is_none() {
+    // Clear had_error when we have real (non-banner) content and no SSE error.
+    // This avoids false failures when the CLI exited non-zero but produced real output.
+    if had_error
+        && !opencode_output_needs_fallback(&final_result)
+        && sse_error_message.lock().unwrap().is_none()
+    {
         had_error = false;
     }
 
@@ -8047,10 +8064,10 @@ pub async fn run_opencode_turn(
         });
     }
 
-    if final_result.trim().is_empty() && !had_error {
+    if !had_error && opencode_output_needs_fallback(&final_result) {
         had_error = true;
         final_result =
-            "OpenCode produced no output. Check CLI installation or authentication.".to_string();
+            "OpenCode produced no assistant output (only runner status lines or empty). The model may not have responded.".to_string();
     }
 
     tracing::info!(
