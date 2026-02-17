@@ -1573,14 +1573,14 @@ async fn run_mission_turn(
             }
 
             // Account rotation: if rate-limited, try alternate Anthropic credentials.
-            // The default resolution may have used CLI creds, OpenCode auth.json,
-            // or ai_providers.json — we don't know which, so we try every
-            // account except: with only 1 account there's nothing to rotate to
-            // (it's the same credential already tried).
+            // The first entry in the list is the highest-priority credential, which
+            // is almost certainly what the initial (override_auth=None) call used.
+            // Skip it to avoid a guaranteed duplicate rate-limit failure.
             if result.terminal_reason == Some(TerminalReason::RateLimited) {
                 let alt_accounts =
                     super::ai_providers::get_all_anthropic_auth_for_claudecode(&config.working_dir);
-                if alt_accounts.len() > 1 {
+                let alt_accounts: Vec<_> = alt_accounts.into_iter().skip(1).collect();
+                if !alt_accounts.is_empty() {
                     tracing::info!(
                         mission_id = %mission_id,
                         total_accounts = alt_accounts.len(),
