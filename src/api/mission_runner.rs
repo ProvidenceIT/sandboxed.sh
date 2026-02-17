@@ -9592,7 +9592,16 @@ fn cleanup_old_debug_files(
 
 #[cfg(test)]
 mod tests {
-    use super::{remap_legacy_codex_model, sync_opencode_agent_config};
+    use super::{
+        build_history_context, extract_part_text, extract_str, extract_thought_line,
+        is_opencode_status_line, is_session_corruption_error, is_tool_call_only_output,
+        parse_opencode_session_token, parse_opencode_stderr_text_part, remap_legacy_codex_model,
+        running_health, stall_severity, strip_ansi_codes, strip_opencode_status_lines,
+        strip_think_tags, sync_opencode_agent_config, MissionHealth, MissionRunState,
+        MissionStallSeverity, STALL_SEVERE_SECS, STALL_WARN_SECS,
+    };
+    use crate::agents::{AgentResult, TerminalReason};
+    use serde_json::json;
     use std::fs;
 
     #[test]
@@ -9813,5 +9822,557 @@ mod tests {
             "\x1b[32mStarting opencode server\x1b[0m\n\x1b[33mAll tasks completed.\x1b[0m";
         let result = strip_opencode_banner_lines(ansi_only);
         assert!(result.trim().is_empty());
+    }
+
+    // ── extract_str tests ─────────────────────────────────────────────
+
+    #[test]
+    fn extract_str_returns_first_matching_key() {
+        let val = json!({"text": "hello", "content": "world"});
+        assert_eq!(extract_str(&val, &["text", "content"]), Some("hello"));
+    }
+
+    #[test]
+    fn extract_str_returns_none_when_no_keys_match() {
+        let val = json!({"foo": "bar"});
+        assert_eq!(extract_str(&val, &["text", "content"]), None);
+    }
+
+    #[test]
+    fn extract_str_skips_non_string_values() {
+        let val = json!({"text": 42, "content": "hello"});
+        assert_eq!(extract_str(&val, &["text", "content"]), Some("hello"));
+    }
+
+    // ── extract_part_text tests ───────────────────────────────────────
+
+    #[test]
+    fn extract_part_text_thinking_type_checks_thinking_key_first() {
+        let val = json!({"thinking": "deep thought", "text": "surface"});
+        assert_eq!(extract_part_text(&val, "thinking"), Some("deep thought"));
+    }
+
+    #[test]
+    fn extract_part_text_thinking_type_falls_back_to_text() {
+        let val = json!({"text": "some text"});
+        assert_eq!(extract_part_text(&val, "reasoning"), Some("some text"));
+    }
+
+    #[test]
+    fn extract_part_text_normal_type_checks_text_first() {
+        let val = json!({"text": "hello", "content": "world"});
+        assert_eq!(extract_part_text(&val, "text"), Some("hello"));
+    }
+
+    #[test]
+    fn extract_part_text_normal_type_falls_back_to_output_text() {
+        let val = json!({"output_text": "result"});
+        assert_eq!(extract_part_text(&val, "message"), Some("result"));
+    }
+
+    #[test]
+    fn extract_part_text_step_types_use_thinking_key_priority() {
+        let val = json!({"reasoning": "step reason"});
+        assert_eq!(extract_part_text(&val, "step-start"), Some("step reason"));
+        assert_eq!(extract_part_text(&val, "step-finish"), Some("step reason"));
+    }
+
+    // ── strip_think_tags tests ────────────────────────────────────────
+
+    #[test]
+    fn strip_think_tags_no_tags_returns_original() {
+        let input = "Hello world, no tags here.";
+        assert_eq!(strip_think_tags(input), input);
+    }
+
+    #[test]
+    fn strip_think_tags_removes_single_block() {
+        let input = "before<think>secret</think>after";
+        assert_eq!(strip_think_tags(input), "beforeafter");
+    }
+
+    #[test]
+    fn strip_think_tags_removes_multiple_blocks() {
+        let input = "a<think>1</think>b<think>2</think>c";
+        assert_eq!(strip_think_tags(input), "abc");
+    }
+
+    #[test]
+    fn strip_think_tags_case_insensitive() {
+        let input = "x<THINK>hidden</THINK>y<Think>also</Think>z";
+        assert_eq!(strip_think_tags(input), "xyz");
+    }
+
+    #[test]
+    fn strip_think_tags_unclosed_tag_drops_rest() {
+        let input = "visible<think>invisible with no close";
+        assert_eq!(strip_think_tags(input), "visible");
+    }
+
+    #[test]
+    fn strip_think_tags_empty_content() {
+        let input = "<think></think>";
+        assert_eq!(strip_think_tags(input), "");
+    }
+
+    // ── extract_thought_line tests ────────────────────────────────────
+
+    #[test]
+    fn extract_thought_line_extracts_thought_prefix() {
+        let input = "thought: I need to check the file\nLet me look at it.";
+        let (thought, remaining) = extract_thought_line(input).unwrap();
+        assert_eq!(thought, "I need to check the file");
+        assert_eq!(remaining, "Let me look at it.");
+    }
+
+    #[test]
+    fn extract_thought_line_extracts_thinking_prefix() {
+        let input = "Thinking: Analyzing the problem\nHere is my answer.";
+        let (thought, remaining) = extract_thought_line(input).unwrap();
+        assert_eq!(thought, "Analyzing the problem");
+        assert_eq!(remaining, "Here is my answer.");
+    }
+
+    #[test]
+    fn extract_thought_line_extracts_thoughts_prefix() {
+        let input = "thoughts: multiple ideas\nLine 2";
+        let (thought, _) = extract_thought_line(input).unwrap();
+        assert_eq!(thought, "multiple ideas");
+    }
+
+    #[test]
+    fn extract_thought_line_returns_none_without_thought() {
+        let input = "Just regular text\nMore text";
+        assert!(extract_thought_line(input).is_none());
+    }
+
+    #[test]
+    fn extract_thought_line_returns_none_for_empty_thought() {
+        let input = "thought: \nsome text after";
+        assert!(extract_thought_line(input).is_none());
+    }
+
+    #[test]
+    fn extract_thought_line_only_first_thought_line_extracted() {
+        let input = "thought: first\nthought: second\nregular text";
+        let (thought, remaining) = extract_thought_line(input).unwrap();
+        assert_eq!(thought, "first");
+        assert!(remaining.contains("thought: second"));
+        assert!(remaining.contains("regular text"));
+    }
+
+    // ── is_opencode_status_line delegation tests ──────────────────────
+
+    #[test]
+    fn is_opencode_status_line_delegates_to_banner_line() {
+        // Verify delegation: status_line matches the same things as banner_line
+        assert!(is_opencode_status_line("Starting OpenCode server..."));
+        assert!(is_opencode_status_line("all tasks completed"));
+        assert!(is_opencode_status_line("session: ses_abc123"));
+        assert!(!is_opencode_status_line("Hello, I am the model."));
+    }
+
+    // ── strip_opencode_status_lines delegation tests ──────────────────
+
+    #[test]
+    fn strip_opencode_status_lines_delegates_to_banner_lines() {
+        let input = "Starting opencode server\nHere is your answer\nall tasks completed";
+        let result = strip_opencode_status_lines(input);
+        assert_eq!(result.trim(), "Here is your answer");
+    }
+
+    // ── strip_ansi_codes tests ────────────────────────────────────────
+
+    #[test]
+    fn strip_ansi_codes_removes_color_codes() {
+        assert_eq!(strip_ansi_codes("\x1b[31mred\x1b[0m"), "red");
+        assert_eq!(
+            strip_ansi_codes("\x1b[1;32mbold green\x1b[0m"),
+            "bold green"
+        );
+    }
+
+    #[test]
+    fn strip_ansi_codes_no_codes_unchanged() {
+        let input = "plain text with no ANSI";
+        assert_eq!(strip_ansi_codes(input), input);
+    }
+
+    #[test]
+    fn strip_ansi_codes_empty_string() {
+        assert_eq!(strip_ansi_codes(""), "");
+    }
+
+    #[test]
+    fn strip_ansi_codes_multiple_codes_in_sequence() {
+        let input = "\x1b[1m\x1b[31mhello\x1b[0m \x1b[32mworld\x1b[0m";
+        assert_eq!(strip_ansi_codes(input), "hello world");
+    }
+
+    // ── is_tool_call_only_output tests ────────────────────────────────
+
+    #[test]
+    fn is_tool_call_only_output_detects_tool_use_type() {
+        let output = r#"{"type":"tool_use","id":"abc","name":"read","input":{}}"#;
+        assert!(is_tool_call_only_output(output));
+    }
+
+    #[test]
+    fn is_tool_call_only_output_detects_function_call_type() {
+        let output = r#"{"type":"function_call","id":"abc","name":"write","input":{}}"#;
+        assert!(is_tool_call_only_output(output));
+    }
+
+    #[test]
+    fn is_tool_call_only_output_detects_name_plus_arguments_shape() {
+        let output = r#"{"name":"read_file","arguments":{"path":"/tmp/test"}}"#;
+        assert!(is_tool_call_only_output(output));
+    }
+
+    #[test]
+    fn is_tool_call_only_output_detects_name_plus_input_shape() {
+        let output = r#"{"name":"read_file","input":{"path":"/tmp/test"}}"#;
+        assert!(is_tool_call_only_output(output));
+    }
+
+    #[test]
+    fn is_tool_call_only_output_false_for_empty() {
+        assert!(!is_tool_call_only_output(""));
+        assert!(!is_tool_call_only_output("   "));
+    }
+
+    #[test]
+    fn is_tool_call_only_output_false_for_real_text() {
+        assert!(!is_tool_call_only_output("Here is the code you asked for."));
+    }
+
+    #[test]
+    fn is_tool_call_only_output_false_for_mixed_content() {
+        let output = r#"{"name":"read","input":{}}\nActual model text here"#;
+        assert!(!is_tool_call_only_output(output));
+    }
+
+    #[test]
+    fn is_tool_call_only_output_ignores_banner_lines() {
+        let output =
+            "Starting opencode server\n{\"type\":\"tool_use\",\"name\":\"read\",\"input\":{}}";
+        assert!(is_tool_call_only_output(output));
+    }
+
+    #[test]
+    fn is_tool_call_only_output_multiple_tool_calls() {
+        let output = "{\"name\":\"a\",\"arguments\":{}}\n{\"name\":\"b\",\"input\":{}}";
+        assert!(is_tool_call_only_output(output));
+    }
+
+    #[test]
+    fn is_tool_call_only_output_json_without_tool_markers() {
+        let output = r#"{"result": "success", "count": 42}"#;
+        assert!(!is_tool_call_only_output(output));
+    }
+
+    // ── stall_severity tests ──────────────────────────────────────────
+
+    #[test]
+    fn stall_severity_none_below_warning_threshold() {
+        assert!(stall_severity(0).is_none());
+        assert!(stall_severity(60).is_none());
+        assert!(stall_severity(STALL_WARN_SECS).is_none());
+    }
+
+    #[test]
+    fn stall_severity_warning_above_warn_threshold() {
+        let result = stall_severity(STALL_WARN_SECS + 1).unwrap();
+        assert!(matches!(result, MissionStallSeverity::Warning));
+    }
+
+    #[test]
+    fn stall_severity_severe_above_severe_threshold() {
+        let result = stall_severity(STALL_SEVERE_SECS + 1).unwrap();
+        assert!(matches!(result, MissionStallSeverity::Severe));
+    }
+
+    #[test]
+    fn stall_severity_at_exact_severe_threshold_is_still_warning() {
+        let result = stall_severity(STALL_SEVERE_SECS).unwrap();
+        assert!(matches!(result, MissionStallSeverity::Warning));
+    }
+
+    // ── running_health tests ──────────────────────────────────────────
+
+    #[test]
+    fn running_health_healthy_when_running_below_threshold() {
+        let health = running_health(MissionRunState::Running, 10);
+        assert!(matches!(health, MissionHealth::Healthy));
+    }
+
+    #[test]
+    fn running_health_stalled_when_running_above_threshold() {
+        let health = running_health(MissionRunState::Running, STALL_WARN_SECS + 1);
+        match health {
+            MissionHealth::Stalled {
+                seconds_since_activity,
+                last_state,
+                severity,
+            } => {
+                assert_eq!(seconds_since_activity, STALL_WARN_SECS + 1);
+                assert_eq!(last_state, "Running");
+                assert!(matches!(severity, MissionStallSeverity::Warning));
+            }
+            other => panic!("Expected Stalled, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn running_health_stalled_when_waiting_for_tool_above_threshold() {
+        let health = running_health(MissionRunState::WaitingForTool, STALL_SEVERE_SECS + 1);
+        match health {
+            MissionHealth::Stalled {
+                last_state,
+                severity,
+                ..
+            } => {
+                assert_eq!(last_state, "WaitingForTool");
+                assert!(matches!(severity, MissionStallSeverity::Severe));
+            }
+            other => panic!("Expected Stalled, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn running_health_healthy_for_queued_state_even_if_stale() {
+        let health = running_health(MissionRunState::Queued, STALL_SEVERE_SECS + 100);
+        assert!(matches!(health, MissionHealth::Healthy));
+    }
+
+    #[test]
+    fn running_health_healthy_for_finished_state() {
+        let health = running_health(MissionRunState::Finished, STALL_SEVERE_SECS + 100);
+        assert!(matches!(health, MissionHealth::Healthy));
+    }
+
+    // ── build_history_context tests ───────────────────────────────────
+
+    #[test]
+    fn build_history_context_formats_entries() {
+        let history = vec![
+            ("user".to_string(), "hello".to_string()),
+            ("assistant".to_string(), "world".to_string()),
+        ];
+        let result = build_history_context(&history, 10000);
+        assert!(result.contains("USER: hello"));
+        assert!(result.contains("ASSISTANT: world"));
+    }
+
+    #[test]
+    fn build_history_context_respects_max_chars() {
+        let history = vec![
+            ("user".to_string(), "first message".to_string()),
+            ("assistant".to_string(), "second message".to_string()),
+            ("user".to_string(), "third message".to_string()),
+        ];
+        // Set max_chars to only allow one or two entries
+        let result = build_history_context(&history, 30);
+        // Should always include the most recent entry
+        assert!(result.contains("USER: third message"));
+    }
+
+    #[test]
+    fn build_history_context_empty_history() {
+        let history: Vec<(String, String)> = vec![];
+        let result = build_history_context(&history, 10000);
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn build_history_context_always_includes_most_recent() {
+        let history = vec![(
+            "user".to_string(),
+            "a very long message that exceeds the max".to_string(),
+        )];
+        let result = build_history_context(&history, 5);
+        // Should still include the only entry even if it exceeds max_chars
+        assert!(result.contains("USER: a very long message"));
+    }
+
+    // ── is_session_corruption_error tests ─────────────────────────────
+
+    #[test]
+    fn is_session_corruption_error_false_for_success() {
+        let result = AgentResult::success("all good", 0);
+        assert!(!is_session_corruption_error(&result));
+    }
+
+    #[test]
+    fn is_session_corruption_error_false_for_non_llm_error() {
+        let result = AgentResult::failure("something failed", 0)
+            .with_terminal_reason(TerminalReason::Stalled);
+        assert!(!is_session_corruption_error(&result));
+    }
+
+    #[test]
+    fn is_session_corruption_error_detects_no_stream_events() {
+        let result = AgentResult::failure(
+            "Claude Code produced no stream events after startup timeout",
+            0,
+        )
+        .with_terminal_reason(TerminalReason::LlmError);
+        assert!(is_session_corruption_error(&result));
+    }
+
+    #[test]
+    fn is_session_corruption_error_detects_tool_use_id_mismatch() {
+        let result = AgentResult::failure("unexpected tool_use_id found in tool_result blocks", 0)
+            .with_terminal_reason(TerminalReason::LlmError);
+        assert!(is_session_corruption_error(&result));
+    }
+
+    #[test]
+    fn is_session_corruption_error_detects_missing_tool_result() {
+        let result =
+            AgentResult::failure("tool_use block must have a corresponding tool_result", 0)
+                .with_terminal_reason(TerminalReason::LlmError);
+        assert!(is_session_corruption_error(&result));
+    }
+
+    #[test]
+    fn is_session_corruption_error_detects_missing_tool_use() {
+        let result =
+            AgentResult::failure("tool_result block must have a corresponding tool_use", 0)
+                .with_terminal_reason(TerminalReason::LlmError);
+        assert!(is_session_corruption_error(&result));
+    }
+
+    #[test]
+    fn is_session_corruption_error_detects_must_have_corresponding() {
+        let result = AgentResult::failure("must have a corresponding tool_use block", 0)
+            .with_terminal_reason(TerminalReason::LlmError);
+        assert!(is_session_corruption_error(&result));
+    }
+
+    #[test]
+    fn is_session_corruption_error_detects_lost_session() {
+        let result = AgentResult::failure("No conversation found with session ID ses_abc", 0)
+            .with_terminal_reason(TerminalReason::LlmError);
+        assert!(is_session_corruption_error(&result));
+    }
+
+    #[test]
+    fn is_session_corruption_error_false_for_other_llm_error() {
+        let result = AgentResult::failure("rate limit exceeded", 0)
+            .with_terminal_reason(TerminalReason::LlmError);
+        assert!(!is_session_corruption_error(&result));
+    }
+
+    // ── parse_opencode_session_token tests ────────────────────────────
+
+    #[test]
+    fn parse_opencode_session_token_ses_prefix() {
+        assert_eq!(
+            parse_opencode_session_token("ses_abc123"),
+            Some("ses_abc123".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_opencode_session_token_ses_prefix_short() {
+        // ses_ prefix is accepted regardless of length
+        assert_eq!(
+            parse_opencode_session_token("ses_a"),
+            Some("ses_a".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_opencode_session_token_long_token_without_prefix() {
+        assert_eq!(
+            parse_opencode_session_token("abcdefgh"),
+            Some("abcdefgh".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_opencode_session_token_short_token_without_prefix_rejected() {
+        assert_eq!(parse_opencode_session_token("abc"), None);
+    }
+
+    #[test]
+    fn parse_opencode_session_token_stops_at_non_alnum_char() {
+        assert_eq!(
+            parse_opencode_session_token("ses_abc!rest"),
+            Some("ses_abc".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_opencode_session_token_allows_hyphens_and_underscores() {
+        assert_eq!(
+            parse_opencode_session_token("ses_abc-def_ghi"),
+            Some("ses_abc-def_ghi".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_opencode_session_token_empty_string() {
+        assert_eq!(parse_opencode_session_token(""), None);
+    }
+
+    // ── parse_opencode_stderr_text_part tests ─────────────────────────
+
+    #[test]
+    fn parse_opencode_stderr_text_part_extracts_text() {
+        let line = r#"some prefix message.part (text): "Hello world""#;
+        assert_eq!(
+            parse_opencode_stderr_text_part(line),
+            Some("Hello world".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_opencode_stderr_text_part_handles_escape_sequences() {
+        let line = r#"message.part (text): "line1\nline2""#;
+        assert_eq!(
+            parse_opencode_stderr_text_part(line),
+            Some("line1\nline2".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_opencode_stderr_text_part_handles_escaped_backslash() {
+        let line = r#"message.part (text): "path\\file""#;
+        assert_eq!(
+            parse_opencode_stderr_text_part(line),
+            Some("path\\file".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_opencode_stderr_text_part_handles_escaped_quotes() {
+        let line = r#"message.part (text): "say \"hello\"""#;
+        assert_eq!(
+            parse_opencode_stderr_text_part(line),
+            Some("say \"hello\"".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_opencode_stderr_text_part_no_marker_returns_none() {
+        let line = "just a regular log line";
+        assert_eq!(parse_opencode_stderr_text_part(line), None);
+    }
+
+    #[test]
+    fn parse_opencode_stderr_text_part_empty_content_returns_none() {
+        let line = r#"message.part (text): """#;
+        assert_eq!(parse_opencode_stderr_text_part(line), None);
+    }
+
+    #[test]
+    fn parse_opencode_stderr_text_part_without_quotes() {
+        let line = "message.part (text): Hello world";
+        assert_eq!(
+            parse_opencode_stderr_text_part(line),
+            Some("Hello world".to_string())
+        );
     }
 }

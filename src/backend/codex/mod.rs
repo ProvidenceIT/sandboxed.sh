@@ -605,4 +605,600 @@ mod tests {
         assert!(!session.id.is_empty());
         assert_eq!(session.directory, "/tmp");
     }
+
+    // ---------------------------------------------------------------
+    // Tests for convert_codex_event
+    // ---------------------------------------------------------------
+
+    use serde_json::json;
+    use std::collections::HashMap;
+
+    #[test]
+    fn convert_codex_event_thread_started_no_events() {
+        let event: CodexEvent = serde_json::from_value(json!({
+            "type": "thread.started",
+            "thread_id": "t1"
+        }))
+        .unwrap();
+        let mut cache = HashMap::new();
+        let events = convert_codex_event(event, &mut cache);
+        assert!(events.is_empty(), "ThreadStarted should produce no events");
+    }
+
+    #[test]
+    fn convert_codex_event_turn_started_no_events() {
+        let event: CodexEvent = serde_json::from_value(json!({
+            "type": "turn.started"
+        }))
+        .unwrap();
+        let mut cache = HashMap::new();
+        let events = convert_codex_event(event, &mut cache);
+        assert!(events.is_empty(), "TurnStarted should produce no events");
+    }
+
+    #[test]
+    fn convert_codex_event_turn_completed_with_summary() {
+        let event: CodexEvent = serde_json::from_value(json!({
+            "type": "turn.completed",
+            "summary": "All tasks done"
+        }))
+        .unwrap();
+        let mut cache = HashMap::new();
+        let events = convert_codex_event(event, &mut cache);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ExecutionEvent::TurnSummary { content } => {
+                assert_eq!(content, "All tasks done");
+            }
+            other => panic!("Expected TurnSummary, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn convert_codex_event_turn_completed_no_summary() {
+        let event: CodexEvent = serde_json::from_value(json!({
+            "type": "turn.completed"
+        }))
+        .unwrap();
+        let mut cache = HashMap::new();
+        let events = convert_codex_event(event, &mut cache);
+        assert!(events.is_empty(), "None summary should produce no events");
+    }
+
+    #[test]
+    fn convert_codex_event_turn_completed_blank_summary() {
+        let event: CodexEvent = serde_json::from_value(json!({
+            "type": "turn.completed",
+            "summary": "   "
+        }))
+        .unwrap();
+        let mut cache = HashMap::new();
+        let events = convert_codex_event(event, &mut cache);
+        assert!(events.is_empty(), "Blank summary should produce no events");
+    }
+
+    #[test]
+    fn convert_codex_event_turn_failed() {
+        let event: CodexEvent = serde_json::from_value(json!({
+            "type": "turn.failed",
+            "error": { "message": "something went wrong" }
+        }))
+        .unwrap();
+        let mut cache = HashMap::new();
+        let events = convert_codex_event(event, &mut cache);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ExecutionEvent::Error { message } => {
+                assert_eq!(message, "something went wrong");
+            }
+            other => panic!("Expected Error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn convert_codex_event_error() {
+        let event: CodexEvent = serde_json::from_value(json!({
+            "type": "error",
+            "message": "fatal error"
+        }))
+        .unwrap();
+        let mut cache = HashMap::new();
+        let events = convert_codex_event(event, &mut cache);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ExecutionEvent::Error { message } => {
+                assert_eq!(message, "fatal error");
+            }
+            other => panic!("Expected Error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn convert_codex_event_unknown_no_events() {
+        // Use an unrecognized type string to trigger the Unknown variant
+        let event: CodexEvent = serde_json::from_value(json!({
+            "type": "some.unknown.event"
+        }))
+        .unwrap();
+        let mut cache = HashMap::new();
+        let events = convert_codex_event(event, &mut cache);
+        assert!(events.is_empty(), "Unknown event should produce nothing");
+    }
+
+    #[test]
+    fn convert_codex_event_item_created_message() {
+        let event: CodexEvent = serde_json::from_value(json!({
+            "type": "item.created",
+            "item": {
+                "id": "msg1",
+                "type": "message",
+                "text": "Hello world"
+            }
+        }))
+        .unwrap();
+        let mut cache = HashMap::new();
+        let events = convert_codex_event(event, &mut cache);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ExecutionEvent::TextDelta { content } => {
+                assert_eq!(content, "Hello world");
+            }
+            other => panic!("Expected TextDelta, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn convert_codex_event_item_created_thinking() {
+        let event: CodexEvent = serde_json::from_value(json!({
+            "type": "item.created",
+            "item": {
+                "id": "think1",
+                "type": "thinking",
+                "text": "Let me consider..."
+            }
+        }))
+        .unwrap();
+        let mut cache = HashMap::new();
+        let events = convert_codex_event(event, &mut cache);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ExecutionEvent::Thinking { content } => {
+                assert_eq!(content, "Let me consider...");
+            }
+            other => panic!("Expected Thinking, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn convert_codex_event_item_created_tool_call() {
+        let event: CodexEvent = serde_json::from_value(json!({
+            "type": "item.created",
+            "item": {
+                "id": "tc1",
+                "type": "tool_call",
+                "name": "read_file",
+                "arguments": "{\"path\": \"/tmp/test.txt\"}"
+            }
+        }))
+        .unwrap();
+        let mut cache = HashMap::new();
+        let events = convert_codex_event(event, &mut cache);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ExecutionEvent::ToolCall { id, name, args } => {
+                assert_eq!(id, "tc1");
+                assert_eq!(name, "read_file");
+                // arguments was a JSON string, should be parsed
+                assert_eq!(args["path"], "/tmp/test.txt");
+            }
+            other => panic!("Expected ToolCall, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn convert_codex_event_item_created_command() {
+        let event: CodexEvent = serde_json::from_value(json!({
+            "type": "item.created",
+            "item": {
+                "id": "cmd1",
+                "type": "command",
+                "name": "shell",
+                "args": {"cmd": "ls -la"}
+            }
+        }))
+        .unwrap();
+        let mut cache = HashMap::new();
+        let events = convert_codex_event(event, &mut cache);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ExecutionEvent::ToolCall { id, name, args } => {
+                assert_eq!(id, "cmd1");
+                assert_eq!(name, "shell");
+                assert_eq!(args["cmd"], "ls -la");
+            }
+            other => panic!("Expected ToolCall, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn convert_codex_event_item_created_mcp_tool_call() {
+        let event: CodexEvent = serde_json::from_value(json!({
+            "type": "item.created",
+            "item": {
+                "id": "mcp1",
+                "type": "mcp_tool_call",
+                "server": "my_server",
+                "tool": "my_tool",
+                "arguments": {"key": "value"}
+            }
+        }))
+        .unwrap();
+        let mut cache = HashMap::new();
+        let events = convert_codex_event(event, &mut cache);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ExecutionEvent::ToolCall { id, name, args } => {
+                assert_eq!(id, "mcp1");
+                assert_eq!(name, "mcp__my_server__my_tool");
+                assert_eq!(args["key"], "value");
+            }
+            other => panic!("Expected ToolCall, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn convert_codex_event_item_completed_message() {
+        let event: CodexEvent = serde_json::from_value(json!({
+            "type": "item.completed",
+            "item": {
+                "id": "msg2",
+                "type": "message",
+                "text": "Final answer"
+            }
+        }))
+        .unwrap();
+        let mut cache = HashMap::new();
+        let events = convert_codex_event(event, &mut cache);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ExecutionEvent::TextDelta { content } => {
+                assert_eq!(content, "Final answer");
+            }
+            other => panic!("Expected TextDelta, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn convert_codex_event_item_completed_tool_result() {
+        let event: CodexEvent = serde_json::from_value(json!({
+            "type": "item.completed",
+            "item": {
+                "id": "tc2",
+                "type": "tool_call",
+                "name": "read_file",
+                "result": "file contents here"
+            }
+        }))
+        .unwrap();
+        let mut cache = HashMap::new();
+        let events = convert_codex_event(event, &mut cache);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ExecutionEvent::ToolResult { id, name, result } => {
+                assert_eq!(id, "tc2");
+                assert_eq!(name, "read_file");
+                assert_eq!(result, "file contents here");
+            }
+            other => panic!("Expected ToolResult, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn convert_codex_event_item_completed_mcp_first_time() {
+        // When an mcp_tool_call appears in ItemCompleted but was never emitted via
+        // ItemCreated, both ToolCall and ToolResult should be produced.
+        let event: CodexEvent = serde_json::from_value(json!({
+            "type": "item.completed",
+            "item": {
+                "id": "mcp2",
+                "type": "mcp_tool_call",
+                "server": "srv",
+                "tool": "do_thing",
+                "arguments": {"a": 1},
+                "result": "ok"
+            }
+        }))
+        .unwrap();
+        let mut cache = HashMap::new();
+        let events = convert_codex_event(event, &mut cache);
+        assert_eq!(events.len(), 2);
+        match &events[0] {
+            ExecutionEvent::ToolCall { id, name, args } => {
+                assert_eq!(id, "mcp2");
+                assert_eq!(name, "mcp__srv__do_thing");
+                assert_eq!(args["a"], 1);
+            }
+            other => panic!("Expected ToolCall, got {:?}", other),
+        }
+        match &events[1] {
+            ExecutionEvent::ToolResult { id, name, result } => {
+                assert_eq!(id, "mcp2");
+                assert_eq!(name, "mcp__srv__do_thing");
+                assert_eq!(result, "ok");
+            }
+            other => panic!("Expected ToolResult, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn convert_codex_event_item_completed_mcp_already_created() {
+        // Simulate that ItemCreated already emitted the ToolCall.
+        // ItemCompleted should only emit ToolResult.
+        let created_event: CodexEvent = serde_json::from_value(json!({
+            "type": "item.created",
+            "item": {
+                "id": "mcp3",
+                "type": "mcp_tool_call",
+                "server": "srv",
+                "tool": "do_thing",
+                "arguments": {"a": 1}
+            }
+        }))
+        .unwrap();
+        let mut cache = HashMap::new();
+        let _ = convert_codex_event(created_event, &mut cache);
+
+        let completed_event: CodexEvent = serde_json::from_value(json!({
+            "type": "item.completed",
+            "item": {
+                "id": "mcp3",
+                "type": "mcp_tool_call",
+                "server": "srv",
+                "tool": "do_thing",
+                "arguments": {"a": 1},
+                "result": "done"
+            }
+        }))
+        .unwrap();
+        let events = convert_codex_event(completed_event, &mut cache);
+        // Should only have ToolResult, no duplicate ToolCall
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ExecutionEvent::ToolResult { id, name, result } => {
+                assert_eq!(id, "mcp3");
+                assert_eq!(name, "mcp__srv__do_thing");
+                assert_eq!(result, "done");
+            }
+            other => panic!("Expected ToolResult, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn convert_codex_event_text_delta_deduplication() {
+        // Two ItemUpdated events where the second text starts with the first.
+        // The second call should only produce the delta suffix.
+        let event1: CodexEvent = serde_json::from_value(json!({
+            "type": "item.updated",
+            "item": {
+                "id": "msg_dedup",
+                "type": "message",
+                "text": "Hello"
+            }
+        }))
+        .unwrap();
+        let event2: CodexEvent = serde_json::from_value(json!({
+            "type": "item.updated",
+            "item": {
+                "id": "msg_dedup",
+                "type": "message",
+                "text": "Hello world"
+            }
+        }))
+        .unwrap();
+        let mut cache = HashMap::new();
+        let events1 = convert_codex_event(event1, &mut cache);
+        assert_eq!(events1.len(), 1);
+        match &events1[0] {
+            ExecutionEvent::TextDelta { content } => assert_eq!(content, "Hello"),
+            other => panic!("Expected TextDelta, got {:?}", other),
+        }
+
+        let events2 = convert_codex_event(event2, &mut cache);
+        assert_eq!(events2.len(), 1);
+        match &events2[0] {
+            ExecutionEvent::TextDelta { content } => assert_eq!(content, " world"),
+            other => panic!("Expected TextDelta, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn convert_codex_event_thinking_dedup_skips_unchanged() {
+        // Two ItemUpdated with "thinking" and the same text.
+        // The second should produce nothing.
+        let event1: CodexEvent = serde_json::from_value(json!({
+            "type": "item.updated",
+            "item": {
+                "id": "think_dedup",
+                "type": "thinking",
+                "text": "same thought"
+            }
+        }))
+        .unwrap();
+        let event2: CodexEvent = serde_json::from_value(json!({
+            "type": "item.updated",
+            "item": {
+                "id": "think_dedup",
+                "type": "thinking",
+                "text": "same thought"
+            }
+        }))
+        .unwrap();
+        let mut cache = HashMap::new();
+        let events1 = convert_codex_event(event1, &mut cache);
+        assert_eq!(events1.len(), 1);
+        match &events1[0] {
+            ExecutionEvent::Thinking { content } => assert_eq!(content, "same thought"),
+            other => panic!("Expected Thinking, got {:?}", other),
+        }
+
+        let events2 = convert_codex_event(event2, &mut cache);
+        assert!(
+            events2.is_empty(),
+            "Unchanged thinking text should produce no events"
+        );
+    }
+
+    #[test]
+    fn convert_codex_event_unknown_item_type() {
+        let event: CodexEvent = serde_json::from_value(json!({
+            "type": "item.created",
+            "item": {
+                "id": "unk1",
+                "type": "weird_type",
+                "text": "data"
+            }
+        }))
+        .unwrap();
+        let mut cache = HashMap::new();
+        let events = convert_codex_event(event, &mut cache);
+        assert!(
+            events.is_empty(),
+            "Unrecognized item type should produce no events"
+        );
+    }
+
+    #[test]
+    fn convert_codex_event_tool_name_fallback_to_tool_object() {
+        // When "name" is not a top-level string but is nested under data["tool"]["name"]
+        let event: CodexEvent = serde_json::from_value(json!({
+            "type": "item.created",
+            "item": {
+                "id": "tc_fallback",
+                "type": "tool_call",
+                "tool": {
+                    "name": "nested_tool",
+                    "arguments": "{\"x\": 42}"
+                }
+            }
+        }))
+        .unwrap();
+        let mut cache = HashMap::new();
+        let events = convert_codex_event(event, &mut cache);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ExecutionEvent::ToolCall { id, name, args } => {
+                assert_eq!(id, "tc_fallback");
+                assert_eq!(name, "nested_tool");
+                // Args come from the nested tool object's arguments field (parsed from JSON string)
+                assert_eq!(args["x"], 42);
+            }
+            other => panic!("Expected ToolCall, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn convert_codex_event_tool_args_from_input_field() {
+        // When args are provided via data["input"] instead of data["arguments"]
+        let event: CodexEvent = serde_json::from_value(json!({
+            "type": "item.created",
+            "item": {
+                "id": "tc_input",
+                "type": "tool_call",
+                "name": "write_file",
+                "input": {"path": "/tmp/out.txt", "content": "hello"}
+            }
+        }))
+        .unwrap();
+        let mut cache = HashMap::new();
+        let events = convert_codex_event(event, &mut cache);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ExecutionEvent::ToolCall { id, name, args } => {
+                assert_eq!(id, "tc_input");
+                assert_eq!(name, "write_file");
+                assert_eq!(args["path"], "/tmp/out.txt");
+                assert_eq!(args["content"], "hello");
+            }
+            other => panic!("Expected ToolCall, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn convert_codex_event_tool_result_with_error() {
+        // ItemCompleted tool_call with an error field should produce ToolResult containing the error
+        let event: CodexEvent = serde_json::from_value(json!({
+            "type": "item.completed",
+            "item": {
+                "id": "tc_err",
+                "type": "tool_call",
+                "name": "run_cmd",
+                "result": null,
+                "error": "command not found"
+            }
+        }))
+        .unwrap();
+        let mut cache = HashMap::new();
+        let events = convert_codex_event(event, &mut cache);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ExecutionEvent::ToolResult { id, name, result } => {
+                assert_eq!(id, "tc_err");
+                assert_eq!(name, "run_cmd");
+                // The result should contain the error field
+                assert_eq!(result["error"], "command not found");
+            }
+            other => panic!("Expected ToolResult, got {:?}", other),
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Tests for extract_text_field
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn extract_text_field_from_text_key() {
+        let mut data = HashMap::new();
+        data.insert(
+            "text".to_string(),
+            serde_json::Value::String("hello from text".to_string()),
+        );
+        let result = extract_text_field(&data);
+        assert_eq!(result, Some("hello from text".to_string()));
+    }
+
+    #[test]
+    fn extract_text_field_from_content_key() {
+        let mut data = HashMap::new();
+        data.insert(
+            "content".to_string(),
+            serde_json::Value::String("hello from content".to_string()),
+        );
+        let result = extract_text_field(&data);
+        assert_eq!(result, Some("hello from content".to_string()));
+    }
+
+    #[test]
+    fn extract_text_field_from_output_text_key() {
+        let mut data = HashMap::new();
+        data.insert(
+            "output_text".to_string(),
+            serde_json::Value::String("hello from output_text".to_string()),
+        );
+        let result = extract_text_field(&data);
+        assert_eq!(result, Some("hello from output_text".to_string()));
+    }
+
+    #[test]
+    fn extract_text_field_from_content_array() {
+        let mut data = HashMap::new();
+        data.insert(
+            "content".to_string(),
+            json!([
+                {"text": "part one"},
+                {"text": " part two"}
+            ]),
+        );
+        let result = extract_text_field(&data);
+        assert_eq!(result, Some("part one part two".to_string()));
+    }
 }
