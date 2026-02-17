@@ -46,7 +46,7 @@ impl std::fmt::Display for CooldownReason {
 }
 
 /// Health state for a single provider account.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct AccountHealth {
     /// When the cooldown expires (None = healthy).
     pub cooldown_until: Option<std::time::Instant>,
@@ -68,23 +68,6 @@ pub struct AccountHealth {
     pub total_latency_ms: u64,
     /// Number of latency samples recorded.
     pub latency_samples: u64,
-}
-
-impl Default for AccountHealth {
-    fn default() -> Self {
-        Self {
-            cooldown_until: None,
-            consecutive_failures: 0,
-            last_failure_reason: None,
-            last_failure_at: None,
-            total_requests: 0,
-            total_successes: 0,
-            total_rate_limits: 0,
-            total_errors: 0,
-            total_latency_ms: 0,
-            latency_samples: 0,
-        }
-    }
 }
 
 impl AccountHealth {
@@ -191,6 +174,12 @@ pub struct AccountHealthSnapshot {
     pub total_errors: u64,
     /// Average latency in milliseconds (None if no samples).
     pub avg_latency_ms: Option<f64>,
+}
+
+impl Default for ProviderHealthTracker {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ProviderHealthTracker {

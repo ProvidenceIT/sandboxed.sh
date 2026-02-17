@@ -1675,8 +1675,7 @@ async fn run_mission_turn(
 
             // Account rotation: if rate-limited, try alternate Amp API keys.
             if result.terminal_reason == Some(TerminalReason::RateLimited) {
-                let alt_keys =
-                    super::ai_providers::get_all_amp_api_keys(&config.working_dir);
+                let alt_keys = super::ai_providers::get_all_amp_api_keys(&config.working_dir);
                 if alt_keys.len() > 1 {
                     tracing::info!(
                         mission_id = %mission_id,
