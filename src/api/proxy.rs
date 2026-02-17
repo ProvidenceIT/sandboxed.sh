@@ -425,6 +425,7 @@ async fn chat_completions(
             let mut is_stream_error = false;
 
             // Read enough of the stream to find the first data line
+            let mut peek_failed = false;
             'peek: while peek_buf.len() < 4096 {
                 match byte_stream.next().await {
                     Some(Ok(chunk)) => {
@@ -447,8 +448,35 @@ async fn chat_completions(
                             }
                         }
                     }
-                    Some(Err(_)) | None => break,
+                    Some(Err(e)) => {
+                        tracing::warn!(
+                            provider = %entry.provider_id,
+                            account_id = %entry.account_id,
+                            error = %e,
+                            "Stream peek failed (network error), trying next entry"
+                        );
+                        peek_failed = true;
+                        break;
+                    }
+                    None => {
+                        tracing::warn!(
+                            provider = %entry.provider_id,
+                            account_id = %entry.account_id,
+                            "Stream ended before first data chunk, trying next entry"
+                        );
+                        peek_failed = true;
+                        break;
+                    }
                 }
+            }
+
+            if peek_failed {
+                state
+                    .health_tracker
+                    .record_failure(entry.account_id, CooldownReason::ServerError, None)
+                    .await;
+                server_error_count += 1;
+                continue;
             }
 
             if is_stream_error {
