@@ -57,6 +57,7 @@ use super::model_routing as model_routing_api;
 use super::monitoring;
 use super::opencode as opencode_api;
 use super::proxy as proxy_api;
+use super::proxy_keys as proxy_keys_api;
 use super::secrets as secrets_api;
 use super::settings as settings_api;
 use super::system as system_api;
@@ -106,6 +107,8 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     /// Bearer token for the internal proxy endpoint
     pub proxy_secret: String,
+    /// User-generated proxy API keys for external tools
+    pub proxy_api_keys: super::proxy_keys::SharedProxyApiKeyStore,
 }
 
 /// Start the HTTP server.
@@ -154,6 +157,14 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     let chain_store = Arc::new(
         crate::provider_health::ModelChainStore::new(
             config.working_dir.join(".sandboxed-sh/model_chains.json"),
+        )
+        .await,
+    );
+
+    // Initialize proxy API key store
+    let proxy_api_keys = Arc::new(
+        super::proxy_keys::ProxyApiKeyStore::new(
+            config.working_dir.join(".sandboxed-sh/proxy_api_keys.json"),
         )
         .await,
     );
@@ -396,6 +407,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
                 std::env::set_var("SANDBOXED_PROXY_SECRET", &secret);
                 secret
             }),
+        proxy_api_keys,
     });
 
     // Start background desktop session cleanup task
@@ -658,6 +670,8 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         .nest("/api/ai/providers", ai_providers_api::routes())
         // Model routing (chains + health)
         .nest("/api/model-routing", model_routing_api::routes())
+        // Proxy API key management
+        .nest("/api/proxy-keys", proxy_keys_api::routes())
         // Secrets management endpoints
         .nest("/api/secrets", secrets_api::routes())
         // Global settings endpoints

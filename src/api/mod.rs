@@ -35,6 +35,7 @@ mod monitoring;
 pub mod opencode;
 mod providers;
 mod proxy;
+mod proxy_keys;
 mod routes;
 pub mod secrets;
 pub mod settings;

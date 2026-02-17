@@ -129,7 +129,14 @@ struct ModelObject {
 }
 
 /// Verify the proxy bearer token from the Authorization header.
-fn verify_proxy_auth(headers: &HeaderMap, expected: &str) -> Result<(), Response> {
+///
+/// Accepts either the internal `SANDBOXED_PROXY_SECRET` or any user-generated
+/// proxy API key from the `ProxyApiKeyStore`.
+async fn verify_proxy_auth(
+    headers: &HeaderMap,
+    state: &super::routes::AppState,
+) -> Result<(), Response> {
+    let expected = &state.proxy_secret;
     // Reject if the expected secret is empty — this should never happen since
     // the initialization code generates a UUID fallback, but guard anyway.
     if expected.is_empty() {
@@ -143,21 +150,33 @@ fn verify_proxy_auth(headers: &HeaderMap, expected: &str) -> Result<(), Response
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "));
-    match token {
-        Some(t) if super::auth::constant_time_eq(t, expected) => Ok(()),
-        _ => Err(error_response(
+    let Some(t) = token else {
+        return Err(error_response(
             StatusCode::UNAUTHORIZED,
             "Invalid or missing proxy authorization".to_string(),
             "authentication_error",
-        )),
+        ));
+    };
+    // Check the internal secret first (fast path for OpenCode / mission_runner).
+    if super::auth::constant_time_eq(t, expected) {
+        return Ok(());
     }
+    // Check user-generated proxy API keys.
+    if state.proxy_api_keys.verify(t).await {
+        return Ok(());
+    }
+    Err(error_response(
+        StatusCode::UNAUTHORIZED,
+        "Invalid or missing proxy authorization".to_string(),
+        "authentication_error",
+    ))
 }
 
 async fn list_models(
     State(state): State<Arc<super::routes::AppState>>,
     headers: HeaderMap,
 ) -> Response {
-    if let Err(resp) = verify_proxy_auth(&headers, &state.proxy_secret) {
+    if let Err(resp) = verify_proxy_auth(&headers, &state).await {
         return resp;
     }
     let chains = state.chain_store.list().await;
@@ -187,7 +206,7 @@ async fn chat_completions(
     body: bytes::Bytes,
 ) -> Response {
     // 0. Verify proxy authorization
-    if let Err(resp) = verify_proxy_auth(&headers, &state.proxy_secret) {
+    if let Err(resp) = verify_proxy_auth(&headers, &state).await {
         return resp;
     }
 

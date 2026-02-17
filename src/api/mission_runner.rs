@@ -6810,8 +6810,12 @@ pub async fn run_opencode_turn(
     }
 
     // Note: Provider concurrency semaphores (previously used for ZAI) have been
-    // removed. Rate limit handling is now done by the proxy's waterfall failover
-    // and per-account health tracking in ProviderHealthTracker.
+    // removed. For `builtin/*` models, rate limit handling is done by the proxy's
+    // waterfall failover and per-account health tracking in ProviderHealthTracker.
+    // For direct provider models (e.g. `zai/*`), OpenCode's own retry logic
+    // handles 429s. The old semaphore only serialized requests — it did not do
+    // failover — so removing it trades slightly higher 429 rates under heavy
+    // concurrency for lower latency in the common case.
 
     let configured_runner = get_opencode_cli_path_from_config(app_working_dir)
         .or_else(|| std::env::var("OPENCODE_CLI_PATH").ok());

@@ -19,6 +19,13 @@ import {
   type FallbackEvent,
 } from '@/lib/api/model-routing';
 import {
+  listProxyApiKeys,
+  createProxyApiKey,
+  deleteProxyApiKey,
+  type ProxyApiKeySummary,
+} from '@/lib/api/proxy-keys';
+import { getRuntimeApiBase } from '@/lib/settings';
+import {
   GitBranch,
   Plus,
   Trash2,
@@ -35,6 +42,9 @@ import {
   ArrowUp,
   Activity,
   ArrowRight,
+  Key,
+  Copy,
+  Check,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -556,6 +566,60 @@ export default function ModelRoutingPage() {
     }
   };
 
+  // ── Proxy API Keys ──
+  const {
+    data: apiKeys = [],
+    isLoading: apiKeysLoading,
+    mutate: mutateApiKeys,
+  } = useSWR('proxy-api-keys', listProxyApiKeys, { revalidateOnFocus: false });
+
+  const [showCreateKey, setShowCreateKey] = useState(false);
+  const [newKeyName, setNewKeyName] = useState('');
+  const [createdKey, setCreatedKey] = useState<string | null>(null);
+  const [creatingKey, setCreatingKey] = useState(false);
+  const [copiedKey, setCopiedKey] = useState(false);
+
+  const handleCreateKey = async () => {
+    if (!newKeyName.trim()) {
+      toast.error('Key name is required');
+      return;
+    }
+    setCreatingKey(true);
+    try {
+      const result = await createProxyApiKey(newKeyName.trim());
+      setCreatedKey(result.key);
+      setNewKeyName('');
+      mutateApiKeys();
+      toast.success('API key created');
+    } catch (err) {
+      toast.error(`Failed to create: ${err instanceof Error ? err.message : 'Unknown error'}`);
+    } finally {
+      setCreatingKey(false);
+    }
+  };
+
+  const handleDeleteKey = async (id: string) => {
+    try {
+      await deleteProxyApiKey(id);
+      toast.success('API key deleted');
+      mutateApiKeys();
+    } catch (err) {
+      toast.error(`Failed to delete: ${err instanceof Error ? err.message : 'Unknown error'}`);
+    }
+  };
+
+  const handleCopyKey = async (text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedKey(true);
+      setTimeout(() => setCopiedKey(false), 2000);
+    } catch {
+      toast.error('Failed to copy to clipboard');
+    }
+  };
+
+  const proxyUrl = `${getRuntimeApiBase()}/v1`;
+
   return (
     <div className="flex-1 flex flex-col items-center p-6 overflow-auto">
       <div className="w-full max-w-2xl">
@@ -793,6 +857,134 @@ export default function ModelRoutingPage() {
                       cd {Math.round(evt.cooldown_secs)}s
                     </span>
                   )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* ── Proxy API Keys Section ── */}
+        <div className="rounded-xl bg-white/[0.02] border border-white/[0.04] p-5 mt-6">
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-3">
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-500/10">
+                <Key className="h-5 w-5 text-indigo-400" />
+              </div>
+              <div>
+                <h2 className="text-sm font-medium text-white">Proxy API Keys</h2>
+                <p className="text-xs text-white/40">
+                  Generate keys for external tools (Cursor, Windsurf, etc.)
+                </p>
+              </div>
+            </div>
+            <button
+              onClick={() => { setShowCreateKey(true); setCreatedKey(null); }}
+              className="flex items-center gap-1.5 rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-1.5 text-xs text-white/70 hover:bg-white/[0.04] transition-colors cursor-pointer"
+            >
+              <Plus className="h-3 w-3" />
+              New Key
+            </button>
+          </div>
+
+          {/* Proxy endpoint URL */}
+          <div className="mb-4 rounded-lg border border-white/[0.06] bg-white/[0.01] px-3 py-2">
+            <div className="flex items-center justify-between">
+              <div>
+                <span className="text-[10px] text-white/30 uppercase tracking-wider">Proxy Endpoint</span>
+                <p className="text-xs text-white/60 font-mono mt-0.5">{proxyUrl}</p>
+              </div>
+              <button
+                onClick={() => handleCopyKey(proxyUrl)}
+                className="p-1.5 rounded-md text-white/20 hover:text-white/60 hover:bg-white/[0.04] transition-colors cursor-pointer"
+                title="Copy endpoint URL"
+              >
+                <Copy className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          </div>
+
+          {/* Create key form */}
+          {showCreateKey && (
+            <div className="mb-4 rounded-lg border border-indigo-500/20 bg-indigo-500/5 p-3 space-y-3">
+              <input
+                type="text"
+                placeholder="Key name (e.g. Cursor, CI pipeline)"
+                value={newKeyName}
+                onChange={(e) => setNewKeyName(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleCreateKey()}
+                className="w-full rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-sm text-white placeholder:text-white/20 focus:outline-none focus:border-indigo-500/50"
+              />
+              {createdKey && (
+                <div className="rounded-lg border border-emerald-500/20 bg-emerald-500/5 p-3">
+                  <p className="text-[10px] text-emerald-400/80 mb-1">
+                    Copy this key now — it won&apos;t be shown again
+                  </p>
+                  <div className="flex items-center gap-2">
+                    <code className="flex-1 text-xs text-emerald-300 font-mono break-all">
+                      {createdKey}
+                    </code>
+                    <button
+                      onClick={() => handleCopyKey(createdKey)}
+                      className="flex-shrink-0 p-1.5 rounded-md text-emerald-400/60 hover:text-emerald-300 hover:bg-white/[0.04] transition-colors cursor-pointer"
+                    >
+                      {copiedKey ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                    </button>
+                  </div>
+                </div>
+              )}
+              <div className="flex justify-end gap-2">
+                <button
+                  onClick={() => { setShowCreateKey(false); setCreatedKey(null); setNewKeyName(''); }}
+                  className="rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-1.5 text-xs text-white/50 hover:bg-white/[0.04] transition-colors cursor-pointer"
+                >
+                  {createdKey ? 'Done' : 'Cancel'}
+                </button>
+                {!createdKey && (
+                  <button
+                    onClick={handleCreateKey}
+                    disabled={creatingKey}
+                    className="rounded-lg bg-indigo-500 px-3 py-1.5 text-xs text-white hover:bg-indigo-600 transition-colors cursor-pointer disabled:opacity-50"
+                  >
+                    {creatingKey ? 'Creating...' : 'Create'}
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Key list */}
+          {apiKeysLoading ? (
+            <div className="flex items-center justify-center py-6">
+              <Loader className="h-4 w-4 animate-spin text-white/30" />
+            </div>
+          ) : apiKeys.length === 0 ? (
+            <p className="text-xs text-white/30 text-center py-4">
+              No API keys yet. Create one to connect external tools.
+            </p>
+          ) : (
+            <div className="space-y-1.5">
+              {apiKeys.map((k) => (
+                <div
+                  key={k.id}
+                  className="flex items-center gap-3 rounded-lg border border-white/[0.06] bg-white/[0.01] px-3 py-2"
+                >
+                  <Key className="h-3.5 w-3.5 text-white/20 flex-shrink-0" />
+                  <span className="text-xs text-white/70 flex-1 min-w-0 truncate">
+                    {k.name}
+                  </span>
+                  <span className="text-[10px] text-white/30 font-mono flex-shrink-0">
+                    {k.key_prefix}...
+                  </span>
+                  <span className="text-[10px] text-white/20 flex-shrink-0">
+                    {new Date(k.created_at).toLocaleDateString()}
+                  </span>
+                  <button
+                    onClick={() => handleDeleteKey(k.id)}
+                    className="p-1.5 rounded-md text-white/20 hover:text-red-400 hover:bg-white/[0.04] transition-colors cursor-pointer flex-shrink-0"
+                    title="Revoke key"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
                 </div>
               ))}
             </div>
