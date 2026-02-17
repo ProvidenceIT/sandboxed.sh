@@ -32,6 +32,7 @@ export interface ResolvedEntry {
 
 export interface AccountHealthSnapshot {
   account_id: string;
+  provider_id: string | null;
   is_healthy: boolean;
   cooldown_remaining_secs: number | null;
   consecutive_failures: number;

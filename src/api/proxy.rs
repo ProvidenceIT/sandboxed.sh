@@ -334,6 +334,12 @@ async fn chat_completions(
             upstream_req = upstream_req.header("OpenAI-Organization", org);
         }
 
+        // Ensure the health tracker knows which provider this account belongs to.
+        state
+            .health_tracker
+            .set_provider_id(entry.account_id, &entry.provider_id)
+            .await;
+
         tracing::debug!(
             provider = %entry.provider_id,
             model = %entry.model_id,
@@ -912,6 +918,25 @@ fn parse_rate_limit_headers(
             }
             best.or_else(|| parse_retry_after_secs(headers))
         }
+        // Anthropic sends ISO 8601 timestamps in anthropic-ratelimit-*-reset headers
+        ProviderType::Anthropic => {
+            let mut best: Option<std::time::Duration> = None;
+            for key in &[
+                "anthropic-ratelimit-requests-reset",
+                "anthropic-ratelimit-tokens-reset",
+                "anthropic-ratelimit-input-tokens-reset",
+                "anthropic-ratelimit-output-tokens-reset",
+            ] {
+                if let Some(d) = headers
+                    .get(*key)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(parse_iso_timestamp_as_duration)
+                {
+                    best = Some(best.map_or(d, |b: std::time::Duration| b.min(d)));
+                }
+            }
+            best.or_else(|| parse_retry_after_secs(headers))
+        }
         // All other providers: use standard Retry-After only
         _ => parse_retry_after_secs(headers),
     }
@@ -922,29 +947,66 @@ fn parse_retry_after_secs(headers: &HeaderMap) -> Option<std::time::Duration> {
     let value = headers.get("retry-after")?.to_str().ok()?;
     let secs: f64 = value.parse().ok()?;
     if secs > 0.0 {
-        Some(std::time::Duration::from_secs_f64(secs))
+        Some(std::time::Duration::from_secs_f64(
+            secs.min(MAX_HEADER_COOLDOWN_SECS),
+        ))
     } else {
         None
     }
 }
 
+/// Parse an ISO 8601 timestamp and return duration from now.
+/// Used for Anthropic's `anthropic-ratelimit-*-reset` headers.
+fn parse_iso_timestamp_as_duration(s: &str) -> Option<std::time::Duration> {
+    let dt = chrono::DateTime::parse_from_rfc3339(s.trim()).ok()?;
+    let now = chrono::Utc::now();
+    let diff = dt.signed_duration_since(now);
+    if diff.num_seconds() > 0 {
+        let secs = (diff.num_seconds() as f64).min(MAX_HEADER_COOLDOWN_SECS);
+        Some(std::time::Duration::from_secs_f64(secs))
+    } else {
+        None // already passed
+    }
+}
+
+/// Maximum cooldown we'll ever set from a provider header (1 hour).
+/// Prevents catastrophic values from buggy headers or misinterpreted timestamps.
+const MAX_HEADER_COOLDOWN_SECS: f64 = 3600.0;
+
 /// Parse a human-friendly duration string like "2s", "1m30s", "200ms", "0.5s".
 ///
 /// Supports the formats returned by OpenAI-family rate limit headers:
 ///   `Xh`, `Xm`, `Xs`, `Xms` and combinations like `1m30s`.
+///
+/// Also detects Unix epoch timestamps (values > 1e9) and converts them to
+/// duration-from-now, to avoid catastrophic multi-year cooldowns.
 fn parse_duration_string(s: &str) -> Option<std::time::Duration> {
     let s = s.trim();
     if s.is_empty() {
         return None;
     }
 
-    // Try plain numeric seconds first (some providers send "60" instead of "60s")
+    // Try plain numeric value first (some providers send "60" instead of "60s")
     if let Ok(secs) = s.parse::<f64>() {
-        return if secs > 0.0 {
-            Some(std::time::Duration::from_secs_f64(secs))
-        } else {
-            None
-        };
+        if secs <= 0.0 {
+            return None;
+        }
+        // Values > 1e9 are almost certainly Unix epoch timestamps, not seconds.
+        // Convert to duration-from-now.
+        if secs > 1_000_000_000.0 {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs_f64();
+            let remaining = (secs - now).clamp(0.0, MAX_HEADER_COOLDOWN_SECS);
+            return if remaining > 0.0 {
+                Some(std::time::Duration::from_secs_f64(remaining))
+            } else {
+                None // timestamp is in the past
+            };
+        }
+        let capped = secs.min(MAX_HEADER_COOLDOWN_SECS);
+        return Some(std::time::Duration::from_secs_f64(capped));
     }
 
     let mut total_ms: f64 = 0.0;
@@ -991,7 +1053,8 @@ fn parse_duration_string(s: &str) -> Option<std::time::Duration> {
     }
 
     if total_ms > 0.0 {
-        Some(std::time::Duration::from_secs_f64(total_ms / 1000.0))
+        let secs = (total_ms / 1000.0).min(MAX_HEADER_COOLDOWN_SECS);
+        Some(std::time::Duration::from_secs_f64(secs))
     } else {
         None
     }
@@ -1309,5 +1372,62 @@ mod tests {
             None
         );
         assert_eq!(parse_rate_limit_headers(&headers, ProviderType::Zai), None);
+    }
+
+    #[test]
+    fn parse_duration_unix_timestamp() {
+        // A value > 1e9 should be treated as a Unix epoch timestamp.
+        // Use a timestamp 60 seconds in the future.
+        let future = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 60;
+        let d = parse_duration_string(&future.to_string());
+        assert!(d.is_some());
+        let secs = d.unwrap().as_secs();
+        // Should be roughly 60 seconds, with some tolerance
+        assert!(secs >= 55 && secs <= 65, "got {} seconds", secs);
+    }
+
+    #[test]
+    fn parse_duration_unix_timestamp_in_past() {
+        // A past timestamp (year 2001, but > 1e9) should return None
+        assert_eq!(parse_duration_string("1000000001"), None);
+    }
+
+    #[test]
+    fn parse_duration_caps_at_max() {
+        // Very large seconds value should be capped at MAX_HEADER_COOLDOWN_SECS
+        let d = parse_duration_string("999999").unwrap();
+        assert_eq!(
+            d,
+            std::time::Duration::from_secs(MAX_HEADER_COOLDOWN_SECS as u64)
+        );
+    }
+
+    #[test]
+    fn parse_duration_compound_caps_at_max() {
+        // A compound "100h" should be capped
+        let d = parse_duration_string("100h").unwrap();
+        assert_eq!(
+            d,
+            std::time::Duration::from_secs(MAX_HEADER_COOLDOWN_SECS as u64)
+        );
+    }
+
+    #[test]
+    fn parse_rate_limit_headers_anthropic() {
+        let mut headers = HeaderMap::new();
+        // Anthropic sends ISO 8601 timestamps
+        let future = (chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339();
+        headers.insert(
+            "anthropic-ratelimit-requests-reset",
+            future.parse().unwrap(),
+        );
+        let d = parse_rate_limit_headers(&headers, ProviderType::Anthropic);
+        assert!(d.is_some());
+        let secs = d.unwrap().as_secs();
+        assert!(secs >= 25 && secs <= 35, "got {} seconds", secs);
     }
 }

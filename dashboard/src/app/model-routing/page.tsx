@@ -41,7 +41,6 @@ import {
   AlertTriangle,
   Clock,
   RotateCcw,
-  GripVertical,
   ArrowDown,
   ArrowUp,
   Activity,
@@ -123,7 +122,6 @@ function EntryEditor({
             key={i}
             className="flex items-center gap-2 rounded-lg border border-white/[0.06] bg-white/[0.01] px-2 py-1.5"
           >
-            <GripVertical className="h-3.5 w-3.5 text-white/20 flex-shrink-0" />
             <span className="text-[10px] text-white/30 w-4 flex-shrink-0">
               {i + 1}.
             </span>
@@ -456,8 +454,8 @@ function HealthDashboard({
                   : 'bg-red-400'
             )}
           />
-          <span className="text-xs text-white/50 font-mono flex-shrink-0">
-            {h.account_id.slice(0, 8)}...
+          <span className="text-xs text-white/50 font-mono flex-shrink-0" title={h.account_id}>
+            {h.provider_id || h.account_id.slice(0, 8)}
           </span>
           <div className="flex-1 flex items-center gap-3 text-[10px] text-white/30">
             <span>{h.total_requests} req</span>

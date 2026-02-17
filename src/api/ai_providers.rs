@@ -882,7 +882,7 @@ fn get_all_anthropic_auth_from_ai_providers(working_dir: &Path) -> Vec<ClaudeCod
 
         // Check for API key first
         if let Some(api_key) = provider.get("api_key").and_then(|v| v.as_str()) {
-            if !api_key.is_empty() {
+            if !api_key.trim().is_empty() {
                 entries.push((priority, idx, ClaudeCodeAuth::ApiKey(api_key.to_string())));
                 continue;
             }
@@ -1019,7 +1019,7 @@ fn get_all_openai_keys_from_ai_providers(working_dir: &Path) -> Vec<String> {
             .unwrap_or(0) as u32;
 
         if let Some(api_key) = provider.get("api_key").and_then(|v| v.as_str()) {
-            if !api_key.is_empty() {
+            if !api_key.trim().is_empty() {
                 entries.push((priority, idx, api_key.to_string()));
             }
         }
@@ -1100,7 +1100,7 @@ fn get_all_amp_keys_from_ai_providers(working_dir: &Path) -> Vec<String> {
             .unwrap_or(0) as u32;
 
         if let Some(api_key) = provider.get("api_key").and_then(|v| v.as_str()) {
-            if !api_key.is_empty() {
+            if !api_key.trim().is_empty() {
                 entries.push((priority, idx, api_key.to_string()));
             }
         }
@@ -4778,8 +4778,11 @@ async fn authenticate_provider(
             .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Provider {} not found", id)))?;
 
         // Store-based providers: connected if they have an API key or a base URL
-        let has_credentials =
-            provider.api_key.as_ref().is_some_and(|k| !k.is_empty()) || provider.base_url.is_some();
+        let has_credentials = provider
+            .api_key
+            .as_ref()
+            .is_some_and(|k| !k.trim().is_empty())
+            || provider.base_url.is_some();
         return Ok(Json(AuthResponse {
             success: has_credentials,
             message: if has_credentials {

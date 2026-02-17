@@ -48,6 +48,8 @@ impl std::fmt::Display for CooldownReason {
 /// Health state for a single provider account.
 #[derive(Debug, Clone, Default)]
 pub struct AccountHealth {
+    /// Provider identifier (e.g. "openai", "zai") — set on first interaction.
+    pub provider_id: Option<String>,
     /// When the cooldown expires (None = healthy).
     pub cooldown_until: Option<std::time::Instant>,
     /// Number of consecutive failures (for exponential backoff).
@@ -190,6 +192,8 @@ pub struct ProviderHealthTracker {
 #[derive(Debug, Clone, Serialize)]
 pub struct AccountHealthSnapshot {
     pub account_id: Uuid,
+    /// Provider identifier (e.g. "openai", "zai"). None if never used.
+    pub provider_id: Option<String>,
     pub is_healthy: bool,
     pub cooldown_remaining_secs: Option<f64>,
     pub consecutive_failures: u32,
@@ -237,6 +241,15 @@ impl ProviderHealthTracker {
             .get(&account_id)
             .map(|h| !h.is_in_cooldown())
             .unwrap_or(true) // Unknown accounts are healthy by default
+    }
+
+    /// Set the provider identifier for an account (no-op if already set).
+    pub async fn set_provider_id(&self, account_id: Uuid, provider_id: &str) {
+        let mut accounts = self.accounts.write().await;
+        let health = accounts.entry(account_id).or_default();
+        if health.provider_id.is_none() {
+            health.provider_id = Some(provider_id.to_string());
+        }
     }
 
     /// Record a successful request for an account.
@@ -355,6 +368,7 @@ impl ProviderHealthTracker {
     ) -> AccountHealthSnapshot {
         AccountHealthSnapshot {
             account_id,
+            provider_id: health.provider_id.clone(),
             is_healthy: !health.is_in_cooldown(),
             cooldown_remaining_secs: health.remaining_cooldown().map(|d| d.as_secs_f64()),
             consecutive_failures: health.consecutive_failures,
@@ -382,6 +396,7 @@ impl ProviderHealthTracker {
             Some(health) => Self::snapshot(account_id, health, &self.backoff_config),
             None => AccountHealthSnapshot {
                 account_id,
+                provider_id: None,
                 is_healthy: true,
                 cooldown_remaining_secs: None,
                 consecutive_failures: 0,

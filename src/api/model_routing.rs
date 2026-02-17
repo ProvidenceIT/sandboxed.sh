@@ -347,9 +347,9 @@ async fn clear_cooldown(
 
 /// GET /api/model-routing/events - List recent fallback events.
 ///
-/// Returns the most recent fallback events (up to 50 by default).
+/// Returns the most recent fallback events (up to the full ring buffer).
 async fn list_fallback_events(
     State(state): State<Arc<super::routes::AppState>>,
 ) -> Json<Vec<crate::provider_health::FallbackEvent>> {
-    Json(state.health_tracker.get_recent_events(50).await)
+    Json(state.health_tracker.get_recent_events(200).await)
 }
