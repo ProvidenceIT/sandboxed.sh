@@ -249,6 +249,10 @@ async fn chat_completions(
     }
 
     // 4. Try each entry in order (waterfall)
+    let mut rate_limit_count: u32 = 0;
+    let mut client_error_count: u32 = 0;
+    let mut server_error_count: u32 = 0;
+
     for entry in &entries {
         let provider_type = match ProviderType::from_id(&entry.provider_id) {
             Some(pt) => pt,
@@ -347,6 +351,7 @@ async fn chat_completions(
                 .health_tracker
                 .record_failure(entry.account_id, reason, retry_after)
                 .await;
+            rate_limit_count += 1;
             continue;
         }
 
@@ -361,6 +366,7 @@ async fn chat_completions(
                 .health_tracker
                 .record_failure(entry.account_id, CooldownReason::ServerError, None)
                 .await;
+            server_error_count += 1;
             continue;
         }
 
@@ -376,6 +382,7 @@ async fn chat_completions(
                 .health_tracker
                 .record_failure(entry.account_id, CooldownReason::AuthError, None)
                 .await;
+            client_error_count += 1;
             continue;
         }
 
@@ -392,6 +399,7 @@ async fn chat_completions(
                 status = %status,
                 "Upstream client error (possibly wrong model), trying next entry"
             );
+            client_error_count += 1;
             continue;
         }
 
@@ -440,6 +448,7 @@ async fn chat_completions(
                     .health_tracker
                     .record_failure(entry.account_id, CooldownReason::RateLimit, None)
                     .await;
+                rate_limit_count += 1;
                 continue;
             }
 
@@ -498,6 +507,7 @@ async fn chat_completions(
                                     None,
                                 )
                                 .await;
+                            rate_limit_count += 1;
                             continue;
                         }
                     }
@@ -531,21 +541,39 @@ async fn chat_completions(
         }
     }
 
-    // All entries exhausted
+    // All entries exhausted — choose status/message based on failure types
     tracing::warn!(
         chain = %chain_id,
         total_entries = entries.len(),
+        rate_limit_count,
+        client_error_count,
+        server_error_count,
         "All chain entries exhausted"
     );
-    error_response(
-        StatusCode::TOO_MANY_REQUESTS,
-        format!(
-            "All {} providers in chain '{}' are rate-limited or unavailable",
-            entries.len(),
-            chain_id
-        ),
-        "rate_limit_exceeded",
-    )
+
+    if client_error_count > 0 && rate_limit_count == 0 && server_error_count == 0 {
+        // All failures were client errors (4xx / auth) — likely a configuration
+        // or credentials issue, not a transient rate limit.
+        error_response(
+            StatusCode::BAD_GATEWAY,
+            format!(
+                "All {} providers in chain '{}' rejected the request (client/auth errors)",
+                entries.len(),
+                chain_id
+            ),
+            "upstream_error",
+        )
+    } else {
+        error_response(
+            StatusCode::TOO_MANY_REQUESTS,
+            format!(
+                "All {} providers in chain '{}' are rate-limited or unavailable",
+                entries.len(),
+                chain_id
+            ),
+            "rate_limit_exceeded",
+        )
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
