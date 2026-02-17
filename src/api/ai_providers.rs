@@ -318,9 +318,7 @@ fn google_authorize_url(challenge: &str, state: &str) -> Result<String, String> 
 ///
 /// These are used by chain resolution to include standard providers alongside
 /// custom providers from `AIProviderStore`.
-pub fn read_standard_accounts(
-    working_dir: &Path,
-) -> Vec<crate::provider_health::StandardAccount> {
+pub fn read_standard_accounts(working_dir: &Path) -> Vec<crate::provider_health::StandardAccount> {
     let config_path = get_opencode_config_path(working_dir);
     let opencode_config = read_opencode_config(&config_path).unwrap_or_default();
     let auth = read_opencode_auth().unwrap_or_else(|_| serde_json::json!({}));

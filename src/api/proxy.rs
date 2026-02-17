@@ -93,13 +93,9 @@ fn default_base_url(provider_type: ProviderType) -> Option<&'static str> {
 }
 
 /// Get the chat completions URL for a resolved entry.
-fn completions_url(
-    provider_type: ProviderType,
-    account_base_url: Option<&str>,
-) -> Option<String> {
+fn completions_url(provider_type: ProviderType, account_base_url: Option<&str>) -> Option<String> {
     // Account-level override takes precedence
-    let base = account_base_url
-        .or_else(|| default_base_url(provider_type))?;
+    let base = account_base_url.or_else(|| default_base_url(provider_type))?;
     let base = base.trim_end_matches('/');
     Some(format!("{}/chat/completions", base))
 }
@@ -236,8 +232,7 @@ async fn chat_completions(
     };
 
     // 3. Resolve chain → expanded entries with health filtering
-    let standard_accounts =
-        super::ai_providers::read_standard_accounts(&state.config.working_dir);
+    let standard_accounts = super::ai_providers::read_standard_accounts(&state.config.working_dir);
 
     let entries = state
         .chain_store
@@ -438,7 +433,9 @@ async fn chat_completions(
                         if let Ok(text) = std::str::from_utf8(&peek_buf) {
                             for line in text.lines() {
                                 if let Some(json_str) = line.strip_prefix("data: ") {
-                                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(json_str) {
+                                    if let Ok(v) =
+                                        serde_json::from_str::<serde_json::Value>(json_str)
+                                    {
                                         if v.get("type").and_then(|t| t.as_str()) == Some("error")
                                             || v.get("error").is_some()
                                         {
@@ -461,7 +458,9 @@ async fn chat_completions(
                     .and_then(|text| {
                         text.lines()
                             .find_map(|line| line.strip_prefix("data: "))
-                            .and_then(|json_str| serde_json::from_str::<serde_json::Value>(json_str).ok())
+                            .and_then(|json_str| {
+                                serde_json::from_str::<serde_json::Value>(json_str).ok()
+                            })
                     })
                     .map(|v| classify_embedded_error(&v))
                     .unwrap_or(CooldownReason::ServerError);
@@ -490,30 +489,20 @@ async fn chat_completions(
             let health_tracker = state.health_tracker.clone();
 
             let mut response_headers = HeaderMap::new();
-            response_headers.insert(
-                header::CONTENT_TYPE,
-                "text/event-stream".parse().unwrap(),
-            );
-            response_headers.insert(
-                header::CACHE_CONTROL,
-                "no-cache".parse().unwrap(),
-            );
+            response_headers.insert(header::CONTENT_TYPE, "text/event-stream".parse().unwrap());
+            response_headers.insert(header::CACHE_CONTROL, "no-cache".parse().unwrap());
 
             // Prepend the peeked bytes, then stream the rest
-            let peek_stream =
-                futures::stream::once(async { Ok::<_, reqwest::Error>(bytes::Bytes::from(peek_buf)) });
+            let peek_stream = futures::stream::once(async {
+                Ok::<_, reqwest::Error>(bytes::Bytes::from(peek_buf))
+            });
             let combined = peek_stream.chain(byte_stream);
             let byte_stream = normalize_sse_stream(combined);
 
             // Wrap the stream to record success/failure on completion.
             let tracked_stream = track_stream_health(byte_stream, health_tracker, account_id);
 
-            return (
-                status,
-                response_headers,
-                Body::from_stream(tracked_stream),
-            )
-                .into_response();
+            return (status, response_headers, Body::from_stream(tracked_stream)).into_response();
         }
 
         // Non-streaming: read full body before recording success, so a
@@ -541,31 +530,28 @@ async fn chat_completions(
                                 .record_failure(entry.account_id, reason, None)
                                 .await;
                             match reason {
-                                CooldownReason::RateLimit | CooldownReason::Overloaded => rate_limit_count += 1,
+                                CooldownReason::RateLimit | CooldownReason::Overloaded => {
+                                    rate_limit_count += 1
+                                }
                                 CooldownReason::AuthError => client_error_count += 1,
                                 _ => server_error_count += 1,
                             }
                             continue;
                         }
                     }
-                    state
-                        .health_tracker
-                        .record_success(entry.account_id)
-                        .await;
+                    state.health_tracker.record_success(entry.account_id).await;
                 }
                 let mut builder = Response::builder().status(status);
                 if let Some(ct) = response_headers.get(header::CONTENT_TYPE) {
                     builder = builder.header(header::CONTENT_TYPE, ct);
                 }
-                return builder
-                    .body(Body::from(resp_body))
-                    .unwrap_or_else(|_| {
-                        error_response(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            "Failed to build response".to_string(),
-                            "internal_error",
-                        )
-                    });
+                return builder.body(Body::from(resp_body)).unwrap_or_else(|_| {
+                    error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Failed to build response".to_string(),
+                        "internal_error",
+                    )
+                });
             }
             Err(e) => {
                 tracing::warn!(
@@ -715,10 +701,7 @@ fn normalize_sse_stream(
                 if let Some(pos) = buf.iter().position(|&b| b == b'\n') {
                     let line = buf.drain(..=pos).collect::<Vec<u8>>();
                     let normalized = normalize_sse_line(&line);
-                    return Some((
-                        Ok(bytes::Bytes::from(normalized)),
-                        (stream, buf),
-                    ));
+                    return Some((Ok(bytes::Bytes::from(normalized)), (stream, buf)));
                 }
 
                 // Need more data
@@ -728,7 +711,10 @@ fn normalize_sse_stream(
                     }
                     Some(Err(e)) => {
                         return Some((
-                            Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())),
+                            Err(std::io::Error::new(
+                                std::io::ErrorKind::Other,
+                                e.to_string(),
+                            )),
                             (stream, buf),
                         ));
                     }
@@ -739,10 +725,7 @@ fn normalize_sse_stream(
                         }
                         let remaining = std::mem::take(&mut buf);
                         let normalized = normalize_sse_line(&remaining);
-                        return Some((
-                            Ok(bytes::Bytes::from(normalized)),
-                            (stream, buf),
-                        ));
+                        return Some((Ok(bytes::Bytes::from(normalized)), (stream, buf)));
                     }
                 }
             }
@@ -753,7 +736,10 @@ fn normalize_sse_stream(
 /// Normalize a single SSE line.  If it's a `data: {...}` line, parse and
 /// fix known provider quirks; otherwise pass through unchanged.
 fn normalize_sse_line(line: &[u8]) -> Vec<u8> {
-    let trimmed = line.strip_suffix(b"\r\n").or_else(|| line.strip_suffix(b"\n")).unwrap_or(line);
+    let trimmed = line
+        .strip_suffix(b"\r\n")
+        .or_else(|| line.strip_suffix(b"\n"))
+        .unwrap_or(line);
     let data_prefix = b"data: ";
 
     if !trimmed.starts_with(data_prefix) {
@@ -795,7 +781,13 @@ fn normalize_sse_line(line: &[u8]) -> Vec<u8> {
     }
 
     // Re-serialize and preserve the original line ending
-    let suffix = if line.ends_with(b"\r\n") { &b"\r\n"[..] } else if line.ends_with(b"\n") { &b"\n"[..] } else { &b""[..] };
+    let suffix = if line.ends_with(b"\r\n") {
+        &b"\r\n"[..]
+    } else if line.ends_with(b"\n") {
+        &b"\n"[..]
+    } else {
+        &b""[..]
+    };
     let mut out = Vec::from(&b"data: "[..]);
     let _ = serde_json::to_writer(&mut out, &chunk);
     out.extend_from_slice(suffix);

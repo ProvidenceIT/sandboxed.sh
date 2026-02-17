@@ -1595,9 +1595,8 @@ async fn run_mission_turn(
             // account. If one matches what was already tried, it'll quickly
             // rate-limit again and we move to the next.
             if result.terminal_reason == Some(TerminalReason::RateLimited) {
-                let alt_accounts = super::ai_providers::get_all_anthropic_auth_for_claudecode(
-                    &config.working_dir,
-                );
+                let alt_accounts =
+                    super::ai_providers::get_all_anthropic_auth_for_claudecode(&config.working_dir);
                 if !alt_accounts.is_empty() {
                     tracing::info!(
                         mission_id = %mission_id,
