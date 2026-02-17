@@ -7483,7 +7483,12 @@ pub async fn run_opencode_turn(
 
     // Spawn a task to read stderr (just log in JSON mode, events come on stdout)
     let mission_id_clone = mission_id;
-    let stderr_error_capture = sse_error_message.clone();
+    // Use a separate mutex for stderr errors so that broad stderr pattern
+    // matches (e.g. log lines containing "error" with JSON) don't write into
+    // sse_error_message.  Only genuine SSE-level errors (session.error,
+    // AgentEvent::Error from the SSE stream) should block recovery guards.
+    let stderr_error_message: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let stderr_error_capture = stderr_error_message.clone();
     let stderr_text_capture = stderr_text_buffer.clone();
     let stderr_text_output_tx = text_output_tx.clone();
     let stderr_last_activity = last_activity.clone();
@@ -8117,11 +8122,26 @@ pub async fn run_opencode_turn(
         }
     }
 
-    // Surface SSE error messages (e.g. session.error) that were captured during streaming
+    // Surface SSE error messages (e.g. session.error) that were captured during streaming.
+    // These are high-confidence errors from the SSE stream and should block recovery.
     if let Some(err_msg) = sse_error_message.lock().unwrap().clone() {
         had_error = true;
         if opencode_output_needs_fallback(&final_result) {
             final_result = err_msg;
+        }
+    }
+
+    // Surface stderr-detected errors (e.g. JSON error payloads from provider).
+    // These are lower-confidence than SSE errors because the stderr detection
+    // uses broad pattern matching and can produce false positives.  They set
+    // had_error but do NOT write into sse_error_message, so recovery guards
+    // below can still clear had_error when valid content is recovered.
+    if sse_error_message.lock().unwrap().is_none() {
+        if let Some(err_msg) = stderr_error_message.lock().unwrap().clone() {
+            had_error = true;
+            if opencode_output_needs_fallback(&final_result) {
+                final_result = err_msg;
+            }
         }
     }
 
