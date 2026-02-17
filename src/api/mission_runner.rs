@@ -1488,10 +1488,16 @@ async fn run_mission_turn(
     let is_continuation = history.iter().any(|(role, _)| role == "assistant");
     let result = match backend_id.as_str() {
         "claudecode" => {
+            // Track the effective message and session used for the most recent
+            // attempt, so account rotation uses the right context (e.g. after
+            // session corruption recovery rebuilds the message).
+            let mut effective_msg = user_message.clone();
+            let mut effective_sid = session_id.clone();
+
             let mut result = run_claudecode_turn(
                 &workspace,
                 &mission_work_dir,
-                &user_message,
+                &effective_msg,
                 config.default_model.as_deref(),
                 effective_agent.as_deref(),
                 mission_id,
@@ -1499,7 +1505,7 @@ async fn run_mission_turn(
                 cancel.clone(),
                 secrets.clone(),
                 &config.working_dir,
-                session_id.as_deref(),
+                effective_sid.as_deref(),
                 is_continuation,
                 Some(Arc::clone(&tool_hub)),
                 Some(Arc::clone(&status)),
@@ -1556,10 +1562,15 @@ async fn run_mission_turn(
                     )
                 };
 
+                // Update effective context so account rotation uses the
+                // recovery message and new session, not the stale originals.
+                effective_msg = retry_message;
+                effective_sid = Some(new_session_id);
+
                 result = run_claudecode_turn(
                     &workspace,
                     &mission_work_dir,
-                    &retry_message,
+                    &effective_msg,
                     config.default_model.as_deref(),
                     effective_agent.as_deref(),
                     mission_id,
@@ -1567,7 +1578,7 @@ async fn run_mission_turn(
                     cancel.clone(),
                     secrets.clone(),
                     &config.working_dir,
-                    Some(&new_session_id),
+                    effective_sid.as_deref(),
                     is_continuation,
                     Some(Arc::clone(&tool_hub)),
                     Some(Arc::clone(&status)),
@@ -1609,7 +1620,7 @@ async fn run_mission_turn(
                         result = run_claudecode_turn(
                             &workspace,
                             &mission_work_dir,
-                            &user_message,
+                            &effective_msg,
                             config.default_model.as_deref(),
                             effective_agent.as_deref(),
                             mission_id,
@@ -1617,7 +1628,7 @@ async fn run_mission_turn(
                             cancel.clone(),
                             secrets.clone(),
                             &config.working_dir,
-                            session_id.as_deref(),
+                            effective_sid.as_deref(),
                             is_continuation,
                             Some(Arc::clone(&tool_hub)),
                             Some(Arc::clone(&status)),
