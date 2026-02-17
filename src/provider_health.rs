@@ -360,18 +360,22 @@ pub struct StandardAccount {
 
 /// Derive a deterministic UUID from a provider type ID string.
 ///
-/// Uses a simple hash-to-UUID scheme so each standard provider always gets the
-/// same UUID across restarts, which lets the health tracker persist state.
+/// Uses SHA-256 to hash a fixed namespace + provider_id, then takes the first
+/// 16 bytes as a UUID (similar to UUID v5 but with SHA-256 instead of SHA-1).
+/// This ensures collision resistance even for short, similar provider IDs
+/// like "xai" and "zai".
 pub fn stable_provider_uuid(provider_id: &str) -> Uuid {
-    // Use a fixed namespace prefix + provider_id bytes to build a deterministic UUID.
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    // Fixed namespace so different input domains don't collide
+    hasher.update(b"sandboxed.sh:provider:");
+    hasher.update(provider_id.as_bytes());
+    let hash = hasher.finalize();
     let mut bytes = [0u8; 16];
-    // Simple hash: XOR provider_id bytes into the 16-byte buffer
-    for (i, b) in provider_id.bytes().enumerate() {
-        bytes[i % 16] ^= b;
-    }
-    // Set version 4 bits (to be a valid UUID) but deterministic
-    bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
-    bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant 1
+    bytes.copy_from_slice(&hash[..16]);
+    // Set UUID version 4 and variant 1 bits for structural validity
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
     Uuid::from_bytes(bytes)
 }
 
@@ -464,14 +468,20 @@ impl ModelChainStore {
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
     }
 
-    async fn save_to_disk(&self) -> Result<(), std::io::Error> {
-        let chains = self.chains.read().await;
+    /// Serialize `chains` to JSON and write to disk atomically (write to
+    /// temp file, then rename). Caller should pass the chains data directly
+    /// so this can be called while the caller still holds the write lock,
+    /// avoiding TOCTOU races between concurrent upsert/delete operations.
+    fn save_chains_to_disk(&self, chains: &[ModelChain]) -> Result<(), std::io::Error> {
         if let Some(parent) = self.storage_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let contents = serde_json::to_string_pretty(&*chains)
+        let contents = serde_json::to_string_pretty(chains)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        std::fs::write(&self.storage_path, contents)?;
+        // Write to a temp file then rename for atomic replacement.
+        let tmp_path = self.storage_path.with_extension("tmp");
+        std::fs::write(&tmp_path, contents)?;
+        std::fs::rename(&tmp_path, &self.storage_path)?;
         Ok(())
     }
 
@@ -517,9 +527,9 @@ impl ModelChainStore {
         } else {
             chains.push(chain);
         }
-        drop(chains);
 
-        if let Err(e) = self.save_to_disk().await {
+        // Serialize while still holding the write lock to avoid TOCTOU races.
+        if let Err(e) = self.save_chains_to_disk(&chains) {
             tracing::error!("Failed to save model chains: {}", e);
         }
     }
@@ -542,10 +552,10 @@ impl ModelChainStore {
                 first.is_default = true;
             }
         }
-        drop(chains);
 
+        // Serialize while still holding the write lock to avoid TOCTOU races.
         if deleted {
-            if let Err(e) = self.save_to_disk().await {
+            if let Err(e) = self.save_chains_to_disk(&chains) {
                 tracing::error!("Failed to save model chains after delete: {}", e);
             }
         }

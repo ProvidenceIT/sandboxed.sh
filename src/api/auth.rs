@@ -42,7 +42,7 @@ pub struct AuthUser {
     pub username: String,
 }
 
-fn constant_time_eq(a: &str, b: &str) -> bool {
+pub(crate) fn constant_time_eq(a: &str, b: &str) -> bool {
     let a_bytes = a.as_bytes();
     let b_bytes = b.as_bytes();
     if a_bytes.len() != b_bytes.len() {

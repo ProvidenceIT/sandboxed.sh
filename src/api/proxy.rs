@@ -139,7 +139,7 @@ fn verify_proxy_auth(headers: &HeaderMap, expected: &str) -> Result<(), Response
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "));
     match token {
-        Some(t) if t == expected => Ok(()),
+        Some(t) if super::auth::constant_time_eq(t, expected) => Ok(()),
         _ => Err(error_response(
             StatusCode::UNAUTHORIZED,
             "Invalid or missing proxy authorization".to_string(),
