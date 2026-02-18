@@ -112,6 +112,9 @@ RUN curl -fsSL https://opencode.ai/install | bash -s -- --no-modify-path \
 RUN npm install -g @sourcegraph/amp@latest \
     && echo "[docker] Amp CLI installed: $(amp --version 2>/dev/null || echo 'unknown')" \
     || echo "[docker] WARNING: Amp CLI install failed (will be installed on first mission)"
+RUN npm install -g @openai/codex@latest \
+    && echo "[docker] Codex CLI installed: $(codex --version 2>/dev/null || echo 'unknown')" \
+    || echo "[docker] WARNING: Codex CLI install failed (will be installed on first mission)"
 
 # -- RTK (CLI output compressor for token savings) --
 RUN RTK_ARCH=$(case "$(uname -m)" in aarch64|arm64) echo "aarch64";; *) echo "x86_64";; esac) \

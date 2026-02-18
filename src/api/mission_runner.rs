@@ -6612,9 +6612,54 @@ async fn ensure_codex_cli_available(
         }
     }
 
-    // Check if already available (host workspace, or container with working binary)
+    // Check if already available (host workspace, or container with working binary).
+    // For host workspaces, also verify the binary actually works — the npm-installed
+    // Node.js wrapper can pass `command_available` but crash at runtime when the
+    // optional native dependency (@openai/codex-linux-x64) is missing.
     if command_available(workspace_exec, cwd, program).await {
-        return Ok(cli_path.to_string());
+        if workspace_exec.workspace.workspace_type == WorkspaceType::Host {
+            // Quick smoke test: run `codex --version` to catch broken wrappers.
+            let check = workspace_exec
+                .output(
+                    cwd,
+                    program,
+                    &["--version".to_string()],
+                    std::collections::HashMap::new(),
+                )
+                .await;
+            match check {
+                Ok(output) if output.status.success() => {
+                    return Ok(cli_path.to_string());
+                }
+                Ok(output) => {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    tracing::warn!(
+                        program = %program,
+                        exit_code = ?output.status.code(),
+                        stderr = %stderr.chars().take(300).collect::<String>(),
+                        "Codex CLI found but --version failed; trying native binary fallback"
+                    );
+                    // Try to find the native binary directly and use that instead.
+                    if let Some(resolved) = resolve_host_executable(program) {
+                        if let Some(native) = resolve_openai_codex_native_binary(&resolved) {
+                            if command_available(workspace_exec, cwd, native.to_string_lossy().as_ref()).await {
+                                tracing::info!(
+                                    native_path = %native.display(),
+                                    "Using native Codex binary instead of broken wrapper"
+                                );
+                                return Ok(native.to_string_lossy().to_string());
+                            }
+                        }
+                    }
+                    // Fall through to auto-install below.
+                }
+                Err(_) => {
+                    // command_available said yes but we can't run it — fall through.
+                }
+            }
+        } else {
+            return Ok(cli_path.to_string());
+        }
     }
 
     // Check bun's global bin directories (bun installs globals to ~/.cache/.bun/bin/)
@@ -6713,11 +6758,43 @@ async fn ensure_codex_cli_available(
 fn resolve_openai_codex_native_binary(
     wrapper_path: &std::path::Path,
 ) -> Option<std::path::PathBuf> {
-    // If `codex` was installed via npm/bun (@openai/codex), the entrypoint is a Node
-    // wrapper script that expects its surrounding package layout (package.json, vendor/).
+    // The @openai/codex npm package ships a Node.js ESM wrapper that delegates
+    // to a native Rust binary.  We need the native binary so we can copy it
+    // into containers (the Node wrapper fails as a standalone file).
     //
-    // When we copy it into a container as a standalone file, Node runs it as CJS and it
-    // fails to import ESM. Instead, copy the actual native binary shipped in vendor/.
+    // Package layout has changed over time:
+    //
+    //  v0.94 and earlier (all-in-one):
+    //    <pkg>/vendor/<triple>/codex/codex          <- native binary
+    //    <pkg>/bin/codex.js                         <- wrapper
+    //
+    //  v0.1.2505+ / v0.104+ (optional-dep split):
+    //    <pkg>/bin/codex.js                         <- wrapper (no vendor/)
+    //    <pkg>/node_modules/@openai/codex-linux-x64/vendor/<triple>/codex/codex
+    //       (npm nests optional deps inside the package's node_modules)
+    //    <node_modules>/@openai/codex-linux-x64/vendor/<triple>/codex/codex
+    //       (bun hoists optional deps as siblings)
+    //
+    //  npm global install quirk:
+    //    npm copies bin/codex.js to <prefix>/bin/codex (no .js extension,
+    //    not a symlink).  We must detect this by reading the shebang.
+
+    let os = std::env::consts::OS;
+    let arch = std::env::consts::ARCH;
+
+    let triple = match (os, arch) {
+        ("linux", "x86_64") => "x86_64-unknown-linux-musl",
+        ("linux", "aarch64") => "aarch64-unknown-linux-musl",
+        ("macos", "x86_64") => "x86_64-apple-darwin",
+        ("macos", "aarch64") => "aarch64-apple-darwin",
+        _ => {
+            tracing::debug!(os, arch, "No Codex native binary triple for this platform");
+            return None;
+        }
+    };
+
+    let binary_name = if cfg!(windows) { "codex.exe" } else { "codex" };
+
     let real = match std::fs::canonicalize(wrapper_path) {
         Ok(p) => p,
         Err(e) => {
@@ -6738,43 +6815,185 @@ fn resolve_openai_codex_native_binary(
         "Resolving Codex native binary"
     );
 
-    if file_name.is_some_and(|n| n == "codex.js") {
-        // .../@openai/codex/bin/codex.js
-        let package_root = real.parent()?.parent()?;
-        let os = std::env::consts::OS;
-        let arch = std::env::consts::ARCH;
+    // Determine if this is a Node.js wrapper by checking the filename or
+    // reading the shebang.  npm copies codex.js → codex (no extension).
+    let is_node_wrapper = file_name.is_some_and(|n| n == "codex.js")
+        || is_node_shebang_file(&real);
 
-        let triple = match (os, arch) {
-            ("linux", "x86_64") => "x86_64-unknown-linux-musl",
-            ("linux", "aarch64") => "aarch64-unknown-linux-musl",
-            ("macos", "x86_64") => "x86_64-apple-darwin",
-            ("macos", "aarch64") => "aarch64-apple-darwin",
-            _ => {
-                tracing::debug!(os, arch, "No Codex native binary triple for this platform");
-                return None;
-            }
-        };
+    if !is_node_wrapper {
+        // Might already be the native binary — nothing to resolve.
+        return None;
+    }
 
-        let binary_name = if cfg!(windows) { "codex.exe" } else { "codex" };
-        let native = package_root
+    // Try to locate the package root.
+    // If the canonical path ends in bin/codex.js, package_root = parent of bin/.
+    // If it's a standalone copy (e.g. /usr/local/bin/codex), we search npm/bun
+    // global directories instead.
+    let package_root: Option<std::path::PathBuf> = if file_name.is_some_and(|n| n == "codex.js") {
+        // .../@openai/codex/bin/codex.js → package_root = .../@openai/codex
+        real.parent().and_then(|bin| bin.parent()).map(|p| p.to_path_buf())
+    } else {
+        None
+    };
+
+    // Helper: given a package root, search all known vendor locations.
+    let search_from_root = |root: &std::path::Path| -> Option<std::path::PathBuf> {
+        // 1) Legacy: <root>/vendor/<triple>/codex/codex
+        let legacy = root.join("vendor").join(triple).join("codex").join(binary_name);
+        if legacy.is_file() {
+            tracing::info!(native_path = %legacy.display(), "Found Codex native binary (legacy vendor)");
+            return Some(legacy);
+        }
+
+        // 2) npm nested optional dep: <root>/node_modules/@openai/codex-<platform>/vendor/...
+        let platform_pkg = codex_platform_package_name();
+        let npm_nested = root
+            .join("node_modules")
+            .join("@openai")
+            .join(&platform_pkg)
             .join("vendor")
             .join(triple)
             .join("codex")
             .join(binary_name);
-        if native.is_file() {
-            tracing::info!(
-                native_path = %native.display(),
-                "Found Codex native binary"
-            );
+        if npm_nested.is_file() {
+            tracing::info!(native_path = %npm_nested.display(), "Found Codex native binary (npm optional dep)");
+            return Some(npm_nested);
+        }
+
+        // 3) bun sibling: <root>/../codex-<platform>/vendor/...
+        if let Some(node_modules) = root.parent() {
+            let bun_sibling = node_modules
+                .join("@openai")
+                .join(&platform_pkg)
+                .join("vendor")
+                .join(triple)
+                .join("codex")
+                .join(binary_name);
+            if bun_sibling.is_file() {
+                tracing::info!(native_path = %bun_sibling.display(), "Found Codex native binary (bun sibling)");
+                return Some(bun_sibling);
+            }
+        }
+
+        None
+    };
+
+    // If we resolved a package root from the symlink, search there first.
+    if let Some(ref root) = package_root {
+        if let Some(native) = search_from_root(root) {
             return Some(native);
         }
-        tracing::debug!(
-            expected = %native.display(),
-            "Codex native binary not found at expected path"
-        );
     }
 
+    // Fallback: search well-known npm/bun global directories.
+    // This covers the case where the wrapper at /usr/local/bin/codex is a
+    // standalone copy and we can't derive the package root from its path.
+    let candidate_roots: Vec<std::path::PathBuf> = collect_codex_package_roots();
+    for root in &candidate_roots {
+        if package_root.as_deref() == Some(root.as_path()) {
+            continue; // Already searched above.
+        }
+        if let Some(native) = search_from_root(root) {
+            return Some(native);
+        }
+    }
+
+    tracing::debug!("Codex native binary not found in any known location");
     None
+}
+
+/// Returns the platform-specific optional dependency package name,
+/// e.g. "codex-linux-x64" on Linux x86_64.
+fn codex_platform_package_name() -> String {
+    let (os_part, arch_part) = match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => ("linux", "x64"),
+        ("linux", "aarch64") => ("linux", "arm64"),
+        ("macos", "x86_64") => ("darwin", "x64"),
+        ("macos", "aarch64") => ("darwin", "arm64"),
+        ("windows", "x86_64") => ("win32", "x64"),
+        ("windows", "aarch64") => ("win32", "arm64"),
+        _ => ("unknown", "unknown"),
+    };
+    format!("codex-{}-{}", os_part, arch_part)
+}
+
+/// Checks if a file starts with a `#!/usr/bin/env node` (or similar) shebang.
+fn is_node_shebang_file(path: &std::path::Path) -> bool {
+    use std::io::Read;
+    let mut file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    let mut buf = [0u8; 64];
+    let n = match file.read(&mut buf) {
+        Ok(n) => n,
+        Err(_) => return false,
+    };
+    let header = String::from_utf8_lossy(&buf[..n]);
+    header.starts_with("#!") && header.contains("node")
+}
+
+/// Collects well-known directories where @openai/codex might be installed globally.
+fn collect_codex_package_roots() -> Vec<std::path::PathBuf> {
+    let mut roots = Vec::new();
+
+    // npm global prefixes: check both common locations
+    for prefix in &["/usr/lib", "/usr/local/lib"] {
+        let root = std::path::PathBuf::from(prefix)
+            .join("node_modules")
+            .join("@openai")
+            .join("codex");
+        if root.is_dir() {
+            roots.push(root);
+        }
+    }
+
+    // npm prefix from env/command
+    if let Ok(output) = std::process::Command::new("npm")
+        .args(["root", "-g"])
+        .output()
+    {
+        if output.status.success() {
+            let npm_root = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let root = std::path::PathBuf::from(&npm_root)
+                .join("@openai")
+                .join("codex");
+            if root.is_dir() && !roots.contains(&root) {
+                roots.push(root);
+            }
+        }
+    }
+
+    // bun global directories
+    for bun_base in &[
+        "/root/.cache/.bun/install/global/node_modules",
+        "/root/.bun/install/global/node_modules",
+    ] {
+        let root = std::path::PathBuf::from(bun_base)
+            .join("@openai")
+            .join("codex");
+        if root.is_dir() && !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
+
+    // Also check $HOME-relative bun paths for non-root users
+    if let Ok(home) = std::env::var("HOME") {
+        for suffix in &[
+            ".cache/.bun/install/global/node_modules",
+            ".bun/install/global/node_modules",
+        ] {
+            let root = std::path::PathBuf::from(&home)
+                .join(suffix)
+                .join("@openai")
+                .join("codex");
+            if root.is_dir() && !roots.contains(&root) {
+                roots.push(root);
+            }
+        }
+    }
+
+    roots
 }
 
 fn resolve_host_executable(program: &str) -> Option<std::path::PathBuf> {
