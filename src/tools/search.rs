@@ -8,12 +8,15 @@
 
 use std::path::Path;
 use std::process::Stdio;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use tokio::process::Command;
 
 use super::{resolve_path, Tool};
+
+const SEARCH_TIMEOUT_SECS: u64 = 120;
 
 /// Search file contents with regex/grep.
 pub struct GrepSearch;
@@ -97,12 +100,13 @@ impl Tool for GrepSearch {
             c
         };
 
-        let output = cmd
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to execute search: {}", e))?;
+        let output = tokio::time::timeout(
+            Duration::from_secs(SEARCH_TIMEOUT_SECS),
+            cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).output(),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("Search timed out after {} seconds", SEARCH_TIMEOUT_SECS))?
+        .map_err(|e| anyhow::anyhow!("Failed to execute search: {}", e))?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
