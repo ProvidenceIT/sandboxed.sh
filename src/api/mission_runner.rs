@@ -188,10 +188,6 @@ async fn set_control_state_for_mission(
     });
 }
 
-fn strip_opencode_status_lines(text: &str) -> String {
-    strip_opencode_banner_lines(text)
-}
-
 fn handle_tool_part_update(
     part: &serde_json::Value,
     state: &mut OpencodeSseState,
@@ -331,7 +327,7 @@ fn handle_part_update(
         return None;
     };
 
-    let filtered = strip_opencode_status_lines(&content);
+    let filtered = strip_opencode_banner_lines(&content);
     if filtered != content {
         *buffer = filtered.clone();
     }
@@ -9625,7 +9621,7 @@ mod tests {
         build_history_context, extract_part_text, extract_str, extract_thought_line,
         is_session_corruption_error, is_tool_call_only_output, parse_opencode_session_token,
         parse_opencode_stderr_text_part, remap_legacy_codex_model, running_health, stall_severity,
-        strip_ansi_codes, strip_opencode_status_lines, strip_think_tags,
+        strip_ansi_codes, strip_opencode_banner_lines, strip_think_tags,
         sync_opencode_agent_config, MissionHealth, MissionRunState, MissionStallSeverity,
         STALL_SEVERE_SECS, STALL_WARN_SECS,
     };
@@ -9988,15 +9984,6 @@ mod tests {
         assert_eq!(thought, "first");
         assert!(remaining.contains("thought: second"));
         assert!(remaining.contains("regular text"));
-    }
-
-    // ── strip_opencode_status_lines delegation tests ──────────────────
-
-    #[test]
-    fn strip_opencode_status_lines_delegates_to_banner_lines() {
-        let input = "Starting opencode server\nHere is your answer\nall tasks completed";
-        let result = strip_opencode_status_lines(input);
-        assert_eq!(result.trim(), "Here is your answer");
     }
 
     // ── strip_ansi_codes tests ────────────────────────────────────────
