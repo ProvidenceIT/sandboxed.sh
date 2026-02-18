@@ -379,6 +379,11 @@ fn default_providers_config() -> ProvidersConfig {
                         description: Some("Fast and economical".to_string()),
                     },
                     ProviderModel {
+                        id: "gpt-5.3-codex".to_string(),
+                        name: "GPT-5.3 Codex".to_string(),
+                        description: Some("Newest Codex coding model".to_string()),
+                    },
+                    ProviderModel {
                         id: "gpt-5.2-codex".to_string(),
                         name: "GPT-5.2 Codex".to_string(),
                         description: Some("Smart and precise coding agent".to_string()),

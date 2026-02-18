@@ -9312,14 +9312,6 @@ impl From<&MissionRunner> for RunningMissionInfo {
     }
 }
 
-fn remap_legacy_codex_model(model: Option<&str>) -> Option<String> {
-    match model {
-        Some("gpt-5.3-codex") | Some("gpt-5.3-codex-spark") => Some("gpt-5-codex".to_string()),
-        Some(m) => Some(m.to_string()),
-        None => None,
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 pub async fn run_codex_turn(
     workspace: &Workspace,
@@ -9341,15 +9333,7 @@ pub async fn run_codex_turn(
 
     let model = model.map(str::trim).filter(|m| !m.is_empty());
     let model_effort = model_effort.map(str::trim).filter(|m| !m.is_empty());
-    let resolved_model: Option<String> = remap_legacy_codex_model(model);
-    if resolved_model.as_deref() != model {
-        tracing::warn!(
-            mission_id = %mission_id,
-            requested_model = ?model,
-            fallback_model = "gpt-5-codex",
-            "Remapping unavailable Codex model to fallback"
-        );
-    }
+    let resolved_model: Option<String> = model.map(|m| m.to_string());
 
     tracing::info!(
         mission_id = %mission_id,
@@ -9566,6 +9550,12 @@ pub async fn run_codex_turn(
     {
         final_message
             .push_str("\n\nTry model `gpt-5-codex` or `gpt-5.1-codex` for Codex missions.");
+        if matches!(model, Some("gpt-5.3-codex") | Some("gpt-5.3-codex-spark")) {
+            final_message.push_str(
+                "\n\nIf you expected GPT-5.3 Codex to work, your Codex CLI may be outdated. \
+Update it to the latest version (`npm install -g @openai/codex@latest`) and retry.",
+            );
+        }
     }
 
     let mut result = if success {
@@ -9735,11 +9725,10 @@ mod tests {
         build_history_context, extract_opencode_session_id, extract_part_text, extract_str,
         extract_thought_line, is_rate_limited_error, is_session_corruption_error,
         is_tool_call_only_output, opencode_output_needs_fallback, opencode_session_token_from_line,
-        parse_opencode_session_token, parse_opencode_stderr_text_part, remap_legacy_codex_model,
-        running_health, sanitized_opencode_stdout, stall_severity, strip_ansi_codes,
-        strip_opencode_banner_lines, strip_opencode_status_lines, strip_think_tags,
-        sync_opencode_agent_config, MissionHealth, MissionRunState, MissionStallSeverity,
-        STALL_SEVERE_SECS, STALL_WARN_SECS,
+        parse_opencode_session_token, parse_opencode_stderr_text_part, running_health,
+        sanitized_opencode_stdout, stall_severity, strip_ansi_codes, strip_opencode_banner_lines,
+        strip_opencode_status_lines, strip_think_tags, sync_opencode_agent_config, MissionHealth,
+        MissionRunState, MissionStallSeverity, STALL_SEVERE_SECS, STALL_WARN_SECS,
     };
     use crate::agents::{AgentResult, TerminalReason};
     use serde_json::json;
@@ -9831,27 +9820,6 @@ mod tests {
 
         assert_eq!(prometheus_model, "openai/gpt-4o");
         assert_eq!(sisyphus_model, "openai/gpt-4o-mini");
-    }
-
-    #[test]
-    fn remap_legacy_codex_model_maps_deprecated_model_ids() {
-        assert_eq!(
-            remap_legacy_codex_model(Some("gpt-5.3-codex")),
-            Some("gpt-5-codex".to_string())
-        );
-        assert_eq!(
-            remap_legacy_codex_model(Some("gpt-5.3-codex-spark")),
-            Some("gpt-5-codex".to_string())
-        );
-    }
-
-    #[test]
-    fn remap_legacy_codex_model_keeps_supported_or_empty_model_ids() {
-        assert_eq!(
-            remap_legacy_codex_model(Some("gpt-5-codex")),
-            Some("gpt-5-codex".to_string())
-        );
-        assert_eq!(remap_legacy_codex_model(None), None);
     }
 
     #[test]
