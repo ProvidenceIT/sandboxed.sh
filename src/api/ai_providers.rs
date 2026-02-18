@@ -2346,19 +2346,19 @@ fn read_oauth_token_entry(provider_type: ProviderType) -> Option<OAuthTokenEntry
 
     let (selected, source, path) = candidates.remove(best_idx);
 
-    let refresh_prefix = if selected.refresh_token.len() > 12 {
-        &selected.refresh_token[..12]
+    let refresh_prefix = if selected.refresh_token.len() > 4 {
+        &selected.refresh_token[..4]
     } else {
         &selected.refresh_token
     };
 
-    tracing::info!(
+    tracing::debug!(
         provider = ?provider_type,
         source = ?source,
         expires_at = selected.expires_at,
         now_ms = now_ms,
         refresh_prefix = %refresh_prefix,
-        "Selected OAuth token source"
+        "Selected OAuth token source (token prefix for correlation only)"
     );
 
     // If we selected a non-canonical source, sync it back to the canonical store.
@@ -2698,13 +2698,13 @@ pub async fn refresh_anthropic_oauth_token() -> Result<(), String> {
     let expires_in = token_data["expires_in"].as_i64().unwrap_or(3600);
     let expires_at = chrono::Utc::now().timestamp_millis() + (expires_in * 1000);
 
-    let new_refresh_prefix = if new_refresh_token.len() > 12 {
-        &new_refresh_token[..12]
+    let new_refresh_prefix = if new_refresh_token.len() > 4 {
+        &new_refresh_token[..4]
     } else {
         new_refresh_token
     };
 
-    tracing::info!(
+    tracing::debug!(
         "Received new tokens from Anthropic (new refresh_token prefix: {}..., expires_in: {}s)",
         new_refresh_prefix,
         expires_in
