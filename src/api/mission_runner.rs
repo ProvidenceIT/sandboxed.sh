@@ -845,6 +845,7 @@ pub struct MissionRunner {
 
 impl MissionRunner {
     /// Create a new mission runner.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         mission_id: Uuid,
         workspace_id: Uuid,

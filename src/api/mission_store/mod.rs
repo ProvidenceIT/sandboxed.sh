@@ -255,6 +255,7 @@ pub fn sanitize_filename(value: &str) -> String {
 }
 
 /// Mission store trait - implemented by all storage backends.
+#[allow(clippy::too_many_arguments)]
 #[async_trait]
 pub trait MissionStore: Send + Sync {
     /// Whether this store persists data across restarts.
