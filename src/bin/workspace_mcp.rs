@@ -22,8 +22,8 @@ use sandboxed_sh::tools::Tool;
 
 #[derive(Debug, Deserialize)]
 struct JsonRpcRequest {
-    #[allow(dead_code)]
-    jsonrpc: String,
+    #[serde(rename = "jsonrpc")]
+    _jsonrpc: String,
     #[serde(default)]
     id: Value,
     method: String,

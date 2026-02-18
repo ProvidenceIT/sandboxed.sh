@@ -1253,14 +1253,14 @@ async fn get_run_tasks(Path(id): Path<Uuid>) -> Json<serde_json::Value> {
     }))
 }
 
-/// Query parameters for memory search.
+/// Query parameters for memory search (stub - memory system removed).
 #[derive(Debug, Deserialize)]
 pub struct SearchMemoryQuery {
     q: String,
-    #[allow(dead_code)]
-    k: Option<usize>,
-    #[allow(dead_code)]
-    run_id: Option<Uuid>,
+    #[serde(rename = "k")]
+    _k: Option<usize>,
+    #[serde(rename = "run_id")]
+    _run_id: Option<Uuid>,
 }
 
 /// Search memory (stub - memory system removed).

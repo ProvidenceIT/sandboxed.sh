@@ -24,8 +24,8 @@ static DISPLAY_COUNTER: AtomicU32 = AtomicU32::new(99);
 
 #[derive(Debug, Deserialize)]
 struct JsonRpcRequest {
-    #[allow(dead_code)]
-    jsonrpc: String,
+    #[serde(rename = "jsonrpc")]
+    _jsonrpc: String,
     /// JSON-RPC 2.0 notifications don't have an id field, so this must be optional
     #[serde(default)]
     id: Value,

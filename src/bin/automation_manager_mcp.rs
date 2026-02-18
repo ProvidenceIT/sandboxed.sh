@@ -21,8 +21,8 @@ use sandboxed_sh::api::mission_store::{
 
 #[derive(Debug, Deserialize)]
 struct JsonRpcRequest {
-    #[allow(dead_code)]
-    jsonrpc: String,
+    #[serde(rename = "jsonrpc")]
+    _jsonrpc: String,
     #[serde(default)]
     id: Value,
     method: String,
