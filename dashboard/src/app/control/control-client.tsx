@@ -3463,6 +3463,10 @@ export default function ControlClient() {
         case "tool_call": {
           // Finalize any pending thinking before tool call
           finalizePendingThinking(timestamp);
+          // Clear pending text delta — the text before this tool call belongs to
+          // the same assistant turn, so it shouldn't linger as a separate "Draft"
+          // stream item if the tool call hangs or the assistant_message is never emitted.
+          lastTextDelta = null;
           const toolCallId = event.tool_call_id || `unknown-${event.id}`;
           const name = event.tool_name || "unknown";
           const isUiTool = name.startsWith("ui_") || name === "question" || name === "AskUserQuestion";
@@ -3522,13 +3526,20 @@ export default function ControlClient() {
     }
 
     if (lastTextDelta && lastTextDelta.timestamp > lastAssistantTimestamp) {
+      // If the text delta is stale (>5 min old) and mission is still active,
+      // treat it as finalized to avoid showing a permanent "Draft" label
+      // when a tool call hung or the assistant_message event was lost.
+      const STALE_THRESHOLD_MS = 5 * 60 * 1000;
+      const isStale =
+        missionActive && Date.now() - lastTextDelta.timestamp > STALE_THRESHOLD_MS;
+      const isDone = !missionActive || isStale;
       items.push({
         kind: "stream" as const,
         id: lastTextDelta.id,
         content: lastTextDelta.content,
-        done: !missionActive,
+        done: isDone,
         startTime: lastTextDelta.timestamp,
-        endTime: missionActive ? undefined : lastTextDelta.timestamp,
+        endTime: isDone ? lastTextDelta.timestamp : undefined,
       });
     }
 
