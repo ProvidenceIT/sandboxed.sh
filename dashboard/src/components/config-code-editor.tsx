@@ -97,6 +97,7 @@ function editorTheme(padding: number | undefined): Extension {
       },
       '&.cm-editor': {
         backgroundColor: 'transparent',
+        height: '100%',
       },
       '.cm-scroller': {
         backgroundColor: 'transparent',
@@ -104,7 +105,25 @@ function editorTheme(padding: number | undefined): Extension {
           '"JetBrainsMono Nerd Font Mono", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace',
         fontSize: '14px',
         lineHeight: '1.5',
-        overflow: 'auto',
+        maxHeight: '100%',
+        overflowX: 'auto',
+        overflowY: 'auto',
+        scrollbarWidth: 'thin',
+        scrollbarColor: 'rgba(110, 110, 115, 0.8) transparent',
+      },
+      '.cm-scroller::-webkit-scrollbar': {
+        width: '8px',
+        height: '8px',
+      },
+      '.cm-scroller::-webkit-scrollbar-track': {
+        background: 'transparent',
+      },
+      '.cm-scroller::-webkit-scrollbar-thumb': {
+        background: 'rgba(110, 110, 115, 0.8)',
+        borderRadius: '4px',
+      },
+      '.cm-scroller::-webkit-scrollbar-thumb:hover': {
+        background: 'rgba(160, 160, 165, 0.9)',
       },
       '.cm-gutters': {
         backgroundColor: 'transparent',
