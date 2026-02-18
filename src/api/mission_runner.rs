@@ -7274,7 +7274,9 @@ pub async fn run_opencode_turn(
 
     // Build CLI arguments for oh-my-opencode run
     // The 'run' command takes a prompt and executes it with completion detection
-    // Arguments: bunx oh-my-opencode run [--agent <agent>] [--directory <path>] [--timeout <ms>] <message>
+    // Arguments: bunx oh-my-opencode run [--agent <agent>] [--directory <path>] <message>
+    // Note: --timeout was removed in oh-my-opencode 3.7.2; the runner handles
+    // completion detection internally so an explicit timeout is not needed.
     let mut args = if runner_is_direct {
         vec!["run".to_string()]
     } else {
@@ -7288,10 +7290,6 @@ pub async fn run_opencode_turn(
 
     args.push("--directory".to_string());
     args.push(work_dir_arg.clone());
-
-    // Add timeout (0 = no timeout, let the agent complete)
-    args.push("--timeout".to_string());
-    args.push("0".to_string());
 
     // The message is passed as the final argument
     args.push(message.to_string());
@@ -9819,11 +9817,10 @@ mod tests {
         build_history_context, extract_opencode_session_id, extract_part_text, extract_str,
         extract_thought_line, is_rate_limited_error, is_session_corruption_error,
         is_tool_call_only_output, opencode_output_needs_fallback, opencode_session_token_from_line,
-        parse_opencode_session_token, parse_opencode_stderr_text_part, remap_legacy_codex_model,
-        running_health, sanitized_opencode_stdout, stall_severity, strip_ansi_codes,
-        strip_opencode_banner_lines, strip_opencode_status_lines, strip_think_tags,
-        summarize_recent_opencode_stderr, sync_opencode_agent_config, MissionHealth,
-        MissionRunState, MissionStallSeverity, STALL_SEVERE_SECS, STALL_WARN_SECS,
+        parse_opencode_session_token, parse_opencode_stderr_text_part, running_health,
+        sanitized_opencode_stdout, stall_severity, strip_ansi_codes, strip_opencode_banner_lines,
+        strip_think_tags, summarize_recent_opencode_stderr, sync_opencode_agent_config,
+        MissionHealth, MissionRunState, MissionStallSeverity, STALL_SEVERE_SECS, STALL_WARN_SECS,
     };
     use crate::agents::{AgentResult, TerminalReason};
     use serde_json::json;
