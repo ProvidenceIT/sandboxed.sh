@@ -3770,9 +3770,50 @@ fn sanitized_opencode_stdout(output: &str) -> Cow<'_, str> {
     strip_opencode_banner_lines(output)
 }
 
+fn is_opencode_exit_status_placeholder(output: &str) -> bool {
+    output
+        .lines()
+        .next()
+        .map(|line| {
+            line.trim_start()
+                .starts_with("OpenCode CLI exited with status:")
+        })
+        .unwrap_or(false)
+}
+
 fn opencode_output_needs_fallback(output: &str) -> bool {
     let sanitized = sanitized_opencode_stdout(output);
-    sanitized.trim().is_empty()
+    sanitized.trim().is_empty() || is_opencode_exit_status_placeholder(sanitized.as_ref())
+}
+
+fn summarize_recent_opencode_stderr(lines: &std::collections::VecDeque<String>) -> Option<String> {
+    for line in lines.iter().rev() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || is_opencode_banner_line(trimmed) {
+            continue;
+        }
+
+        let lower = trimmed.to_lowercase();
+        if lower.contains("server.heartbeat")
+            || lower.contains("server.connected")
+            || lower.contains("server.listening")
+            || lower.contains("message.updated")
+            || lower.contains("message.part.updated")
+            || lower.contains("session.status: busy")
+            || lower.contains("session.status: idle")
+        {
+            continue;
+        }
+
+        const MAX_LEN: usize = 300;
+        if trimmed.chars().count() <= MAX_LEN {
+            return Some(trimmed.to_string());
+        }
+        let mut truncated: String = trimmed.chars().take(MAX_LEN).collect();
+        truncated.push_str("...");
+        return Some(truncated);
+    }
+    None
 }
 
 /// Returns true if the output looks like a raw tool-call JSON fragment rather
@@ -6958,7 +6999,7 @@ pub async fn run_opencode_turn(
         ensure_anthropic_oauth_token_valid, ensure_google_oauth_token_valid,
         ensure_openai_oauth_token_valid,
     };
-    use std::collections::HashMap;
+    use std::collections::{HashMap, VecDeque};
     use std::sync::{Arc, Mutex};
     use tokio::io::{AsyncBufReadExt, BufReader};
 
@@ -7394,8 +7435,11 @@ pub async fn run_opencode_turn(
 
     let mut final_result = String::new();
     let mut had_error = false;
+    let mut final_result_from_nonzero_exit = false;
     let session_id_capture: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let stderr_text_buffer: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+    let stderr_recent_lines: Arc<Mutex<VecDeque<String>>> =
+        Arc::new(Mutex::new(VecDeque::with_capacity(32)));
     // Accumulates the latest full-text snapshot from SSE TextDelta events.
     // Used as a fallback when stdout JSON and session storage both fail —
     // this buffer contains exactly what was streamed to the dashboard,
@@ -7675,6 +7719,7 @@ pub async fn run_opencode_turn(
     let stderr_error_message: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let stderr_error_capture = stderr_error_message.clone();
     let stderr_text_capture = stderr_text_buffer.clone();
+    let stderr_recent_capture = stderr_recent_lines.clone();
     let stderr_text_output_tx = text_output_tx.clone();
     let stderr_last_activity = last_activity.clone();
     let stderr_rate_limit = rate_limit_detected.clone();
@@ -7690,6 +7735,12 @@ pub async fn run_opencode_turn(
             while let Ok(Some(line)) = stderr_lines.next_line().await {
                 let clean = line.trim().to_string();
                 if !clean.is_empty() {
+                    if let Ok(mut recent_lines) = stderr_recent_capture.lock() {
+                        if recent_lines.len() >= 32 {
+                            let _ = recent_lines.pop_front();
+                        }
+                        recent_lines.push_back(clean.clone());
+                    }
                     // Refresh global inactivity timer for lines that indicate
                     // real work progress.  Heartbeats and server-internal status
                     // lines are excluded — they fire every ~30s and would keep a
@@ -8333,8 +8384,22 @@ pub async fn run_opencode_turn(
     if let Ok(status) = exit_status {
         if !status.success() {
             had_error = true;
-            if final_result.is_empty() {
-                final_result = format!("OpenCode CLI exited with status: {}", status);
+            if opencode_output_needs_fallback(&final_result) {
+                if let Some(err_msg) = stderr_error_message.lock().unwrap().clone() {
+                    final_result = err_msg;
+                } else if let Ok(recent_lines) = stderr_recent_lines.lock() {
+                    if let Some(last_stderr) = summarize_recent_opencode_stderr(&recent_lines) {
+                        final_result = format!(
+                            "OpenCode CLI exited with status: {}. Last stderr: {}",
+                            status, last_stderr
+                        );
+                    } else {
+                        final_result = format!("OpenCode CLI exited with status: {}", status);
+                    }
+                } else {
+                    final_result = format!("OpenCode CLI exited with status: {}", status);
+                }
+                final_result_from_nonzero_exit = true;
             }
         }
     }
@@ -8345,6 +8410,7 @@ pub async fn run_opencode_turn(
         had_error = true;
         if opencode_output_needs_fallback(&final_result) {
             final_result = err_msg.clone();
+            final_result_from_nonzero_exit = false;
         }
     }
 
@@ -8362,6 +8428,7 @@ pub async fn run_opencode_turn(
             had_error = true;
             if opencode_output_needs_fallback(&final_result) {
                 final_result = err_msg;
+                final_result_from_nonzero_exit = false;
             }
         }
     }
@@ -8388,6 +8455,7 @@ pub async fn run_opencode_turn(
                         "Recovered OpenCode assistant output from storage"
                     );
                     final_result = text;
+                    final_result_from_nonzero_exit = false;
                 } else {
                     tracing::warn!(
                         mission_id = %mission_id,
@@ -8425,6 +8493,7 @@ pub async fn run_opencode_turn(
                 );
                 final_result = buffer.clone();
                 recovered_from_sse = true;
+                final_result_from_nonzero_exit = false;
             }
         }
     }
@@ -8434,6 +8503,7 @@ pub async fn run_opencode_turn(
             if !buffer.trim().is_empty() {
                 final_result = buffer.clone();
                 recovered_from_stderr = true;
+                final_result_from_nonzero_exit = false;
             }
         }
     }
@@ -8447,7 +8517,11 @@ pub async fn run_opencode_turn(
 
     // Clear had_error when we have real (non-banner) content and no SSE error.
     // This avoids false failures when the CLI exited non-zero but produced real output.
-    if had_error && !opencode_output_needs_fallback(&final_result) && !has_sse_error {
+    if had_error
+        && !opencode_output_needs_fallback(&final_result)
+        && !has_sse_error
+        && !final_result_from_nonzero_exit
+    {
         had_error = false;
     }
 
@@ -9745,10 +9819,11 @@ mod tests {
         build_history_context, extract_opencode_session_id, extract_part_text, extract_str,
         extract_thought_line, is_rate_limited_error, is_session_corruption_error,
         is_tool_call_only_output, opencode_output_needs_fallback, opencode_session_token_from_line,
-        parse_opencode_session_token, parse_opencode_stderr_text_part, running_health,
-        sanitized_opencode_stdout, stall_severity, strip_ansi_codes, strip_opencode_banner_lines,
-        strip_think_tags, sync_opencode_agent_config, MissionHealth, MissionRunState,
-        MissionStallSeverity, STALL_SEVERE_SECS, STALL_WARN_SECS,
+        parse_opencode_session_token, parse_opencode_stderr_text_part, remap_legacy_codex_model,
+        running_health, sanitized_opencode_stdout, stall_severity, strip_ansi_codes,
+        strip_opencode_banner_lines, strip_opencode_status_lines, strip_think_tags,
+        summarize_recent_opencode_stderr, sync_opencode_agent_config, MissionHealth,
+        MissionRunState, MissionStallSeverity, STALL_SEVERE_SECS, STALL_WARN_SECS,
     };
     use crate::agents::{AgentResult, TerminalReason};
     use serde_json::json;
@@ -10026,6 +10101,33 @@ mod tests {
         // Pure model output does NOT need fallback
         let model_only = "Here is your answer: 42";
         assert!(!opencode_output_needs_fallback(model_only));
+    }
+
+    #[test]
+    fn opencode_output_needs_fallback_detects_exit_status_placeholder() {
+        let status_only = "OpenCode CLI exited with status: exit status: 1";
+        assert!(opencode_output_needs_fallback(status_only));
+
+        let status_with_stderr = "OpenCode CLI exited with status: exit status: 1. Last stderr: session.error: Requested entity was not found";
+        assert!(opencode_output_needs_fallback(status_with_stderr));
+
+        let normal_text = "The OpenCode CLI exited with status: 1 in a prior run, now fixed.";
+        assert!(!opencode_output_needs_fallback(normal_text));
+    }
+
+    #[test]
+    fn summarize_recent_opencode_stderr_prefers_last_meaningful_line() {
+        use std::collections::VecDeque;
+
+        let mut lines = VecDeque::new();
+        lines.push_back("server.connected".to_string());
+        lines.push_back("message.updated (assistant, build)".to_string());
+        lines.push_back("response.error: 404 Not Found".to_string());
+
+        assert_eq!(
+            summarize_recent_opencode_stderr(&lines).as_deref(),
+            Some("response.error: 404 Not Found")
+        );
     }
     #[test]
     fn strip_opencode_banner_lines_handles_ansi_codes() {
