@@ -229,7 +229,7 @@ export function ConfigCodeEditor({
         theme="none"
         minHeight={typeof minHeight === 'number' ? `${minHeight}px` : minHeight}
         height={height !== undefined ? (typeof height === 'number' ? `${height}px` : height) : undefined}
-        className={cn('config-code-editor', editorClassName)}
+        className={cn('config-code-editor', height && 'h-full', editorClassName)}
         basicSetup={{
           lineNumbers: false,
           highlightActiveLine: false,
