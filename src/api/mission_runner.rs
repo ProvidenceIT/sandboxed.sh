@@ -7277,28 +7277,66 @@ pub async fn run_opencode_turn(
     // Arguments: bunx oh-my-opencode run [--agent <agent>] [--directory <path>] <message>
     // Note: --timeout was removed in oh-my-opencode 3.7.2; the runner handles
     // completion detection internally so an explicit timeout is not needed.
-    let mut args = if runner_is_direct {
-        vec!["run".to_string()]
-    } else {
-        vec!["oh-my-opencode".to_string(), "run".to_string()]
+    //
+    // The message is written to a temp file and passed via $(cat ...) to avoid
+    // argument splitting issues when multi-line messages go through
+    // systemd-nspawn or nsenter shell wrappers.
+    let prompt_file_host = work_dir.join(".sandboxed-sh-prompt.txt");
+    if let Err(e) = std::fs::write(&prompt_file_host, message) {
+        let err_msg = format!("Failed to write prompt file: {}", e);
+        tracing::error!("{}", err_msg);
+        return AgentResult::failure(err_msg, 0).with_terminal_reason(TerminalReason::LlmError);
+    }
+    let prompt_file_env = workspace_path_for_env(workspace, &prompt_file_host);
+    let prompt_file_arg = prompt_file_env.to_string_lossy().to_string();
+
+    // Build the oh-my-opencode run command as a shell string so that
+    // $(cat <file>) correctly expands the message as a single argument.
+    let shell_escape = |s: &str| -> String {
+        let mut escaped = String::with_capacity(s.len() + 2);
+        escaped.push('\'');
+        for ch in s.chars() {
+            if ch == '\'' {
+                escaped.push_str("'\"'\"'");
+            } else {
+                escaped.push(ch);
+            }
+        }
+        escaped.push('\'');
+        escaped
     };
 
-    if let Some(a) = agent {
-        args.push("--agent".to_string());
-        args.push(a.to_string());
+    let mut shell_cmd = String::new();
+    if runner_is_direct {
+        shell_cmd.push_str(&shell_escape(&cli_runner));
+        shell_cmd.push_str(" run");
+    } else {
+        shell_cmd.push_str(&shell_escape(&cli_runner));
+        shell_cmd.push_str(" oh-my-opencode run");
     }
 
-    args.push("--directory".to_string());
-    args.push(work_dir_arg.clone());
+    if let Some(a) = agent {
+        shell_cmd.push_str(" --agent ");
+        shell_cmd.push_str(&shell_escape(a));
+    }
 
-    // The message is passed as the final argument
-    args.push(message.to_string());
+    shell_cmd.push_str(" --directory ");
+    shell_cmd.push_str(&shell_escape(&work_dir_arg));
+
+    // Read message from file via command substitution to guarantee a single argument
+    shell_cmd.push_str(" \"$(cat ");
+    shell_cmd.push_str(&shell_escape(&prompt_file_arg));
+    shell_cmd.push_str(")\"");
+
+    let args = vec!["-c".to_string(), shell_cmd.clone()];
+    let cli_runner_shell = "/bin/sh".to_string();
 
     tracing::debug!(
         mission_id = %mission_id,
         runner_is_direct = runner_is_direct,
-        cli_args = ?args,
-        "OpenCode CLI args prepared"
+        shell_cmd = %shell_cmd,
+        prompt_file = %prompt_file_arg,
+        "OpenCode CLI args prepared (shell wrapper)"
     );
 
     // Build environment variables
@@ -7402,9 +7440,11 @@ pub async fn run_opencode_turn(
 
     cleanup_opencode_listeners(&workspace_exec, work_dir, Some(&opencode_port)).await;
 
-    // Use WorkspaceExec to spawn the CLI in the correct workspace context
+    // Use WorkspaceExec to spawn the CLI in the correct workspace context.
+    // We invoke /bin/sh -c '...' so the prompt file is read via $(cat ...)
+    // and passed as a single argument regardless of workspace type.
     let mut child = match workspace_exec
-        .spawn_streaming(work_dir, &cli_runner, &args, env)
+        .spawn_streaming(work_dir, &cli_runner_shell, &args, env)
         .await
     {
         Ok(child) => child,
@@ -8629,6 +8669,10 @@ pub async fn run_opencode_turn(
     if let Some(model) = model_used {
         result = result.with_model(model);
     }
+
+    // Clean up the temp prompt file (best-effort; the workspace may clean it later)
+    let _ = std::fs::remove_file(&prompt_file_host);
+
     result
 }
 
