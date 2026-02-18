@@ -97,7 +97,6 @@ function editorTheme(padding: number | undefined): Extension {
       },
       '&.cm-editor': {
         backgroundColor: 'transparent',
-        height: '100%',
       },
       '.cm-scroller': {
         backgroundColor: 'transparent',
