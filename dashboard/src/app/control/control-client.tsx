@@ -6315,7 +6315,7 @@ export default function ControlClient() {
                               : "bg-indigo-500"
                           )}
                         >
-                          <p className="whitespace-pre-wrap text-sm">
+                          <p className="whitespace-pre-wrap text-sm break-all">
                             {item.content}
                           </p>
                         </div>
@@ -6648,7 +6648,7 @@ export default function ControlClient() {
                       <Ban className="h-4 w-4 text-white/40" />
                     </div>
                     <div className="max-w-[80%] rounded-2xl rounded-tl-md bg-white/[0.02] border border-white/[0.04] px-4 py-3">
-                      <p className="whitespace-pre-wrap text-sm text-white/60">
+                      <p className="whitespace-pre-wrap text-sm text-white/60 break-all">
                         {item.content}
                       </p>
                       {item.resumable && (
