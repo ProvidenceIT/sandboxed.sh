@@ -1552,6 +1552,7 @@ pub fn write_codex_credentials_for_workspace(
         .or_else(|| get_openai_api_key_for_codex_default(working_dir))
     {
         write_codex_auth_json_apikey(&codex_dir, &api_key)?;
+        log_codex_auth_status(workspace, &codex_dir, "api_key");
         tracing::info!(
             workspace_id = %workspace.id,
             workspace_type = ?workspace.workspace_type,
@@ -1564,6 +1565,7 @@ pub fn write_codex_credentials_for_workspace(
     // This works for ChatGPT Plus/Pro users without an API platform org.
     if read_oauth_token_entry(ProviderType::OpenAI).is_some() {
         write_codex_auth_json_chatgpt(&codex_dir)?;
+        log_codex_auth_status(workspace, &codex_dir, "chatgpt_oauth");
         tracing::info!(
             workspace_id = %workspace.id,
             workspace_type = ?workspace.workspace_type,
@@ -1574,12 +1576,43 @@ pub fn write_codex_credentials_for_workspace(
 
     // Priority 3: Copy existing host auth.json verbatim.
     ensure_codex_auth_json(&codex_dir)?;
+    log_codex_auth_status(workspace, &codex_dir, "host_copy");
     tracing::info!(
         workspace_id = %workspace.id,
         workspace_type = ?workspace.workspace_type,
         "Ensured Codex auth.json for workspace"
     );
     Ok(())
+}
+
+fn log_codex_auth_status(
+    workspace: &crate::workspace::Workspace,
+    codex_dir: &Path,
+    source: &str,
+) {
+    let auth_path = codex_dir.join("auth.json");
+    match std::fs::metadata(&auth_path) {
+        Ok(meta) => {
+            tracing::info!(
+                workspace_id = %workspace.id,
+                workspace_type = ?workspace.workspace_type,
+                source = %source,
+                auth_path = %auth_path.display(),
+                auth_size_bytes = meta.len(),
+                "Codex auth.json present for workspace"
+            );
+        }
+        Err(err) => {
+            tracing::warn!(
+                workspace_id = %workspace.id,
+                workspace_type = ?workspace.workspace_type,
+                source = %source,
+                auth_path = %auth_path.display(),
+                error = %err,
+                "Codex auth.json missing or unreadable after write"
+            );
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2028,6 +2061,13 @@ struct OAuthTokenEntry {
     expires_at: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OAuthTokenSource {
+    SandboxedCredentials,
+    OpenCodeAuth,
+    ClaudeCliCredentials,
+}
+
 /// Path to Open Agent's canonical credential store.
 fn get_sandboxed_credentials_path() -> PathBuf {
     let home = home_dir();
@@ -2043,7 +2083,7 @@ fn get_sandboxed_credentials_path() -> PathBuf {
 ///   "anthropic": { "type": "oauth", "refresh": "...", "access": "...", "expires": 123 }
 /// }
 /// ```
-fn read_sandboxed_credential(provider_type: ProviderType) -> Option<OAuthTokenEntry> {
+fn read_sandboxed_credential(provider_type: ProviderType) -> Option<(OAuthTokenEntry, PathBuf)> {
     let path = get_sandboxed_credentials_path();
     if !path.exists() {
         return None;
@@ -2074,11 +2114,14 @@ fn read_sandboxed_credential(provider_type: ProviderType) -> Option<OAuthTokenEn
             "Found OAuth token in Open Agent credentials"
         );
 
-        return Some(OAuthTokenEntry {
+        return Some((
+            OAuthTokenEntry {
             refresh_token: refresh_token.to_string(),
             access_token: access_token.to_string(),
             expires_at,
-        });
+        },
+            path,
+        ));
     }
 
     None
@@ -2167,16 +2210,21 @@ fn remove_sandboxed_credential(provider_type: ProviderType) -> Result<(), String
 /// Read Anthropic OAuth credentials from Claude Code's `.credentials.json`.
 /// Checks `$HOME/.claude/.credentials.json` and `/var/lib/opencode/.claude/.credentials.json`.
 /// Parses the `claudeAiOauth` format and converts to `OAuthTokenEntry`.
-fn read_anthropic_from_claude_credentials() -> Option<OAuthTokenEntry> {
+fn read_anthropic_from_claude_credentials() -> Option<(OAuthTokenEntry, PathBuf)> {
     let home = home_dir();
-    let candidates = vec![
-        PathBuf::from(&home)
-            .join(".claude")
-            .join(".credentials.json"),
+    let mut candidates = vec![
         PathBuf::from("/var/lib/opencode")
             .join(".claude")
             .join(".credentials.json"),
+        PathBuf::from("/root").join(".claude").join(".credentials.json"),
     ];
+
+    let home_path = PathBuf::from(&home)
+        .join(".claude")
+        .join(".credentials.json");
+    if !candidates.iter().any(|p| p == &home_path) {
+        candidates.push(home_path);
+    }
 
     for path in candidates {
         if !path.exists() {
@@ -2205,60 +2253,158 @@ fn read_anthropic_from_claude_credentials() -> Option<OAuthTokenEntry> {
             .and_then(|v| v.as_str())
             .unwrap_or("");
         let expires_at = oauth.get("expiresAt").and_then(|v| v.as_i64()).unwrap_or(0);
+        let has_refresh = !refresh_token.trim().is_empty();
 
         tracing::debug!(
             path = %path.display(),
             expires_at = expires_at,
+            has_refresh = has_refresh,
             "Found Anthropic OAuth token in Claude credentials"
         );
 
-        return Some(OAuthTokenEntry {
+        return Some((
+            OAuthTokenEntry {
             refresh_token: refresh_token.to_string(),
             access_token: access_token.to_string(),
             expires_at,
-        });
+        },
+            path,
+        ));
     }
 
     None
 }
 
 fn read_oauth_token_entry(provider_type: ProviderType) -> Option<OAuthTokenEntry> {
+    let mut candidates: Vec<(OAuthTokenEntry, OAuthTokenSource, Option<PathBuf>)> = Vec::new();
+
     // Tier 1: Open Agent's canonical credential store
-    if let Some(entry) = read_sandboxed_credential(provider_type) {
-        return Some(entry);
+    let tier1 = read_sandboxed_credential(provider_type);
+    if let Some((entry, path)) = tier1.clone() {
+        candidates.push((entry, OAuthTokenSource::SandboxedCredentials, Some(path)));
     }
 
     // Tier 2: OpenCode auth.json paths (legacy / external auth flows)
-    if let Some(entry) = read_from_opencode_auth_paths(provider_type) {
-        // Auto-sync to Open Agent's file so future reads hit tier 1
-        let _ = write_sandboxed_credential(
-            provider_type,
-            &entry.refresh_token,
-            &entry.access_token,
-            entry.expires_at,
-        );
-        return Some(entry);
+    if let Some((entry, path)) = read_from_opencode_auth_paths(provider_type) {
+        candidates.push((entry, OAuthTokenSource::OpenCodeAuth, Some(path)));
     }
 
     // Tier 3: Claude .credentials.json (Anthropic only, from Claude CLI auth)
     if matches!(provider_type, ProviderType::Anthropic) {
-        if let Some(entry) = read_anthropic_from_claude_credentials() {
-            // Auto-sync to Open Agent's file
-            let _ = write_sandboxed_credential(
-                provider_type,
-                &entry.refresh_token,
-                &entry.access_token,
-                entry.expires_at,
-            );
-            return Some(entry);
+        if let Some((entry, path)) = read_anthropic_from_claude_credentials() {
+            candidates.push((entry, OAuthTokenSource::ClaudeCliCredentials, Some(path)));
         }
     }
 
-    None
+    if candidates.is_empty() {
+        tracing::debug!(
+            provider = ?provider_type,
+            "No OAuth token candidates found in any tier"
+        );
+        return None;
+    }
+
+    tracing::debug!(
+        provider = ?provider_type,
+        candidates = candidates
+            .iter()
+            .map(|(entry, source, path)| {
+                format!(
+                    "{:?}@{}(expires_at={})",
+                    source,
+                    path.as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "<none>".to_string()),
+                    entry.expires_at
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
+        "Collected OAuth token candidates"
+    );
+
+    // Prefer non-expired tokens; otherwise pick the newest expiry.
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let mut best_idx: usize = 0;
+    let mut best_is_fresh = false;
+    let mut best_expires = i64::MIN;
+
+    for (idx, (entry, _, _)) in candidates.iter().enumerate() {
+        let is_fresh = !oauth_token_expired(entry.expires_at);
+        let expires = entry.expires_at;
+
+        if is_fresh && !best_is_fresh {
+            best_idx = idx;
+            best_is_fresh = true;
+            best_expires = expires;
+            continue;
+        }
+
+        if is_fresh == best_is_fresh && expires > best_expires {
+            best_idx = idx;
+            best_expires = expires;
+        }
+    }
+
+    let (selected, source, path) = candidates.remove(best_idx);
+
+    let refresh_prefix = if selected.refresh_token.len() > 12 {
+        &selected.refresh_token[..12]
+    } else {
+        &selected.refresh_token
+    };
+
+    tracing::info!(
+        provider = ?provider_type,
+        source = ?source,
+        expires_at = selected.expires_at,
+        now_ms = now_ms,
+        refresh_prefix = %refresh_prefix,
+        "Selected OAuth token source"
+    );
+
+    // If we selected a non-canonical source, sync it back to the canonical store.
+    if source != OAuthTokenSource::SandboxedCredentials {
+        if let Some((tier1_entry, _tier1_path)) = tier1 {
+            if tier1_entry.refresh_token != selected.refresh_token {
+                tracing::warn!(
+                    provider = ?provider_type,
+                    source = ?source,
+                    expires_at = selected.expires_at,
+                    "Canonical OAuth refresh token differs from selected source; syncing canonical store"
+                );
+            }
+        }
+
+        if let Err(e) = write_sandboxed_credential(
+            provider_type,
+            &selected.refresh_token,
+            &selected.access_token,
+            selected.expires_at,
+        ) {
+            tracing::warn!(
+                provider = ?provider_type,
+                source = ?source,
+                error = %e,
+                "Failed to sync selected OAuth token to canonical store"
+            );
+        } else if let Some(path) = path {
+            tracing::info!(
+                provider = ?provider_type,
+                source = ?source,
+                path = %path.display(),
+                "Synced OAuth token from non-canonical source to canonical store"
+            );
+        }
+    }
+
+    Some(selected)
 }
 
 /// Read an OAuth token entry from OpenCode auth.json paths (tier 2 fallback).
-fn read_from_opencode_auth_paths(provider_type: ProviderType) -> Option<OAuthTokenEntry> {
+fn read_from_opencode_auth_paths(
+    provider_type: ProviderType,
+) -> Option<(OAuthTokenEntry, PathBuf)> {
     let auth_paths = get_all_opencode_auth_paths();
 
     for auth_path in auth_paths {
@@ -2300,11 +2446,14 @@ fn read_from_opencode_auth_paths(provider_type: ProviderType) -> Option<OAuthTok
                 "Found OAuth token entry in OpenCode auth"
             );
 
-            return Some(OAuthTokenEntry {
+            return Some((
+                OAuthTokenEntry {
                 refresh_token: refresh_token.to_string(),
                 access_token: access_token.to_string(),
                 expires_at,
-            });
+            },
+                auth_path,
+            ));
         }
     }
 

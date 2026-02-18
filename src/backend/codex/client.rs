@@ -160,7 +160,7 @@ impl CodexClient {
 
         let stderr_capture = Arc::new(Mutex::new(String::new()));
         let stderr_capture_clone = Arc::clone(&stderr_capture);
-        tokio::spawn(async move {
+        let stderr_task = tokio::spawn(async move {
             use tokio::io::AsyncBufReadExt;
             let reader = BufReader::new(stderr);
             let mut lines = reader.lines();
@@ -192,6 +192,8 @@ impl CodexClient {
         // Wrap child in Arc<Mutex> so it can be killed from outside the task
         let child_handle = Arc::new(Mutex::new(Some(child)));
         let child_for_task = Arc::clone(&child_handle);
+        let stdout_non_json = Arc::new(Mutex::new(Vec::<String>::new()));
+        let stdout_non_json_clone = Arc::clone(&stdout_non_json);
 
         let task_handle = tokio::spawn(async move {
             let reader = BufReader::new(stdout);
@@ -229,33 +231,27 @@ impl CodexClient {
                                 line.clone()
                             }
                         );
+                        let mut captured = stdout_non_json_clone.lock().await;
+                        if captured.len() < 10 {
+                            if line.len() > 400 {
+                                captured.push(format!(
+                                    "{}...",
+                                    line.chars().take(400).collect::<String>()
+                                ));
+                            } else {
+                                captured.push(line);
+                            }
+                        }
                     }
                 }
             }
 
-            // If the CLI exited without emitting any JSON events, surface stderr as an error.
-            if !saw_any_event {
-                let stderr_content = stderr_capture.lock().await;
-                if !stderr_content.trim().is_empty() {
-                    let _ = tx
-                        .send(CodexEvent::Error {
-                            message: format!(
-                                "Codex CLI produced no JSON output. Stderr: {}",
-                                stderr_content
-                                    .lines()
-                                    .take(10)
-                                    .collect::<Vec<_>>()
-                                    .join(" | ")
-                            ),
-                        })
-                        .await;
-                }
-            }
-
             // Wait for process to finish (if it wasn't killed)
+            let mut exit_status: Option<std::process::ExitStatus> = None;
             if let Some(mut child) = child_for_task.lock().await.take() {
                 match child.wait().await {
                     Ok(status) => {
+                        exit_status = Some(status);
                         if !status.success() {
                             warn!("Codex CLI exited with status: {}", status);
                         } else {
@@ -265,6 +261,45 @@ impl CodexClient {
                     Err(e) => {
                         error!("Failed to wait for Codex CLI: {}", e);
                     }
+                }
+            }
+
+            let _ = stderr_task.await;
+
+            // If the CLI exited without emitting any JSON events, surface stderr/stdout as an error.
+            if !saw_any_event {
+                let stderr_content = stderr_capture.lock().await;
+                let non_json = stdout_non_json.lock().await;
+                let exit_status = exit_status
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+
+                if !stderr_content.trim().is_empty() || !non_json.is_empty() {
+                    let stderr_excerpt = stderr_content
+                        .lines()
+                        .take(10)
+                        .collect::<Vec<_>>()
+                        .join(" | ");
+                    let stdout_excerpt = non_json.join(" | ");
+                    let _ = tx
+                        .send(CodexEvent::Error {
+                            message: format!(
+                                "Codex CLI produced no JSON output (exit_status: {}). Stderr: {} | Stdout: {}",
+                                exit_status,
+                                if stderr_excerpt.is_empty() { "<empty>" } else { &stderr_excerpt },
+                                if stdout_excerpt.is_empty() { "<empty>" } else { &stdout_excerpt }
+                            ),
+                        })
+                        .await;
+                } else {
+                    let _ = tx
+                        .send(CodexEvent::Error {
+                            message: format!(
+                                "Codex CLI produced no JSON output (exit_status: {}). No stderr/stdout captured.",
+                                exit_status
+                            ),
+                        })
+                        .await;
                 }
             }
         });

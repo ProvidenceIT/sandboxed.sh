@@ -2031,25 +2031,25 @@ pub fn run_claudecode_turn<'a>(
             }
         }
 
-        fn looks_like_claude_cli_credentials(path: &std::path::Path) -> bool {
+        fn claude_cli_credentials_info(path: &std::path::Path) -> Option<(i64, bool)> {
             let metadata = match std::fs::metadata(path) {
                 Ok(m) => m,
-                Err(_) => return false,
+                Err(_) => return None,
             };
             if metadata.len() == 0 {
-                return false;
+                return None;
             }
             let contents = match std::fs::read_to_string(path) {
                 Ok(c) => c,
-                Err(_) => return false,
+                Err(_) => return None,
             };
             let creds: serde_json::Value = match serde_json::from_str(&contents) {
                 Ok(v) => v,
-                Err(_) => return false,
+                Err(_) => return None,
             };
             let oauth = match creds.get("claudeAiOauth") {
                 Some(o) => o,
-                None => return false,
+                None => return None,
             };
             let has_access_token = oauth
                 .get("accessToken")
@@ -2057,23 +2057,31 @@ pub fn run_claudecode_turn<'a>(
                 .map(|s| !s.trim().is_empty())
                 .unwrap_or(false);
             if !has_access_token {
-                return false;
+                return None;
             }
-            // Check if the access token is expired.
-            // Claude Code in --print mode does not auto-refresh OAuth tokens,
-            // so we must ensure the token is valid before launching.
             let expires_at = oauth
                 .get("expiresAt")
                 .and_then(|v| v.as_i64())
                 .unwrap_or(i64::MAX);
+            let has_refresh = oauth
+                .get("refreshToken")
+                .and_then(|v| v.as_str())
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false);
+            Some((expires_at, has_refresh))
+        }
+
+        fn looks_like_claude_cli_credentials(path: &std::path::Path) -> bool {
+            let (expires_at, has_refresh) = match claude_cli_credentials_info(path) {
+                Some(info) => info,
+                None => return false,
+            };
+            // Check if the access token is expired.
+            // Claude Code in --print mode does not auto-refresh OAuth tokens,
+            // so we must ensure the token is valid before launching.
             let now_ms = chrono::Utc::now().timestamp_millis();
             // Add 60s buffer to avoid race conditions with near-expiry tokens
             if expires_at < now_ms + 60_000 {
-                let has_refresh = oauth
-                    .get("refreshToken")
-                    .and_then(|v| v.as_str())
-                    .map(|s| !s.trim().is_empty())
-                    .unwrap_or(false);
                 tracing::warn!(
                     path = %path.display(),
                     expires_at = expires_at,
@@ -2128,11 +2136,36 @@ pub fn run_claudecode_turn<'a>(
             }
         }
         let has_cli_creds = looks_like_claude_cli_credentials(&mission_creds_path);
+        if let Some((expires_at, has_refresh)) = claude_cli_credentials_info(&mission_creds_path) {
+            tracing::info!(
+                mission_id = %mission_id,
+                path = %mission_creds_path.display(),
+                expires_at = expires_at,
+                has_refresh = has_refresh,
+                has_cli_creds = has_cli_creds,
+                "Claude CLI credential status for mission"
+            );
+        } else {
+            tracing::info!(
+                mission_id = %mission_id,
+                path = %mission_creds_path.display(),
+                has_cli_creds = has_cli_creds,
+                "No Claude CLI credentials found for mission"
+            );
+        }
 
         // Only refresh OpenCode/Anthropic OAuth tokens if we plan to inject them.
         let oauth_refresh_result = if has_cli_creds {
+            tracing::info!(
+                mission_id = %mission_id,
+                "Using Claude CLI credentials for mission; skipping OAuth refresh injection"
+            );
             Ok(())
         } else {
+            tracing::info!(
+                mission_id = %mission_id,
+                "No valid Claude CLI credentials; using OAuth refresh flow"
+            );
             // Ensure OAuth tokens are fresh before resolving credentials.
             ensure_anthropic_oauth_token_valid().await
         };
