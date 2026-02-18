@@ -1585,11 +1585,7 @@ pub fn write_codex_credentials_for_workspace(
     Ok(())
 }
 
-fn log_codex_auth_status(
-    workspace: &crate::workspace::Workspace,
-    codex_dir: &Path,
-    source: &str,
-) {
+fn log_codex_auth_status(workspace: &crate::workspace::Workspace, codex_dir: &Path, source: &str) {
     let auth_path = codex_dir.join("auth.json");
     match std::fs::metadata(&auth_path) {
         Ok(meta) => {
@@ -2116,10 +2112,10 @@ fn read_sandboxed_credential(provider_type: ProviderType) -> Option<(OAuthTokenE
 
         return Some((
             OAuthTokenEntry {
-            refresh_token: refresh_token.to_string(),
-            access_token: access_token.to_string(),
-            expires_at,
-        },
+                refresh_token: refresh_token.to_string(),
+                access_token: access_token.to_string(),
+                expires_at,
+            },
             path,
         ));
     }
@@ -2216,7 +2212,9 @@ fn read_anthropic_from_claude_credentials() -> Option<(OAuthTokenEntry, PathBuf)
         PathBuf::from("/var/lib/opencode")
             .join(".claude")
             .join(".credentials.json"),
-        PathBuf::from("/root").join(".claude").join(".credentials.json"),
+        PathBuf::from("/root")
+            .join(".claude")
+            .join(".credentials.json"),
     ];
 
     let home_path = PathBuf::from(&home)
@@ -2264,10 +2262,10 @@ fn read_anthropic_from_claude_credentials() -> Option<(OAuthTokenEntry, PathBuf)
 
         return Some((
             OAuthTokenEntry {
-            refresh_token: refresh_token.to_string(),
-            access_token: access_token.to_string(),
-            expires_at,
-        },
+                refresh_token: refresh_token.to_string(),
+                access_token: access_token.to_string(),
+                expires_at,
+            },
             path,
         ));
     }
@@ -2448,10 +2446,10 @@ fn read_from_opencode_auth_paths(
 
             return Some((
                 OAuthTokenEntry {
-                refresh_token: refresh_token.to_string(),
-                access_token: access_token.to_string(),
-                expires_at,
-            },
+                    refresh_token: refresh_token.to_string(),
+                    access_token: access_token.to_string(),
+                    expires_at,
+                },
                 auth_path,
             ));
         }
