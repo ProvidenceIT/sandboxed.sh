@@ -453,6 +453,7 @@ select:focus-visible {
    ========================================================================= */
 .prose-glass {
   color: rgba(255, 255, 255, 0.9);
+  overflow-wrap: anywhere;
 }
 
 .prose-glass strong {
