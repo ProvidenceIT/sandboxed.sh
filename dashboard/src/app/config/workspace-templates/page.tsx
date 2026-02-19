@@ -18,7 +18,6 @@ import {
   type WorkspaceTemplateSummary,
   type SkillSummary,
   type InitScriptSummary,
-  type InitScript,
   type ConfigProfileSummary,
   type TailscaleMode,
 } from '@/lib/api';
@@ -139,7 +138,6 @@ export default function WorkspaceTemplatesPage() {
   const [renaming, setRenaming] = useState(false);
 
   // Script Fragment editing state
-  const [selectedFragment, setSelectedFragment] = useState<InitScript | null>(null);
   const [selectedFragmentName, setSelectedFragmentName] = useState<string | null>(null);
   const [fragmentContent, setFragmentContent] = useState('');
   const [originalFragmentContent, setOriginalFragmentContent] = useState('');
@@ -251,7 +249,6 @@ export default function WorkspaceTemplatesPage() {
   const loadTemplate = useCallback(async (name: string) => {
     try {
       // Clear fragment selection when selecting a template
-      setSelectedFragment(null);
       setSelectedFragmentName(null);
       setFragmentContent('');
       setOriginalFragmentContent('');
@@ -296,7 +293,6 @@ export default function WorkspaceTemplatesPage() {
       setDirty(false);
 
       const fragment = await getInitScript(name);
-      setSelectedFragment(fragment);
       setSelectedFragmentName(name);
       setFragmentContent(fragment.content);
       setOriginalFragmentContent(fragment.content);
@@ -449,7 +445,6 @@ export default function WorkspaceTemplatesPage() {
     setSaving(true);
     try {
       await deleteInitScript(selectedFragmentName);
-      setSelectedFragment(null);
       setSelectedFragmentName(null);
       setFragmentContent('');
       setOriginalFragmentContent('');

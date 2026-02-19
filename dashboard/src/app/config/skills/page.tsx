@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import {
   getLibrarySkill,
   getSkillReference,
@@ -11,7 +11,6 @@ import {
   searchSkillsRegistry,
   installFromRegistry,
   type Skill,
-  type SkillSummary,
   type RegistrySkillListing,
 } from '@/lib/api';
 import {
@@ -164,24 +163,8 @@ function formatYamlValue(value: string): string {
   return value;
 }
 
-/**
- * Check if a frontmatter value contains YAML special characters that need quoting.
- * Returns an array of field names that have problematic values.
- */
-function checkFrontmatterForYamlIssues(frontmatter: Frontmatter): string[] {
-  const problematicFields: string[] = [];
-  
-  for (const [key, value] of Object.entries(frontmatter)) {
-    if (value && YAML_SPECIAL_CHARS.some(char => value.includes(char))) {
-      problematicFields.push(key);
-    }
-  }
-  
-  return problematicFields;
-}
-
 function buildContent(frontmatter: Frontmatter, body: string): string {
-  const entries = Object.entries(frontmatter).filter(([_, v]) => v !== undefined && v !== '');
+  const entries = Object.entries(frontmatter).filter(([, v]) => v !== undefined && v !== '');
   if (entries.length === 0) {
     return body;
   }
@@ -810,6 +793,7 @@ export default function SkillsPage() {
     };
     document.addEventListener('keydown', handleKeyDown);
     return () => document.removeEventListener('keydown', handleKeyDown);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isDirty, selectedSkill, selectedFile, showNewSkillDialog, showImportDialog, showNewFileDialog, showCommitDialog]);
 
   const loadSkill = async (name: string) => {

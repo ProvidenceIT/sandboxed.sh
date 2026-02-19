@@ -14,7 +14,6 @@ import {
   TrendingUp,
   DollarSign,
   Activity,
-  Clock,
   CheckCircle,
   XCircle,
   BarChart3,
@@ -262,7 +261,7 @@ export default function AnalyticsPage() {
 
           {/* Simple bar chart */}
           <div className="h-48 flex items-end gap-1">
-            {costByDay.slice(-14).map((day, i) => {
+            {costByDay.slice(-14).map((day) => {
               const height = maxDayCost > 0 ? (day.cost / maxDayCost) * 100 : 0;
               const date = new Date(day.date);
               const isWeekend = date.getDay() === 0 || date.getDay() === 6;

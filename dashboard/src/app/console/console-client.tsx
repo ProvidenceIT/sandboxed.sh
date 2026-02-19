@@ -21,7 +21,6 @@ const isTerminalDebugEnabled = () => {
 
 function terminalDebug(...args: unknown[]) {
   if (!isTerminalDebugEnabled()) return;
-  // eslint-disable-next-line no-console
   console.debug("[terminal]", ...args);
 }
 
@@ -32,19 +31,15 @@ function wsLog(level: WsLogLevel, message: string, meta?: Record<string, unknown
   const args = meta ? [prefix, message, meta] : [prefix, message];
   switch (level) {
     case "debug":
-      // eslint-disable-next-line no-console
       console.debug(...args);
       break;
     case "info":
-      // eslint-disable-next-line no-console
       console.info(...args);
       break;
     case "warn":
-      // eslint-disable-next-line no-console
       console.warn(...args);
       break;
     case "error":
-      // eslint-disable-next-line no-console
       console.error(...args);
       break;
   }
@@ -581,6 +576,7 @@ function TerminalTab({ tabId, isActive, onStatusChange }: { tabId: string; isAct
             retryCountRef.current += 1;
             setTimeout(() => {
               if (!mountedRef.current || wsSeqRef.current !== seq) return;
+              // eslint-disable-next-line react-hooks/immutability
               connectWebSocket(term, fit, true);
             }, 300);
           }
@@ -920,6 +916,7 @@ function WorkspaceShellTab({
             retryCountRef.current += 1;
             setTimeout(() => {
               if (!mountedRef.current || wsSeqRef.current !== seq) return;
+              // eslint-disable-next-line react-hooks/immutability
               connectWebSocket(term, fit, true);
             }, 300);
           }
