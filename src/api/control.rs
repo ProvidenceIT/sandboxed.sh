@@ -5500,6 +5500,10 @@ async fn run_single_control_turn(
         // clear the global default so the profile's oh-my-opencode agent
         // models take precedence instead of being overridden.
         config.default_model = None;
+    } else if backend_id.as_deref() == Some("codex") && requested_model.is_none() {
+        // The global DEFAULT_MODEL (e.g. claude-opus-4-6) is not valid for
+        // Codex. Clear it so Codex uses its own CLI default.
+        config.default_model = None;
     }
     if let Some(ref agent) = agent_override {
         config.opencode_agent = Some(agent.clone());
