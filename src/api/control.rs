@@ -28,7 +28,7 @@ use crate::agents::{AgentContext, AgentRef, TerminalReason};
 use crate::config::Config;
 use crate::mcp::McpRegistry;
 use crate::secrets::SecretsStore;
-use crate::util::build_history_context;
+use crate::util::{build_history_context, internal_error};
 use crate::workspace;
 
 use super::auth::AuthUser;
@@ -179,11 +179,6 @@ fn recv_failed<T>(_: T) -> (StatusCode, String) {
         StatusCode::INTERNAL_SERVER_ERROR,
         "Failed to receive response".to_string(),
     )
-}
-
-/// Wrap a string error as an internal server error.
-fn internal_error(e: String) -> (StatusCode, String) {
-    (StatusCode::INTERNAL_SERVER_ERROR, e)
 }
 
 /// Shorthand for a `{ "ok": true }` JSON response.

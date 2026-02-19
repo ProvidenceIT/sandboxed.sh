@@ -265,6 +265,21 @@ pub fn auth_entry_has_credentials(value: &serde_json::Value) -> bool {
         || value.get("access_token").is_some()
 }
 
+/// Map any error into an HTTP 500 response.
+pub fn internal_error(e: impl std::fmt::Display) -> (axum::http::StatusCode, String) {
+    (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+}
+
+/// Map an error to 404 if the message contains "not found", otherwise 500.
+pub fn not_found_or_internal(e: impl std::fmt::Display) -> (axum::http::StatusCode, String) {
+    let msg = e.to_string();
+    if msg.contains("not found") {
+        (axum::http::StatusCode::NOT_FOUND, msg)
+    } else {
+        (axum::http::StatusCode::INTERNAL_SERVER_ERROR, msg)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

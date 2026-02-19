@@ -14,6 +14,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::settings::Settings;
+use crate::util::internal_error;
 use crate::workspace;
 
 use super::routes::AppState;
@@ -105,7 +106,7 @@ async fn update_settings(
         .settings
         .update(new_settings.clone())
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(internal_error)?;
 
     Ok(Json(new_settings.into()))
 }
@@ -124,7 +125,7 @@ async fn update_library_remote(
         .settings
         .set_library_remote(new_remote.clone())
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(internal_error)?;
 
     // If the value actually changed, reinitialize the library
     let (library_reinitialized, library_error) = if changed {
@@ -176,7 +177,7 @@ async fn update_rtk_enabled(
         .settings
         .set_rtk_enabled(Some(req.rtk_enabled))
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(internal_error)?;
 
     tracing::info!(
         rtk_enabled = req.rtk_enabled,

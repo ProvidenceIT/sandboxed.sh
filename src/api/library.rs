@@ -29,7 +29,7 @@ use crate::library::{
     WorkspaceTemplate, WorkspaceTemplateSummary,
 };
 use crate::nspawn::NspawnDistro;
-use crate::util::sanitize_skill_list;
+use crate::util::{internal_error, not_found_or_internal, sanitize_skill_list};
 use crate::workspace::{self, WorkspaceType, DEFAULT_WORKSPACE_ID};
 
 /// Shared library state.
@@ -396,13 +396,10 @@ async fn sync_library_configs(
     library: &LibraryStore,
 ) -> Result<(), (StatusCode, String)> {
     // Sync plugins to global OpenCode config
-    let plugins = library
-        .get_plugins()
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let plugins = library.get_plugins().await.map_err(internal_error)?;
     crate::opencode_config::sync_global_plugins(&plugins)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(internal_error)?;
 
     // Sync OpenCode settings (oh-my-opencode.json) from Library to system
     if let Err(e) = workspace::sync_opencode_settings(library).await {
@@ -426,11 +423,7 @@ async fn get_status(
     headers: HeaderMap,
 ) -> Result<Json<LibraryStatus>, (StatusCode, String)> {
     let library = ensure_library(&state, &headers).await?;
-    library
-        .status()
-        .await
-        .map(Json)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+    library.status().await.map(Json).map_err(internal_error)
 }
 
 /// POST /api/library/sync - Pull latest changes from remote.
@@ -471,10 +464,7 @@ async fn force_sync_library(
     headers: HeaderMap,
 ) -> Result<(StatusCode, String), (StatusCode, String)> {
     let library = ensure_library(&state, &headers).await?;
-    library
-        .force_sync()
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    library.force_sync().await.map_err(internal_error)?;
 
     // Sync all library configurations
     sync_library_configs(&state, library.as_ref()).await?;
@@ -503,7 +493,7 @@ async fn force_push_library(
                 "Force pushed successfully - remote updated with local changes".to_string(),
             )
         })
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        .map_err(internal_error)
 }
 
 /// POST /api/library/commit - Commit all changes.
@@ -518,7 +508,7 @@ async fn commit_library(
         .commit(&req.message, author.as_ref())
         .await
         .map(|_| (StatusCode::OK, "Committed successfully".to_string()))
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        .map_err(internal_error)
 }
 
 /// POST /api/library/push - Push changes to remote.
@@ -531,7 +521,7 @@ async fn push_library(
         .push()
         .await
         .map(|_| (StatusCode::OK, "Pushed successfully".to_string()))
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        .map_err(internal_error)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -548,7 +538,7 @@ async fn get_mcps(
         .get_mcp_servers()
         .await
         .map(Json)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        .map_err(internal_error)
 }
 
 /// PUT /api/library/mcps - Save all MCP server definitions.
@@ -562,7 +552,7 @@ async fn save_mcps(
         .save_mcp_servers(&servers)
         .await
         .map(|_| (StatusCode::OK, "MCPs saved successfully".to_string()))
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        .map_err(internal_error)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -579,7 +569,7 @@ async fn list_skills(
         .list_skills()
         .await
         .map(Json)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        .map_err(internal_error)
 }
 
 /// GET /api/library/skills/:name - Get a skill by name.
@@ -609,7 +599,7 @@ async fn save_skill(
     library
         .save_skill(&name, &req.content)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(internal_error)?;
     sync_skill_to_workspaces(&state, library.as_ref(), &name).await;
     Ok((StatusCode::OK, "Skill saved successfully".to_string()))
 }
@@ -621,10 +611,7 @@ async fn delete_skill(
     headers: HeaderMap,
 ) -> Result<(StatusCode, String), (StatusCode, String)> {
     let library = ensure_library(&state, &headers).await?;
-    library
-        .delete_skill(&name)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    library.delete_skill(&name).await.map_err(internal_error)?;
     sync_skill_to_workspaces(&state, library.as_ref(), &name).await;
     Ok((StatusCode::OK, "Skill deleted successfully".to_string()))
 }
@@ -640,13 +627,7 @@ async fn get_skill_reference(
         .get_skill_reference(&name, &path)
         .await
         .map(|content| (StatusCode::OK, content))
-        .map_err(|e| {
-            if e.to_string().contains("not found") {
-                (StatusCode::NOT_FOUND, e.to_string())
-            } else {
-                (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
-            }
-        })
+        .map_err(not_found_or_internal)
 }
 
 /// PUT /api/library/skills/:name/references/*path - Save a reference file.
@@ -660,7 +641,7 @@ async fn save_skill_reference(
     library
         .save_skill_reference(&name, &path, &req.content)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(internal_error)?;
     sync_skill_to_workspaces(&state, library.as_ref(), &name).await;
     Ok((StatusCode::OK, "Reference saved successfully".to_string()))
 }
@@ -907,7 +888,7 @@ async fn list_commands(
         .list_commands()
         .await
         .map(Json)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        .map_err(internal_error)
 }
 
 /// GET /api/library/commands/:name - Get a command by name.
@@ -938,7 +919,7 @@ async fn save_command(
         .save_command(&name, &req.content)
         .await
         .map(|_| (StatusCode::OK, "Command saved successfully".to_string()))
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        .map_err(internal_error)
 }
 
 /// DELETE /api/library/commands/:name - Delete a command.
@@ -952,7 +933,7 @@ async fn delete_command(
         .delete_command(&name)
         .await
         .map(|_| (StatusCode::OK, "Command deleted successfully".to_string()))
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        .map_err(internal_error)
 }
 
 /// Response for builtin commands endpoint.
@@ -1115,7 +1096,7 @@ async fn list_library_agents(
         .list_library_agents()
         .await
         .map(Json)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        .map_err(internal_error)
 }
 
 /// GET /api/library/agent/:name - Get a library agent by name.
@@ -1129,13 +1110,7 @@ async fn get_library_agent(
         .get_library_agent(&name)
         .await
         .map(Json)
-        .map_err(|e| {
-            if e.to_string().contains("not found") {
-                (StatusCode::NOT_FOUND, e.to_string())
-            } else {
-                (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
-            }
-        })
+        .map_err(not_found_or_internal)
 }
 
 /// PUT /api/library/agent/:name - Save a library agent.
@@ -1150,7 +1125,7 @@ async fn save_library_agent(
         .save_library_agent(&name, &agent)
         .await
         .map(|_| (StatusCode::OK, "Agent saved successfully".to_string()))
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        .map_err(internal_error)
 }
 
 /// DELETE /api/library/agent/:name - Delete a library agent.
@@ -1164,7 +1139,7 @@ async fn delete_library_agent(
         .delete_library_agent(&name)
         .await
         .map(|_| (StatusCode::OK, "Agent deleted successfully".to_string()))
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        .map_err(internal_error)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1181,7 +1156,7 @@ async fn list_workspace_templates(
         .list_workspace_templates()
         .await
         .map(Json)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        .map_err(internal_error)
 }
 
 /// GET /api/library/workspace-template/:name - Get workspace template.
@@ -1195,13 +1170,7 @@ async fn get_workspace_template(
         .get_workspace_template(&name)
         .await
         .map(Json)
-        .map_err(|e| {
-            if e.to_string().contains("not found") {
-                (StatusCode::NOT_FOUND, e.to_string())
-            } else {
-                (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
-            }
-        })
+        .map_err(not_found_or_internal)
 }
 
 /// PUT /api/library/workspace-template/:name - Save workspace template.
@@ -1250,7 +1219,7 @@ async fn save_workspace_template(
                 "Workspace template saved successfully".to_string(),
             )
         })
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        .map_err(internal_error)
 }
 
 /// DELETE /api/library/workspace-template/:name - Delete workspace template.
@@ -1269,7 +1238,7 @@ async fn delete_workspace_template(
                 "Workspace template deleted successfully".to_string(),
             )
         })
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        .map_err(internal_error)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1286,7 +1255,7 @@ async fn list_init_scripts(
         .list_init_scripts()
         .await
         .map(Json)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        .map_err(internal_error)
 }
 
 /// GET /api/library/init-script/:name - Get an init script fragment by name.
@@ -1317,7 +1286,7 @@ async fn save_init_script(
         .save_init_script(&name, &req.content)
         .await
         .map(|_| (StatusCode::OK, "Init script saved successfully".to_string()))
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        .map_err(internal_error)
 }
 
 /// DELETE /api/library/init-script/:name - Delete an init script fragment.
@@ -1336,7 +1305,7 @@ async fn delete_init_script(
                 "Init script deleted successfully".to_string(),
             )
         })
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        .map_err(internal_error)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1353,7 +1322,7 @@ async fn migrate_library(
         .migrate_structure()
         .await
         .map(Json)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        .map_err(internal_error)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1370,7 +1339,7 @@ async fn get_opencode_settings(
         .get_opencode_settings()
         .await
         .map(Json)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        .map_err(internal_error)
 }
 
 /// PUT /api/library/opencode/settings - Save oh-my-opencode settings to Library.
@@ -1392,7 +1361,7 @@ async fn save_opencode_settings(
     library
         .save_opencode_settings(&settings)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(internal_error)?;
 
     // Sync to system location
     if let Err(e) = workspace::sync_opencode_settings(&library).await {
@@ -1419,7 +1388,7 @@ async fn get_sandboxed_config(
             .get_sandboxed_config()
             .await
             .map(Json)
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+            .map_err(internal_error),
         Err((StatusCode::SERVICE_UNAVAILABLE, _)) => {
             let config = workspace::read_sandboxed_config(&state.config.working_dir).await;
             Ok(Json(config))
@@ -1439,7 +1408,7 @@ async fn save_sandboxed_config(
             library
                 .save_sandboxed_config(&config)
                 .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+                .map_err(internal_error)?;
 
             // Sync to working directory
             if let Err(e) =
@@ -1717,7 +1686,7 @@ async fn rename_item(
     let result = library
         .rename_item(item_type, &name, &req.new_name, req.dry_run)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(internal_error)?;
 
     // If not dry run and successful, update workspace references
     if !req.dry_run && result.success {
@@ -1819,7 +1788,7 @@ async fn get_claudecode_config(
         .get_claudecode_config()
         .await
         .map(Json)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        .map_err(internal_error)
 }
 
 /// PUT /api/library/claudecode/config - Save Claude Code config to Library.
@@ -1833,7 +1802,7 @@ async fn save_claudecode_config(
     library
         .save_claudecode_config(&config)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(internal_error)?;
 
     Ok((
         StatusCode::OK,
@@ -1855,7 +1824,7 @@ async fn list_config_profiles(
         .list_config_profiles()
         .await
         .map(Json)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        .map_err(internal_error)
 }
 
 /// POST /api/library/config-profile - Create a new config profile.
@@ -1889,13 +1858,7 @@ async fn get_config_profile(
         .get_config_profile(&name)
         .await
         .map(Json)
-        .map_err(|e| {
-            if e.to_string().contains("not found") {
-                (StatusCode::NOT_FOUND, e.to_string())
-            } else {
-                (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
-            }
-        })
+        .map_err(not_found_or_internal)
 }
 
 /// PUT /api/library/config-profile/:name - Save a config profile.
@@ -1915,7 +1878,7 @@ async fn save_config_profile(
                 "Config profile saved successfully".to_string(),
             )
         })
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        .map_err(internal_error)
 }
 
 /// DELETE /api/library/config-profile/:name - Delete a config profile.
@@ -1954,7 +1917,7 @@ async fn get_opencode_settings_for_profile(
         .get_opencode_settings_for_profile(&name)
         .await
         .map(Json)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        .map_err(internal_error)
 }
 
 /// PUT /api/library/config-profile/:name/opencode/settings - Save OpenCode settings for a profile.
@@ -1982,7 +1945,7 @@ async fn save_opencode_settings_for_profile(
                 "OpenCode settings saved successfully".to_string(),
             )
         })
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        .map_err(internal_error)
 }
 
 /// GET /api/library/config-profile/:name/sandboxed-sh/config - Get Sandboxed config for a profile.
@@ -1996,7 +1959,7 @@ async fn get_sandboxed_config_for_profile(
         .get_sandboxed_config_for_profile(&name)
         .await
         .map(Json)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        .map_err(internal_error)
 }
 
 /// PUT /api/library/config-profile/:name/sandboxed-sh/config - Save Sandboxed config for a profile.
@@ -2016,7 +1979,7 @@ async fn save_sandboxed_config_for_profile(
                 "Sandboxed config saved successfully".to_string(),
             )
         })
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        .map_err(internal_error)
 }
 
 /// GET /api/library/config-profile/:name/claudecode/config - Get Claude Code config for a profile.
@@ -2030,7 +1993,7 @@ async fn get_claudecode_config_for_profile(
         .get_claudecode_config_for_profile(&name)
         .await
         .map(Json)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        .map_err(internal_error)
 }
 
 /// PUT /api/library/config-profile/:name/claudecode/config - Save Claude Code config for a profile.
@@ -2050,7 +2013,7 @@ async fn save_claudecode_config_for_profile(
                 "Claude Code config saved successfully".to_string(),
             )
         })
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        .map_err(internal_error)
 }
 
 /// GET /api/library/config-profile/:name/ampcode/config - Get Amp Code config for a profile.
@@ -2064,7 +2027,7 @@ async fn get_ampcode_config_for_profile(
         .get_ampcode_config_for_profile(&name)
         .await
         .map(Json)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        .map_err(internal_error)
 }
 
 /// PUT /api/library/config-profile/:name/ampcode/config - Save Amp Code config for a profile.
@@ -2084,7 +2047,7 @@ async fn save_ampcode_config_for_profile(
                 "Amp Code config saved successfully".to_string(),
             )
         })
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        .map_err(internal_error)
 }
 
 /// GET /api/library/config-profile/:name/files - List all files in a config profile.
@@ -2098,7 +2061,7 @@ async fn list_config_profile_files(
         .list_config_profile_files(&name)
         .await
         .map(Json)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        .map_err(internal_error)
 }
 
 /// GET /api/library/config-profile/:name/file/*file_path - Get a specific file from a config profile.
@@ -2111,13 +2074,7 @@ async fn get_config_profile_file(
     library
         .get_config_profile_file(&name, &file_path)
         .await
-        .map_err(|e| {
-            if e.to_string().contains("not found") {
-                (StatusCode::NOT_FOUND, e.to_string())
-            } else {
-                (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
-            }
-        })
+        .map_err(not_found_or_internal)
 }
 
 /// PUT /api/library/config-profile/:name/file/*file_path - Save a specific file in a config profile.
@@ -2132,7 +2089,7 @@ async fn save_config_profile_file(
         .save_config_profile_file(&name, &file_path, &body)
         .await
         .map(|_| (StatusCode::OK, "File saved successfully".to_string()))
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+        .map_err(internal_error)
 }
 
 /// DELETE /api/library/config-profile/:name/file/*file_path - Delete a specific file from a config profile.
@@ -2146,13 +2103,7 @@ async fn delete_config_profile_file(
         .delete_config_profile_file(&name, &file_path)
         .await
         .map(|_| (StatusCode::OK, "File deleted successfully".to_string()))
-        .map_err(|e| {
-            if e.to_string().contains("not found") {
-                (StatusCode::NOT_FOUND, e.to_string())
-            } else {
-                (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
-            }
-        })
+        .map_err(not_found_or_internal)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2231,7 +2182,7 @@ async fn search_registry(
 ) -> Result<Json<Vec<crate::skills_registry::RegistrySkillListing>>, (StatusCode, String)> {
     let results = crate::skills_registry::search_skills(&query.q)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(internal_error)?;
 
     Ok(Json(results))
 }
@@ -2242,7 +2193,7 @@ async fn list_repo_skills(
 ) -> Result<Json<Vec<String>>, (StatusCode, String)> {
     let skills = crate::skills_registry::list_repo_skills(&identifier)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(internal_error)?;
 
     Ok(Json(skills))
 }
@@ -2262,18 +2213,18 @@ async fn install_from_registry(
     if temp_dir.exists() {
         tokio::fs::remove_dir_all(&temp_dir)
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            .map_err(internal_error)?;
     }
     tokio::fs::create_dir_all(&temp_dir)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(internal_error)?;
 
     // Initialize a minimal structure for the skills CLI
     // The skills CLI expects certain directories to exist
     let claude_skills_dir = temp_dir.join(".claude").join("skills");
     tokio::fs::create_dir_all(&claude_skills_dir)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(internal_error)?;
 
     // Run the install command
     let skill_refs: Vec<&str> = request.skills.iter().map(|s| s.as_str()).collect();
@@ -2285,7 +2236,7 @@ async fn install_from_registry(
 
     let result = crate::skills_registry::install_skill(&request.identifier, skill_names, &temp_dir)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(internal_error)?;
 
     if !result.errors.is_empty() {
         // Clean up temp dir
@@ -2300,13 +2251,9 @@ async fn install_from_registry(
     let mut installed_skill_dir = None;
     let mut entries = tokio::fs::read_dir(&claude_skills_dir)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(internal_error)?;
 
-    while let Some(entry) = entries
-        .next_entry()
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-    {
+    while let Some(entry) = entries.next_entry().await.map_err(internal_error)? {
         let path = entry.path();
         if path.is_dir() && path.join("SKILL.md").exists() {
             installed_skill_dir = Some(path);
@@ -2341,7 +2288,7 @@ async fn install_from_registry(
 
     copy_dir_recursive(&source_dir, &target_dir)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(internal_error)?;
 
     // Write the source metadata file
     let source = SkillSource::SkillsRegistry {
@@ -2351,11 +2298,10 @@ async fn install_from_registry(
         installed_at: Some(chrono::Utc::now().to_rfc3339()),
         updated_at: None,
     };
-    let source_json = serde_json::to_string_pretty(&source)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let source_json = serde_json::to_string_pretty(&source).map_err(internal_error)?;
     tokio::fs::write(target_dir.join(".skill-source.json"), source_json)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(internal_error)?;
 
     // Clean up temp directory
     let _ = tokio::fs::remove_dir_all(&temp_dir).await;
@@ -2364,7 +2310,7 @@ async fn install_from_registry(
     let skill = library
         .get_skill(&skill_name)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(internal_error)?;
 
     // Sync to workspaces
     sync_skill_to_workspaces(&state, &library, &skill_name).await;

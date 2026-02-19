@@ -16,7 +16,7 @@ use tokio::io::AsyncWriteExt;
 use tokio_util::io::ReaderStream;
 
 use super::routes::AppState;
-use crate::util::home_dir;
+use crate::util::{home_dir, internal_error};
 use crate::workspace::WorkspaceType;
 
 #[derive(Debug, Deserialize)]
@@ -492,7 +492,7 @@ pub async fn list(
 ) -> Result<Json<Vec<FsEntry>>, (StatusCode, String)> {
     let entries = list_directory_local(&q.path)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(internal_error)?;
     Ok(Json(entries))
 }
 
@@ -539,7 +539,7 @@ pub async fn mkdir(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     tokio::fs::create_dir_all(&req.path)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(internal_error)?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -552,11 +552,11 @@ pub async fn rm(
     if recursive {
         tokio::fs::remove_dir_all(&req.path)
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            .map_err(internal_error)?;
     } else {
         tokio::fs::remove_file(&req.path)
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            .map_err(internal_error)?;
     }
     Ok(Json(serde_json::json!({ "ok": true })))
 }
@@ -593,7 +593,7 @@ pub async fn validate(
 
     let metadata = tokio::fs::metadata(&resolved_path)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(internal_error)?;
 
     let name = resolved_path
         .file_name()
@@ -678,7 +678,7 @@ pub async fn upload(
         let tmp = std::env::temp_dir().join(format!("sandboxed_sh_ul_{}", uuid::Uuid::new_v4()));
         let mut f = tokio::fs::File::create(&tmp)
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            .map_err(internal_error)?;
 
         let mut field = field;
         while let Some(chunk) = field
@@ -686,13 +686,9 @@ pub async fn upload(
             .await
             .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?
         {
-            f.write_all(&chunk)
-                .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            f.write_all(&chunk).await.map_err(internal_error)?;
         }
-        f.flush()
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        f.flush().await.map_err(internal_error)?;
 
         let remote_path = base.join(&file_name);
 
@@ -774,7 +770,7 @@ pub async fn upload_chunk(
         let chunk_path = chunk_dir.join(format!("chunk_{:06}", q.chunk_index));
         let mut f = tokio::fs::File::create(&chunk_path)
             .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            .map_err(internal_error)?;
 
         let mut field = field;
         while let Some(chunk) = field
@@ -782,13 +778,9 @@ pub async fn upload_chunk(
             .await
             .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?
         {
-            f.write_all(&chunk)
-                .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            f.write_all(&chunk).await.map_err(internal_error)?;
         }
-        f.flush()
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        f.flush().await.map_err(internal_error)?;
 
         return Ok(Json(serde_json::json!({
             "ok": true,
@@ -866,10 +858,7 @@ pub async fn upload_finalize(
                 )
             })?;
         }
-        assembled
-            .flush()
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        assembled.flush().await.map_err(internal_error)?;
         drop(assembled);
 
         // Move assembled file to destination (using sanitized file_name)
@@ -1026,7 +1015,7 @@ pub async fn download_from_url(
     let tmp = std::env::temp_dir().join(format!("sandboxed_sh_url_{}", uuid::Uuid::new_v4()));
     let mut f = tokio::fs::File::create(&tmp)
         .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(internal_error)?;
 
     let bytes = response.bytes().await.map_err(|e| {
         (
@@ -1035,12 +1024,8 @@ pub async fn download_from_url(
         )
     })?;
 
-    f.write_all(&bytes)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    f.flush()
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    f.write_all(&bytes).await.map_err(internal_error)?;
+    f.flush().await.map_err(internal_error)?;
     drop(f);
 
     // Move to destination
