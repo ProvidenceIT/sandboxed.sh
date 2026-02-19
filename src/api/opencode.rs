@@ -300,17 +300,17 @@ pub async fn fetch_opencode_agents_for_profile(
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn not_found_connection(id: Uuid) -> (StatusCode, String) {
-    (StatusCode::NOT_FOUND, format!("Connection {} not found", id))
+    (
+        StatusCode::NOT_FOUND,
+        format!("Connection {} not found", id),
+    )
 }
 
 async fn require_connection(
     store: &crate::opencode_config::OpenCodeStore,
     id: Uuid,
 ) -> Result<OpenCodeConnection, (StatusCode, String)> {
-    store
-        .get(id)
-        .await
-        .ok_or_else(|| not_found_connection(id))
+    store.get(id).await.ok_or_else(|| not_found_connection(id))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
