@@ -186,6 +186,23 @@ fn ok_json() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "ok": true }))
 }
 
+/// Unwrap a mission ID or emit an error event and return a failure result.
+fn require_mission_id(
+    mission_id: Option<Uuid>,
+    backend: &str,
+    events_tx: &broadcast::Sender<AgentEvent>,
+) -> Result<Uuid, crate::agents::AgentResult> {
+    mission_id.ok_or_else(|| {
+        let msg = format!("{} backend requires a mission ID", backend);
+        let _ = events_tx.send(AgentEvent::Error {
+            message: msg.clone(),
+            mission_id: None,
+            resumable: false,
+        });
+        crate::agents::AgentResult::failure(msg, 0).with_terminal_reason(TerminalReason::LlmError)
+    })
+}
+
 /// Query the control actor for the list of currently running missions.
 async fn get_running_missions(
     control: &ControlState,
@@ -5652,20 +5669,9 @@ async fn run_single_control_turn(
     // Execute based on backend
     let result = match backend_id.as_deref() {
         Some("claudecode") => {
-            let mid = match mission_id {
-                Some(id) => id,
-                None => {
-                    let _ = events_tx.send(AgentEvent::Error {
-                        message: "Claude Code backend requires a mission ID".to_string(),
-                        mission_id: None,
-                        resumable: false,
-                    });
-                    return crate::agents::AgentResult::failure(
-                        "Claude Code backend requires a mission ID".to_string(),
-                        0,
-                    )
-                    .with_terminal_reason(TerminalReason::LlmError);
-                }
+            let mid = match require_mission_id(mission_id, "Claude Code", &events_tx) {
+                Ok(id) => id,
+                Err(r) => return r,
             };
             // Check if this is a continuation turn (has prior assistant response).
             // Note: history may include the current user message before the turn runs,
@@ -5771,20 +5777,9 @@ async fn run_single_control_turn(
             result
         }
         Some("amp") => {
-            let mid = match mission_id {
-                Some(id) => id,
-                None => {
-                    let _ = events_tx.send(AgentEvent::Error {
-                        message: "Amp backend requires a mission ID".to_string(),
-                        mission_id: None,
-                        resumable: false,
-                    });
-                    return crate::agents::AgentResult::failure(
-                        "Amp backend requires a mission ID".to_string(),
-                        0,
-                    )
-                    .with_terminal_reason(TerminalReason::LlmError);
-                }
+            let mid = match require_mission_id(mission_id, "Amp", &events_tx) {
+                Ok(id) => id,
+                Err(r) => return r,
             };
             let is_continuation =
                 force_session_resume || history.iter().any(|(role, _)| role == "assistant");
@@ -5805,20 +5800,9 @@ async fn run_single_control_turn(
             .await
         }
         Some("codex") => {
-            let mid = match mission_id {
-                Some(id) => id,
-                None => {
-                    let _ = events_tx.send(AgentEvent::Error {
-                        message: "Codex backend requires a mission ID".to_string(),
-                        mission_id: None,
-                        resumable: false,
-                    });
-                    return crate::agents::AgentResult::failure(
-                        "Codex backend requires a mission ID".to_string(),
-                        0,
-                    )
-                    .with_terminal_reason(TerminalReason::LlmError);
-                }
+            let mid = match require_mission_id(mission_id, "Codex", &events_tx) {
+                Ok(id) => id,
+                Err(r) => return r,
             };
             Box::pin(super::mission_runner::run_codex_turn(
                 exec_workspace,
