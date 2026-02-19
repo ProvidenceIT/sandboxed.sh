@@ -296,6 +296,24 @@ pub async fn fetch_opencode_agents_for_profile(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn not_found_connection(id: Uuid) -> (StatusCode, String) {
+    (StatusCode::NOT_FOUND, format!("Connection {} not found", id))
+}
+
+async fn require_connection(
+    store: &crate::opencode_config::OpenCodeStore,
+    id: Uuid,
+) -> Result<OpenCodeConnection, (StatusCode, String)> {
+    store
+        .get(id)
+        .await
+        .ok_or_else(|| not_found_connection(id))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Handlers
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -389,17 +407,8 @@ async fn get_connection(
     State(state): State<Arc<super::routes::AppState>>,
     AxumPath(id): AxumPath<Uuid>,
 ) -> Result<Json<ConnectionResponse>, (StatusCode, String)> {
-    state
-        .opencode_connections
-        .get(id)
-        .await
-        .map(|c| Json(c.into()))
-        .ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                format!("Connection {} not found", id),
-            )
-        })
+    let connection = require_connection(&state.opencode_connections, id).await?;
+    Ok(Json(connection.into()))
 }
 
 /// PUT /api/opencode/connections/:id - Update a connection.
@@ -408,12 +417,7 @@ async fn update_connection(
     AxumPath(id): AxumPath<Uuid>,
     Json(req): Json<UpdateConnectionRequest>,
 ) -> Result<Json<ConnectionResponse>, (StatusCode, String)> {
-    let mut connection = state.opencode_connections.get(id).await.ok_or_else(|| {
-        (
-            StatusCode::NOT_FOUND,
-            format!("Connection {} not found", id),
-        )
-    })?;
+    let mut connection = require_connection(&state.opencode_connections, id).await?;
 
     if let Some(name) = req.name {
         if name.is_empty() {
@@ -451,12 +455,7 @@ async fn update_connection(
         .opencode_connections
         .update(id, connection)
         .await
-        .ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                format!("Connection {} not found", id),
-            )
-        })?;
+        .ok_or_else(|| not_found_connection(id))?;
 
     tracing::info!("Updated OpenCode connection: {} ({})", updated.name, id);
 
@@ -474,10 +473,7 @@ async fn delete_connection(
             format!("Connection {} deleted successfully", id),
         ))
     } else {
-        Err((
-            StatusCode::NOT_FOUND,
-            format!("Connection {} not found", id),
-        ))
+        Err(not_found_connection(id))
     }
 }
 
@@ -486,12 +482,7 @@ async fn test_connection(
     State(state): State<Arc<super::routes::AppState>>,
     AxumPath(id): AxumPath<Uuid>,
 ) -> Result<Json<TestConnectionResponse>, (StatusCode, String)> {
-    let connection = state.opencode_connections.get(id).await.ok_or_else(|| {
-        (
-            StatusCode::NOT_FOUND,
-            format!("Connection {} not found", id),
-        )
-    })?;
+    let connection = require_connection(&state.opencode_connections, id).await?;
 
     // Try to connect to the OpenCode server
     let client = reqwest::Client::builder()
@@ -553,18 +544,10 @@ async fn set_default(
     AxumPath(id): AxumPath<Uuid>,
 ) -> Result<Json<ConnectionResponse>, (StatusCode, String)> {
     if !state.opencode_connections.set_default(id).await {
-        return Err((
-            StatusCode::NOT_FOUND,
-            format!("Connection {} not found", id),
-        ));
+        return Err(not_found_connection(id));
     }
 
-    let connection = state.opencode_connections.get(id).await.ok_or_else(|| {
-        (
-            StatusCode::NOT_FOUND,
-            format!("Connection {} not found", id),
-        )
-    })?;
+    let connection = require_connection(&state.opencode_connections, id).await?;
 
     tracing::info!(
         "Set default OpenCode connection: {} ({})",
