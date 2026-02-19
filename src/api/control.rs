@@ -629,6 +629,11 @@ pub enum AgentEvent {
         status: MissionStatus,
         summary: Option<String>,
     },
+    /// Mission title changed (by user)
+    MissionTitleChanged {
+        mission_id: Uuid,
+        title: String,
+    },
     /// Agent phase update (for showing preparation steps)
     AgentPhase {
         /// Phase name: "executing", "delegating", etc.
@@ -829,6 +834,12 @@ pub enum ControlCommand {
         status: MissionStatus,
         respond: oneshot::Sender<Result<(), String>>,
     },
+    /// Update mission title
+    SetMissionTitle {
+        id: Uuid,
+        title: String,
+        respond: oneshot::Sender<Result<(), String>>,
+    },
     /// Start a mission in parallel (if slots available)
     StartParallel {
         mission_id: Uuid,
@@ -935,6 +946,12 @@ pub struct DesktopSessionInfo {
 #[derive(Debug, Clone, Deserialize)]
 pub struct SetMissionStatusRequest {
     pub status: MissionStatus,
+}
+
+/// Request to rename a mission.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SetMissionTitleRequest {
+    pub title: String,
 }
 
 // MissionStore trait and implementations are in mission_store module
@@ -1629,6 +1646,32 @@ pub async fn set_mission_status(
         .send(ControlCommand::SetMissionStatus {
             id,
             status: req.status,
+            respond: tx,
+        })
+        .await
+        .map_err(session_unavailable)?;
+
+    rx.await
+        .map_err(recv_failed)?
+        .map(|_| ok_json())
+        .map_err(internal_error)
+}
+
+/// Set mission title (rename mission).
+pub async fn set_mission_title(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<SetMissionTitleRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let (tx, rx) = oneshot::channel();
+
+    let control = control_for_user(&state, &user).await;
+    control
+        .cmd_tx
+        .send(ControlCommand::SetMissionTitle {
+            id,
+            title: req.title,
             respond: tx,
         })
         .await
@@ -3958,6 +4001,16 @@ async fn control_actor_loop(
                                 mission_id: id,
                                 status: new_status,
                                 summary: None,
+                            });
+                        }
+                        let _ = respond.send(result);
+                    }
+                    ControlCommand::SetMissionTitle { id, title, respond } => {
+                        let result = mission_store.update_mission_title(id, &title).await;
+                        if result.is_ok() {
+                            let _ = events_tx.send(AgentEvent::MissionTitleChanged {
+                                mission_id: id,
+                                title: title.clone(),
                             });
                         }
                         let _ = respond.send(result);
