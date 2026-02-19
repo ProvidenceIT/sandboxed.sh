@@ -1657,7 +1657,7 @@ mod tests {
         assert!(d.is_some());
         let secs = d.unwrap().as_secs();
         // Should be roughly 60 seconds, with some tolerance
-        assert!(secs >= 55 && secs <= 65, "got {} seconds", secs);
+        assert!((55..=65).contains(&secs), "got {} seconds", secs);
     }
 
     #[test]
@@ -1698,6 +1698,6 @@ mod tests {
         let d = parse_rate_limit_headers(&headers, ProviderType::Anthropic);
         assert!(d.is_some());
         let secs = d.unwrap().as_secs();
-        assert!(secs >= 25 && secs <= 35, "got {} seconds", secs);
+        assert!((25..=35).contains(&secs), "got {} seconds", secs);
     }
 }
