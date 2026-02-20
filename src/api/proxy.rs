@@ -2727,6 +2727,29 @@ mod tests {
     }
 
     #[test]
+    fn parse_google_retry_after_from_message_hint() {
+        let headers = HeaderMap::new();
+        let body = serde_json::json!({
+            "error": {
+                "code": 429,
+                "message": "You have exhausted your capacity on this model. Your quota will reset after 28s.",
+                "status": "RESOURCE_EXHAUSTED",
+                "details": [{
+                    "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                    "reason": "RATE_LIMIT_EXCEEDED",
+                    "domain": "cloudcode-pa.googleapis.com",
+                    "metadata": {
+                        "model": "gemini-2.5-flash",
+                        "uiMessage": "true"
+                    }
+                }]
+            }
+        });
+        let d = parse_google_retry_after(&headers, serde_json::to_vec(&body).unwrap().as_slice());
+        assert_eq!(d, Some(std::time::Duration::from_secs(28)));
+    }
+
+    #[test]
     fn classify_google_rate_limit_error_info() {
         let body = serde_json::json!({
             "error": {
