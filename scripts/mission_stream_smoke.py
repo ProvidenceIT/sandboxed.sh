@@ -35,6 +35,21 @@ def env_or(name: str, default: Optional[str] = None) -> Optional[str]:
     return default
 
 
+def parse_backend_map(values: Optional[List[str]], flag_name: str) -> Dict[str, str]:
+    parsed: Dict[str, str] = {}
+    for raw in values or []:
+        backend, sep, value = raw.partition("=")
+        backend = backend.strip()
+        value = value.strip()
+        if sep != "=" or not backend or not value:
+            die(
+                f"Invalid {flag_name} '{raw}'. Expected format backend=value "
+                "(example: opencode=builtin/smart)."
+            )
+        parsed[backend] = value
+    return parsed
+
+
 @dataclass
 class StreamStats:
     thinking_chunks: int = 0
@@ -42,6 +57,7 @@ class StreamStats:
     assistant_messages: int = 0
     tool_calls: int = 0
     tool_results: int = 0
+    assistant_models: Set[str] = field(default_factory=set)
     tool_call_ids: Set[str] = field(default_factory=set)
     tool_result_ids: Set[str] = field(default_factory=set)
     errors: List[str] = field(default_factory=list)
@@ -164,6 +180,9 @@ class StreamWatcher(threading.Thread):
                 self.stats.text_deltas += 1
         elif event_type == "assistant_message":
             self.stats.assistant_messages += 1
+            model = payload.get("model")
+            if isinstance(model, str) and model.strip():
+                self.stats.assistant_models.add(model.strip())
         elif event_type == "tool_call":
             self.stats.tool_calls += 1
             tool_call_id = payload.get("tool_call_id")
@@ -195,6 +214,7 @@ def run_backend(
     timeout: float,
     require_thinking: bool,
     verbose: bool,
+    model_override: Optional[str],
 ) -> MissionResult:
     title = f"stream-smoke-{backend}-{int(time.time())}"
     payload = {
@@ -202,6 +222,8 @@ def run_backend(
         "workspace_id": workspace_id,
         "backend": backend,
     }
+    if model_override:
+        payload["model_override"] = model_override
     mission = http_json("POST", f"{base_url}/api/control/missions", token, payload)
     mission_id = mission.get("id")
     if not mission_id:
@@ -275,6 +297,22 @@ def main() -> None:
         help="Backend to test (repeatable). Defaults to claudecode/opencode/codex.",
     )
     parser.add_argument(
+        "--model-override",
+        action="append",
+        help=(
+            "Backend-specific model override in backend=model format "
+            "(repeatable, e.g. opencode=builtin/smart)."
+        ),
+    )
+    parser.add_argument(
+        "--expect-model",
+        action="append",
+        help=(
+            "Backend-specific expected resolved model substring in backend=substring "
+            "format (repeatable)."
+        ),
+    )
+    parser.add_argument(
         "--timeout",
         type=float,
         default=180,
@@ -284,6 +322,11 @@ def main() -> None:
         "--allow-no-thinking",
         action="store_true",
         help="Allow missing thinking events (still requires text_delta).",
+    )
+    parser.add_argument(
+        "--allow-missing-model",
+        action="store_true",
+        help="Do not fail when assistant_message events omit model metadata.",
     )
     parser.add_argument(
         "--verbose",
@@ -304,6 +347,8 @@ def main() -> None:
     workspace_id = args.workspace_id
     backends = args.backend or DEFAULT_BACKENDS
     require_thinking = not args.allow_no_thinking
+    model_overrides = parse_backend_map(args.model_override, "--model-override")
+    expected_models = parse_backend_map(args.expect_model, "--expect-model")
 
     results: List[MissionResult] = []
     failed = False
@@ -319,6 +364,7 @@ def main() -> None:
                 timeout=args.timeout,
                 require_thinking=require_thinking,
                 verbose=args.verbose,
+                model_override=model_overrides.get(backend),
             )
             results.append(result)
         except Exception as exc:
@@ -328,11 +374,22 @@ def main() -> None:
 
     for result in results:
         stats = result.stats
-        ok = stats.has_required_events(require_thinking) and result.queued_ok
-        if not result.queued_ok:
-            ok = False
+        model_ok = args.allow_missing_model or bool(stats.assistant_models)
+        expected_substring = expected_models.get(result.backend)
+        expected_ok = True
+        if expected_substring:
+            expected_ok = any(
+                expected_substring in model for model in stats.assistant_models
+            )
+        ok = (
+            stats.has_required_events(require_thinking)
+            and result.queued_ok
+            and model_ok
+            and expected_ok
+        )
         if not ok:
             failed = True
+        models_display = ",".join(sorted(stats.assistant_models)) or "-"
         print(
             f"{result.backend}: "
             f"assistant_messages={stats.assistant_messages} "
@@ -340,10 +397,16 @@ def main() -> None:
             f"text_deltas={stats.text_deltas} "
             f"tool_calls={stats.tool_calls} "
             f"tool_results={stats.tool_results} "
+            f"models={models_display} "
             f"queued={result.queued_ok} "
             f"errors={len(stats.errors)} "
             f"=> {'OK' if ok else 'FAIL'}"
         )
+        if expected_substring and not expected_ok:
+            print(
+                f"  expected model substring '{expected_substring}' "
+                f"not found in {sorted(stats.assistant_models)}"
+            )
 
     if failed:
         sys.exit(1)

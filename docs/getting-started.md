@@ -23,6 +23,36 @@ Before starting, you need:
    - Web: `http://localhost:3001` (local development)
    - iOS app: Available from the App Store
 
+## Optional: Run Dev Smoke Suites
+
+Before or after backend changes, run the smoke scripts against your dev deployment to quickly validate model routing and harness streaming behavior.
+
+Required environment variables:
+
+```bash
+export SANDBOXED_SH_DEV_URL="https://your-dev-backend.example.com"
+export SANDBOXED_SH_TOKEN="<control-api-token>"
+export SANDBOXED_SH_WORKSPACE_ID="<workspace-uuid>"
+export SANDBOXED_PROXY_SECRET="<proxy-bearer-token>"
+```
+
+Run the unified smoke gate:
+
+```bash
+scripts/smoke_harnesses_dev.sh \
+  --backend claudecode \
+  --backend opencode \
+  --backend codex \
+  --model-override opencode=builtin/smart \
+  --expect-model opencode=glm-5 \
+  --non-streaming
+```
+
+Notes:
+- Use `--skip-proxy` to run harness streaming smoke only.
+- Use `--skip-mission` to run proxy smoke only.
+- Use `--help` to see all options.
+
 ## Step 1: Initial Dashboard View
 
 When you first access the sandboxed.sh dashboard, you'll see the global monitor overview:
