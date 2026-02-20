@@ -5,7 +5,12 @@ import { useSearchParams, useRouter } from "next/navigation";
 import { toast } from "@/components/toast";
 import { MarkdownContent } from "@/components/markdown-content";
 import { StreamingMarkdown } from "@/components/streaming-markdown";
-import { EnhancedInput, type SubmitPayload, type EnhancedInputHandle } from "@/components/enhanced-input";
+import {
+  EnhancedInput,
+  type SubmitPayload,
+  type EnhancedInputHandle,
+  type FilePasteContext,
+} from "@/components/enhanced-input";
 import { MissionAutomationsDialog } from "@/components/mission-automations-dialog";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
@@ -108,6 +113,7 @@ import {
   MessageSquare,
 } from "lucide-react";
 import { IMAGE_PATH_PATTERN } from "@/lib/file-extensions";
+import { insertTextAtSelection, type TextSelection } from "@/lib/text-selection";
 
 type StreamDiagnosticsState = {
   phase: "idle" | "connecting" | "open" | "streaming" | "closed" | "error";
@@ -123,6 +129,10 @@ type StreamDiagnosticsState = {
   lastChunkAt?: number;
   bytes: number;
   lastError?: string | null;
+};
+
+type InputInsertionState = TextSelection & {
+  insertedCount: number;
 };
 
 function formatDiagAge(ts?: number) {
@@ -2904,7 +2914,7 @@ export default function ControlClient() {
   }, []);
 
   // Handle file upload - wrapped in useCallback to avoid stale closures
-  const handleFileUpload = useCallback(async (file: File) => {
+  const handleFileUpload = useCallback(async (file: File, insertion?: InputInsertionState) => {
     let fileToUpload = file;
     try {
       fileToUpload = await compressImageFile(file);
@@ -2939,11 +2949,25 @@ export default function ControlClient() {
 
       toast.success(`Uploaded ${result.name}`);
 
-      // Add a message about the upload at the beginning (use full path)
-      setInput((prev) => {
-        const uploadNote = `[Uploaded: ${result.path}]`;
-        return prev ? `${uploadNote}\n${prev}` : uploadNote;
-      });
+      const uploadNote = `[Uploaded: ${result.path}]`;
+      if (insertion) {
+        setInput((prev) => {
+          const textToInsert = insertion.insertedCount > 0 ? `\n${uploadNote}` : uploadNote;
+          const inserted = insertTextAtSelection(prev, textToInsert, {
+            start: insertion.start,
+            end: insertion.end,
+          });
+          insertion.start = inserted.cursor;
+          insertion.end = inserted.cursor;
+          insertion.insertedCount += 1;
+          return inserted.value;
+        });
+      } else {
+        // Preserve existing non-paste behavior for attach/upload button paths.
+        setInput((prev) => {
+          return prev ? `${uploadNote}\n${prev}` : uploadNote;
+        });
+      }
     } catch (error) {
       console.error("Upload failed:", error);
       toast.error(`Failed to upload ${displayName}`);
@@ -3001,9 +3025,14 @@ export default function ControlClient() {
   };
 
   // Handle paste to upload files (e.g., screenshots from clipboard)
-  const handleFilePaste = useCallback(async (files: File[]) => {
+  const handleFilePaste = useCallback(async (files: File[], context: FilePasteContext) => {
+    const insertion: InputInsertionState = {
+      start: context.selectionStart,
+      end: context.selectionEnd,
+      insertedCount: 0,
+    };
     for (const file of files) {
-      await handleFileUpload(file);
+      await handleFileUpload(file, insertion);
     }
   }, [handleFileUpload]);
 
