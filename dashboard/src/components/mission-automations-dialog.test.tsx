@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { shouldPrefillInlinePromptOnSourceSwitch } from "./mission-automations-dialog";
+import {
+  clearInlinePrefillCache,
+  shouldPrefillInlinePromptOnSourceSwitch,
+} from "./mission-automations-dialog";
 
 describe("shouldPrefillInlinePromptOnSourceSwitch", () => {
   it("prefills only for library -> inline when inline prompt is empty", () => {
@@ -25,5 +28,15 @@ describe("shouldPrefillInlinePromptOnSourceSwitch", () => {
     expect(firstSwitch).toBe(true);
     expect(withExistingText).toBe(false);
     expect(afterClearing).toBe(true);
+  });
+
+  it("clears command selection refs on form reset", () => {
+    const commandNameRef = { current: "daily-check" };
+    const libraryCommandContentRef = { current: "Run diagnostics" };
+
+    clearInlinePrefillCache(commandNameRef, libraryCommandContentRef);
+
+    expect(commandNameRef.current).toBe("");
+    expect(libraryCommandContentRef.current).toBe("");
   });
 });
