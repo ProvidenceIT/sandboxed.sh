@@ -24,6 +24,10 @@ use crate::provider_health::CooldownReason;
 
 static GOOGLE_PROJECT_CACHE: OnceLock<tokio::sync::RwLock<HashMap<uuid::Uuid, String>>> =
     OnceLock::new();
+const GOOGLE_USER_AGENT: &str = "google-api-nodejs-client/9.15.1";
+const GOOGLE_API_CLIENT: &str = "gl-node/22.17.0";
+const GOOGLE_CLIENT_METADATA: &str =
+    "ideType=IDE_UNSPECIFIED,platform=PLATFORM_UNSPECIFIED,pluginType=GEMINI";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -339,24 +343,7 @@ async fn chat_completions(
                         continue;
                     }
                 };
-            let mut headers = HeaderMap::new();
-            if let Ok(v) = HeaderValue::from_str(&format!("Bearer {}", access_token)) {
-                headers.insert(header::AUTHORIZATION, v);
-            }
-            headers.insert(
-                "User-Agent",
-                "google-api-nodejs-client/9.15.1".parse().unwrap(),
-            );
-            headers.insert("X-Goog-Api-Client", "gl-node/22.17.0".parse().unwrap());
-            headers.insert(
-                "Client-Metadata",
-                "ideType=IDE_UNSPECIFIED,platform=PLATFORM_UNSPECIFIED,pluginType=GEMINI"
-                    .parse()
-                    .unwrap(),
-            );
-            if is_stream {
-                headers.insert(header::ACCEPT, "text/event-stream".parse().unwrap());
-            }
+            let headers = build_google_proxy_headers(&access_token, is_stream);
             (google_url, google_body, headers)
         } else {
             let Some(url) = completions_url(provider_type, entry.base_url.as_deref()) else {
@@ -1836,6 +1823,27 @@ fn get_google_project_cache() -> &'static tokio::sync::RwLock<HashMap<uuid::Uuid
     GOOGLE_PROJECT_CACHE.get_or_init(|| tokio::sync::RwLock::new(HashMap::new()))
 }
 
+fn apply_google_client_headers(builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    builder
+        .header("User-Agent", GOOGLE_USER_AGENT)
+        .header("X-Goog-Api-Client", GOOGLE_API_CLIENT)
+        .header("Client-Metadata", GOOGLE_CLIENT_METADATA)
+}
+
+fn build_google_proxy_headers(access_token: &str, is_stream: bool) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    if let Ok(v) = HeaderValue::from_str(&format!("Bearer {}", access_token)) {
+        headers.insert(header::AUTHORIZATION, v);
+    }
+    headers.insert("User-Agent", GOOGLE_USER_AGENT.parse().unwrap());
+    headers.insert("X-Goog-Api-Client", GOOGLE_API_CLIENT.parse().unwrap());
+    headers.insert("Client-Metadata", GOOGLE_CLIENT_METADATA.parse().unwrap());
+    if is_stream {
+        headers.insert(header::ACCEPT, "text/event-stream".parse().unwrap());
+    }
+    headers
+}
+
 async fn get_google_access_token() -> Result<String, String> {
     super::ai_providers::ensure_google_oauth_token_valid().await?;
     super::ai_providers::read_google_oauth_access_token()
@@ -1863,20 +1871,16 @@ async fn get_google_project_id(
             "pluginType": "GEMINI",
         }
     });
-    let resp = http_client
-        .post("https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist")
-        .header("Content-Type", "application/json")
-        .header("Authorization", format!("Bearer {}", access_token))
-        .header("User-Agent", "google-api-nodejs-client/9.15.1")
-        .header("X-Goog-Api-Client", "gl-node/22.17.0")
-        .header(
-            "Client-Metadata",
-            "ideType=IDE_UNSPECIFIED,platform=PLATFORM_UNSPECIFIED,pluginType=GEMINI",
-        )
-        .json(&load_body)
-        .send()
-        .await
-        .map_err(|e| format!("loadCodeAssist request failed: {}", e))?;
+    let resp = apply_google_client_headers(
+        http_client
+            .post("https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist")
+            .header("Content-Type", "application/json")
+            .header("Authorization", format!("Bearer {}", access_token)),
+    )
+    .json(&load_body)
+    .send()
+    .await
+    .map_err(|e| format!("loadCodeAssist request failed: {}", e))?;
 
     let status = resp.status();
     let body = resp
