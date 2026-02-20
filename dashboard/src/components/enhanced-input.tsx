@@ -88,21 +88,26 @@ export const EnhancedInput = forwardRef<EnhancedInputHandle, EnhancedInputProps>
       let builtinCommands: CommandSummary[] = [];
       try {
         const builtinResponse = await fetchBuiltinCommands();
-        // Select commands based on backend type
-        if (backend === 'claudecode') {
-          builtinCommands = builtinResponse.claudecode;
-        } else if (backend === 'opencode') {
-          builtinCommands = builtinResponse.opencode;
+        // Select commands based on backend type.
+        // For known backends with no native slash commands (e.g., codex), show none.
+        const builtinByBackend: Record<string, CommandSummary[]> = {
+          claudecode: builtinResponse.claudecode,
+          opencode: builtinResponse.opencode,
+        };
+        if (backend) {
+          builtinCommands = builtinByBackend[backend] ?? [];
         } else {
-          // No backend specified, show both
+          // No backend selected yet, show both known builtin sets.
           builtinCommands = [...builtinResponse.opencode, ...builtinResponse.claudecode];
         }
       } catch {
         // Use fallback commands if API fails
-        if (backend === 'claudecode') {
-          builtinCommands = FALLBACK_CLAUDECODE_COMMANDS;
-        } else if (backend === 'opencode') {
-          builtinCommands = FALLBACK_OPENCODE_COMMANDS;
+        const fallbackByBackend: Record<string, CommandSummary[]> = {
+          claudecode: FALLBACK_CLAUDECODE_COMMANDS,
+          opencode: FALLBACK_OPENCODE_COMMANDS,
+        };
+        if (backend) {
+          builtinCommands = fallbackByBackend[backend] ?? [];
         } else {
           builtinCommands = [...FALLBACK_OPENCODE_COMMANDS, ...FALLBACK_CLAUDECODE_COMMANDS];
         }
