@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <em>Formerly known as "Sandboxed.sh"</em>
+  <em>Formerly known as Open Agent</em>
 </p>
 
 <p align="center">
