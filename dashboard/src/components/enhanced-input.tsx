@@ -26,13 +26,18 @@ export interface EnhancedInputHandle {
   canSubmit: () => boolean;
 }
 
+export interface FilePasteContext {
+  selectionStart: number;
+  selectionEnd: number;
+}
+
 interface EnhancedInputProps {
   value: string;
   onChange: (value: string) => void;
   onSubmit: (payload: SubmitPayload) => void;
   onCanSubmitChange?: (canSubmit: boolean) => void;
   /** Called when files are pasted (e.g., images from clipboard) */
-  onFilePaste?: (files: File[]) => void;
+  onFilePaste?: (files: File[], context: FilePasteContext) => void;
   placeholder?: string;
   disabled?: boolean;
   className?: string;
@@ -436,7 +441,10 @@ export const EnhancedInput = forwardRef<EnhancedInputHandle, EnhancedInputProps>
 
       // Prevent default paste and handle file upload
       event.preventDefault();
-      onFilePaste(files);
+      onFilePaste(files, {
+        selectionStart: textarea.selectionStart ?? 0,
+        selectionEnd: textarea.selectionEnd ?? 0,
+      });
     };
 
     textarea.addEventListener("paste", handlePaste);
