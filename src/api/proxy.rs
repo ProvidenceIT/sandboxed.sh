@@ -29,10 +29,6 @@ const GOOGLE_API_CLIENT: &str = "gl-node/22.17.0";
 const GOOGLE_CLIENT_METADATA: &str =
     "ideType=IDE_UNSPECIFIED,platform=PLATFORM_UNSPECIFIED,pluginType=GEMINI";
 
-const GOOGLE_USER_AGENT: &str = "google-api-nodejs-client/9.15.1";
-const GOOGLE_API_CLIENT: &str = "gl-node/22.17.0";
-const GOOGLE_CLIENT_METADATA: &str =
-    "ideType=IDE_UNSPECIFIED,platform=PLATFORM_UNSPECIFIED,pluginType=GEMINI";
 const TEXT_EVENT_STREAM: &str = "text/event-stream";
 const NO_CACHE: &str = "no-cache";
 
