@@ -22,12 +22,19 @@ use serde::{Deserialize, Serialize};
 use crate::ai_providers::ProviderType;
 use crate::provider_health::CooldownReason;
 
-static GOOGLE_PROJECT_CACHE: OnceLock<tokio::sync::RwLock<HashMap<uuid::Uuid, String>>> =
+static GOOGLE_PROJECT_CACHE: OnceLock<tokio::sync::RwLock<HashMap<(uuid::Uuid, String), String>>> =
     OnceLock::new();
 const GOOGLE_USER_AGENT: &str = "google-api-nodejs-client/9.15.1";
 const GOOGLE_API_CLIENT: &str = "gl-node/22.17.0";
 const GOOGLE_CLIENT_METADATA: &str =
     "ideType=IDE_UNSPECIFIED,platform=PLATFORM_UNSPECIFIED,pluginType=GEMINI";
+
+const GOOGLE_USER_AGENT: &str = "google-api-nodejs-client/9.15.1";
+const GOOGLE_API_CLIENT: &str = "gl-node/22.17.0";
+const GOOGLE_CLIENT_METADATA: &str =
+    "ideType=IDE_UNSPECIFIED,platform=PLATFORM_UNSPECIFIED,pluginType=GEMINI";
+const TEXT_EVENT_STREAM: &str = "text/event-stream";
+const NO_CACHE: &str = "no-cache";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -450,8 +457,11 @@ async fn chat_completions(
         if use_google_oauth_adapter {
             if is_stream && status.is_success() {
                 let mut response_headers = HeaderMap::new();
-                response_headers.insert(header::CONTENT_TYPE, "text/event-stream".parse().unwrap());
-                response_headers.insert(header::CACHE_CONTROL, "no-cache".parse().unwrap());
+                response_headers.insert(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static(TEXT_EVENT_STREAM),
+                );
+                response_headers.insert(header::CACHE_CONTROL, HeaderValue::from_static(NO_CACHE));
 
                 let stream_id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
                 let stream_created = chrono::Utc::now().timestamp();
@@ -1819,13 +1829,14 @@ fn track_stream_health(
     }
 }
 
-fn get_google_project_cache() -> &'static tokio::sync::RwLock<HashMap<uuid::Uuid, String>> {
+fn get_google_project_cache() -> &'static tokio::sync::RwLock<HashMap<(uuid::Uuid, String), String>>
+{
     GOOGLE_PROJECT_CACHE.get_or_init(|| tokio::sync::RwLock::new(HashMap::new()))
 }
 
 fn apply_google_client_headers(builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
     builder
-        .header("User-Agent", GOOGLE_USER_AGENT)
+        .header(header::USER_AGENT, GOOGLE_USER_AGENT)
         .header("X-Goog-Api-Client", GOOGLE_API_CLIENT)
         .header("Client-Metadata", GOOGLE_CLIENT_METADATA)
 }
@@ -1835,11 +1846,20 @@ fn build_google_proxy_headers(access_token: &str, is_stream: bool) -> HeaderMap 
     if let Ok(v) = HeaderValue::from_str(&format!("Bearer {}", access_token)) {
         headers.insert(header::AUTHORIZATION, v);
     }
-    headers.insert("User-Agent", GOOGLE_USER_AGENT.parse().unwrap());
-    headers.insert("X-Goog-Api-Client", GOOGLE_API_CLIENT.parse().unwrap());
-    headers.insert("Client-Metadata", GOOGLE_CLIENT_METADATA.parse().unwrap());
+    headers.insert(
+        header::USER_AGENT,
+        HeaderValue::from_static(GOOGLE_USER_AGENT),
+    );
+    headers.insert(
+        "X-Goog-Api-Client",
+        HeaderValue::from_static(GOOGLE_API_CLIENT),
+    );
+    headers.insert(
+        "Client-Metadata",
+        HeaderValue::from_static(GOOGLE_CLIENT_METADATA),
+    );
     if is_stream {
-        headers.insert(header::ACCEPT, "text/event-stream".parse().unwrap());
+        headers.insert(header::ACCEPT, HeaderValue::from_static(TEXT_EVENT_STREAM));
     }
     headers
 }
@@ -1855,10 +1875,11 @@ async fn get_google_project_id(
     account_id: uuid::Uuid,
     access_token: &str,
 ) -> Result<String, String> {
+    let cache_key = (account_id, access_token.to_string());
     if let Some(cached) = get_google_project_cache()
         .read()
         .await
-        .get(&account_id)
+        .get(&cache_key)
         .cloned()
     {
         return Ok(cached);
@@ -1909,10 +1930,9 @@ async fn get_google_project_id(
         .ok_or_else(|| "loadCodeAssist did not return a managed project".to_string())?
         .to_string();
 
-    get_google_project_cache()
-        .write()
-        .await
-        .insert(account_id, project.clone());
+    let mut cache = get_google_project_cache().write().await;
+    cache.retain(|(cached_account_id, _), _| *cached_account_id != account_id);
+    cache.insert(cache_key, project.clone());
     Ok(project)
 }
 
@@ -1954,7 +1974,11 @@ fn build_google_upstream_request(
             "assistant" => "model",
             _ => "user",
         };
-        let mut parts: Vec<serde_json::Value> = extract_openai_parts(message.get("content"));
+        let mut parts: Vec<serde_json::Value> = if role == "tool" {
+            Vec::new()
+        } else {
+            extract_openai_parts(message.get("content"))
+        };
 
         if let Some(tool_calls) = message.get("tool_calls").and_then(|v| v.as_array()) {
             for tc in tool_calls {
@@ -2291,11 +2315,21 @@ fn transform_google_sse_to_openai(
             Vec::<u8>::new(),
             false, // sent role chunk
             false, // emitted terminal chunk
+            false, // emitted tool call
             stream_id,
             model_id,
             created,
         ),
-        |(mut stream, mut buf, mut sent_role, mut emitted_done, stream_id, model_id, created)| async move {
+        |(
+            mut stream,
+            mut buf,
+            mut sent_role,
+            mut emitted_done,
+            mut emitted_tool_call,
+            stream_id,
+            model_id,
+            created,
+        )| async move {
             loop {
                 if let Some(pos) = buf.iter().position(|&b| b == b'\n') {
                     let line = buf.drain(..=pos).collect::<Vec<u8>>();
@@ -2317,6 +2351,7 @@ fn transform_google_sse_to_openai(
                                     buf,
                                     sent_role,
                                     emitted_done,
+                                    emitted_tool_call,
                                     stream_id,
                                     model_id,
                                     created,
@@ -2394,11 +2429,16 @@ fn transform_google_sse_to_openai(
                                     }],
                                 });
                                 chunks.push(format!("data: {}\n\n", chunk));
+                                emitted_tool_call = true;
                             }
                         }
                     }
 
                     if let Some(fr) = candidate.get("finishReason").and_then(|v| v.as_str()) {
+                        let mut finish_reason = finish_reason_from_google(Some(fr)).to_string();
+                        if emitted_tool_call && finish_reason == "stop" {
+                            finish_reason = "tool_calls".to_string();
+                        }
                         let finish_chunk = serde_json::json!({
                             "id": stream_id,
                             "object": "chat.completion.chunk",
@@ -2407,7 +2447,7 @@ fn transform_google_sse_to_openai(
                             "choices": [{
                                 "index": 0,
                                 "delta": {},
-                                "finish_reason": finish_reason_from_google(Some(fr)),
+                                "finish_reason": finish_reason,
                             }],
                         });
                         chunks.push(format!("data: {}\n\n", finish_chunk));
@@ -2426,6 +2466,7 @@ fn transform_google_sse_to_openai(
                             buf,
                             sent_role,
                             emitted_done,
+                            emitted_tool_call,
                             stream_id,
                             model_id,
                             created,
@@ -2443,6 +2484,7 @@ fn transform_google_sse_to_openai(
                                 buf,
                                 sent_role,
                                 emitted_done,
+                                emitted_tool_call,
                                 stream_id,
                                 model_id,
                                 created,
@@ -2455,7 +2497,16 @@ fn transform_google_sse_to_openai(
                         }
                         return Some((
                             Ok(bytes::Bytes::from_static(b"data: [DONE]\n\n")),
-                            (stream, buf, sent_role, true, stream_id, model_id, created),
+                            (
+                                stream,
+                                buf,
+                                sent_role,
+                                true,
+                                emitted_tool_call,
+                                stream_id,
+                                model_id,
+                                created,
+                            ),
                         ));
                     }
                 }
@@ -2556,6 +2607,8 @@ fn extract_google_retry_from_message(message: &str) -> Option<std::time::Duratio
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
+    use futures::StreamExt;
 
     #[test]
     fn parse_duration_simple_seconds() {
@@ -2787,5 +2840,80 @@ mod tests {
         let reason =
             classify_google_error_reason(serde_json::to_vec(&body).unwrap().as_slice()).unwrap();
         assert!(matches!(reason, CooldownReason::Overloaded));
+    }
+
+    #[test]
+    fn build_google_request_tool_message_uses_only_function_response_part() {
+        let body = serde_json::json!({
+            "messages": [
+                {
+                    "role": "tool",
+                    "name": "read_file",
+                    "content": "file content"
+                }
+            ]
+        });
+
+        let (_, payload_bytes) = build_google_upstream_request(
+            serde_json::to_vec(&body).unwrap().as_slice(),
+            "gemini-2.5-pro",
+            "project-123",
+            false,
+        )
+        .unwrap();
+
+        let payload: serde_json::Value = serde_json::from_slice(payload_bytes.as_ref()).unwrap();
+        let parts = payload
+            .get("request")
+            .and_then(|v| v.get("contents"))
+            .and_then(|v| v.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|v| v.get("parts"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap();
+
+        assert_eq!(parts.len(), 1);
+        assert!(parts[0].get("functionResponse").is_some());
+        assert!(parts[0].get("text").is_none());
+    }
+
+    #[test]
+    fn google_stream_finish_reason_maps_to_tool_calls_when_function_call_seen() {
+        let sse_payload = serde_json::json!({
+            "response": {
+                "candidates": [{
+                    "content": {
+                        "parts": [{
+                            "functionCall": {
+                                "name": "search",
+                                "args": { "q": "test" }
+                            }
+                        }]
+                    },
+                    "finishReason": "STOP"
+                }]
+            }
+        });
+        let sse_bytes = Bytes::from(format!("data: {}\n\n", sse_payload));
+        let input = futures::stream::iter(vec![Ok(sse_bytes)]);
+
+        let out = futures::executor::block_on(async move {
+            transform_google_sse_to_openai(
+                input,
+                "chatcmpl-test".to_string(),
+                1,
+                "gemini-2.5-pro".to_string(),
+            )
+            .collect::<Vec<_>>()
+            .await
+        });
+
+        let text = out
+            .into_iter()
+            .map(|item| String::from_utf8(item.unwrap().to_vec()).unwrap())
+            .collect::<String>();
+
+        assert!(text.contains("\"finish_reason\":\"tool_calls\""));
     }
 }
