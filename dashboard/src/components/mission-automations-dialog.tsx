@@ -118,6 +118,18 @@ const STATUS_STYLES: Record<string, string> = {
   skipped: 'text-white/30',
 };
 
+export function shouldPrefillInlinePromptOnSourceSwitch(
+  previousSourceType: CommandSourceType,
+  nextSourceType: CommandSourceType,
+  inlinePrompt: string
+): boolean {
+  return (
+    previousSourceType === 'library' &&
+    nextSourceType === 'inline' &&
+    inlinePrompt.trim().length === 0
+  );
+}
+
 export function MissionAutomationsDialog({
   open,
   missionId,
@@ -145,7 +157,10 @@ export function MissionAutomationsDialog({
   const [commandSourceType, setCommandSourceType] = useState<CommandSourceType>('library');
   const [commandName, setCommandName] = useState('');
   const commandNameRef = useRef('');
+  const libraryCommandContentRef = useRef('');
   const [inlinePrompt, setInlinePrompt] = useState('');
+  const commandSourceTypeRef = useRef<CommandSourceType>('library');
+  const inlinePromptRef = useRef('');
   const [triggerKind, setTriggerKind] = useState<TriggerKind>('interval');
   const [intervalValue, setIntervalValue] = useState('5');
   const [intervalUnit, setIntervalUnit] = useState<IntervalUnit>('minutes');
@@ -171,6 +186,14 @@ export function MissionAutomationsDialog({
     return new Map(commands.map((command) => [command.name, command]));
   }, [commands]);
 
+  useEffect(() => {
+    commandSourceTypeRef.current = commandSourceType;
+  }, [commandSourceType]);
+
+  useEffect(() => {
+    inlinePromptRef.current = inlinePrompt;
+  }, [inlinePrompt]);
+
   // Helper to add auto-populated variables (merges with existing, never overwrites manual)
   const addAutoVariables = useCallback((names: string[]) => {
     setVariables((prev) => {
@@ -190,6 +213,7 @@ export function MissionAutomationsDialog({
     (name: string) => {
       setCommandName(name);
       commandNameRef.current = name;
+      libraryCommandContentRef.current = '';
       const cmd = commandsByName.get(name);
       if (cmd?.params?.length) {
         addAutoVariables(cmd.params.map((p) => p.name));
@@ -200,6 +224,7 @@ export function MissionAutomationsDialog({
           .then((full) => {
             // Guard against stale response if user changed selection
             if (commandNameRef.current !== capturedName) return;
+            libraryCommandContentRef.current = full.content;
             const fromParams = full.params?.map((p) => p.name) ?? [];
             const fromContent = extractPromptVariables(full.content);
             const all = [...new Set([...fromParams, ...fromContent])];
@@ -209,6 +234,42 @@ export function MissionAutomationsDialog({
       }
     },
     [commandsByName, addAutoVariables]
+  );
+
+  const handleSourceTypeChange = useCallback(
+    (nextSourceType: CommandSourceType) => {
+      commandSourceTypeRef.current = nextSourceType;
+      if (
+        shouldPrefillInlinePromptOnSourceSwitch(commandSourceType, nextSourceType, inlinePrompt)
+      ) {
+        const selectedName = commandNameRef.current.trim();
+        const prefetchedContent = libraryCommandContentRef.current.trim();
+        if (prefetchedContent.length > 0) {
+          setInlinePrompt(prefetchedContent);
+          addAutoVariables(extractPromptVariables(prefetchedContent));
+        } else if (selectedName) {
+          const expectedName = selectedName;
+          void getLibraryCommand(selectedName)
+            .then((full) => {
+              if (
+                commandNameRef.current !== expectedName ||
+                commandSourceTypeRef.current !== 'inline' ||
+                inlinePromptRef.current.trim().length > 0
+              ) {
+                return;
+              }
+              const content = full.content.trim();
+              if (!content) return;
+              libraryCommandContentRef.current = content;
+              setInlinePrompt(content);
+              addAutoVariables(extractPromptVariables(content));
+            })
+            .catch(() => {});
+        }
+      }
+      setCommandSourceType(nextSourceType);
+    },
+    [addAutoVariables, commandSourceType, inlinePrompt]
   );
 
   // Re-populate variables when commands finish loading (fixes late-load race condition)
@@ -688,7 +749,7 @@ export function MissionAutomationsDialog({
                     <label className="block text-xs text-white/50 mb-1.5">Source</label>
                     <select
                       value={commandSourceType}
-                      onChange={(e) => setCommandSourceType(e.target.value as CommandSourceType)}
+                      onChange={(e) => handleSourceTypeChange(e.target.value as CommandSourceType)}
                       className={cn(selectClass, 'w-full')}
                       style={selectStyle}
                     >
