@@ -194,6 +194,11 @@ export function MissionAutomationsDialog({
     inlinePromptRef.current = inlinePrompt;
   }, [inlinePrompt]);
 
+  const setInlinePromptState = useCallback((nextPrompt: string) => {
+    inlinePromptRef.current = nextPrompt;
+    setInlinePrompt(nextPrompt);
+  }, []);
+
   // Helper to add auto-populated variables (merges with existing, never overwrites manual)
   const addAutoVariables = useCallback((names: string[]) => {
     setVariables((prev) => {
@@ -245,7 +250,7 @@ export function MissionAutomationsDialog({
         const selectedName = commandNameRef.current.trim();
         const prefetchedContent = libraryCommandContentRef.current.trim();
         if (prefetchedContent.length > 0) {
-          setInlinePrompt(prefetchedContent);
+          setInlinePromptState(prefetchedContent);
           addAutoVariables(extractPromptVariables(prefetchedContent));
         } else if (selectedName) {
           const expectedName = selectedName;
@@ -261,7 +266,7 @@ export function MissionAutomationsDialog({
               const content = full.content.trim();
               if (!content) return;
               libraryCommandContentRef.current = content;
-              setInlinePrompt(content);
+              setInlinePromptState(content);
               addAutoVariables(extractPromptVariables(content));
             })
             .catch(() => {});
@@ -269,7 +274,7 @@ export function MissionAutomationsDialog({
       }
       setCommandSourceType(nextSourceType);
     },
-    [addAutoVariables, commandSourceType, inlinePrompt]
+    [addAutoVariables, commandSourceType, inlinePrompt, setInlinePromptState]
   );
 
   // Re-populate variables when commands finish loading (fixes late-load race condition)
@@ -285,14 +290,14 @@ export function MissionAutomationsDialog({
   const promptTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const handleInlinePromptChange = useCallback(
     (text: string) => {
-      setInlinePrompt(text);
+      setInlinePromptState(text);
       if (promptTimerRef.current) clearTimeout(promptTimerRef.current);
       promptTimerRef.current = setTimeout(() => {
         const detected = extractPromptVariables(text);
         addAutoVariables(detected);
       }, 400);
     },
-    [addAutoVariables]
+    [addAutoVariables, setInlinePromptState]
   );
 
   // Detected built-in variables in inline prompt
@@ -525,7 +530,7 @@ export function MissionAutomationsDialog({
       ]);
       // Reset form
       setCommandName('');
-      setInlinePrompt('');
+      setInlinePromptState('');
       setIntervalValue('5');
       setIntervalUnit('minutes');
       setVariables([]);
