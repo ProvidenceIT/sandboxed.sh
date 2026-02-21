@@ -191,22 +191,9 @@ struct ControlView: View {
                     Button {
                         Task {
                             await workspaceState.loadWorkspaces()
-                            // Check if we should skip agent selection
-                            let skipAgentSelection = UserDefaults.standard.bool(forKey: "skip_agent_selection")
-                            let defaultAgent = UserDefaults.standard.string(forKey: "default_agent")
-                            
-                            if skipAgentSelection, let savedDefault = defaultAgent, !savedDefault.isEmpty,
-                               let parsed = CombinedAgent.parse(savedDefault) {
-                                // Create mission directly with default agent
-                                let options = NewMissionOptions(
-                                    workspaceId: workspaceState.selectedWorkspace?.id,
-                                    agent: parsed.agent,
-                                    modelOverride: nil,
-                                    backend: parsed.backend
-                                )
+                            if let options = await getValidatedDefaultAgentOptions() {
                                 await createNewMission(options: options)
                             } else {
-                                // Show the sheet for agent selection
                                 showNewMissionSheet = true
                             }
                         }
@@ -401,19 +388,7 @@ struct ControlView: View {
                     showMissionSwitcher = false
                     Task {
                         await workspaceState.loadWorkspaces()
-                        // Check if we should skip agent selection
-                        let skipAgentSelection = UserDefaults.standard.bool(forKey: "skip_agent_selection")
-                        let defaultAgent = UserDefaults.standard.string(forKey: "default_agent")
-                        
-                        if skipAgentSelection, let savedDefault = defaultAgent, !savedDefault.isEmpty,
-                           let parsed = CombinedAgent.parse(savedDefault) {
-                            // Create mission directly with default agent
-                            let options = NewMissionOptions(
-                                workspaceId: workspaceState.selectedWorkspace?.id,
-                                agent: parsed.agent,
-                                modelOverride: nil,
-                                backend: parsed.backend
-                            )
+                        if let options = await getValidatedDefaultAgentOptions() {
                             await createNewMission(options: options)
                         } else {
                             showNewMissionSheet = true
@@ -1247,6 +1222,65 @@ struct ControlView: View {
             print("Failed to resume mission: \(error)")
             HapticService.error()
         }
+    }
+    
+    // MARK: - Default Agent Helper
+    
+    private func getValidatedDefaultAgentOptions() async -> NewMissionOptions? {
+        let skipAgentSelection = UserDefaults.standard.bool(forKey: "skip_agent_selection")
+        let defaultAgent = UserDefaults.standard.string(forKey: "default_agent")
+        
+        guard skipAgentSelection,
+              let savedDefault = defaultAgent,
+              !savedDefault.isEmpty,
+              let parsed = CombinedAgent.parse(savedDefault) else {
+            return nil
+        }
+        
+        var backendAgents: [String: [BackendAgent]] = [:]
+        var enabledBackendIds: Set<String> = []
+        
+        do {
+            let backends = try await api.listBackends()
+            for backend in backends {
+                do {
+                    let config = try await api.getBackendConfig(backendId: backend.id)
+                    if config.isEnabled {
+                        enabledBackendIds.insert(backend.id)
+                    }
+                } catch {
+                    enabledBackendIds.insert(backend.id)
+                }
+            }
+            
+            for backendId in enabledBackendIds {
+                do {
+                    let agents = try await api.listBackendAgents(backendId: backendId)
+                    backendAgents[backendId] = agents
+                } catch {
+                    if backendId == "amp" {
+                        backendAgents[backendId] = [
+                            BackendAgent(id: "smart", name: "Smart Mode"),
+                            BackendAgent(id: "rush", name: "Rush Mode")
+                        ]
+                    }
+                }
+            }
+        } catch {
+            return nil
+        }
+        
+        guard let agents = backendAgents[parsed.backend],
+              agents.contains(where: { $0.id == parsed.agent }) else {
+            return nil
+        }
+        
+        return NewMissionOptions(
+            workspaceId: workspaceState.selectedWorkspace?.id,
+            agent: parsed.agent,
+            modelOverride: nil,
+            backend: parsed.backend
+        )
     }
     
     // MARK: - Backend Helpers
