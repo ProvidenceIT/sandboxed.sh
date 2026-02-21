@@ -191,7 +191,24 @@ struct ControlView: View {
                     Button {
                         Task {
                             await workspaceState.loadWorkspaces()
-                            showNewMissionSheet = true
+                            // Check if we should skip agent selection
+                            let skipAgentSelection = UserDefaults.standard.bool(forKey: "skip_agent_selection")
+                            let defaultAgent = UserDefaults.standard.string(forKey: "default_agent")
+                            
+                            if skipAgentSelection, let savedDefault = defaultAgent, !savedDefault.isEmpty,
+                               let parsed = CombinedAgent.parse(savedDefault) {
+                                // Create mission directly with default agent
+                                let options = NewMissionOptions(
+                                    workspaceId: workspaceState.selectedWorkspace?.id,
+                                    agent: parsed.agent,
+                                    modelOverride: nil,
+                                    backend: parsed.backend
+                                )
+                                await createNewMission(options: options)
+                            } else {
+                                // Show the sheet for agent selection
+                                showNewMissionSheet = true
+                            }
                         }
                     } label: {
                         Label("New Mission", systemImage: "plus")
@@ -384,7 +401,23 @@ struct ControlView: View {
                     showMissionSwitcher = false
                     Task {
                         await workspaceState.loadWorkspaces()
-                        showNewMissionSheet = true
+                        // Check if we should skip agent selection
+                        let skipAgentSelection = UserDefaults.standard.bool(forKey: "skip_agent_selection")
+                        let defaultAgent = UserDefaults.standard.string(forKey: "default_agent")
+                        
+                        if skipAgentSelection, let savedDefault = defaultAgent, !savedDefault.isEmpty,
+                           let parsed = CombinedAgent.parse(savedDefault) {
+                            // Create mission directly with default agent
+                            let options = NewMissionOptions(
+                                workspaceId: workspaceState.selectedWorkspace?.id,
+                                agent: parsed.agent,
+                                modelOverride: nil,
+                                backend: parsed.backend
+                            )
+                            await createNewMission(options: options)
+                        } else {
+                            showNewMissionSheet = true
+                        }
                     }
                 },
                 onDismiss: {

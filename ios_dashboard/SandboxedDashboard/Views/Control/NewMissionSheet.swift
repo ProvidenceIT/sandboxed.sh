@@ -484,14 +484,27 @@ struct NewMissionSheet: View {
             }
         }
         
-        // Set default agent (prefer Sisyphus in OpenCode, then first available)
-        // Use agent.id for CLI value, not display name
+        // Set default agent (prefer saved default, then Sisyphus in OpenCode, then first available)
         if selectedAgentValue.isEmpty {
-            if let sisyphus = backendAgents["opencode"]?.first(where: { $0.name == "Sisyphus" }) {
-                selectedAgentValue = "opencode:\(sisyphus.id)"
-            } else if let firstBackend = backends.first(where: { enabledBackendIds.contains($0.id) }),
-                      let firstAgent = backendAgents[firstBackend.id]?.first {
-                selectedAgentValue = "\(firstBackend.id):\(firstAgent.id)"
+            // First check for saved default agent
+            if let savedDefault = UserDefaults.standard.string(forKey: "default_agent"), !savedDefault.isEmpty {
+                let parsed = CombinedAgent.parse(savedDefault)
+                // Verify the saved agent still exists
+                if let backendId = parsed?.backend,
+                   let agentId = parsed?.agent,
+                   backendAgents[backendId]?.contains(where: { $0.id == agentId }) == true {
+                    selectedAgentValue = savedDefault
+                }
+            }
+            
+            // Fall back to Sisyphus or first available
+            if selectedAgentValue.isEmpty {
+                if let sisyphus = backendAgents["opencode"]?.first(where: { $0.name == "Sisyphus" }) {
+                    selectedAgentValue = "opencode:\(sisyphus.id)"
+                } else if let firstBackend = backends.first(where: { enabledBackendIds.contains($0.id) }),
+                          let firstAgent = backendAgents[firstBackend.id]?.first {
+                    selectedAgentValue = "\(firstBackend.id):\(firstAgent.id)"
+                }
             }
         }
         
