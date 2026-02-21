@@ -53,18 +53,16 @@ export default function LLMSettingsPage() {
   const handleTest = async () => {
     setTesting(true);
     setTestResult(null);
+    // Temporarily enable so generateMissionTitle reads an enabled config.
+    // Only toggle the `enabled` flag — don't snapshot/restore the full config
+    // to avoid clobbering edits the user makes while the async call is in flight.
+    const wasEnabled = config.enabled;
+    if (!wasEnabled) writeLLMConfig({ ...config, enabled: true });
     try {
-      // Temporarily enable for test
-      const prev = readLLMConfig();
-      writeLLMConfig({ ...config, enabled: true });
-
       const title = await generateMissionTitle(
         'Fix the authentication bug in the login page',
         'I\'ll investigate the login flow and fix the session handling issue.'
       );
-
-      // Restore
-      writeLLMConfig(prev);
 
       if (title) {
         setTestResult(title);
@@ -75,6 +73,12 @@ export default function LLMSettingsPage() {
     } catch {
       toast.error('LLM request failed');
     } finally {
+      // Restore only the enabled flag we toggled, using the *current* config
+      // so any other edits the user made during the test are preserved.
+      if (!wasEnabled) {
+        const current = readLLMConfig();
+        writeLLMConfig({ ...current, enabled: wasEnabled });
+      }
       setTesting(false);
     }
   };

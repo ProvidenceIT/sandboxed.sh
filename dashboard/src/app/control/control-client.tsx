@@ -4772,36 +4772,39 @@ export default function ControlClient() {
           phase: "idle",
         }));
 
-        // Auto-generate mission title on first assistant response (LLM-powered, best-effort)
-        const activeMission = currentMissionRef.current;
+        // Auto-generate mission title on first successful assistant response (LLM-powered, best-effort).
+        // Use viewingMissionIdRef (not currentMissionRef) to target the correct mission —
+        // events are already filtered by viewingId, so this matches the event's mission.
+        const targetMissionId = viewingMissionIdRef.current;
+        const targetMission = viewingMissionRef.current;
         if (
-          activeMission &&
-          !autoTitleAttemptedRef.current.has(activeMission.id)
+          targetMissionId &&
+          !isFailure &&
+          !targetMission?.title &&
+          !autoTitleAttemptedRef.current.has(targetMissionId)
         ) {
-          autoTitleAttemptedRef.current.add(activeMission.id);
+          autoTitleAttemptedRef.current.add(targetMissionId);
           const assistantContent = String(data["content"] ?? "");
-          // Find first user message to pair with assistant reply
-          setItems((prev) => {
-            const firstUser = prev.find((it) => it.kind === "user");
-            if (firstUser && firstUser.kind === "user") {
-              autoGenerateMissionTitle(
-                activeMission.id,
-                firstUser.content,
-                assistantContent
-              ).then((title) => {
-                if (title) {
-                  // Update local mission state so the UI reflects the new title immediately
-                  setCurrentMission((m) =>
-                    m?.id === activeMission.id ? { ...m, title } : m
-                  );
-                  setViewingMission((m) =>
-                    m?.id === activeMission.id ? { ...m, title } : m
-                  );
-                }
-              });
-            }
-            return prev; // No mutation — just reading items
-          });
+          // Use itemsRef for synchronous read — avoids side effects in state updaters
+          // and prevents double-firing in React StrictMode.
+          const firstUser = itemsRef.current.find((it) => it.kind === "user");
+          if (firstUser && firstUser.kind === "user") {
+            autoGenerateMissionTitle(
+              targetMissionId,
+              firstUser.content,
+              assistantContent
+            ).then((title) => {
+              if (title) {
+                // Update local mission state so the UI reflects the new title immediately
+                setCurrentMission((m) =>
+                  m?.id === targetMissionId ? { ...m, title } : m
+                );
+                setViewingMission((m) =>
+                  m?.id === targetMissionId ? { ...m, title } : m
+                );
+              }
+            });
+          }
         }
         return;
       }
