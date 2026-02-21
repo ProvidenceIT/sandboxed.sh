@@ -264,6 +264,25 @@ impl OpenCodeClient {
                                     &mut sse_state,
                                 );
 
+                                // Flush any pending usage extracted from the event
+                                // (e.g. from response.completed) before the main event.
+                                if let Some((input, output)) = sse_state.pending_usage.take() {
+                                    let usage_event = OpenCodeEvent::Usage {
+                                        input_tokens: input,
+                                        output_tokens: output,
+                                    };
+                                    event_count += 1;
+                                    if event_tx.send(usage_event).await.is_err() {
+                                        tracing::debug!(
+                                            session_id = %session_id_clone,
+                                            "SSE receiver dropped (usage flush)"
+                                        );
+                                        let _ = child.kill().await;
+                                        let _ = child.wait().await;
+                                        return;
+                                    }
+                                }
+
                                 if let Some(ref event) = parsed {
                                     event_count += 1;
                                     let is_complete =
@@ -825,6 +844,8 @@ struct SseState {
     /// Track last emitted thinking/text content to deduplicate identical events
     last_emitted_thinking: Option<String>,
     last_emitted_text: Option<String>,
+    /// Token usage extracted from response.completed events (input, output).
+    pending_usage: Option<(u64, u64)>,
 }
 
 fn extract_str<'a>(value: &'a serde_json::Value, keys: &[&str]) -> Option<&'a str> {
@@ -1148,9 +1169,36 @@ fn parse_sse_event(
                 })
             }
         }
-        "response.completed" | "response.incomplete" => Some(OpenCodeEvent::MessageComplete {
-            session_id: session_id.to_string(),
-        }),
+        "response.completed" | "response.incomplete" => {
+            // Extract token usage from the response object if present.
+            // OpenAI Responses API sends usage in response.completed events:
+            //   { "response": { "usage": { "input_tokens": N, "output_tokens": N } } }
+            // Also check top-level usage for direct OpenCode responses.
+            let usage = props
+                .get("response")
+                .and_then(|r| r.get("usage"))
+                .or_else(|| props.get("usage"));
+            if let Some(usage_obj) = usage {
+                let input = usage_obj
+                    .get("input_tokens")
+                    .or_else(|| usage_obj.get("prompt_tokens"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let output = usage_obj
+                    .get("output_tokens")
+                    .or_else(|| usage_obj.get("completion_tokens"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                if input > 0 || output > 0 {
+                    // Emit usage before the completion marker so the agent
+                    // can accumulate it before building the final result.
+                    state.pending_usage = Some((input, output));
+                }
+            }
+            Some(OpenCodeEvent::MessageComplete {
+                session_id: session_id.to_string(),
+            })
+        }
         "response.output_item.added" => {
             if let Some(item) = props.get("item") {
                 if item.get("type").and_then(|v| v.as_str()) == Some("function_call") {

@@ -370,10 +370,13 @@ struct SettingsView: View {
         enabledBackendIds = data.enabledBackendIds
         backendAgents = data.backendAgents
 
-        // Clear stale default if the saved agent no longer exists on the server
+        // Clear stale default if the saved agent no longer exists on the server.
+        // Only validate when we actually received agents for the backend —
+        // a nil/missing entry means the API was unreachable, so we keep the
+        // saved preference rather than falsely clearing it.
         if !selectedDefaultAgent.isEmpty,
-           let parsed = CombinedAgent.parse(selectedDefaultAgent) {
-            let agentsForBackend = data.backendAgents[parsed.backend] ?? []
+           let parsed = CombinedAgent.parse(selectedDefaultAgent),
+           let agentsForBackend = data.backendAgents[parsed.backend] {
             if !agentsForBackend.contains(where: { $0.id == parsed.agent }) {
                 selectedDefaultAgent = ""
             }
