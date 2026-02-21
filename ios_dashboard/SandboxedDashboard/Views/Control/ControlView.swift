@@ -1229,52 +1229,21 @@ struct ControlView: View {
     private func getValidatedDefaultAgentOptions() async -> NewMissionOptions? {
         let skipAgentSelection = UserDefaults.standard.bool(forKey: "skip_agent_selection")
         let defaultAgent = UserDefaults.standard.string(forKey: "default_agent")
-        
+
         guard skipAgentSelection,
               let savedDefault = defaultAgent,
               !savedDefault.isEmpty,
               let parsed = CombinedAgent.parse(savedDefault) else {
             return nil
         }
-        
-        var backendAgents: [String: [BackendAgent]] = [:]
-        var enabledBackendIds: Set<String> = []
-        
-        do {
-            let backends = try await api.listBackends()
-            for backend in backends {
-                do {
-                    let config = try await api.getBackendConfig(backendId: backend.id)
-                    if config.isEnabled {
-                        enabledBackendIds.insert(backend.id)
-                    }
-                } catch {
-                    enabledBackendIds.insert(backend.id)
-                }
-            }
-            
-            for backendId in enabledBackendIds {
-                do {
-                    let agents = try await api.listBackendAgents(backendId: backendId)
-                    backendAgents[backendId] = agents
-                } catch {
-                    if backendId == "amp" {
-                        backendAgents[backendId] = [
-                            BackendAgent(id: "smart", name: "Smart Mode"),
-                            BackendAgent(id: "rush", name: "Rush Mode")
-                        ]
-                    }
-                }
-            }
-        } catch {
-            return nil
-        }
-        
-        guard let agents = backendAgents[parsed.backend],
+
+        let data = await BackendAgentService.loadBackendsAndAgents()
+
+        guard let agents = data.backendAgents[parsed.backend],
               agents.contains(where: { $0.id == parsed.agent }) else {
             return nil
         }
-        
+
         return NewMissionOptions(
             workspaceId: workspaceState.selectedWorkspace?.id,
             agent: parsed.agent,

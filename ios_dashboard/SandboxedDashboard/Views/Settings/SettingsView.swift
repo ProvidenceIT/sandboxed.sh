@@ -352,66 +352,23 @@ struct SettingsView: View {
     }
     
     // MARK: - Helpers
-    
+
     private func backendIcon(for id: String?) -> String {
-        guard let id = id else { return "questionmark" }
-        switch id {
-        case "opencode": return "terminal"
-        case "claudecode": return "brain"
-        case "amp": return "bolt.fill"
-        default: return "cpu"
-        }
+        BackendAgentService.icon(for: id)
     }
-    
+
     private func backendColor(for id: String?) -> Color {
-        guard let id = id else { return Theme.textSecondary }
-        switch id {
-        case "opencode": return Theme.success
-        case "claudecode": return Theme.accent
-        case "amp": return .orange
-        default: return Theme.textSecondary
-        }
+        BackendAgentService.color(for: id)
     }
-    
+
     private func loadAgents() async {
         isLoadingAgents = true
         defer { isLoadingAgents = false }
-        
-        // Load backends
-        do {
-            backends = try await api.listBackends()
-        } catch {
-            backends = Backend.defaults
-        }
-        
-        // Load backend configs to check enabled status
-        var enabled = Set<String>()
-        for backend in backends {
-            do {
-                let config = try await api.getBackendConfig(backendId: backend.id)
-                if config.isEnabled {
-                    enabled.insert(backend.id)
-                }
-            } catch {
-                enabled.insert(backend.id)
-            }
-        }
-        enabledBackendIds = enabled
-        
-        // Load agents for each enabled backend
-        for backendId in enabled {
-            do {
-                let agents = try await api.listBackendAgents(backendId: backendId)
-                backendAgents[backendId] = agents
-            } catch {
-                if backendId == "amp" {
-                    backendAgents[backendId] = [
-                        BackendAgent(id: "smart", name: "Smart Mode"),
-                        BackendAgent(id: "rush", name: "Rush Mode")
-                    ]
-                }
-            }
-        }
+
+        let data = await BackendAgentService.loadBackendsAndAgents()
+        backends = data.backends
+        enabledBackendIds = data.enabledBackendIds
+        backendAgents = data.backendAgents
     }
 
     private func testConnection() async {
