@@ -369,6 +369,15 @@ struct SettingsView: View {
         backends = data.backends
         enabledBackendIds = data.enabledBackendIds
         backendAgents = data.backendAgents
+
+        // Clear stale default if the saved agent no longer exists on the server
+        if !selectedDefaultAgent.isEmpty,
+           let parsed = CombinedAgent.parse(selectedDefaultAgent) {
+            let agentsForBackend = data.backendAgents[parsed.backend] ?? []
+            if !agentsForBackend.contains(where: { $0.id == parsed.agent }) {
+                selectedDefaultAgent = ""
+            }
+        }
     }
 
     private func testConnection() async {

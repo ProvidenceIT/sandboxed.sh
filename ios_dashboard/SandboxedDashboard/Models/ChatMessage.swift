@@ -299,6 +299,18 @@ struct ChatMessage: Identifiable {
         return false
     }
 
+    /// Short label for the cost source badge (e.g. "Actual", "Est."), or nil when hidden.
+    var costSourceLabel: String? {
+        if case .assistant(_, _, let costSource, _, _) = type {
+            switch costSource {
+            case .actual: return "Actual"
+            case .estimated: return "Est."
+            case .unknown: return nil
+            }
+        }
+        return nil
+    }
+
     /// Shared files attached to this message (only for assistant messages)
     var sharedFiles: [SharedFile]? {
         if case .assistant(_, _, _, _, let files) = type {

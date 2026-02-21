@@ -2053,6 +2053,17 @@ private struct MessageBubble: View {
                             Text(cost)
                                 .font(.caption2.monospaced())
                                 .foregroundStyle(message.costIsEstimated ? Theme.textSecondary : Theme.success)
+                            if let badge = message.costSourceLabel {
+                                Text(badge)
+                                    .font(.system(size: 8, weight: .medium))
+                                    .textCase(.uppercase)
+                                    .tracking(0.4)
+                                    .foregroundStyle(Theme.textMuted)
+                                    .padding(.horizontal, 4)
+                                    .padding(.vertical, 2)
+                                    .background(Color.white.opacity(0.08))
+                                    .clipShape(RoundedRectangle(cornerRadius: 3))
+                            }
                         }
 
                         Text("•")
