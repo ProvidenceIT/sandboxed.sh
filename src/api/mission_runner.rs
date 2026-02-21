@@ -11,6 +11,7 @@
 //! - Working directory (isolated per mission)
 
 use std::borrow::Cow;
+use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, LazyLock, Mutex as StdMutex};
 use std::time::{Duration, Instant};
@@ -19,7 +20,7 @@ use tokio::sync::{broadcast, mpsc, OwnedSemaphorePermit, RwLock, Semaphore};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::agents::{AgentRef, AgentResult, TerminalReason};
+use crate::agents::{AgentRef, AgentResult, CostSource, TerminalReason};
 use crate::backend::claudecode::client::{ClaudeEvent, ContentBlock, StreamEvent};
 use crate::config::Config;
 use crate::mcp::McpRegistry;
@@ -98,6 +99,50 @@ fn codex_account_semaphore_for_key(api_key: &str) -> Arc<Semaphore> {
         .clone()
 }
 
+fn resolve_cost_cents_and_source(
+    actual_cost_cents: Option<u64>,
+    model: Option<&str>,
+    usage: &crate::cost::TokenUsage,
+) -> (u64, CostSource) {
+    if let Some(actual) = actual_cost_cents {
+        return (actual, CostSource::Actual);
+    }
+
+    if usage.has_usage() {
+        if let Some(model_name) = model {
+            if crate::cost::pricing_for_model(model_name).is_some() {
+                return (
+                    crate::cost::cost_cents_from_usage(model_name, usage),
+                    CostSource::Estimated,
+                );
+            }
+            return (0, CostSource::Unknown);
+        }
+    }
+
+    (0, CostSource::Unknown)
+}
+
+fn preferred_model_for_cost<'a>(
+    requested_model: Option<&'a str>,
+    observed_model: Option<&'a str>,
+) -> Option<&'a str> {
+    requested_model
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .or_else(|| observed_model.map(str::trim).filter(|m| !m.is_empty()))
+}
+
+fn actual_cost_cents_from_total_cost_usd(total_cost_usd: Option<f64>) -> Option<u64> {
+    total_cost_usd.and_then(|cost| {
+        if cost.is_finite() {
+            Some((cost.max(0.0) * 100.0) as u64)
+        } else {
+            None
+        }
+    })
+}
+
 async fn lease_codex_account(
     working_dir: &std::path::Path,
     tried_keys: &HashSet<String>,
@@ -123,7 +168,7 @@ async fn lease_codex_account(
     }
 
     // Prefer the currently least-loaded key (highest available permits).
-    candidates.sort_by(|a, b| b.2.cmp(&a.2));
+    candidates.sort_by_key(|candidate| Reverse(candidate.2));
 
     for (key, sem, available) in &candidates {
         if let Ok(permit) = sem.clone().try_acquire_owned() {
@@ -2942,7 +2987,12 @@ pub fn run_claudecode_turn<'a>(
 
         // Track tool calls for result mapping
         let mut pending_tools: HashMap<String, String> = HashMap::new();
-        let mut total_cost_usd = 0.0f64;
+        let mut total_cost_usd: Option<f64> = None;
+        let mut total_input_tokens: u64 = 0;
+        let mut total_output_tokens: u64 = 0;
+        let mut total_cache_creation_tokens: u64 = 0;
+        let mut total_cache_read_tokens: u64 = 0;
+        let mut observed_model: Option<String> = None;
         let mut final_result = String::new();
         let mut had_error = false;
 
@@ -3066,9 +3116,12 @@ pub fn run_claudecode_turn<'a>(
 
                             match claude_event {
                                 ClaudeEvent::System(sys) => {
+                                    if let Some(m) = sys.model {
+                                        observed_model = Some(m);
+                                    }
                                     tracing::debug!(
                                         "Claude session init: session_id={}, model={:?}",
-                                        sys.session_id, sys.model
+                                        sys.session_id, observed_model
                                     );
                                 }
                                 ClaudeEvent::StreamEvent(wrapper) => {
@@ -3156,6 +3209,17 @@ pub fn run_claudecode_turn<'a>(
                                     }
                                 }
                                 ClaudeEvent::Assistant(evt) => {
+                                    if let Some(m) = evt.message.model.as_ref() {
+                                        observed_model = Some(m.clone());
+                                    }
+                                    if let Some(usage) = &evt.message.usage {
+                                        total_input_tokens += usage.input_tokens.unwrap_or(0);
+                                        total_output_tokens += usage.output_tokens.unwrap_or(0);
+                                        total_cache_creation_tokens +=
+                                            usage.cache_creation_input_tokens.unwrap_or(0);
+                                        total_cache_read_tokens +=
+                                            usage.cache_read_input_tokens.unwrap_or(0);
+                                    }
                                     for (content_idx, block) in evt.message.content.into_iter().enumerate() {
                                         let content_idx = content_idx as u32;
                                         match block {
@@ -3335,7 +3399,7 @@ pub fn run_claudecode_turn<'a>(
                                 }
                                 ClaudeEvent::Result(res) => {
                                     if let Some(cost) = res.total_cost_usd {
-                                        total_cost_usd = cost;
+                                        total_cost_usd = Some(cost);
                                     }
                                     // Check for errors: explicit error flags OR embedded API error payloads.
                                     //
@@ -3360,7 +3424,7 @@ pub fn run_claudecode_turn<'a>(
                                     }
                                     tracing::info!(
                                         mission_id = %mission_id,
-                                        cost_usd = total_cost_usd,
+                                        cost_usd = total_cost_usd.unwrap_or(0.0),
                                         "Claude Code execution completed"
                                     );
                                     break;
@@ -3389,8 +3453,24 @@ pub fn run_claudecode_turn<'a>(
         // Ensure the PTY reader task stops (it should naturally end after process exit).
         let _ = reader_handle.await;
 
-        // Convert cost from USD to cents
-        let cost_cents = (total_cost_usd * 100.0) as u64;
+        let usage = crate::cost::TokenUsage {
+            input_tokens: total_input_tokens,
+            output_tokens: total_output_tokens,
+            cache_creation_input_tokens: if total_cache_creation_tokens > 0 {
+                Some(total_cache_creation_tokens)
+            } else {
+                None
+            },
+            cache_read_input_tokens: if total_cache_read_tokens > 0 {
+                Some(total_cache_read_tokens)
+            } else {
+                None
+            },
+        };
+        let actual_cost_cents = actual_cost_cents_from_total_cost_usd(total_cost_usd);
+        let model_for_cost = preferred_model_for_cost(model, observed_model.as_deref());
+        let (cost_cents, cost_source) =
+            resolve_cost_cents_and_source(actual_cost_cents, model_for_cost, &usage);
 
         // If no final result from Assistant or Result events, use accumulated text buffer
         // This handles plan mode and other cases where text is streamed incrementally
@@ -3472,9 +3552,13 @@ pub fn run_claudecode_turn<'a>(
             AgentResult::success(final_result, cost_cents)
                 .with_terminal_reason(TerminalReason::Completed)
         };
-        if let Some(model) = model {
+        if let Some(model) = model_for_cost {
             result = result.with_model(model.to_string());
         }
+        if usage.has_usage() {
+            result = result.with_usage(usage);
+        }
+        result = result.with_cost_source(cost_source);
         result
     }) // end Box::pin(async move { ... })
 }
@@ -9680,10 +9764,8 @@ pub async fn run_amp_turn(
             None
         },
     };
-    let cost_cents = model_used
-        .as_deref()
-        .map(|m| crate::cost::cost_cents_from_usage(m, &usage))
-        .unwrap_or(0);
+    let (cost_cents, cost_source) =
+        resolve_cost_cents_and_source(None, model_used.as_deref(), &usage);
 
     tracing::debug!(
         mission_id = %mission_id,
@@ -9791,7 +9873,10 @@ pub async fn run_amp_turn(
         result = result.with_model(model);
     }
 
-    result
+    if usage.has_usage() {
+        result = result.with_usage(usage);
+    }
+    result.with_cost_source(cost_source)
 }
 
 /// Compact info about a running mission (for API responses).
@@ -10251,18 +10336,19 @@ fn cleanup_old_debug_files(
 #[cfg(test)]
 mod tests {
     use super::{
-        bind_command_params, codex_key_fingerprint, extract_model_from_message,
-        extract_opencode_session_id, extract_part_text, extract_str, extract_thought_line,
-        is_capacity_limited_error, is_codex_node_wrapper, is_rate_limited_error,
-        is_session_corruption_error, is_tool_call_only_output, opencode_output_needs_fallback,
-        opencode_session_token_from_line, parse_opencode_session_token, parse_opencode_sse_event,
-        parse_opencode_stderr_text_part, running_health, sanitized_opencode_stdout, stall_severity,
-        strip_ansi_codes, strip_opencode_banner_lines, strip_think_tags,
-        summarize_recent_opencode_stderr, sync_opencode_agent_config, MissionHealth,
-        MissionRunState, MissionStallSeverity, OpencodeSseState, STALL_SEVERE_SECS,
+        actual_cost_cents_from_total_cost_usd, bind_command_params, codex_key_fingerprint,
+        extract_model_from_message, extract_opencode_session_id, extract_part_text, extract_str,
+        extract_thought_line, is_capacity_limited_error, is_codex_node_wrapper,
+        is_rate_limited_error, is_session_corruption_error, is_tool_call_only_output,
+        opencode_output_needs_fallback, opencode_session_token_from_line,
+        parse_opencode_session_token, parse_opencode_sse_event, parse_opencode_stderr_text_part,
+        preferred_model_for_cost, resolve_cost_cents_and_source, running_health,
+        sanitized_opencode_stdout, stall_severity, strip_ansi_codes, strip_opencode_banner_lines,
+        strip_think_tags, summarize_recent_opencode_stderr, sync_opencode_agent_config,
+        MissionHealth, MissionRunState, MissionStallSeverity, OpencodeSseState, STALL_SEVERE_SECS,
         STALL_WARN_SECS,
     };
-    use crate::agents::{AgentResult, TerminalReason};
+    use crate::agents::{AgentResult, CostSource, TerminalReason};
     use crate::library::types::CommandParam;
     use serde_json::json;
     use std::borrow::Cow;
@@ -11324,5 +11410,124 @@ mod tests {
     fn is_codex_node_wrapper_rejects_nonexistent_file() {
         let wrapper_path = std::path::Path::new("/nonexistent/path/codex");
         assert!(!is_codex_node_wrapper(wrapper_path));
+    }
+
+    #[test]
+    fn resolve_cost_cents_prefers_actual_source() {
+        let usage = crate::cost::TokenUsage {
+            input_tokens: 10_000,
+            output_tokens: 2_000,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        };
+        let (cost, source) =
+            resolve_cost_cents_and_source(Some(123), Some("claude-sonnet-5"), &usage);
+        assert_eq!(cost, 123);
+        assert_eq!(source, CostSource::Actual);
+    }
+
+    #[test]
+    fn resolve_cost_cents_keeps_actual_source_when_zero() {
+        let usage = crate::cost::TokenUsage {
+            input_tokens: 10_000,
+            output_tokens: 2_000,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        };
+        let (cost, source) = resolve_cost_cents_and_source(Some(0), Some("gpt-5"), &usage);
+        assert_eq!(cost, 0);
+        assert_eq!(source, CostSource::Actual);
+    }
+
+    #[test]
+    fn resolve_cost_cents_estimates_when_usage_available() {
+        let usage = crate::cost::TokenUsage {
+            input_tokens: 20_000,
+            output_tokens: 5_000,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        };
+        let (cost, source) = resolve_cost_cents_and_source(None, Some("gpt-5"), &usage);
+        assert!(cost > 0);
+        assert_eq!(source, CostSource::Estimated);
+    }
+
+    #[test]
+    fn resolve_cost_cents_unknown_without_usage() {
+        let usage = crate::cost::TokenUsage::default();
+        let (cost, source) = resolve_cost_cents_and_source(None, Some("gpt-5"), &usage);
+        assert_eq!(cost, 0);
+        assert_eq!(source, CostSource::Unknown);
+    }
+
+    #[test]
+    fn resolve_cost_cents_unknown_for_unpriced_model_with_usage() {
+        let usage = crate::cost::TokenUsage {
+            input_tokens: 2_000,
+            output_tokens: 500,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        };
+        let (cost, source) =
+            resolve_cost_cents_and_source(None, Some("provider/new-model"), &usage);
+        assert_eq!(cost, 0);
+        assert_eq!(source, CostSource::Unknown);
+    }
+
+    #[test]
+    fn resolve_cost_cents_estimates_when_only_cache_usage_available() {
+        let usage = crate::cost::TokenUsage {
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_creation_input_tokens: Some(10_000),
+            cache_read_input_tokens: Some(5_000),
+        };
+        let (cost, source) = resolve_cost_cents_and_source(None, Some("claude-sonnet-5"), &usage);
+        assert!(cost > 0);
+        assert_eq!(source, CostSource::Estimated);
+    }
+
+    #[test]
+    fn actual_cost_cents_from_total_cost_usd_preserves_zero() {
+        assert_eq!(actual_cost_cents_from_total_cost_usd(Some(0.0)), Some(0));
+    }
+
+    #[test]
+    fn actual_cost_cents_from_total_cost_usd_none_stays_none() {
+        assert_eq!(actual_cost_cents_from_total_cost_usd(None), None);
+    }
+
+    #[test]
+    fn actual_cost_cents_from_total_cost_usd_rejects_non_finite() {
+        assert_eq!(
+            actual_cost_cents_from_total_cost_usd(Some(f64::INFINITY)),
+            None
+        );
+        assert_eq!(
+            actual_cost_cents_from_total_cost_usd(Some(f64::NEG_INFINITY)),
+            None
+        );
+        assert_eq!(actual_cost_cents_from_total_cost_usd(Some(f64::NAN)), None);
+    }
+
+    #[test]
+    fn preferred_model_for_cost_prefers_requested_then_observed() {
+        assert_eq!(
+            preferred_model_for_cost(Some("requested-model"), Some("observed-model")),
+            Some("requested-model")
+        );
+        assert_eq!(
+            preferred_model_for_cost(None, Some("observed-model")),
+            Some("observed-model")
+        );
+        assert_eq!(preferred_model_for_cost(None, None), None);
+    }
+
+    #[test]
+    fn preferred_model_for_cost_ignores_blank_requested_model() {
+        assert_eq!(
+            preferred_model_for_cost(Some("   "), Some("observed-model")),
+            Some("observed-model")
+        );
     }
 }
