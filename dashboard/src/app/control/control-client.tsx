@@ -40,6 +40,7 @@ import {
   getRunningMissions,
   isNetworkError,
   cancelMission,
+  autoGenerateMissionTitle,
   listWorkspaces,
   getHealth,
   listDesktopSessions,
@@ -2857,6 +2858,7 @@ export default function ControlClient() {
   const currentMissionRef = useRef<Mission | null>(null);
   const viewingMissionRef = useRef<Mission | null>(null);
   const submittingRef = useRef(false); // Guard against double-submission
+  const autoTitleAttemptedRef = useRef<Set<string>>(new Set()); // Track missions we've tried to auto-title
 
   // Keep refs in sync with state
   useEffect(() => {
@@ -4769,6 +4771,38 @@ export default function ControlClient() {
           ...prev,
           phase: "idle",
         }));
+
+        // Auto-generate mission title on first assistant response (LLM-powered, best-effort)
+        const activeMission = currentMissionRef.current;
+        if (
+          activeMission &&
+          !autoTitleAttemptedRef.current.has(activeMission.id)
+        ) {
+          autoTitleAttemptedRef.current.add(activeMission.id);
+          const assistantContent = String(data["content"] ?? "");
+          // Find first user message to pair with assistant reply
+          setItems((prev) => {
+            const firstUser = prev.find((it) => it.kind === "user");
+            if (firstUser && firstUser.kind === "user") {
+              autoGenerateMissionTitle(
+                activeMission.id,
+                firstUser.content,
+                assistantContent
+              ).then((title) => {
+                if (title) {
+                  // Update local mission state so the UI reflects the new title immediately
+                  setCurrentMission((m) =>
+                    m?.id === activeMission.id ? { ...m, title } : m
+                  );
+                  setViewingMission((m) =>
+                    m?.id === activeMission.id ? { ...m, title } : m
+                  );
+                }
+              });
+            }
+            return prev; // No mutation — just reading items
+          });
+        }
         return;
       }
 
@@ -5799,8 +5833,8 @@ export default function ControlClient() {
                       <span className="text-white/40">·</span>
                     </>
                   )}
-                  <span className="text-sm font-medium text-white/70 truncate max-w-[140px] sm:max-w-[180px]">
-                    {getMissionShortName(activeMission.id)}
+                  <span className="text-sm font-medium text-white/70 truncate max-w-[140px] sm:max-w-[180px]" title={activeMission.title ?? undefined}>
+                    {activeMission.title || getMissionShortName(activeMission.id)}
                   </span>
                 </>
               ) : (
