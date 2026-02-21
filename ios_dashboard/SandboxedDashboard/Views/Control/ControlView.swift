@@ -896,7 +896,7 @@ struct ControlView: View {
         messages = mission.history.enumerated().map { index, entry in
             ChatMessage(
                 id: "\(mission.id)-\(index)",
-                type: entry.isUser ? .user : .assistant(success: true, costCents: 0, model: nil, sharedFiles: nil),
+                type: entry.isUser ? .user : .assistant(success: true, costCents: 0, costSource: .unknown, model: nil, sharedFiles: nil),
                 content: entry.content
             )
         }
@@ -1677,6 +1677,7 @@ struct ControlView: View {
                let id = data["id"] as? String {
                 let success = data["success"] as? Bool ?? true
                 let costCents = data["cost_cents"] as? Int ?? 0
+                let costSource = (data["cost_source"] as? String).flatMap(CostSource.init(rawValue:)) ?? .unknown
                 let model = data["model"] as? String
 
                 // Parse shared_files if present
@@ -1704,7 +1705,7 @@ struct ControlView: View {
 
                 let message = ChatMessage(
                     id: id,
-                    type: .assistant(success: success, costCents: costCents, model: model, sharedFiles: sharedFiles),
+                    type: .assistant(success: success, costCents: costCents, costSource: costSource, model: model, sharedFiles: sharedFiles),
                     content: content
                 )
                 messages.append(message)
@@ -2034,7 +2035,7 @@ private struct MessageBubble: View {
         HStack(alignment: .top, spacing: 8) {
             VStack(alignment: .leading, spacing: 8) {
                 // Status header for assistant messages
-                if case .assistant(let success, _, _, _) = message.type {
+                if case .assistant(let success, _, _, _, _) = message.type {
                     HStack(spacing: 6) {
                         Image(systemName: success ? "checkmark.circle.fill" : "xmark.circle.fill")
                             .font(.caption2)
@@ -2051,7 +2052,7 @@ private struct MessageBubble: View {
                                 .foregroundStyle(Theme.textMuted)
                             Text(cost)
                                 .font(.caption2.monospaced())
-                                .foregroundStyle(Theme.success)
+                                .foregroundStyle(message.costIsEstimated ? Theme.textSecondary : Theme.success)
                         }
 
                         Text("•")

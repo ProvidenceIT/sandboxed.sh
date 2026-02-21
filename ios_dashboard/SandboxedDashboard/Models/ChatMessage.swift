@@ -180,11 +180,21 @@ struct ToolCallData {
     }
 }
 
+// MARK: - Cost Source
+
+/// Provenance of the cost value attached to an assistant message.
+/// Matches the backend's `CostSource` enum serialized as snake_case strings.
+enum CostSource: String {
+    case actual
+    case estimated
+    case unknown
+}
+
 // MARK: - Chat Message Type
 
 enum ChatMessageType {
     case user
-    case assistant(success: Bool, costCents: Int, model: String?, sharedFiles: [SharedFile]?)
+    case assistant(success: Bool, costCents: Int, costSource: CostSource, model: String?, sharedFiles: [SharedFile]?)
     case thinking(done: Bool, startTime: Date)
     case phase(phase: String, detail: String?, agent: String?)
     case toolCall(name: String, isActive: Bool)
@@ -261,7 +271,7 @@ struct ChatMessage: Identifiable {
     }
     
     var displayModel: String? {
-        if case .assistant(_, _, let model, _) = type {
+        if case .assistant(_, _, _, let model, _) = type {
             if let model = model {
                 return model.split(separator: "/").last.map(String.init)
             }
@@ -269,16 +279,29 @@ struct ChatMessage: Identifiable {
         return nil
     }
 
+    /// Formatted cost string, or nil when cost is unknown/zero.
     var costFormatted: String? {
-        if case .assistant(_, let costCents, _, _) = type, costCents > 0 {
-            return String(format: "$%.4f", Double(costCents) / 100.0)
+        if case .assistant(_, let costCents, let costSource, _, _) = type {
+            // Don't show cost for unknown sources — avoids misleading "$0.0000"
+            guard costSource != .unknown else { return nil }
+            guard costCents > 0 else { return nil }
+            let formatted = String(format: "$%.4f", Double(costCents) / 100.0)
+            return costSource == .estimated ? "~\(formatted)" : formatted
         }
         return nil
     }
 
+    /// Whether the cost is an estimate rather than an actual billed value.
+    var costIsEstimated: Bool {
+        if case .assistant(_, _, let costSource, _, _) = type {
+            return costSource == .estimated
+        }
+        return false
+    }
+
     /// Shared files attached to this message (only for assistant messages)
     var sharedFiles: [SharedFile]? {
-        if case .assistant(_, _, _, let files) = type {
+        if case .assistant(_, _, _, _, let files) = type {
             return files
         }
         return nil
