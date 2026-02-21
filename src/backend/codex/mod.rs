@@ -401,7 +401,7 @@ fn convert_codex_event(
             debug!("Codex turn started");
         }
 
-        CodexEvent::TurnCompleted { summary } => {
+        CodexEvent::TurnCompleted { summary, usage } => {
             if let Some(summary_text) = summary {
                 if !summary_text.trim().is_empty() {
                     results.push(ExecutionEvent::TurnSummary {
@@ -411,6 +411,16 @@ fn convert_codex_event(
                 debug!("Codex turn completed: {}", summary_text);
             } else {
                 debug!("Codex turn completed");
+            }
+
+            if let Some(usage) = usage {
+                let (input, output) = usage.normalized();
+                if input > 0 || output > 0 {
+                    results.push(ExecutionEvent::Usage {
+                        input_tokens: input,
+                        output_tokens: output,
+                    });
+                }
             }
         }
 
@@ -690,6 +700,77 @@ mod tests {
         let mut cache = HashMap::new();
         let events = convert_codex_event(event, &mut cache);
         assert!(events.is_empty(), "Blank summary should produce no events");
+    }
+
+    #[test]
+    fn convert_codex_event_turn_completed_with_usage() {
+        let event: CodexEvent = serde_json::from_value(json!({
+            "type": "turn.completed",
+            "summary": "Done",
+            "usage": {
+                "input_tokens": 1500,
+                "output_tokens": 300
+            }
+        }))
+        .unwrap();
+        let mut cache = HashMap::new();
+        let events = convert_codex_event(event, &mut cache);
+        assert_eq!(events.len(), 2);
+        match &events[0] {
+            ExecutionEvent::TurnSummary { content } => assert_eq!(content, "Done"),
+            other => panic!("Expected TurnSummary, got {:?}", other),
+        }
+        match &events[1] {
+            ExecutionEvent::Usage {
+                input_tokens,
+                output_tokens,
+            } => {
+                assert_eq!(*input_tokens, 1500);
+                assert_eq!(*output_tokens, 300);
+            }
+            other => panic!("Expected Usage, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn convert_codex_event_turn_completed_with_legacy_usage() {
+        // Codex may use prompt_tokens/completion_tokens naming
+        let event: CodexEvent = serde_json::from_value(json!({
+            "type": "turn.completed",
+            "usage": {
+                "prompt_tokens": 800,
+                "completion_tokens": 200
+            }
+        }))
+        .unwrap();
+        let mut cache = HashMap::new();
+        let events = convert_codex_event(event, &mut cache);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            ExecutionEvent::Usage {
+                input_tokens,
+                output_tokens,
+            } => {
+                assert_eq!(*input_tokens, 800);
+                assert_eq!(*output_tokens, 200);
+            }
+            other => panic!("Expected Usage, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn convert_codex_event_turn_completed_with_zero_usage() {
+        let event: CodexEvent = serde_json::from_value(json!({
+            "type": "turn.completed",
+            "usage": {
+                "input_tokens": 0,
+                "output_tokens": 0
+            }
+        }))
+        .unwrap();
+        let mut cache = HashMap::new();
+        let events = convert_codex_event(event, &mut cache);
+        assert!(events.is_empty(), "Zero usage should not emit Usage event");
     }
 
     #[test]

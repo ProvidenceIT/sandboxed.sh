@@ -21,6 +21,11 @@ pub enum ExecutionEvent {
     TextDelta { content: String },
     /// Optional turn summary (backend-specific).
     TurnSummary { content: String },
+    /// Token usage report from the backend (e.g. Codex turn.completed).
+    Usage {
+        input_tokens: u64,
+        output_tokens: u64,
+    },
     /// Message execution completed.
     MessageComplete { session_id: String },
     /// Error occurred.

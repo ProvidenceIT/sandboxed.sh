@@ -117,6 +117,7 @@ impl OpenCodeAgent {
             },
             OpenCodeEvent::MessageComplete { .. } => return, // Don't forward completion marker
             OpenCodeEvent::TurnSummary { .. } => return,     // Summary is handled elsewhere
+            OpenCodeEvent::Usage { .. } => return,           // Usage tracked at runner level
         };
 
         match events_tx.send(agent_event) {

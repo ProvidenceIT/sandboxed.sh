@@ -328,6 +328,9 @@ pub enum CodexEvent {
     TurnCompleted {
         #[serde(default)]
         summary: Option<String>,
+        /// Token usage reported by the Codex CLI at end of turn.
+        #[serde(default)]
+        usage: Option<CodexUsage>,
     },
 
     #[serde(rename = "turn.failed")]
@@ -348,6 +351,30 @@ pub enum CodexEvent {
     // Catch-all for unknown event types
     #[serde(other)]
     Unknown,
+}
+
+/// Token usage reported by the Codex CLI in `turn.completed` events.
+/// Supports both OpenAI Responses API field names (`input_tokens`/`output_tokens`)
+/// and legacy Chat Completions names (`prompt_tokens`/`completion_tokens`).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CodexUsage {
+    #[serde(default)]
+    pub input_tokens: Option<u64>,
+    #[serde(default)]
+    pub output_tokens: Option<u64>,
+    #[serde(default)]
+    pub prompt_tokens: Option<u64>,
+    #[serde(default)]
+    pub completion_tokens: Option<u64>,
+}
+
+impl CodexUsage {
+    /// Normalize to (input, output) regardless of field naming convention.
+    pub fn normalized(&self) -> (u64, u64) {
+        let input = self.input_tokens.or(self.prompt_tokens).unwrap_or(0);
+        let output = self.output_tokens.or(self.completion_tokens).unwrap_or(0);
+        (input, output)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -414,5 +441,55 @@ mod tests {
             }
             _ => panic!("Expected TurnFailed event"),
         }
+    }
+
+    #[test]
+    fn test_parse_turn_completed_with_usage() {
+        let json = r#"{"type":"turn.completed","summary":"done","usage":{"input_tokens":1000,"output_tokens":250}}"#;
+        let event: CodexEvent = serde_json::from_str(json).unwrap();
+        match event {
+            CodexEvent::TurnCompleted { summary, usage } => {
+                assert_eq!(summary.as_deref(), Some("done"));
+                let u = usage.unwrap();
+                assert_eq!(u.normalized(), (1000, 250));
+            }
+            _ => panic!("Expected TurnCompleted event"),
+        }
+    }
+
+    #[test]
+    fn test_parse_turn_completed_without_usage() {
+        let json = r#"{"type":"turn.completed","summary":"done"}"#;
+        let event: CodexEvent = serde_json::from_str(json).unwrap();
+        match event {
+            CodexEvent::TurnCompleted { summary, usage } => {
+                assert_eq!(summary.as_deref(), Some("done"));
+                assert!(usage.is_none());
+            }
+            _ => panic!("Expected TurnCompleted event"),
+        }
+    }
+
+    #[test]
+    fn test_codex_usage_normalized_prefers_input_tokens() {
+        let usage = CodexUsage {
+            input_tokens: Some(100),
+            output_tokens: Some(50),
+            prompt_tokens: Some(999),
+            completion_tokens: Some(999),
+        };
+        // input_tokens/output_tokens take precedence over prompt/completion
+        assert_eq!(usage.normalized(), (100, 50));
+    }
+
+    #[test]
+    fn test_codex_usage_normalized_falls_back_to_prompt() {
+        let usage = CodexUsage {
+            input_tokens: None,
+            output_tokens: None,
+            prompt_tokens: Some(800),
+            completion_tokens: Some(200),
+        };
+        assert_eq!(usage.normalized(), (800, 200));
     }
 }

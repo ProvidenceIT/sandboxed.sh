@@ -10047,6 +10047,8 @@ pub async fn run_codex_turn(
     let mut thinking_emitted = false;
     let mut thinking_done_emitted = false;
     let mut last_summary: Option<String> = None;
+    let mut total_input_tokens: u64 = 0;
+    let mut total_output_tokens: u64 = 0;
 
     loop {
         tokio::select! {
@@ -10098,6 +10100,10 @@ pub async fn run_codex_turn(
                         if !content.trim().is_empty() {
                             last_summary = Some(content);
                         }
+                    }
+                    ExecutionEvent::Usage { input_tokens, output_tokens } => {
+                        total_input_tokens = total_input_tokens.saturating_add(input_tokens);
+                        total_output_tokens = total_output_tokens.saturating_add(output_tokens);
                     }
                     ExecutionEvent::Error { message } => {
                         error_message = Some(message.clone());
@@ -10170,8 +10176,19 @@ Update it to the latest version (`npm install -g @openai/codex@latest`) and retr
         }
     }
 
+    let usage = crate::cost::TokenUsage {
+        input_tokens: total_input_tokens,
+        output_tokens: total_output_tokens,
+        cache_creation_input_tokens: None,
+        cache_read_input_tokens: None,
+    };
+
+    let model_for_cost = resolved_model.as_deref();
+    let (cost_cents, cost_source) =
+        resolve_cost_cents_and_source(None, model_for_cost, &usage);
+
     let mut result = if success {
-        AgentResult::success(final_message, 0) // TODO: Calculate cost from Codex usage
+        AgentResult::success(final_message, cost_cents)
             .with_terminal_reason(TerminalReason::Completed)
     } else {
         // Distinguish provider concurrency exhaustion from classic rate limits.
@@ -10182,9 +10199,13 @@ Update it to the latest version (`npm install -g @openai/codex@latest`) and retr
         } else {
             TerminalReason::LlmError
         };
-        AgentResult::failure(final_message, 0).with_terminal_reason(reason)
+        AgentResult::failure(final_message, cost_cents).with_terminal_reason(reason)
     };
 
+    result = result.with_cost_source(cost_source);
+    if usage.has_usage() {
+        result = result.with_usage(usage);
+    }
     if let Some(m) = resolved_model.as_deref() {
         result = result.with_model(m.to_string());
     }
