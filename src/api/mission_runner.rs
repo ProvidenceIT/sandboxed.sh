@@ -11,6 +11,7 @@
 //! - Working directory (isolated per mission)
 
 use std::borrow::Cow;
+use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, LazyLock, Mutex as StdMutex};
 use std::time::{Duration, Instant};
@@ -19,7 +20,7 @@ use tokio::sync::{broadcast, mpsc, OwnedSemaphorePermit, RwLock, Semaphore};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::agents::{AgentRef, AgentResult, TerminalReason};
+use crate::agents::{AgentRef, AgentResult, CostSource, TerminalReason};
 use crate::backend::claudecode::client::{ClaudeEvent, ContentBlock, StreamEvent};
 use crate::config::Config;
 use crate::mcp::McpRegistry;
@@ -98,6 +99,50 @@ fn codex_account_semaphore_for_key(api_key: &str) -> Arc<Semaphore> {
         .clone()
 }
 
+fn resolve_cost_cents_and_source(
+    actual_cost_cents: Option<u64>,
+    model: Option<&str>,
+    usage: &crate::cost::TokenUsage,
+) -> (u64, CostSource) {
+    if let Some(actual) = actual_cost_cents {
+        return (actual, CostSource::Actual);
+    }
+
+    if usage.has_usage() {
+        if let Some(model_name) = model {
+            if crate::cost::pricing_for_model(model_name).is_some() {
+                return (
+                    crate::cost::cost_cents_from_usage(model_name, usage),
+                    CostSource::Estimated,
+                );
+            }
+            return (0, CostSource::Unknown);
+        }
+    }
+
+    (0, CostSource::Unknown)
+}
+
+fn preferred_model_for_cost<'a>(
+    requested_model: Option<&'a str>,
+    observed_model: Option<&'a str>,
+) -> Option<&'a str> {
+    requested_model
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .or_else(|| observed_model.map(str::trim).filter(|m| !m.is_empty()))
+}
+
+fn actual_cost_cents_from_total_cost_usd(total_cost_usd: Option<f64>) -> Option<u64> {
+    total_cost_usd.and_then(|cost| {
+        if cost.is_finite() {
+            Some((cost.max(0.0) * 100.0) as u64)
+        } else {
+            None
+        }
+    })
+}
+
 async fn lease_codex_account(
     working_dir: &std::path::Path,
     tried_keys: &HashSet<String>,
@@ -123,7 +168,7 @@ async fn lease_codex_account(
     }
 
     // Prefer the currently least-loaded key (highest available permits).
-    candidates.sort_by(|a, b| b.2.cmp(&a.2));
+    candidates.sort_by_key(|candidate| Reverse(candidate.2));
 
     for (key, sem, available) in &candidates {
         if let Ok(permit) = sem.clone().try_acquire_owned() {
@@ -1554,12 +1599,11 @@ async fn run_mission_turn(
     // Prepare user message and session ID (potentially with rotation)
     let (mut user_message, mut session_id) = (user_message, session_id);
 
-    if should_rotate && (backend_id == "claudecode" || backend_id == "opencode") {
+    if should_rotate && backend_id == "claudecode" {
         tracing::info!(
             mission_id = %mission_id,
             turn_count = turn_count,
             interval = SESSION_ROTATION_INTERVAL,
-            backend = %backend_id,
             "Rotating session to prevent OOM from unbounded context accumulation"
         );
 
@@ -1587,22 +1631,19 @@ async fn run_mission_turn(
 
         session_id = Some(new_session_id.clone());
 
-        // Delete the session marker file to force a fresh session (Claude Code only)
-        if backend_id == "claudecode" {
-            let session_marker = mission_work_dir.join(".claude-session-initiated");
-            if session_marker.exists() {
-                if let Err(e) = std::fs::remove_file(&session_marker) {
-                    tracing::warn!(
-                        error = %e,
-                        "Failed to remove session marker during rotation"
-                    );
-                }
+        // Delete the session marker file to force a fresh session
+        let session_marker = mission_work_dir.join(".claude-session-initiated");
+        if session_marker.exists() {
+            if let Err(e) = std::fs::remove_file(&session_marker) {
+                tracing::warn!(
+                    error = %e,
+                    "Failed to remove session marker during rotation"
+                );
             }
         }
 
         tracing::info!(
             mission_id = %mission_id,
-            backend = %backend_id,
             new_session_id = %new_session_id,
             summary_length = summary.len(),
             "Session rotated successfully"
@@ -1795,7 +1836,6 @@ async fn run_mission_turn(
                 events_tx.clone(),
                 cancel,
                 &config.working_dir,
-                session_id.as_deref(),
             )
             .await
         }
@@ -2098,32 +2138,6 @@ fn get_backend_bool_setting(backend_id: &str, key: &str) -> Option<bool> {
         }
     }
     None
-}
-
-fn workspace_env_setting(workspace: &Workspace, key: &str) -> Option<String> {
-    workspace
-        .env_vars
-        .get(key)
-        .map(|v| v.trim())
-        .filter(|v| !v.is_empty())
-        .map(ToOwned::to_owned)
-}
-
-fn resolve_opencode_runner_setting(workspace: &Workspace) -> Option<String> {
-    workspace_env_setting(workspace, "SANDBOXED_SH_OPENCODE_CLI_PATH")
-        .or_else(|| workspace_env_setting(workspace, "OPENCODE_CLI_PATH"))
-        .or_else(|| get_backend_string_setting("opencode", "cli_path"))
-        .or_else(|| std::env::var("OPENCODE_CLI_PATH").ok())
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-}
-
-fn resolve_opencode_binary_hint(workspace: &Workspace) -> Option<String> {
-    workspace_env_setting(workspace, "SANDBOXED_SH_OPENCODE_BINARY_PATH")
-        .or_else(|| workspace_env_setting(workspace, "OPENCODE_BINARY_PATH"))
-        .or_else(|| std::env::var("OPENCODE_BINARY_PATH").ok())
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
 }
 
 /// Read API key from Amp backend config file if available.
@@ -2973,7 +2987,12 @@ pub fn run_claudecode_turn<'a>(
 
         // Track tool calls for result mapping
         let mut pending_tools: HashMap<String, String> = HashMap::new();
-        let mut total_cost_usd = 0.0f64;
+        let mut total_cost_usd: Option<f64> = None;
+        let mut total_input_tokens: u64 = 0;
+        let mut total_output_tokens: u64 = 0;
+        let mut total_cache_creation_tokens: u64 = 0;
+        let mut total_cache_read_tokens: u64 = 0;
+        let mut observed_model: Option<String> = None;
         let mut final_result = String::new();
         let mut had_error = false;
 
@@ -3097,9 +3116,12 @@ pub fn run_claudecode_turn<'a>(
 
                             match claude_event {
                                 ClaudeEvent::System(sys) => {
+                                    if let Some(m) = sys.model {
+                                        observed_model = Some(m);
+                                    }
                                     tracing::debug!(
                                         "Claude session init: session_id={}, model={:?}",
-                                        sys.session_id, sys.model
+                                        sys.session_id, observed_model
                                     );
                                 }
                                 ClaudeEvent::StreamEvent(wrapper) => {
@@ -3187,6 +3209,17 @@ pub fn run_claudecode_turn<'a>(
                                     }
                                 }
                                 ClaudeEvent::Assistant(evt) => {
+                                    if let Some(m) = evt.message.model.as_ref() {
+                                        observed_model = Some(m.clone());
+                                    }
+                                    if let Some(usage) = &evt.message.usage {
+                                        total_input_tokens += usage.input_tokens.unwrap_or(0);
+                                        total_output_tokens += usage.output_tokens.unwrap_or(0);
+                                        total_cache_creation_tokens +=
+                                            usage.cache_creation_input_tokens.unwrap_or(0);
+                                        total_cache_read_tokens +=
+                                            usage.cache_read_input_tokens.unwrap_or(0);
+                                    }
                                     for (content_idx, block) in evt.message.content.into_iter().enumerate() {
                                         let content_idx = content_idx as u32;
                                         match block {
@@ -3366,7 +3399,7 @@ pub fn run_claudecode_turn<'a>(
                                 }
                                 ClaudeEvent::Result(res) => {
                                     if let Some(cost) = res.total_cost_usd {
-                                        total_cost_usd = cost;
+                                        total_cost_usd = Some(cost);
                                     }
                                     // Check for errors: explicit error flags OR embedded API error payloads.
                                     //
@@ -3391,7 +3424,7 @@ pub fn run_claudecode_turn<'a>(
                                     }
                                     tracing::info!(
                                         mission_id = %mission_id,
-                                        cost_usd = total_cost_usd,
+                                        cost_usd = total_cost_usd.unwrap_or(0.0),
                                         "Claude Code execution completed"
                                     );
                                     break;
@@ -3420,8 +3453,24 @@ pub fn run_claudecode_turn<'a>(
         // Ensure the PTY reader task stops (it should naturally end after process exit).
         let _ = reader_handle.await;
 
-        // Convert cost from USD to cents
-        let cost_cents = (total_cost_usd * 100.0) as u64;
+        let usage = crate::cost::TokenUsage {
+            input_tokens: total_input_tokens,
+            output_tokens: total_output_tokens,
+            cache_creation_input_tokens: if total_cache_creation_tokens > 0 {
+                Some(total_cache_creation_tokens)
+            } else {
+                None
+            },
+            cache_read_input_tokens: if total_cache_read_tokens > 0 {
+                Some(total_cache_read_tokens)
+            } else {
+                None
+            },
+        };
+        let actual_cost_cents = actual_cost_cents_from_total_cost_usd(total_cost_usd);
+        let model_for_cost = preferred_model_for_cost(model, observed_model.as_deref());
+        let (cost_cents, cost_source) =
+            resolve_cost_cents_and_source(actual_cost_cents, model_for_cost, &usage);
 
         // If no final result from Assistant or Result events, use accumulated text buffer
         // This handles plan mode and other cases where text is streamed incrementally
@@ -3503,9 +3552,13 @@ pub fn run_claudecode_turn<'a>(
             AgentResult::success(final_result, cost_cents)
                 .with_terminal_reason(TerminalReason::Completed)
         };
-        if let Some(model) = model {
+        if let Some(model) = model_for_cost {
             result = result.with_model(model.to_string());
         }
+        if usage.has_usage() {
+            result = result.with_usage(usage);
+        }
+        result = result.with_cost_source(cost_source);
         result
     }) // end Box::pin(async move { ... })
 }
@@ -6072,17 +6125,7 @@ fn format_exit_status(status: &std::process::ExitStatus) -> String {
     {
         use std::os::unix::process::ExitStatusExt;
         if let Some(signal) = status.signal() {
-            let signal_name = match signal {
-                1 => "SIGHUP",
-                2 => "SIGINT",
-                3 => "SIGQUIT",
-                6 => "SIGABRT",
-                9 => "SIGKILL",
-                11 => "SIGSEGV",
-                15 => "SIGTERM",
-                _ => "UNKNOWN",
-            };
-            return format!("signal: {} ({})", signal, signal_name);
+            return format!("signal {}", signal);
         }
     }
     "code <unknown>".to_string()
@@ -6999,8 +7042,6 @@ fn runner_is_oh_my_opencode(path: &str) -> bool {
         .unwrap_or(false)
 }
 
-const MIN_SUPPORTED_OPENCODE_VERSION: &str = "1.1.59";
-
 async fn resolve_opencode_installer_fetcher(
     workspace_exec: &WorkspaceExec,
     cwd: &std::path::Path,
@@ -7022,183 +7063,26 @@ async fn resolve_opencode_installer_fetcher(
     None
 }
 
-fn opencode_binary_candidates(
-    workspace_exec: &WorkspaceExec,
-    binary_hint: Option<&str>,
-) -> Vec<String> {
-    let mut candidates = Vec::new();
-    if let Some(hint) = binary_hint.map(str::trim).filter(|v| !v.is_empty()) {
-        candidates.push(hint.to_string());
+async fn opencode_binary_available(workspace_exec: &WorkspaceExec, cwd: &std::path::Path) -> bool {
+    if command_available(workspace_exec, cwd, "opencode").await {
+        return true;
     }
-
-    candidates.push("opencode".to_string());
-    candidates.push("/usr/local/bin/opencode".to_string());
-
+    if command_available(workspace_exec, cwd, "/usr/local/bin/opencode").await {
+        return true;
+    }
     if workspace_exec.workspace.workspace_type == WorkspaceType::Container
         && workspace::use_nspawn_for_workspace(&workspace_exec.workspace)
     {
-        candidates.push("/root/.opencode/bin/opencode".to_string());
+        if command_available(workspace_exec, cwd, "/root/.opencode/bin/opencode").await {
+            return true;
+        }
     } else if let Ok(home) = std::env::var("HOME") {
-        candidates.push(format!("{}/.opencode/bin/opencode", home));
-    }
-
-    let mut deduped = Vec::new();
-    for candidate in candidates {
-        if !deduped.iter().any(|existing| existing == &candidate) {
-            deduped.push(candidate);
-        }
-    }
-
-    deduped
-}
-
-async fn opencode_binary_available(
-    workspace_exec: &WorkspaceExec,
-    cwd: &std::path::Path,
-    binary_hint: Option<&str>,
-) -> bool {
-    for candidate in opencode_binary_candidates(workspace_exec, binary_hint) {
-        if command_available(workspace_exec, cwd, &candidate).await {
+        let path = format!("{}/.opencode/bin/opencode", home);
+        if command_available(workspace_exec, cwd, &path).await {
             return true;
         }
     }
     false
-}
-
-fn extract_semver_token(input: &str) -> Option<String> {
-    let mut best: Option<String> = None;
-    let mut current = String::new();
-
-    for ch in input.chars() {
-        if ch.is_ascii_digit() || ch == '.' {
-            current.push(ch);
-            continue;
-        }
-        if current.contains('.') {
-            best = Some(current.clone());
-        }
-        current.clear();
-    }
-
-    if current.contains('.') {
-        best = Some(current);
-    }
-
-    best.map(|v| v.trim_start_matches('v').to_string())
-}
-
-fn version_is_newer(a: &str, b: &str) -> bool {
-    let parse = |v: &str| -> Vec<u32> { v.split('.').filter_map(|s| s.parse().ok()).collect() };
-
-    let va = parse(a);
-    let vb = parse(b);
-
-    for i in 0..va.len().max(vb.len()) {
-        let a_part = va.get(i).copied().unwrap_or(0);
-        let b_part = vb.get(i).copied().unwrap_or(0);
-        if a_part > b_part {
-            return true;
-        }
-        if a_part < b_part {
-            return false;
-        }
-    }
-    false
-}
-
-async fn detect_opencode_version(
-    workspace_exec: &WorkspaceExec,
-    cwd: &std::path::Path,
-    binary_hint: Option<&str>,
-) -> Option<String> {
-    for candidate in opencode_binary_candidates(workspace_exec, binary_hint) {
-        if !command_available(workspace_exec, cwd, &candidate).await {
-            continue;
-        }
-
-        let output = match workspace_exec
-            .output(cwd, &candidate, &["--version".to_string()], HashMap::new())
-            .await
-        {
-            Ok(output) => output,
-            Err(_) => continue,
-        };
-
-        if !output.status.success() {
-            continue;
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let combined = if stdout.trim().is_empty() {
-            stderr.to_string()
-        } else if stderr.trim().is_empty() {
-            stdout.to_string()
-        } else {
-            format!("{}\n{}", stdout, stderr)
-        };
-
-        if let Some(version) = extract_semver_token(&combined) {
-            return Some(version);
-        }
-    }
-
-    None
-}
-
-fn format_opencode_version_too_old_error(current_version: &str) -> String {
-    format!(
-        "OpenCode CLI {} is too old. sandboxed.sh requires OpenCode {} or newer (older versions can crash with SIGKILL). Update OpenCode in this workspace and retry.",
-        current_version, MIN_SUPPORTED_OPENCODE_VERSION
-    )
-}
-
-async fn install_or_upgrade_opencode_cli(
-    workspace_exec: &WorkspaceExec,
-    cwd: &std::path::Path,
-) -> Result<(), String> {
-    let fetcher = resolve_opencode_installer_fetcher(workspace_exec, cwd)
-        .await
-        .ok_or_else(|| {
-            "OpenCode CLI install/upgrade requires curl or wget in the workspace.".to_string()
-        })?;
-
-    let mut args = Vec::new();
-    args.push("-lc".to_string());
-    // Use explicit /root path for container workspaces since $HOME may not be set in nspawn
-    // Try both /root and $HOME to cover both container and host workspaces
-    args.push(format!(
-        "{} | bash -s -- --no-modify-path \
-      && for bindir in /root/.opencode/bin \"$HOME/.opencode/bin\"; do \
-           if [ -x \"$bindir/opencode\" ]; then install -m 0755 \"$bindir/opencode\" /usr/local/bin/opencode && break; fi; \
-         done",
-        fetcher
-    ));
-    let output = workspace_exec
-        .output(cwd, "/bin/sh", &args, HashMap::new())
-        .await
-        .map_err(|e| format!("Failed to run OpenCode installer: {}", e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let mut message = String::new();
-        if !stderr.trim().is_empty() {
-            message.push_str(stderr.trim());
-        }
-        if !stdout.trim().is_empty() {
-            if !message.is_empty() {
-                message.push_str(" | ");
-            }
-            message.push_str(stdout.trim());
-        }
-        if message.is_empty() {
-            message = "OpenCode install failed with no output".to_string();
-        }
-        return Err(format!("OpenCode install failed: {}", message));
-    }
-
-    Ok(())
 }
 
 async fn cleanup_opencode_listeners(
@@ -7226,43 +7110,12 @@ async fn cleanup_opencode_listeners(
 async fn ensure_opencode_cli_available(
     workspace_exec: &WorkspaceExec,
     cwd: &std::path::Path,
-    binary_hint: Option<&str>,
 ) -> Result<(), String> {
-    let auto_install = env_var_bool("SANDBOXED_SH_AUTO_INSTALL_OPENCODE", true);
-    let has_binary = opencode_binary_available(workspace_exec, cwd, binary_hint).await;
-    if has_binary {
-        if let Some(current_version) =
-            detect_opencode_version(workspace_exec, cwd, binary_hint).await
-        {
-            if version_is_newer(MIN_SUPPORTED_OPENCODE_VERSION, &current_version) {
-                if !auto_install {
-                    return Err(format_opencode_version_too_old_error(&current_version));
-                }
-                tracing::warn!(
-                    current_version = %current_version,
-                    min_supported = MIN_SUPPORTED_OPENCODE_VERSION,
-                    "OpenCode version is below minimum supported, attempting in-place upgrade"
-                );
-                install_or_upgrade_opencode_cli(workspace_exec, cwd).await?;
-                if let Some(updated_version) =
-                    detect_opencode_version(workspace_exec, cwd, binary_hint).await
-                {
-                    if version_is_newer(MIN_SUPPORTED_OPENCODE_VERSION, &updated_version) {
-                        return Err(format_opencode_version_too_old_error(&updated_version));
-                    }
-                }
-            }
-        }
+    if opencode_binary_available(workspace_exec, cwd).await {
         return Ok(());
     }
 
-    if let Some(custom_path) = binary_hint.map(str::trim).filter(|v| !v.is_empty()) {
-        return Err(format!(
-            "OpenCode CLI not found at configured path '{}'. Update SANDBOXED_SH_OPENCODE_BINARY_PATH / OPENCODE_BINARY_PATH or install OpenCode there.",
-            custom_path
-        ));
-    }
-
+    let auto_install = env_var_bool("SANDBOXED_SH_AUTO_INSTALL_OPENCODE", true);
     if !auto_install {
         return Err(
             "OpenCode CLI 'opencode' not found in workspace. Install it or disable OpenCode."
@@ -7270,19 +7123,53 @@ async fn ensure_opencode_cli_available(
         );
     }
 
-    install_or_upgrade_opencode_cli(workspace_exec, cwd).await?;
+    let fetcher = resolve_opencode_installer_fetcher(workspace_exec, cwd).await.ok_or_else(|| {
+        "OpenCode CLI 'opencode' not found and neither curl nor wget is available in the workspace. Install curl/wget in the workspace template or disable OpenCode."
+            .to_string()
+    })?;
 
-    if !opencode_binary_available(workspace_exec, cwd, binary_hint).await {
+    let mut args = Vec::new();
+    args.push("-lc".to_string());
+    // Use explicit /root path for container workspaces since $HOME may not be set in nspawn
+    // Try both /root and $HOME to cover both container and host workspaces
+    args.push(
+        format!(
+            "{} | bash -s -- --no-modify-path \
+        && for bindir in /root/.opencode/bin \"$HOME/.opencode/bin\"; do \
+            if [ -x \"$bindir/opencode\" ]; then install -m 0755 \"$bindir/opencode\" /usr/local/bin/opencode && break; fi; \
+        done"
+            , fetcher
+        ),
+    );
+    let output = workspace_exec
+        .output(cwd, "/bin/sh", &args, HashMap::new())
+        .await
+        .map_err(|e| format!("Failed to run OpenCode installer: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut message = String::new();
+        if !stderr.trim().is_empty() {
+            message.push_str(stderr.trim());
+        }
+        if !stdout.trim().is_empty() {
+            if !message.is_empty() {
+                message.push_str(" | ");
+            }
+            message.push_str(stdout.trim());
+        }
+        if message.is_empty() {
+            message = "OpenCode install failed with no output".to_string();
+        }
+        return Err(format!("OpenCode install failed: {}", message));
+    }
+
+    if !opencode_binary_available(workspace_exec, cwd).await {
         return Err(
             "OpenCode install completed but 'opencode' is still not available in workspace PATH."
                 .to_string(),
         );
-    }
-
-    if let Some(current_version) = detect_opencode_version(workspace_exec, cwd, binary_hint).await {
-        if version_is_newer(MIN_SUPPORTED_OPENCODE_VERSION, &current_version) {
-            return Err(format_opencode_version_too_old_error(&current_version));
-        }
     }
 
     Ok(())
@@ -7389,10 +7276,8 @@ async fn check_opencode_prerequisites(
     cwd: &std::path::Path,
 ) -> BackendPreflightResult {
     let mut missing = Vec::new();
-    let binary_hint = resolve_opencode_binary_hint(&workspace_exec.workspace);
 
-    let cli_available =
-        opencode_binary_available(workspace_exec, cwd, binary_hint.as_deref()).await;
+    let cli_available = opencode_binary_available(workspace_exec, cwd).await;
 
     if cli_available {
         return BackendPreflightResult {
@@ -7412,8 +7297,7 @@ async fn check_opencode_prerequisites(
         missing.push("curl or wget".to_string());
     }
 
-    let custom_binary_configured = binary_hint.is_some();
-    let auto_install_possible = !custom_binary_configured && (has_curl || has_wget);
+    let auto_install_possible = has_curl || has_wget;
 
     BackendPreflightResult {
         backend_id: "opencode".to_string(),
@@ -7421,12 +7305,7 @@ async fn check_opencode_prerequisites(
         cli_available: false,
         auto_install_possible,
         missing_dependencies: missing,
-        message: if custom_binary_configured {
-            Some(format!(
-                "OpenCode CLI not found at configured path '{}'. Update SANDBOXED_SH_OPENCODE_BINARY_PATH / OPENCODE_BINARY_PATH in workspace env vars.",
-                binary_hint.unwrap_or_default()
-            ))
-        } else if !auto_install_possible {
+        message: if !auto_install_possible {
             Some("OpenCode CLI not found and neither curl nor wget is available. Install curl/wget in the workspace template.".to_string())
         } else {
             Some("OpenCode CLI not found but can be auto-installed via curl/wget.".to_string())
@@ -7546,7 +7425,6 @@ pub async fn run_opencode_turn(
     events_tx: broadcast::Sender<AgentEvent>,
     cancel: CancellationToken,
     app_working_dir: &std::path::Path,
-    session_id: Option<&str>,
 ) -> AgentResult {
     use super::ai_providers::{
         ensure_anthropic_oauth_token_valid, ensure_google_oauth_token_valid,
@@ -7556,23 +7434,10 @@ pub async fn run_opencode_turn(
     use std::sync::{Arc, Mutex};
     use tokio::io::{AsyncBufReadExt, BufReader};
 
-    // DEBUG: Log session_id being passed to OpenCode turn
-    tracing::debug!(
-        mission_id = %mission_id,
-        session_id = ?session_id,
-        message_len = message.len(),
-        "OpenCode turn starting with session_id"
-    );
-
-    // Determine CLI runner and binary hints from workspace env/config.
+    // Determine CLI runner: prefer backend config, then env var, then try bunx/npx
     // We use 'bunx oh-my-opencode run' or 'npx oh-my-opencode run' for per-workspace execution.
     let workspace_exec = WorkspaceExec::new(workspace.clone());
-    let configured_runner = resolve_opencode_runner_setting(workspace);
-    let opencode_binary_hint = resolve_opencode_binary_hint(workspace);
-    if let Err(err) =
-        ensure_opencode_cli_available(&workspace_exec, work_dir, opencode_binary_hint.as_deref())
-            .await
-    {
+    if let Err(err) = ensure_opencode_cli_available(&workspace_exec, work_dir).await {
         tracing::error!("{}", err);
         return AgentResult::failure(err, 0).with_terminal_reason(TerminalReason::LlmError);
     }
@@ -7688,6 +7553,9 @@ pub async fn run_opencode_turn(
     // failover — so removing it trades slightly higher 429 rates under heavy
     // concurrency for lower latency in the common case.
 
+    let configured_runner = get_backend_string_setting("opencode", "cli_path")
+        .or_else(|| std::env::var("OPENCODE_CLI_PATH").ok());
+
     let mut runner_is_direct = false;
     let cli_runner = if let Some(path) = configured_runner {
         if command_available(&workspace_exec, work_dir, &path).await {
@@ -7695,7 +7563,7 @@ pub async fn run_opencode_turn(
             path
         } else {
             let err_msg = format!(
-                "OpenCode CLI runner '{}' not found in workspace. Install it or update workspace OPENCODE_CLI_PATH / SANDBOXED_SH_OPENCODE_CLI_PATH.",
+                "OpenCode CLI runner '{}' not found in workspace. Install it or update OPENCODE_CLI_PATH.",
                 path
             );
             tracing::error!("{}", err_msg);
@@ -9073,15 +8941,6 @@ pub async fn run_opencode_turn(
         .unwrap_or_else(|e| e.into_inner())
         .clone();
     let session_id = session_id.or_else(|| extract_opencode_session_id(&final_result));
-
-    // DEBUG: Log session_id extraction for debugging session resets
-    tracing::debug!(
-        mission_id = %mission_id,
-        session_id_captured = ?session_id,
-        has_stored_message = session_id.as_ref().map(|id| load_latest_opencode_assistant_message(workspace, id).is_some()).unwrap_or(false),
-        "OpenCode session_id extraction debug"
-    );
-
     let stored_message = session_id
         .as_deref()
         .and_then(|id| load_latest_opencode_assistant_message(workspace, id));
@@ -9905,10 +9764,8 @@ pub async fn run_amp_turn(
             None
         },
     };
-    let cost_cents = model_used
-        .as_deref()
-        .map(|m| crate::cost::cost_cents_from_usage(m, &usage))
-        .unwrap_or(0);
+    let (cost_cents, cost_source) =
+        resolve_cost_cents_and_source(None, model_used.as_deref(), &usage);
 
     tracing::debug!(
         mission_id = %mission_id,
@@ -10016,7 +9873,10 @@ pub async fn run_amp_turn(
         result = result.with_model(model);
     }
 
-    result
+    if usage.has_usage() {
+        result = result.with_usage(usage);
+    }
+    result.with_cost_source(cost_source)
 }
 
 /// Compact info about a running mission (for API responses).
@@ -10476,21 +10336,20 @@ fn cleanup_old_debug_files(
 #[cfg(test)]
 mod tests {
     use super::{
-        bind_command_params, codex_key_fingerprint, extract_model_from_message,
-        extract_opencode_session_id, extract_part_text, extract_semver_token, extract_str,
-        extract_thought_line, format_opencode_version_too_old_error, is_capacity_limited_error,
-        is_codex_node_wrapper, is_rate_limited_error, is_session_corruption_error,
-        is_tool_call_only_output, opencode_output_needs_fallback, opencode_session_token_from_line,
+        actual_cost_cents_from_total_cost_usd, bind_command_params, codex_key_fingerprint,
+        extract_model_from_message, extract_opencode_session_id, extract_part_text, extract_str,
+        extract_thought_line, is_capacity_limited_error, is_codex_node_wrapper,
+        is_rate_limited_error, is_session_corruption_error, is_tool_call_only_output,
+        opencode_output_needs_fallback, opencode_session_token_from_line,
         parse_opencode_session_token, parse_opencode_sse_event, parse_opencode_stderr_text_part,
-        resolve_opencode_binary_hint, resolve_opencode_runner_setting, running_health,
+        preferred_model_for_cost, resolve_cost_cents_and_source, running_health,
         sanitized_opencode_stdout, stall_severity, strip_ansi_codes, strip_opencode_banner_lines,
         strip_think_tags, summarize_recent_opencode_stderr, sync_opencode_agent_config,
-        version_is_newer, MissionHealth, MissionRunState, MissionStallSeverity, OpencodeSseState,
-        MIN_SUPPORTED_OPENCODE_VERSION, STALL_SEVERE_SECS, STALL_WARN_SECS,
+        MissionHealth, MissionRunState, MissionStallSeverity, OpencodeSseState, STALL_SEVERE_SECS,
+        STALL_WARN_SECS,
     };
-    use crate::agents::{AgentResult, TerminalReason};
+    use crate::agents::{AgentResult, CostSource, TerminalReason};
     use crate::library::types::CommandParam;
-    use crate::workspace::Workspace;
     use serde_json::json;
     use std::borrow::Cow;
     use std::fs;
@@ -11493,77 +11352,6 @@ mod tests {
         assert!(!is_tool_call_only_output(mixed));
     }
 
-    // ── OpenCode version guard tests ───────────────────────────────────
-
-    #[test]
-    fn extract_semver_token_from_opencode_version_output() {
-        assert_eq!(
-            extract_semver_token("opencode version 1.2.10"),
-            Some("1.2.10".to_string())
-        );
-    }
-
-    #[test]
-    fn extract_semver_token_handles_v_prefix() {
-        assert_eq!(
-            extract_semver_token("OpenCode v1.1.59 (build abc)"),
-            Some("1.1.59".to_string())
-        );
-    }
-
-    #[test]
-    fn extract_semver_token_returns_none_when_missing() {
-        assert_eq!(extract_semver_token("opencode unknown"), None);
-    }
-
-    #[test]
-    fn version_is_newer_handles_patch_versions() {
-        assert!(version_is_newer("1.1.59", "1.1.53"));
-        assert!(!version_is_newer("1.1.53", "1.1.59"));
-    }
-
-    #[test]
-    fn version_is_newer_handles_missing_parts() {
-        assert!(version_is_newer("1.2.0", "1.1"));
-        assert!(!version_is_newer("1.1", "1.1.0"));
-    }
-
-    #[test]
-    fn format_opencode_version_too_old_error_mentions_minimum() {
-        let msg = format_opencode_version_too_old_error("1.1.53");
-        assert!(msg.contains("1.1.53"));
-        assert!(msg.contains(MIN_SUPPORTED_OPENCODE_VERSION));
-        assert!(msg.contains("SIGKILL"));
-    }
-
-    #[test]
-    fn resolve_opencode_runner_setting_prefers_workspace_env() {
-        let mut workspace = Workspace::default_host(std::path::PathBuf::from("/tmp"));
-        workspace.env_vars.insert(
-            "SANDBOXED_SH_OPENCODE_CLI_PATH".to_string(),
-            "/opt/custom/oh-my-opencode".to_string(),
-        );
-
-        assert_eq!(
-            resolve_opencode_runner_setting(&workspace),
-            Some("/opt/custom/oh-my-opencode".to_string())
-        );
-    }
-
-    #[test]
-    fn resolve_opencode_binary_hint_prefers_workspace_env() {
-        let mut workspace = Workspace::default_host(std::path::PathBuf::from("/tmp"));
-        workspace.env_vars.insert(
-            "OPENCODE_BINARY_PATH".to_string(),
-            "/opt/custom/opencode".to_string(),
-        );
-
-        assert_eq!(
-            resolve_opencode_binary_hint(&workspace),
-            Some("/opt/custom/opencode".to_string())
-        );
-    }
-
     // ── is_codex_node_wrapper tests ─────────────────────────────────────
 
     #[test]
@@ -11622,5 +11410,124 @@ mod tests {
     fn is_codex_node_wrapper_rejects_nonexistent_file() {
         let wrapper_path = std::path::Path::new("/nonexistent/path/codex");
         assert!(!is_codex_node_wrapper(wrapper_path));
+    }
+
+    #[test]
+    fn resolve_cost_cents_prefers_actual_source() {
+        let usage = crate::cost::TokenUsage {
+            input_tokens: 10_000,
+            output_tokens: 2_000,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        };
+        let (cost, source) =
+            resolve_cost_cents_and_source(Some(123), Some("claude-sonnet-5"), &usage);
+        assert_eq!(cost, 123);
+        assert_eq!(source, CostSource::Actual);
+    }
+
+    #[test]
+    fn resolve_cost_cents_keeps_actual_source_when_zero() {
+        let usage = crate::cost::TokenUsage {
+            input_tokens: 10_000,
+            output_tokens: 2_000,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        };
+        let (cost, source) = resolve_cost_cents_and_source(Some(0), Some("gpt-5"), &usage);
+        assert_eq!(cost, 0);
+        assert_eq!(source, CostSource::Actual);
+    }
+
+    #[test]
+    fn resolve_cost_cents_estimates_when_usage_available() {
+        let usage = crate::cost::TokenUsage {
+            input_tokens: 20_000,
+            output_tokens: 5_000,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        };
+        let (cost, source) = resolve_cost_cents_and_source(None, Some("gpt-5"), &usage);
+        assert!(cost > 0);
+        assert_eq!(source, CostSource::Estimated);
+    }
+
+    #[test]
+    fn resolve_cost_cents_unknown_without_usage() {
+        let usage = crate::cost::TokenUsage::default();
+        let (cost, source) = resolve_cost_cents_and_source(None, Some("gpt-5"), &usage);
+        assert_eq!(cost, 0);
+        assert_eq!(source, CostSource::Unknown);
+    }
+
+    #[test]
+    fn resolve_cost_cents_unknown_for_unpriced_model_with_usage() {
+        let usage = crate::cost::TokenUsage {
+            input_tokens: 2_000,
+            output_tokens: 500,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        };
+        let (cost, source) =
+            resolve_cost_cents_and_source(None, Some("provider/new-model"), &usage);
+        assert_eq!(cost, 0);
+        assert_eq!(source, CostSource::Unknown);
+    }
+
+    #[test]
+    fn resolve_cost_cents_estimates_when_only_cache_usage_available() {
+        let usage = crate::cost::TokenUsage {
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_creation_input_tokens: Some(10_000),
+            cache_read_input_tokens: Some(5_000),
+        };
+        let (cost, source) = resolve_cost_cents_and_source(None, Some("claude-sonnet-5"), &usage);
+        assert!(cost > 0);
+        assert_eq!(source, CostSource::Estimated);
+    }
+
+    #[test]
+    fn actual_cost_cents_from_total_cost_usd_preserves_zero() {
+        assert_eq!(actual_cost_cents_from_total_cost_usd(Some(0.0)), Some(0));
+    }
+
+    #[test]
+    fn actual_cost_cents_from_total_cost_usd_none_stays_none() {
+        assert_eq!(actual_cost_cents_from_total_cost_usd(None), None);
+    }
+
+    #[test]
+    fn actual_cost_cents_from_total_cost_usd_rejects_non_finite() {
+        assert_eq!(
+            actual_cost_cents_from_total_cost_usd(Some(f64::INFINITY)),
+            None
+        );
+        assert_eq!(
+            actual_cost_cents_from_total_cost_usd(Some(f64::NEG_INFINITY)),
+            None
+        );
+        assert_eq!(actual_cost_cents_from_total_cost_usd(Some(f64::NAN)), None);
+    }
+
+    #[test]
+    fn preferred_model_for_cost_prefers_requested_then_observed() {
+        assert_eq!(
+            preferred_model_for_cost(Some("requested-model"), Some("observed-model")),
+            Some("requested-model")
+        );
+        assert_eq!(
+            preferred_model_for_cost(None, Some("observed-model")),
+            Some("observed-model")
+        );
+        assert_eq!(preferred_model_for_cost(None, None), None);
+    }
+
+    #[test]
+    fn preferred_model_for_cost_ignores_blank_requested_model() {
+        assert_eq!(
+            preferred_model_for_cost(Some("   "), Some("observed-model")),
+            Some("observed-model")
+        );
     }
 }

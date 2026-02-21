@@ -18,7 +18,7 @@ pub struct ModelPricing {
 }
 
 /// Token usage from an API call.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct TokenUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -29,7 +29,10 @@ pub struct TokenUsage {
 impl TokenUsage {
     /// Check if there's any usage to compute cost from.
     pub fn has_usage(&self) -> bool {
-        self.input_tokens > 0 || self.output_tokens > 0
+        self.input_tokens > 0
+            || self.output_tokens > 0
+            || self.cache_creation_input_tokens.unwrap_or(0) > 0
+            || self.cache_read_input_tokens.unwrap_or(0) > 0
     }
 }
 
@@ -69,6 +72,11 @@ fn normalize_model(model: &str) -> &str {
         // Return as-is if no alias found
         _ => trimmed,
     }
+}
+
+/// Normalize model names to the canonical pricing key.
+pub fn normalized_model(model: &str) -> String {
+    normalize_model(model).to_string()
 }
 
 /// Get pricing for a model. Returns None if model is unknown.
@@ -259,9 +267,9 @@ pub fn cost_cents_from_usage(model: &str, usage: &TokenUsage) -> u64 {
     let mut cost_nano: u64 = 0;
 
     // Regular input tokens
-    let regular_input = usage.input_tokens.saturating_sub(
-        usage.cache_creation_input_tokens.unwrap_or(0) + usage.cache_read_input_tokens.unwrap_or(0),
-    );
+    let regular_input = usage
+        .input_tokens
+        .saturating_sub(usage.cache_creation_input_tokens.unwrap_or(0));
     cost_nano += regular_input.saturating_mul(pricing.input_nano_per_token);
 
     // Output tokens
@@ -341,7 +349,7 @@ mod tests {
         // 5000 cache read tokens at $0.30/1M = 1500 nanodollars
         // 1000 output tokens at $15/1M = 15_000_000 nanodollars
         let usage = TokenUsage {
-            input_tokens: 5000, // These will be treated as cache read
+            input_tokens: 0,
             output_tokens: 1000,
             cache_creation_input_tokens: None,
             cache_read_input_tokens: Some(5000),
@@ -349,6 +357,18 @@ mod tests {
         let cost = cost_cents_from_usage("claude-3-5-sonnet", &usage);
         // (0 * 3000 + 1000 * 15000 + 5000 * 300) / 10_000_000 = (15_000_000 + 1_500_000) / 10_000_000 = 1.65 cents
         assert_eq!(cost, 2); // Rounds to 2 cents
+    }
+
+    #[test]
+    fn test_cache_read_tokens_do_not_reduce_regular_input_tokens() {
+        let usage = TokenUsage {
+            input_tokens: 10_000,
+            output_tokens: 0,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: Some(20_000),
+        };
+        let cost = cost_cents_from_usage("claude-3-5-sonnet", &usage);
+        assert_eq!(cost, 4);
     }
 
     #[test]
@@ -383,5 +403,16 @@ mod tests {
         };
         let cost = cost_cents_from_usage("completely-unknown-model", &usage);
         assert_eq!(cost, 0);
+    }
+
+    #[test]
+    fn test_has_usage_true_for_cache_only() {
+        let usage = TokenUsage {
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_creation_input_tokens: Some(1_000),
+            cache_read_input_tokens: Some(2_000),
+        };
+        assert!(usage.has_usage());
     }
 }
