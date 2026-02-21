@@ -19,6 +19,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::str::FromStr;
 use uuid::Uuid;
 
 /// A mission (persistent goal-oriented session).
@@ -140,6 +141,55 @@ pub enum TriggerType {
     AgentFinished,
 }
 
+/// Stop policy for automation lifecycle.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StopPolicy {
+    /// Never auto-disable this automation.
+    #[default]
+    Never,
+    /// Auto-disable when mission reaches completed status.
+    OnMissionCompleted,
+    /// Auto-disable on any terminal status (completed/failed/interrupted/blocked/not_feasible).
+    OnTerminalAny,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParseStopPolicyError;
+
+impl StopPolicy {
+    #[must_use]
+    pub const fn as_db_str(self) -> &'static str {
+        match self {
+            Self::Never => "never",
+            Self::OnMissionCompleted => "on_mission_completed",
+            Self::OnTerminalAny => "on_terminal_any",
+        }
+    }
+
+    #[must_use]
+    pub fn disables_on_status(self, status: MissionStatus) -> bool {
+        match self {
+            Self::Never => false,
+            Self::OnMissionCompleted => status == MissionStatus::Completed,
+            Self::OnTerminalAny => status.is_terminal(),
+        }
+    }
+}
+
+impl FromStr for StopPolicy {
+    type Err = ParseStopPolicyError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "never" => Ok(Self::Never),
+            "on_mission_completed" => Ok(Self::OnMissionCompleted),
+            "on_terminal_any" => Ok(Self::OnTerminalAny),
+            _ => Err(ParseStopPolicyError),
+        }
+    }
+}
+
 /// Retry configuration for automation execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetryConfig {
@@ -189,6 +239,31 @@ pub struct Automation {
     /// Retry configuration
     #[serde(default)]
     pub retry_config: RetryConfig,
+    /// Auto-stop behavior when mission reaches terminal state.
+    #[serde(default)]
+    pub stop_policy: StopPolicy,
+}
+
+impl Automation {
+    #[must_use]
+    pub fn should_auto_disable_for_status(&self, status: MissionStatus) -> bool {
+        self.active && self.stop_policy.disables_on_status(status)
+    }
+
+    #[must_use]
+    pub fn deactivate_if_stop_policy_matches(&mut self, status: MissionStatus) -> bool {
+        if !self.should_auto_disable_for_status(status) {
+            return false;
+        }
+
+        self.active = false;
+        true
+    }
+
+    #[must_use]
+    pub fn blocks_transition_to_status(&self, target_status: MissionStatus) -> bool {
+        self.active && !self.stop_policy.disables_on_status(target_status)
+    }
 }
 
 /// Execution status for automation runs.
@@ -663,5 +738,31 @@ mod tests {
         assert_eq!(format!("{}", MissionStatus::Active), "active");
         assert_eq!(format!("{}", MissionStatus::Completed), "completed");
         assert_eq!(format!("{}", MissionStatus::Interrupted), "interrupted");
+    }
+
+    #[test]
+    fn test_stop_policy_db_mapping() {
+        assert_eq!(StopPolicy::Never.as_db_str(), "never");
+        assert_eq!(
+            StopPolicy::OnMissionCompleted.as_db_str(),
+            "on_mission_completed"
+        );
+        assert_eq!(StopPolicy::OnTerminalAny.as_db_str(), "on_terminal_any");
+
+        assert_eq!("never".parse::<StopPolicy>(), Ok(StopPolicy::Never));
+        assert_eq!(
+            "on_mission_completed".parse::<StopPolicy>(),
+            Ok(StopPolicy::OnMissionCompleted)
+        );
+        assert_eq!(
+            "on_terminal_any".parse::<StopPolicy>(),
+            Ok(StopPolicy::OnTerminalAny)
+        );
+        assert!("invalid".parse::<StopPolicy>().is_err());
+        assert_eq!(
+            "invalid".parse::<StopPolicy>().unwrap_or_default(),
+            StopPolicy::Never
+        );
+        assert_eq!(StopPolicy::default(), StopPolicy::Never);
     }
 }

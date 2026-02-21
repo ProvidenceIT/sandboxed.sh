@@ -27,6 +27,7 @@ import {
   type CommandSource,
   type CreateAutomationInput,
   type TriggerType,
+  type StopPolicy,
   listMissionAutomations,
   createMissionAutomation,
   updateAutomation,
@@ -173,6 +174,7 @@ export function MissionAutomationsDialog({
   const [intervalValue, setIntervalValue] = useState('5');
   const [intervalUnit, setIntervalUnit] = useState<IntervalUnit>('minutes');
   const [startImmediately, setStartImmediately] = useState(true);
+  const [stopPolicy, setStopPolicy] = useState<StopPolicy>('on_terminal_any');
   const [variables, setVariables] = useState<Array<{ key: string; value: string }>>([]);
   const [creating, setCreating] = useState(false);
   const [togglingId, setTogglingId] = useState<string | null>(null);
@@ -381,6 +383,12 @@ export function MissionAutomationsDialog({
     return 'Unknown';
   }, []);
 
+  const getStopPolicyLabel = useCallback((policy?: StopPolicy) => {
+    if (!policy || policy === 'never') return 'Never';
+    if (policy === 'on_mission_completed') return 'On mission completed';
+    return 'On any terminal state';
+  }, []);
+
   // -- Data loading --
   const setAutomationsForMission = useCallback(
     (targetMissionId: string, nextAutomations: Automation[]) => {
@@ -523,6 +531,7 @@ export function MissionAutomationsDialog({
     const input: CreateAutomationInput = {
       command_source,
       trigger,
+      stop_policy: stopPolicy,
       ...(Object.keys(vars).length > 0 ? { variables: vars } : {}),
       start_immediately: startImmediately,
     };
@@ -542,6 +551,7 @@ export function MissionAutomationsDialog({
       setInlinePromptState('');
       setIntervalValue('5');
       setIntervalUnit('minutes');
+      setStopPolicy('on_terminal_any');
       setVariables([]);
       if (promptTimerRef.current) {
         clearTimeout(promptTimerRef.current);
@@ -918,6 +928,29 @@ export function MissionAutomationsDialog({
                   </div>
                 )}
 
+                <div>
+                  <label className="block text-xs text-white/50 mb-1.5">Stop policy</label>
+                  <select
+                    value={stopPolicy}
+                    onChange={(e) => setStopPolicy(e.target.value as StopPolicy)}
+                    className={cn(selectClass, 'w-full')}
+                    style={selectStyle}
+                  >
+                    <option value="on_terminal_any" className="bg-[#1a1a1a]">
+                      On any terminal state (recommended)
+                    </option>
+                    <option value="on_mission_completed" className="bg-[#1a1a1a]">
+                      On mission completed
+                    </option>
+                    <option value="never" className="bg-[#1a1a1a]">
+                      Never
+                    </option>
+                  </select>
+                  <div className="mt-1 text-[11px] text-white/30">
+                    Auto-disables this automation when the mission reaches the selected terminal condition.
+                  </div>
+                </div>
+
                 {/* Variables */}
                 <div>
                   <div className="flex items-center justify-between mb-1.5">
@@ -1129,6 +1162,12 @@ export function MissionAutomationsDialog({
                               )}
                               <span>·</span>
                               <span>Last run {lastRunLabel}</span>
+                              {automation.stop_policy && automation.stop_policy !== 'never' && (
+                                <>
+                                  <span>·</span>
+                                  <span>Stop: {getStopPolicyLabel(automation.stop_policy)}</span>
+                                </>
+                              )}
                               {hasVars && (
                                 <>
                                   <span>·</span>

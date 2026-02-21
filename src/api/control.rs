@@ -218,7 +218,7 @@ async fn get_running_missions(
 
 /// Look up an automation by ID, returning 404 if it does not exist.
 async fn require_automation(
-    store: &Arc<dyn MissionStore>,
+    store: &dyn MissionStore,
     id: Uuid,
 ) -> Result<mission_store::Automation, (StatusCode, String)> {
     store
@@ -229,6 +229,18 @@ async fn require_automation(
             StatusCode::NOT_FOUND,
             format!("Automation {} not found", id),
         ))
+}
+
+fn normalize_automation_trigger(trigger: mission_store::TriggerType) -> mission_store::TriggerType {
+    match trigger {
+        mission_store::TriggerType::Webhook { mut config } => {
+            if config.webhook_id.is_empty() {
+                config.webhook_id = Uuid::new_v4().to_string();
+            }
+            mission_store::TriggerType::Webhook { config }
+        }
+        other => other,
+    }
 }
 
 /// Validate that a command exists in the library.
@@ -262,12 +274,15 @@ async fn validate_library_command(
     }
 }
 
-async fn mission_has_active_automation(
-    mission_store: &Arc<dyn MissionStore>,
+async fn mission_has_blocking_automation_for_status(
+    mission_store: &dyn MissionStore,
     mission_id: Uuid,
+    target_status: MissionStatus,
 ) -> bool {
     match mission_store.get_mission_automations(mission_id).await {
-        Ok(automations) => automations.iter().any(|automation| automation.active),
+        Ok(automations) => automations
+            .iter()
+            .any(|automation| automation.blocks_transition_to_status(target_status)),
         Err(err) => {
             tracing::warn!(
                 "Failed to load automations for mission {}: {}",
@@ -277,6 +292,235 @@ async fn mission_has_active_automation(
             false
         }
     }
+}
+
+async fn stop_policy_matched_mission_status(
+    mission_store: &dyn MissionStore,
+    mission_id: Uuid,
+    stop_policy: mission_store::StopPolicy,
+    context: StopPolicyContext,
+) -> Option<MissionStatus> {
+    match mission_store.get_mission(mission_id).await {
+        Ok(Some(mission)) => {
+            let status = mission.status;
+            if stop_policy.disables_on_status(status) {
+                Some(status)
+            } else {
+                None
+            }
+        }
+        Ok(None) => None,
+        Err(err) => {
+            tracing::warn!(
+                "Failed to load mission {} while evaluating stop policy ({}): {}",
+                mission_id,
+                context.as_str(),
+                err
+            );
+            None
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StopPolicyContext {
+    CreateAutomation,
+    UpdateAutomation,
+    IntervalScheduler,
+    AgentFinishedHook,
+    WebhookTrigger,
+    Reconciliation,
+}
+
+impl StopPolicyContext {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::CreateAutomation => "create_automation",
+            Self::UpdateAutomation => "update_automation",
+            Self::IntervalScheduler => "interval scheduler",
+            Self::AgentFinishedHook => "agent_finished hook",
+            Self::WebhookTrigger => "webhook trigger",
+            Self::Reconciliation => "stop policy reconciliation",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StopPolicyDisableOutcome {
+    NotMatched,
+    Deactivated,
+    DeactivationFailed,
+}
+
+impl StopPolicyDisableOutcome {
+    fn should_skip_execution(self) -> bool {
+        !matches!(self, Self::NotMatched)
+    }
+
+    fn was_deactivated(self) -> bool {
+        matches!(self, Self::Deactivated)
+    }
+}
+
+#[must_use]
+async fn disable_automation_when_stop_policy_matches(
+    mission_store: &dyn MissionStore,
+    automation: &mission_store::Automation,
+    mission_status: MissionStatus,
+    context: StopPolicyContext,
+) -> StopPolicyDisableOutcome {
+    if !automation.should_auto_disable_for_status(mission_status) {
+        return StopPolicyDisableOutcome::NotMatched;
+    }
+
+    match mission_store
+        .update_automation_active(automation.id, false)
+        .await
+    {
+        Ok(()) => {
+            tracing::info!(
+                "Disabled automation {} due to stop policy {:?} on mission {} status {:?} ({})",
+                automation.id,
+                automation.stop_policy,
+                automation.mission_id,
+                mission_status,
+                context.as_str()
+            );
+            StopPolicyDisableOutcome::Deactivated
+        }
+        Err(err) => {
+            tracing::warn!(
+                "Failed to disable automation {} after stop policy match ({}): {}",
+                automation.id,
+                context.as_str(),
+                err
+            );
+            StopPolicyDisableOutcome::DeactivationFailed
+        }
+    }
+}
+
+async fn enforce_stop_policy_after_create(
+    mission_store: &dyn MissionStore,
+    automation: &mut mission_store::Automation,
+) {
+    let mission = match mission_store.get_mission(automation.mission_id).await {
+        Ok(Some(mission)) => mission,
+        Ok(None) => {
+            tracing::warn!(
+                "Mission {} not found while enforcing stop policy after create",
+                automation.mission_id
+            );
+            return;
+        }
+        Err(err) => {
+            tracing::warn!(
+                "Failed to load mission {} while enforcing stop policy after create: {}",
+                automation.mission_id,
+                err
+            );
+            return;
+        }
+    };
+    let mission_status = mission.status;
+
+    if !automation.stop_policy.disables_on_status(mission_status) {
+        if !automation.active {
+            match mission_store
+                .update_automation_active(automation.id, true)
+                .await
+            {
+                Ok(()) => {
+                    tracing::info!(
+                        "Re-enabled automation {} after post-create stop policy check found mission {} status {:?} no longer matches {:?}",
+                        automation.id,
+                        automation.mission_id,
+                        mission_status,
+                        automation.stop_policy
+                    );
+                    automation.active = true;
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        "Failed to re-enable automation {} after post-create stop policy check: {}",
+                        automation.id,
+                        err
+                    );
+                }
+            }
+        }
+        return;
+    }
+
+    if disable_automation_when_stop_policy_matches(
+        mission_store,
+        automation,
+        mission_status,
+        StopPolicyContext::CreateAutomation,
+    )
+    .await
+    .should_skip_execution()
+    {
+        automation.active = false;
+    }
+}
+
+async fn reconcile_automation_stop_policies_for_status(
+    mission_store: &dyn MissionStore,
+    mission_id: Uuid,
+    status: MissionStatus,
+) {
+    let automations = match mission_store.get_mission_automations(mission_id).await {
+        Ok(automations) => automations,
+        Err(err) => {
+            tracing::warn!(
+                "Failed to load automations for mission {} during stop policy reconciliation: {}",
+                mission_id,
+                err
+            );
+            return;
+        }
+    };
+
+    let mut matched_count = 0usize;
+    let mut deactivated_count = 0usize;
+    for automation in automations {
+        let outcome = disable_automation_when_stop_policy_matches(
+            mission_store,
+            &automation,
+            status,
+            StopPolicyContext::Reconciliation,
+        )
+        .await;
+        if outcome.should_skip_execution() {
+            matched_count += 1;
+        }
+        if outcome.was_deactivated() {
+            deactivated_count += 1;
+        }
+    }
+
+    if matched_count > 0 {
+        tracing::info!(
+            "Matched stop policy for {} automation(s) and deactivated {} automation(s) for mission {} after status change to {:?}",
+            matched_count,
+            deactivated_count,
+            mission_id,
+            status
+        );
+    }
+}
+
+async fn update_mission_status_and_reconcile_stop_policies(
+    mission_store: &dyn MissionStore,
+    mission_id: Uuid,
+    status: MissionStatus,
+) -> Result<(), String> {
+    mission_store
+        .update_mission_status(mission_id, status)
+        .await?;
+    reconcile_automation_stop_policies_for_status(mission_store, mission_id, status).await;
+    Ok(())
 }
 
 pub(crate) async fn resolve_claudecode_default_model(
@@ -310,7 +554,7 @@ pub(crate) async fn resolve_claudecode_default_model(
 }
 
 async fn close_mission_desktop_sessions(
-    mission_store: &Arc<dyn MissionStore>,
+    mission_store: &dyn MissionStore,
     mission_id: Uuid,
     working_dir: &std::path::Path,
 ) {
@@ -983,6 +1227,15 @@ impl std::fmt::Display for MissionStatus {
             Self::NotFeasible => write!(f, "not_feasible"),
             Self::Interrupted => write!(f, "interrupted"),
         }
+    }
+}
+
+impl MissionStatus {
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Completed | Self::Failed | Self::Interrupted | Self::Blocked | Self::NotFeasible
+        )
     }
 }
 
@@ -2316,9 +2569,12 @@ fn spawn_control_session(
                             mission.title.as_deref().unwrap_or("Untitled"),
                             mission.updated_at
                         );
-                        if let Err(e) = store
-                            .update_mission_status(mission.id, MissionStatus::Interrupted)
-                            .await
+                        if let Err(e) = update_mission_status_and_reconcile_stop_policies(
+                            store.as_ref(),
+                            mission.id,
+                            MissionStatus::Interrupted,
+                        )
+                        .await
                         {
                             tracing::warn!(
                                 "Failed to mark orphaned mission {} as interrupted: {}",
@@ -2459,9 +2715,12 @@ async fn stale_mission_cleanup_loop(
                                 mission.title.as_deref().unwrap_or("Untitled"),
                                 mission.updated_at
                             );
-                            if let Err(e) = mission_store
-                                .update_mission_status(mission.id, MissionStatus::Interrupted)
-                                .await
+                            if let Err(e) = update_mission_status_and_reconcile_stop_policies(
+                                mission_store.as_ref(),
+                                mission.id,
+                                MissionStatus::Interrupted,
+                            )
+                            .await
                             {
                                 tracing::warn!(
                                     "Failed to mark orphaned mission {} as interrupted: {}",
@@ -2503,9 +2762,12 @@ async fn stale_mission_cleanup_loop(
                         mission.updated_at
                     );
 
-                    if let Err(e) = mission_store
-                        .update_mission_status(mission.id, MissionStatus::Completed)
-                        .await
+                    if let Err(e) = update_mission_status_and_reconcile_stop_policies(
+                        mission_store.as_ref(),
+                        mission.id,
+                        MissionStatus::Completed,
+                    )
+                    .await
                     {
                         tracing::warn!("Failed to auto-close stale mission {}: {}", mission.id, e);
                     } else {
@@ -2592,6 +2854,18 @@ async fn automation_scheduler_loop(
                     continue;
                 }
             };
+
+            if disable_automation_when_stop_policy_matches(
+                mission_store.as_ref(),
+                &automation,
+                mission.status,
+                StopPolicyContext::IntervalScheduler,
+            )
+            .await
+            .should_skip_execution()
+            {
+                continue;
+            }
 
             // Check if enough time has passed since last trigger
             let should_trigger = if let Some(ref last_triggered) = automation.last_triggered_at {
@@ -2872,7 +3146,7 @@ async fn resolve_automation_command(
     automation: &mission_store::Automation,
     mission_id: Uuid,
     state: &Arc<AppState>,
-    store: &Arc<dyn MissionStore>,
+    store: &dyn MissionStore,
 ) -> Option<String> {
     use super::automation_variables::{substitute_variables, SubstitutionContext};
     use super::mission_store::CommandSource;
@@ -2908,14 +3182,29 @@ async fn resolve_automation_command(
     Some(substitute_variables(&command_content, &context))
 }
 
+fn active_agent_finished_automations(
+    automations: Vec<mission_store::Automation>,
+) -> Vec<mission_store::Automation> {
+    automations
+        .into_iter()
+        .filter(|automation| {
+            automation.active
+                && matches!(
+                    automation.trigger,
+                    mission_store::TriggerType::AgentFinished
+                )
+        })
+        .collect()
+}
+
 async fn agent_finished_automation_messages(
-    mission_store: &Arc<dyn MissionStore>,
+    mission_store: &dyn MissionStore,
     mission_id: Uuid,
     library: &SharedLibrary,
     workspaces: &workspace::SharedWorkspaceStore,
 ) -> Vec<String> {
     use super::automation_variables::{substitute_variables, SubstitutionContext};
-    use super::mission_store::{AutomationExecution, CommandSource, ExecutionStatus, TriggerType};
+    use super::mission_store::{AutomationExecution, CommandSource, ExecutionStatus};
 
     let automations = match mission_store.get_mission_automations(mission_id).await {
         Ok(list) => list,
@@ -2929,10 +3218,7 @@ async fn agent_finished_automation_messages(
         }
     };
 
-    let mut active: Vec<super::mission_store::Automation> = automations
-        .into_iter()
-        .filter(|a| a.active && matches!(a.trigger, TriggerType::AgentFinished))
-        .collect();
+    let mut active = active_agent_finished_automations(automations);
 
     if active.is_empty() {
         return Vec::new();
@@ -2950,6 +3236,27 @@ async fn agent_finished_automation_messages(
             return Vec::new();
         }
     };
+
+    let mut eligible = Vec::with_capacity(active.len());
+    for automation in active {
+        if disable_automation_when_stop_policy_matches(
+            mission_store,
+            &automation,
+            mission.status,
+            StopPolicyContext::AgentFinishedHook,
+        )
+        .await
+        .should_skip_execution()
+        {
+            continue;
+        }
+        eligible.push(automation);
+    }
+    active = eligible;
+
+    if active.is_empty() {
+        return Vec::new();
+    }
 
     // Stable ordering to avoid surprising changes in multi-automation setups.
     active.sort_by_key(|a| a.created_at.clone());
@@ -3138,7 +3445,7 @@ async fn control_actor_loop(
 
     // Helper to persist history to a specific mission ID
     async fn persist_mission_history_to(
-        mission_store: &Arc<dyn MissionStore>,
+        mission_store: &dyn MissionStore,
         mission_id: Option<Uuid>,
         history: &[(String, String)],
     ) {
@@ -3191,7 +3498,7 @@ async fn control_actor_loop(
 
     // Helper to persist history to current mission (wrapper for backwards compatibility)
     async fn persist_mission_history(
-        mission_store: &Arc<dyn MissionStore>,
+        mission_store: &dyn MissionStore,
         current_mission: &Arc<RwLock<Option<Uuid>>>,
         history: &[(String, String)],
     ) {
@@ -3213,7 +3520,7 @@ async fn control_actor_loop(
 
     // Helper to load a mission and return a Mission struct
     async fn load_mission_record(
-        mission_store: &Arc<dyn MissionStore>,
+        mission_store: &dyn MissionStore,
         id: Uuid,
     ) -> Result<Mission, String> {
         mission_store
@@ -3223,13 +3530,13 @@ async fn control_actor_loop(
     }
 
     // Helper to create a new mission
-    async fn create_new_mission(mission_store: &Arc<dyn MissionStore>) -> Result<Mission, String> {
+    async fn create_new_mission(mission_store: &dyn MissionStore) -> Result<Mission, String> {
         create_new_mission_with_title(mission_store, None, None, None, None, None, None, None).await
     }
 
     // Helper to create a new mission with title
     async fn create_new_mission_with_title(
-        mission_store: &Arc<dyn MissionStore>,
+        mission_store: &dyn MissionStore,
         title: Option<&str>,
         workspace_id: Option<Uuid>,
         agent: Option<&str>,
@@ -3253,7 +3560,7 @@ async fn control_actor_loop(
 
     // Helper to build resume context for an interrupted or blocked mission
     async fn resume_mission_impl(
-        mission_store: &Arc<dyn MissionStore>,
+        mission_store: &dyn MissionStore,
         config: &Config,
         workspaces: &workspace::SharedWorkspaceStore,
         mission_id: Uuid,
@@ -3520,7 +3827,7 @@ async fn control_actor_loop(
                                     continue;
                                 } else {
                                     // Load mission and start in parallel
-                                    match load_mission_record(&mission_store, tid).await {
+                                    match load_mission_record(mission_store.as_ref(), tid).await {
                                         Ok(mission) => {
                                             // Activate mission: if pending, interrupted, blocked, completed, or failed, update status to active
                                             if matches!(
@@ -3619,7 +3926,7 @@ async fn control_actor_loop(
                                     // Load mission history from DB so continuation detection
                                     // works correctly (e.g., after server restart when
                                     // current_mission is None but the mission has prior turns).
-                                    if let Ok(mission) = load_mission_record(&mission_store, tid).await {
+                                    if let Ok(mission) = load_mission_record(mission_store.as_ref(), tid).await {
                                         if !mission.history.is_empty() {
                                             history.clear();
                                             for entry in &mission.history {
@@ -3656,7 +3963,7 @@ async fn control_actor_loop(
                                     }
                                     *current_mission.write().await = Some(tid);
                                     tracing::info!("Set current mission to target: {}", tid);
-                                } else if let Ok(new_mission) = create_new_mission(&mission_store).await {
+                                } else if let Ok(new_mission) = create_new_mission(mission_store.as_ref()).await {
                                     *current_mission.write().await = Some(new_mission.id);
                                     tracing::info!("Auto-created mission: {}", new_mission.id);
                                 }
@@ -3664,8 +3971,13 @@ async fn control_actor_loop(
                                 if !main_is_running {
                                     if mission_id != Some(tid) {
                                         // Switch main session to target mission
-                                        persist_mission_history(&mission_store, &current_mission, &history).await;
-                                        if let Ok(mission) = load_mission_record(&mission_store, tid).await {
+                                        persist_mission_history(
+                                            mission_store.as_ref(),
+                                            &current_mission,
+                                            &history,
+                                        )
+                                        .await;
+                                        if let Ok(mission) = load_mission_record(mission_store.as_ref(), tid).await {
                                             history.clear();
                                             for entry in &mission.history {
                                                 history.push((entry.role.clone(), entry.content.clone()));
@@ -3700,7 +4012,7 @@ async fn control_actor_loop(
                                         // Same mission but no assistant history in memory
                                         // (e.g., after server restart). Reload from database
                                         // so Claude Code continuation detection works correctly.
-                                        if let Ok(mission) = load_mission_record(&mission_store, tid).await {
+                                        if let Ok(mission) = load_mission_record(mission_store.as_ref(), tid).await {
                                             if !mission.history.is_empty() {
                                                 history.clear();
                                                 for entry in &mission.history {
@@ -3779,7 +4091,7 @@ async fn control_actor_loop(
 
                                 // Immediately persist user message so it's visible when loading mission
                                 history.push(("user".to_string(), msg.clone()));
-                                persist_mission_history_to(&mission_store, msg_target_mid, &history)
+                                persist_mission_history_to(mission_store.as_ref(), msg_target_mid, &history)
                                     .await;
 
                                 let cfg = config.clone();
@@ -3919,18 +4231,14 @@ async fn control_actor_loop(
                     ControlCommand::LoadMission { id, respond } => {
                         // First persist current mission history
                         persist_mission_history(
-                            &mission_store,
+                            mission_store.as_ref(),
                             &current_mission,
                             &history,
                         )
                         .await;
 
                         // Load the new mission
-                        match load_mission_record(
-                            &mission_store,
-                            id,
-                        )
-                        .await {
+                        match load_mission_record(mission_store.as_ref(), id).await {
                             Ok(mission) => {
                                 // Update history from loaded mission
                                 history = mission.history.iter()
@@ -3965,7 +4273,7 @@ async fn control_actor_loop(
                     ControlCommand::CreateMission { title, workspace_id, agent, model_override, model_effort, backend, config_profile, respond } => {
                         // First persist current mission history
                         persist_mission_history(
-                            &mission_store,
+                            mission_store.as_ref(),
                             &current_mission,
                             &history,
                         )
@@ -3973,7 +4281,7 @@ async fn control_actor_loop(
 
                         // Create a new mission with optional title, workspace, agent, and backend
                         match create_new_mission_with_title(
-                            &mission_store,
+                            mission_store.as_ref(),
                             title.as_deref(),
                             workspace_id,
                             agent.as_deref(),
@@ -4021,9 +4329,12 @@ async fn control_actor_loop(
                             }
                         }
 
-                        let result = mission_store
-                            .update_mission_status(id, new_status)
-                            .await;
+                        let result = update_mission_status_and_reconcile_stop_policies(
+                            mission_store.as_ref(),
+                            id,
+                            new_status,
+                        )
+                        .await;
                         if result.is_ok() {
                             let _ = events_tx.send(AgentEvent::MissionStatusChanged {
                                 mission_id: id,
@@ -4061,7 +4372,7 @@ async fn control_actor_loop(
                             parallel_runners.entry(mission_id)
                         {
                             // Load mission to get existing history
-                            let mission = match load_mission_record(&mission_store, mission_id).await {
+                            let mission = match load_mission_record(mission_store.as_ref(), mission_id).await {
                                 Ok(m) => m,
                                 Err(e) => {
                                     let _ = respond.send(Err(format!("Failed to load mission: {}", e)));
@@ -4124,9 +4435,12 @@ async fn control_actor_loop(
                             runner.cancel();
                             // Update status to Interrupted so the mission can be
                             // resumed later (fixes #149: cancel left status as pending).
-                            if let Err(e) = mission_store
-                                .update_mission_status(mission_id, MissionStatus::Interrupted)
-                                .await
+                            if let Err(e) = update_mission_status_and_reconcile_stop_policies(
+                                mission_store.as_ref(),
+                                mission_id,
+                                MissionStatus::Interrupted,
+                            )
+                            .await
                             {
                                 tracing::warn!(
                                     "Failed to update cancelled parallel mission status: {}",
@@ -4145,7 +4459,7 @@ async fn control_actor_loop(
                             });
                             parallel_runners.remove(&mission_id);
                             close_mission_desktop_sessions(
-                                &mission_store,
+                                mission_store.as_ref(),
                                 mission_id,
                                 &config.working_dir,
                             )
@@ -4160,7 +4474,7 @@ async fn control_actor_loop(
                                 if let Some(token) = &running_cancel {
                                     token.cancel();
                                     close_mission_desktop_sessions(
-                                        &mission_store,
+                                        mission_store.as_ref(),
                                         mission_id,
                                         &config.working_dir,
                                     )
@@ -4230,7 +4544,7 @@ async fn control_actor_loop(
                     ControlCommand::ResumeMission { mission_id, clean_workspace, skip_message, respond } => {
                         // Resume an interrupted mission by building resume context
                         match resume_mission_impl(
-                            &mission_store,
+                            mission_store.as_ref(),
                             &config,
                             &workspaces,
                             mission_id,
@@ -4240,7 +4554,7 @@ async fn control_actor_loop(
                             Ok((mission, resume_prompt)) => {
                                 // First persist current mission history (if any)
                                 persist_mission_history(
-                                    &mission_store,
+                            mission_store.as_ref(),
                                     &current_mission,
                                     &history,
                                 )
@@ -4379,7 +4693,7 @@ async fn control_actor_loop(
                                 let current_mid = *current_mission.read().await;
                                 if current_mid == Some(mission_id) {
                                     persist_mission_history(
-                                        &mission_store,
+                            mission_store.as_ref(),
                                         &current_mission,
                                         &history,
                                     )
@@ -4388,10 +4702,13 @@ async fn control_actor_loop(
                                 // Note: If missions differ, don't persist - the local history
                                 // belongs to current_mission, not running_mission_id
 
-                                if mission_store
-                                    .update_mission_status(mission_id, MissionStatus::Interrupted)
-                                    .await
-                                    .is_ok()
+                                if update_mission_status_and_reconcile_stop_policies(
+                                    mission_store.as_ref(),
+                                    mission_id,
+                                    MissionStatus::Interrupted,
+                                )
+                                .await
+                                .is_ok()
                                 {
                                     interrupted_ids.push(mission_id);
                                     tracing::info!("Marked mission {} as interrupted", mission_id);
@@ -4425,10 +4742,13 @@ async fn control_actor_loop(
                                     e
                                 );
                             }
-                            if mission_store
-                                .update_mission_status(*mission_id, MissionStatus::Interrupted)
-                                .await
-                                .is_ok()
+                            if update_mission_status_and_reconcile_stop_policies(
+                                mission_store.as_ref(),
+                                *mission_id,
+                                MissionStatus::Interrupted,
+                            )
+                            .await
+                            .is_ok()
                             {
                                 interrupted_ids.push(*mission_id);
                                 tracing::info!("Marked parallel mission {} as interrupted", mission_id);
@@ -4539,10 +4859,15 @@ async fn control_actor_loop(
                             };
                             let success = matches!(status, crate::tools::mission::MissionStatusValue::Completed);
                             if new_status == MissionStatus::Completed
-                                && mission_has_active_automation(&mission_store, id).await
+                                && mission_has_blocking_automation_for_status(
+                                    mission_store.as_ref(),
+                                    id,
+                                    new_status,
+                                )
+                                .await
                             {
                                 tracing::info!(
-                                    "Skipping completion for mission {} because active automations are enabled",
+                                    "Skipping completion for mission {} because blocking automations are still active",
                                     id
                                 );
                                 continue;
@@ -4556,10 +4881,13 @@ async fn control_actor_loop(
                                 }
                             }
 
-                            if mission_store
-                                .update_mission_status(id, new_status)
-                                .await
-                                .is_ok()
+                            if update_mission_status_and_reconcile_stop_policies(
+                                mission_store.as_ref(),
+                                id,
+                                new_status,
+                            )
+                            .await
+                            .is_ok()
                             {
                                 // Generate and store mission summary
                                 if let Some(ref summary_text) = summary {
@@ -4716,10 +5044,15 @@ async fn control_actor_loop(
                                                     TerminalReason::CapacityLimited => "capacity_limited",
                                                 });
                                                 if new_status == MissionStatus::Completed
-                                                    && mission_has_active_automation(&mission_store, mission_id).await
+                                                    && mission_has_blocking_automation_for_status(
+                                                        mission_store.as_ref(),
+                                                        mission_id,
+                                                        new_status,
+                                                    )
+                                                    .await
                                                 {
                                                     tracing::info!(
-                                                        "Skipping auto-complete for mission {} because active automations are enabled",
+                                                        "Skipping auto-complete for mission {} because blocking automations are still active",
                                                         mission_id
                                                     );
                                                 } else {
@@ -4733,6 +5066,12 @@ async fn control_actor_loop(
                                                     {
                                                         tracing::warn!("Failed to auto-complete mission: {}", e);
                                                     } else {
+                                                        reconcile_automation_stop_policies_for_status(
+                                                            mission_store.as_ref(),
+                                                            mission_id,
+                                                            new_status,
+                                                        )
+                                                        .await;
                                                         // Send status change event - the actual completion content
                                                         // is already in the assistant_message event, so we just provide
                                                         // a clean summary based on how the mission ended
@@ -4830,7 +5169,7 @@ async fn control_actor_loop(
                             });
                             if let Some(mission_id) = completed_mission_id {
                                 close_mission_desktop_sessions(
-                                    &mission_store,
+                                    mission_store.as_ref(),
                                     mission_id,
                                     &config.working_dir,
                                 )
@@ -4846,9 +5185,12 @@ async fn control_actor_loop(
                             if let Some(mission_id) = completed_mission_id {
                                 // Update mission status so it doesn't stay Active forever.
                                 // Mark as Failed (resumable) so the user can retry.
-                                if let Err(e) = mission_store
-                                    .update_mission_status(mission_id, MissionStatus::Failed)
-                                    .await
+                                if let Err(e) = update_mission_status_and_reconcile_stop_policies(
+                                    mission_store.as_ref(),
+                                    mission_id,
+                                    MissionStatus::Failed,
+                                )
+                                .await
                                 {
                                     tracing::warn!("Failed to update mission status after join error: {}", e);
                                 } else {
@@ -4859,7 +5201,7 @@ async fn control_actor_loop(
                                     });
                                 }
                                 close_mission_desktop_sessions(
-                                    &mission_store,
+                                    mission_store.as_ref(),
                                     mission_id,
                                     &config.working_dir,
                                 )
@@ -4877,7 +5219,7 @@ async fn control_actor_loop(
                             // Small delay so the UI can display the completion before restarting.
                             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
                             let messages = agent_finished_automation_messages(
-                                &mission_store,
+                                mission_store.as_ref(),
                                 mission_id,
                                 &library,
                                 &workspaces,
@@ -4904,7 +5246,7 @@ async fn control_actor_loop(
 
                     // Immediately persist user message so it's visible when loading mission
                     history.push(("user".to_string(), msg.clone()));
-                    persist_mission_history_to(&mission_store, msg_target_mid, &history)
+                    persist_mission_history_to(mission_store.as_ref(), msg_target_mid, &history)
                         .await;
 
                     let cfg = config.clone();
@@ -5080,7 +5422,7 @@ async fn control_actor_loop(
                                 // Small delay so the UI can display the completion before restarting.
                                 tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
                                 let messages = agent_finished_automation_messages(
-                                    &mission_store,
+                                    mission_store.as_ref(),
                                     *mission_id,
                                     &library,
                                     &workspaces,
@@ -5138,15 +5480,23 @@ async fn control_actor_loop(
                                                 MissionStatus::Failed
                                             };
                                             if new_status == MissionStatus::Completed
-                                                && mission_has_active_automation(&mission_store, *mission_id).await
+                                                && mission_has_blocking_automation_for_status(
+                                                    mission_store.as_ref(),
+                                                    *mission_id,
+                                                    new_status,
+                                                )
+                                                .await
                                             {
                                                 tracing::info!(
-                                                    "Skipping parallel completion for mission {} because active automations are enabled",
+                                                    "Skipping parallel completion for mission {} because blocking automations are still active",
                                                     mission_id
                                                 );
-                                            } else if let Err(e) = mission_store
-                                                .update_mission_status(*mission_id, new_status)
-                                                .await
+                                            } else if let Err(e) = update_mission_status_and_reconcile_stop_policies(
+                                                mission_store.as_ref(),
+                                                *mission_id,
+                                                new_status,
+                                            )
+                                            .await
                                             {
                                                 tracing::warn!(
                                                     "Failed to update parallel mission status: {}",
@@ -5172,7 +5522,7 @@ async fn control_actor_loop(
                 for mid in completed_missions {
                     parallel_runners.remove(&mid);
                     close_mission_desktop_sessions(
-                        &mission_store,
+                        mission_store.as_ref(),
                         mid,
                         &config.working_dir,
                     )
@@ -5866,14 +6216,24 @@ async fn run_single_control_turn(
 
 // === Automation API handlers ===
 
+fn deserialize_default_on_null<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+}
+
 #[derive(Debug, Deserialize)]
 pub struct CreateAutomationRequest {
     pub command_source: mission_store::CommandSource,
     pub trigger: mission_store::TriggerType,
     #[serde(default)]
     pub variables: HashMap<String, String>,
-    #[serde(default)]
-    pub retry_config: Option<mission_store::RetryConfig>,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub retry_config: mission_store::RetryConfig,
+    #[serde(default, deserialize_with = "deserialize_default_on_null")]
+    pub stop_policy: mission_store::StopPolicy,
     /// When true, trigger the first execution immediately after creation.
     #[serde(default)]
     pub start_immediately: bool,
@@ -5885,6 +6245,7 @@ pub struct UpdateAutomationRequest {
     pub trigger: Option<mission_store::TriggerType>,
     pub variables: Option<HashMap<String, String>>,
     pub retry_config: Option<mission_store::RetryConfig>,
+    pub stop_policy: Option<mission_store::StopPolicy>,
     pub active: Option<bool>,
 }
 
@@ -5935,17 +6296,7 @@ pub async fn create_automation(
         validate_library_command(&state, name).await?;
     }
 
-    // Generate webhook_id if trigger type is Webhook
-    let trigger = match req.trigger {
-        mission_store::TriggerType::Webhook { mut config } => {
-            // Generate a unique webhook_id if not provided or empty
-            if config.webhook_id.is_empty() {
-                config.webhook_id = Uuid::new_v4().to_string();
-            }
-            mission_store::TriggerType::Webhook { config }
-        }
-        other => other,
-    };
+    let trigger = normalize_automation_trigger(req.trigger);
 
     let start_immediately = req.start_immediately;
 
@@ -5958,6 +6309,16 @@ pub async fn create_automation(
             None
         };
 
+    let stop_policy = req.stop_policy;
+    let active = stop_policy_matched_mission_status(
+        control.mission_store.as_ref(),
+        mission_id,
+        stop_policy,
+        StopPolicyContext::CreateAutomation,
+    )
+    .await
+    .is_none();
+
     // Build the complete Automation struct
     let automation = mission_store::Automation {
         id: Uuid::new_v4(),
@@ -5965,30 +6326,38 @@ pub async fn create_automation(
         command_source: req.command_source,
         trigger,
         variables: req.variables,
-        active: true,
+        active,
+        stop_policy,
         created_at: mission_store::now_string(),
         last_triggered_at,
-        retry_config: req.retry_config.unwrap_or_default(),
+        retry_config: req.retry_config,
     };
 
-    let automation = control
+    let mut automation = control
         .mission_store
         .create_automation(automation)
         .await
         .map_err(internal_error)?;
 
+    enforce_stop_policy_after_create(control.mission_store.as_ref(), &mut automation).await;
+
     // If start_immediately is requested for agent_finished triggers, fire the
     // first execution right away by resolving the command and sending it as a
     // user message to the control actor.
     if start_immediately
+        && automation.active
         && matches!(
             automation.trigger,
             mission_store::TriggerType::AgentFinished
         )
     {
-        let cmd_content =
-            resolve_automation_command(&automation, mission_id, &state, &control.mission_store)
-                .await;
+        let cmd_content = resolve_automation_command(
+            &automation,
+            mission_id,
+            &state,
+            control.mission_store.as_ref(),
+        )
+        .await;
 
         if let Some(content) = cmd_content {
             // Record the execution
@@ -6041,7 +6410,7 @@ pub async fn get_automation(
 ) -> Result<Json<mission_store::Automation>, (StatusCode, String)> {
     let control = control_for_user(&state, &user).await;
 
-    let automation = require_automation(&control.mission_store, automation_id).await?;
+    let automation = require_automation(control.mission_store.as_ref(), automation_id).await?;
 
     Ok(Json(automation))
 }
@@ -6055,7 +6424,7 @@ pub async fn update_automation(
 ) -> Result<Json<mission_store::Automation>, (StatusCode, String)> {
     let control = control_for_user(&state, &user).await;
 
-    let mut automation = require_automation(&control.mission_store, automation_id).await?;
+    let mut automation = require_automation(control.mission_store.as_ref(), automation_id).await?;
 
     // Validate the command exists in the library if CommandSource::Library is being updated
     if let Some(mission_store::CommandSource::Library { name }) = req.command_source.as_ref() {
@@ -6068,16 +6437,7 @@ pub async fn update_automation(
     }
 
     if let Some(trigger) = req.trigger {
-        // Generate webhook_id if trigger type is Webhook and webhook_id is empty
-        automation.trigger = match trigger {
-            mission_store::TriggerType::Webhook { mut config } => {
-                if config.webhook_id.is_empty() {
-                    config.webhook_id = Uuid::new_v4().to_string();
-                }
-                mission_store::TriggerType::Webhook { config }
-            }
-            other => other,
-        };
+        automation.trigger = normalize_automation_trigger(trigger);
     }
 
     if let Some(variables) = req.variables {
@@ -6088,8 +6448,35 @@ pub async fn update_automation(
         automation.retry_config = retry_config;
     }
 
+    if let Some(stop_policy) = req.stop_policy {
+        automation.stop_policy = stop_policy;
+    }
+
     if let Some(active) = req.active {
         automation.active = active;
+    }
+
+    // Enforce stop policy at update-time so persisted active state doesn't
+    // remain stale on missions that are already terminal.
+    if automation.active {
+        let matched_status = stop_policy_matched_mission_status(
+            control.mission_store.as_ref(),
+            automation.mission_id,
+            automation.stop_policy,
+            StopPolicyContext::UpdateAutomation,
+        )
+        .await;
+        if let Some(status) = matched_status {
+            if automation.deactivate_if_stop_policy_matches(status) {
+                tracing::info!(
+                    "Disabling automation {} during update due to stop policy {:?} (mission {} status {:?})",
+                    automation.id,
+                    automation.stop_policy,
+                    automation.mission_id,
+                    status
+                );
+            }
+        }
     }
 
     // Update automation in the store
@@ -6134,7 +6521,7 @@ pub async fn get_automation_executions(
 ) -> Result<Json<Vec<mission_store::AutomationExecution>>, (StatusCode, String)> {
     let control = control_for_user(&state, &user).await;
 
-    let _automation = require_automation(&control.mission_store, automation_id).await?;
+    let _automation = require_automation(control.mission_store.as_ref(), automation_id).await?;
 
     let executions = control
         .mission_store
@@ -6291,6 +6678,24 @@ pub async fn webhook_receiver(
             StatusCode::NOT_FOUND,
             format!("Mission {} not found", mission_id),
         ))?;
+
+    if disable_automation_when_stop_policy_matches(
+        control.mission_store.as_ref(),
+        &automation,
+        mission.status,
+        StopPolicyContext::WebhookTrigger,
+    )
+    .await
+    .should_skip_execution()
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "Automation {} is stopped by policy {:?} for mission status {:?}",
+                automation.id, automation.stop_policy, mission.status
+            ),
+        ));
+    }
 
     // Get workspace for reading local files
     let workspace = state.workspaces.get(mission.workspace_id).await;
@@ -6483,6 +6888,7 @@ pub async fn webhook_receiver(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn test_parse_image_tag() {
@@ -6573,6 +6979,60 @@ And the report:
     }
 
     #[test]
+    fn test_normalize_automation_trigger_generates_webhook_id_when_empty() {
+        let trigger = mission_store::TriggerType::Webhook {
+            config: mission_store::WebhookConfig {
+                webhook_id: String::new(),
+                secret: None,
+                variable_mappings: std::collections::HashMap::new(),
+            },
+        };
+
+        let normalized = normalize_automation_trigger(trigger);
+        let mission_store::TriggerType::Webhook { config } = normalized else {
+            panic!("expected webhook trigger");
+        };
+        assert!(!config.webhook_id.is_empty());
+    }
+
+    #[test]
+    fn test_normalize_automation_trigger_keeps_non_webhook_triggers_unchanged() {
+        let trigger = mission_store::TriggerType::AgentFinished;
+        let normalized = normalize_automation_trigger(trigger.clone());
+        assert_eq!(normalized, trigger);
+    }
+
+    #[test]
+    fn test_create_automation_request_defaults_stop_policy_and_retry_config_when_missing() {
+        let req: CreateAutomationRequest = serde_json::from_value(serde_json::json!({
+            "command_source": {"type": "inline", "content": "echo run"},
+            "trigger": {"type": "agent_finished"}
+        }))
+        .expect("request should deserialize");
+
+        assert_eq!(req.stop_policy, mission_store::StopPolicy::Never);
+        assert_eq!(req.retry_config.max_retries, 3);
+        assert_eq!(req.retry_config.retry_delay_seconds, 60);
+        assert_eq!(req.retry_config.backoff_multiplier, 2.0);
+    }
+
+    #[test]
+    fn test_create_automation_request_defaults_stop_policy_and_retry_config_when_null() {
+        let req: CreateAutomationRequest = serde_json::from_value(serde_json::json!({
+            "command_source": {"type": "inline", "content": "echo run"},
+            "trigger": {"type": "agent_finished"},
+            "stop_policy": null,
+            "retry_config": null
+        }))
+        .expect("request should deserialize");
+
+        assert_eq!(req.stop_policy, mission_store::StopPolicy::Never);
+        assert_eq!(req.retry_config.max_retries, 3);
+        assert_eq!(req.retry_config.retry_delay_seconds, 60);
+        assert_eq!(req.retry_config.backoff_multiplier, 2.0);
+    }
+
+    #[test]
     fn test_automation_library_command_body_strips_frontmatter() {
         let content = r#"---
 description: Analyze failures
@@ -6593,6 +7053,466 @@ Investigate <service/> failures.
             automation_library_command_body("  Echo current status. \n"),
             "Echo current status."
         );
+    }
+
+    #[test]
+    fn test_stop_policy_matches_completed_only_for_completed_policy() {
+        assert!(mission_store::StopPolicy::OnMissionCompleted
+            .disables_on_status(MissionStatus::Completed));
+        assert!(!mission_store::StopPolicy::OnMissionCompleted
+            .disables_on_status(MissionStatus::Failed));
+    }
+
+    #[test]
+    fn test_stop_policy_matches_any_terminal_for_terminal_policy() {
+        assert!(
+            mission_store::StopPolicy::OnTerminalAny.disables_on_status(MissionStatus::Completed)
+        );
+        assert!(mission_store::StopPolicy::OnTerminalAny.disables_on_status(MissionStatus::Failed));
+        assert!(
+            mission_store::StopPolicy::OnTerminalAny.disables_on_status(MissionStatus::Interrupted)
+        );
+        assert!(mission_store::StopPolicy::OnTerminalAny.disables_on_status(MissionStatus::Blocked));
+        assert!(
+            mission_store::StopPolicy::OnTerminalAny.disables_on_status(MissionStatus::NotFeasible)
+        );
+        assert!(!mission_store::StopPolicy::OnTerminalAny.disables_on_status(MissionStatus::Active));
+    }
+
+    #[test]
+    fn test_stop_policy_never_never_matches() {
+        assert!(!mission_store::StopPolicy::Never.disables_on_status(MissionStatus::Completed));
+        assert!(!mission_store::StopPolicy::Never.disables_on_status(MissionStatus::Failed));
+    }
+
+    fn sample_test_automation() -> mission_store::Automation {
+        mission_store::Automation {
+            id: Uuid::new_v4(),
+            mission_id: Uuid::new_v4(),
+            command_source: mission_store::CommandSource::Inline {
+                content: "echo run".to_string(),
+            },
+            trigger: mission_store::TriggerType::AgentFinished,
+            variables: std::collections::HashMap::new(),
+            active: true,
+            stop_policy: mission_store::StopPolicy::Never,
+            created_at: mission_store::now_string(),
+            last_triggered_at: None,
+            retry_config: mission_store::RetryConfig::default(),
+        }
+    }
+
+    #[test]
+    fn test_automation_should_auto_disable_requires_active_flag() {
+        let mut automation = sample_test_automation();
+        automation.active = false;
+        automation.stop_policy = mission_store::StopPolicy::OnMissionCompleted;
+        assert!(!automation.should_auto_disable_for_status(MissionStatus::Completed));
+    }
+
+    #[test]
+    fn test_automation_should_auto_disable_matches_terminal_status() {
+        let mut automation = sample_test_automation();
+        automation.stop_policy = mission_store::StopPolicy::OnTerminalAny;
+        assert!(automation.should_auto_disable_for_status(MissionStatus::Failed));
+        automation.stop_policy = mission_store::StopPolicy::OnMissionCompleted;
+        assert!(!automation.should_auto_disable_for_status(MissionStatus::Failed));
+    }
+
+    #[test]
+    fn test_automation_deactivate_if_stop_policy_matches_mutates_active() {
+        let mut automation = sample_test_automation();
+        automation.stop_policy = mission_store::StopPolicy::OnTerminalAny;
+        assert!(automation.deactivate_if_stop_policy_matches(MissionStatus::Failed));
+        assert!(!automation.active);
+    }
+
+    #[tokio::test]
+    async fn test_disable_automation_when_stop_policy_match_skips_on_update_failure() {
+        let mut automation = sample_test_automation();
+        automation.stop_policy = mission_store::StopPolicy::OnTerminalAny;
+        let store = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission_store: Arc<dyn mission_store::MissionStore> = store.clone();
+
+        let outcome = disable_automation_when_stop_policy_matches(
+            mission_store.as_ref(),
+            &automation,
+            MissionStatus::Failed,
+            StopPolicyContext::IntervalScheduler,
+        )
+        .await;
+
+        assert_eq!(outcome, StopPolicyDisableOutcome::DeactivationFailed);
+    }
+
+    #[tokio::test]
+    async fn test_disable_automation_when_stop_policy_does_not_match() {
+        let mut automation = sample_test_automation();
+        automation.stop_policy = mission_store::StopPolicy::OnMissionCompleted;
+        let store = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission_store: Arc<dyn mission_store::MissionStore> = store.clone();
+
+        let outcome = disable_automation_when_stop_policy_matches(
+            mission_store.as_ref(),
+            &automation,
+            MissionStatus::Failed,
+            StopPolicyContext::IntervalScheduler,
+        )
+        .await;
+
+        assert_eq!(outcome, StopPolicyDisableOutcome::NotMatched);
+    }
+
+    #[tokio::test]
+    async fn test_enforce_stop_policy_after_create_deactivates_after_status_change() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(
+            mission_store::SqliteMissionStore::new(temp_dir.path().to_path_buf(), "test-user")
+                .await
+                .expect("sqlite store"),
+        );
+        let mission = store
+            .create_mission(Some("stop policy race"), None, None, None, None, None, None)
+            .await
+            .expect("mission created");
+
+        let created = store
+            .create_automation(mission_store::Automation {
+                id: Uuid::new_v4(),
+                mission_id: mission.id,
+                command_source: mission_store::CommandSource::Inline {
+                    content: "echo run".to_string(),
+                },
+                trigger: mission_store::TriggerType::Webhook {
+                    config: mission_store::WebhookConfig {
+                        webhook_id: "post-create-check".to_string(),
+                        secret: None,
+                        variable_mappings: std::collections::HashMap::new(),
+                    },
+                },
+                variables: std::collections::HashMap::new(),
+                active: true,
+                stop_policy: mission_store::StopPolicy::OnMissionCompleted,
+                created_at: mission_store::now_string(),
+                last_triggered_at: None,
+                retry_config: mission_store::RetryConfig::default(),
+            })
+            .await
+            .expect("automation created");
+
+        store
+            .update_mission_status(mission.id, MissionStatus::Completed)
+            .await
+            .expect("mission marked completed");
+
+        let mission_store: Arc<dyn mission_store::MissionStore> = store.clone();
+        let mut automation = created;
+        enforce_stop_policy_after_create(mission_store.as_ref(), &mut automation).await;
+
+        assert!(!automation.active);
+        let persisted = store
+            .get_automation(automation.id)
+            .await
+            .expect("automation lookup should succeed")
+            .expect("automation should exist");
+        assert!(!persisted.active);
+    }
+
+    #[tokio::test]
+    async fn test_enforce_stop_policy_after_create_marks_in_memory_inactive_on_disable_failure() {
+        let store = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = store
+            .create_mission(
+                Some("stop policy disable failure"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("mission created");
+        store
+            .update_mission_status(mission.id, MissionStatus::Completed)
+            .await
+            .expect("mission marked completed");
+
+        // This automation is intentionally not persisted so active-only update fails.
+        let mut automation = mission_store::Automation {
+            mission_id: mission.id,
+            stop_policy: mission_store::StopPolicy::OnMissionCompleted,
+            ..sample_test_automation()
+        };
+        let mission_store: Arc<dyn mission_store::MissionStore> = store.clone();
+
+        enforce_stop_policy_after_create(mission_store.as_ref(), &mut automation).await;
+
+        assert!(!automation.active);
+    }
+
+    #[tokio::test]
+    async fn test_enforce_stop_policy_after_create_reactivates_when_status_no_longer_matches() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(
+            mission_store::SqliteMissionStore::new(temp_dir.path().to_path_buf(), "test-user")
+                .await
+                .expect("sqlite store"),
+        );
+        let mission = store
+            .create_mission(
+                Some("stop policy re-enable"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("mission created");
+        store
+            .update_mission_status(mission.id, MissionStatus::Completed)
+            .await
+            .expect("mission marked completed");
+
+        let created = store
+            .create_automation(mission_store::Automation {
+                id: Uuid::new_v4(),
+                mission_id: mission.id,
+                command_source: mission_store::CommandSource::Inline {
+                    content: "echo run".to_string(),
+                },
+                trigger: mission_store::TriggerType::Webhook {
+                    config: mission_store::WebhookConfig {
+                        webhook_id: "post-create-reactivate".to_string(),
+                        secret: None,
+                        variable_mappings: std::collections::HashMap::new(),
+                    },
+                },
+                variables: std::collections::HashMap::new(),
+                active: false,
+                stop_policy: mission_store::StopPolicy::OnMissionCompleted,
+                created_at: mission_store::now_string(),
+                last_triggered_at: None,
+                retry_config: mission_store::RetryConfig::default(),
+            })
+            .await
+            .expect("automation created");
+
+        store
+            .update_mission_status(mission.id, MissionStatus::Active)
+            .await
+            .expect("mission marked active");
+
+        let mission_store: Arc<dyn mission_store::MissionStore> = store.clone();
+        let mut automation = created;
+        enforce_stop_policy_after_create(mission_store.as_ref(), &mut automation).await;
+
+        assert!(automation.active);
+        let persisted = store
+            .get_automation(automation.id)
+            .await
+            .expect("automation lookup should succeed")
+            .expect("automation should exist");
+        assert!(persisted.active);
+    }
+
+    #[tokio::test]
+    async fn test_enforce_stop_policy_after_create_keeps_inactive_when_status_still_matches() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(
+            mission_store::SqliteMissionStore::new(temp_dir.path().to_path_buf(), "test-user")
+                .await
+                .expect("sqlite store"),
+        );
+        let mission = store
+            .create_mission(
+                Some("stop policy remains matched"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("mission created");
+        store
+            .update_mission_status(mission.id, MissionStatus::Completed)
+            .await
+            .expect("mission marked completed");
+
+        let created = store
+            .create_automation(mission_store::Automation {
+                id: Uuid::new_v4(),
+                mission_id: mission.id,
+                command_source: mission_store::CommandSource::Inline {
+                    content: "echo run".to_string(),
+                },
+                trigger: mission_store::TriggerType::Webhook {
+                    config: mission_store::WebhookConfig {
+                        webhook_id: "post-create-stays-inactive".to_string(),
+                        secret: None,
+                        variable_mappings: std::collections::HashMap::new(),
+                    },
+                },
+                variables: std::collections::HashMap::new(),
+                active: false,
+                stop_policy: mission_store::StopPolicy::OnMissionCompleted,
+                created_at: mission_store::now_string(),
+                last_triggered_at: None,
+                retry_config: mission_store::RetryConfig::default(),
+            })
+            .await
+            .expect("automation created");
+
+        let mission_store: Arc<dyn mission_store::MissionStore> = store.clone();
+        let mut automation = created;
+        enforce_stop_policy_after_create(mission_store.as_ref(), &mut automation).await;
+
+        assert!(!automation.active);
+        let persisted = store
+            .get_automation(automation.id)
+            .await
+            .expect("automation lookup should succeed")
+            .expect("automation should exist");
+        assert!(!persisted.active);
+    }
+
+    #[test]
+    fn test_should_disable_automation_applies_to_non_interval_triggers() {
+        let mission_id = Uuid::new_v4();
+        let now = mission_store::now_string();
+
+        let webhook_automation = mission_store::Automation {
+            id: Uuid::new_v4(),
+            mission_id,
+            command_source: mission_store::CommandSource::Inline {
+                content: "echo webhook".to_string(),
+            },
+            trigger: mission_store::TriggerType::Webhook {
+                config: mission_store::WebhookConfig {
+                    webhook_id: "hook-1".to_string(),
+                    secret: None,
+                    variable_mappings: std::collections::HashMap::new(),
+                },
+            },
+            variables: std::collections::HashMap::new(),
+            active: true,
+            stop_policy: mission_store::StopPolicy::OnTerminalAny,
+            created_at: now.clone(),
+            last_triggered_at: None,
+            retry_config: mission_store::RetryConfig::default(),
+        };
+
+        let agent_finished_automation = mission_store::Automation {
+            id: Uuid::new_v4(),
+            mission_id,
+            command_source: mission_store::CommandSource::Inline {
+                content: "echo finished".to_string(),
+            },
+            trigger: mission_store::TriggerType::AgentFinished,
+            variables: std::collections::HashMap::new(),
+            active: true,
+            stop_policy: mission_store::StopPolicy::OnMissionCompleted,
+            created_at: now,
+            last_triggered_at: None,
+            retry_config: mission_store::RetryConfig::default(),
+        };
+
+        assert!(webhook_automation.should_auto_disable_for_status(MissionStatus::Failed));
+        assert!(agent_finished_automation.should_auto_disable_for_status(MissionStatus::Completed));
+        assert!(!agent_finished_automation.should_auto_disable_for_status(MissionStatus::Failed));
+    }
+
+    #[test]
+    fn test_active_agent_finished_automations_filters_by_active_and_trigger() {
+        let mission_id = Uuid::new_v4();
+        let now = mission_store::now_string();
+        let base = mission_store::Automation {
+            id: Uuid::new_v4(),
+            mission_id,
+            command_source: mission_store::CommandSource::Inline {
+                content: "echo run".to_string(),
+            },
+            trigger: mission_store::TriggerType::AgentFinished,
+            variables: std::collections::HashMap::new(),
+            active: true,
+            stop_policy: mission_store::StopPolicy::Never,
+            created_at: now,
+            last_triggered_at: None,
+            retry_config: mission_store::RetryConfig::default(),
+        };
+
+        let mut inactive_agent_finished = base.clone();
+        inactive_agent_finished.id = Uuid::new_v4();
+        inactive_agent_finished.active = false;
+
+        let mut active_webhook = base.clone();
+        active_webhook.id = Uuid::new_v4();
+        active_webhook.trigger = mission_store::TriggerType::Webhook {
+            config: mission_store::WebhookConfig {
+                webhook_id: "hook-keep-out".to_string(),
+                secret: None,
+                variable_mappings: std::collections::HashMap::new(),
+            },
+        };
+
+        let filtered = active_agent_finished_automations(vec![
+            base.clone(),
+            inactive_agent_finished,
+            active_webhook,
+        ]);
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].id, base.id);
+    }
+
+    #[test]
+    fn test_automation_blocks_status_transition_when_policy_would_not_disable() {
+        let automation = mission_store::Automation {
+            id: Uuid::new_v4(),
+            mission_id: Uuid::new_v4(),
+            command_source: mission_store::CommandSource::Inline {
+                content: "echo run".to_string(),
+            },
+            trigger: mission_store::TriggerType::AgentFinished,
+            variables: std::collections::HashMap::new(),
+            active: true,
+            stop_policy: mission_store::StopPolicy::Never,
+            created_at: mission_store::now_string(),
+            last_triggered_at: None,
+            retry_config: mission_store::RetryConfig::default(),
+        };
+
+        assert!(automation.blocks_transition_to_status(MissionStatus::Completed));
+    }
+
+    #[test]
+    fn test_automation_does_not_block_transition_when_policy_matches_target_status() {
+        let automation = mission_store::Automation {
+            id: Uuid::new_v4(),
+            mission_id: Uuid::new_v4(),
+            command_source: mission_store::CommandSource::Inline {
+                content: "echo run".to_string(),
+            },
+            trigger: mission_store::TriggerType::Webhook {
+                config: mission_store::WebhookConfig {
+                    webhook_id: "hook".to_string(),
+                    secret: None,
+                    variable_mappings: std::collections::HashMap::new(),
+                },
+            },
+            variables: std::collections::HashMap::new(),
+            active: true,
+            stop_policy: mission_store::StopPolicy::OnTerminalAny,
+            created_at: mission_store::now_string(),
+            last_triggered_at: None,
+            retry_config: mission_store::RetryConfig::default(),
+        };
+
+        assert!(!automation.blocks_transition_to_status(MissionStatus::Completed));
     }
 
     #[tokio::test]

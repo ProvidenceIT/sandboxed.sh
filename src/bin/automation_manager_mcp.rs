@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use sandboxed_sh::api::mission_store::{
-    Automation, AutomationExecution, CommandSource, RetryConfig, TriggerType,
+    Automation, AutomationExecution, CommandSource, RetryConfig, StopPolicy, TriggerType,
 };
 
 // =============================================================================
@@ -108,6 +108,8 @@ struct CreateAutomationParams {
     variables: HashMap<String, String>,
     #[serde(default)]
     retry_config: Option<RetryConfig>,
+    #[serde(default)]
+    stop_policy: Option<StopPolicy>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -121,6 +123,8 @@ struct UpdateAutomationParams {
     variables: Option<HashMap<String, String>>,
     #[serde(default)]
     retry_config: Option<RetryConfig>,
+    #[serde(default)]
+    stop_policy: Option<StopPolicy>,
     #[serde(default)]
     active: Option<bool>,
 }
@@ -263,6 +267,11 @@ impl AutomationManagerMcp {
                                 "retry_delay_seconds": {"type": "number", "description": "Initial delay between retries"},
                                 "backoff_multiplier": {"type": "number", "description": "Exponential backoff multiplier"}
                             }
+                        },
+                        "stop_policy": {
+                            "type": "string",
+                            "description": "Auto-stop behavior for this automation",
+                            "enum": ["never", "on_mission_completed", "on_terminal_any"]
                         }
                     }
                 }),
@@ -291,6 +300,11 @@ impl AutomationManagerMcp {
                         "retry_config": {
                             "type": "object",
                             "description": "New retry configuration (optional)"
+                        },
+                        "stop_policy": {
+                            "type": "string",
+                            "description": "New stop policy (optional)",
+                            "enum": ["never", "on_mission_completed", "on_terminal_any"]
                         },
                         "active": {"type": "boolean", "description": "Enable or disable automation"}
                     }
@@ -366,6 +380,7 @@ impl AutomationManagerMcp {
             "trigger": params.trigger,
             "variables": params.variables,
             "retry_config": params.retry_config,
+            "stop_policy": params.stop_policy,
         }));
 
         if let Some(ref token) = self.api_token {
@@ -402,6 +417,7 @@ impl AutomationManagerMcp {
             "trigger": params.trigger,
             "variables": params.variables,
             "retry_config": params.retry_config,
+            "stop_policy": params.stop_policy,
             "active": params.active,
         }));
 

@@ -2,8 +2,8 @@
 
 use super::{
     now_string, sanitize_filename, Automation, AutomationExecution, CommandSource, ExecutionStatus,
-    Mission, MissionHistoryEntry, MissionStatus, MissionStore, RetryConfig, StoredEvent,
-    TriggerType, WebhookConfig,
+    Mission, MissionHistoryEntry, MissionStatus, MissionStore, RetryConfig, StopPolicy,
+    StoredEvent, TriggerType, WebhookConfig,
 };
 use crate::api::control::{AgentEvent, AgentTreeNode, DesktopSessionInfo};
 use async_trait::async_trait;
@@ -107,6 +107,7 @@ CREATE TABLE IF NOT EXISTS automations (
     trigger_data TEXT NOT NULL,
     variables TEXT NOT NULL DEFAULT '{}',
     active INTEGER NOT NULL DEFAULT 1,
+    stop_policy TEXT NOT NULL DEFAULT 'never',
     created_at TEXT NOT NULL,
     last_triggered_at TEXT,
     retry_max_retries INTEGER NOT NULL DEFAULT 3,
@@ -158,11 +159,12 @@ impl SqliteMissionStore {
         let trigger_data: String = row.get(5)?;
         let variables_json: String = row.get(6)?;
         let active: i64 = row.get(7)?;
-        let created_at: String = row.get(8)?;
-        let last_triggered_at: Option<String> = row.get(9)?;
-        let retry_max_retries: i64 = row.get(10)?;
-        let retry_delay_seconds: i64 = row.get(11)?;
-        let retry_backoff_multiplier: f64 = row.get(12)?;
+        let stop_policy_str: String = row.get(8)?;
+        let created_at: String = row.get(9)?;
+        let last_triggered_at: Option<String> = row.get(10)?;
+        let retry_max_retries: i64 = row.get(11)?;
+        let retry_delay_seconds: i64 = row.get(12)?;
+        let retry_backoff_multiplier: f64 = row.get(13)?;
 
         // Parse command source
         let command_source: CommandSource = match command_source_type.as_str() {
@@ -219,6 +221,14 @@ impl SqliteMissionStore {
         // Parse variables
         let variables: HashMap<String, String> =
             serde_json::from_str(&variables_json).unwrap_or_default();
+        let stop_policy = stop_policy_str.parse().unwrap_or_else(|_| {
+            tracing::warn!(
+                "Unknown stop_policy '{}' for automation {}; defaulting to 'never'",
+                stop_policy_str,
+                id
+            );
+            StopPolicy::Never
+        });
 
         Ok(Automation {
             id: Uuid::parse_str(&id)
@@ -229,6 +239,7 @@ impl SqliteMissionStore {
             trigger,
             variables,
             active: active != 0,
+            stop_policy,
             created_at,
             last_triggered_at,
             retry_config: RetryConfig {
@@ -500,6 +511,7 @@ impl SqliteMissionStore {
                     trigger_data TEXT NOT NULL,
                     variables TEXT NOT NULL DEFAULT '{}',
                     active INTEGER NOT NULL DEFAULT 1,
+                    stop_policy TEXT NOT NULL DEFAULT 'never',
                     created_at TEXT NOT NULL,
                     last_triggered_at TEXT,
                     retry_max_retries INTEGER NOT NULL DEFAULT 3,
@@ -559,9 +571,10 @@ impl SqliteMissionStore {
 
                 conn.execute(
                     "INSERT INTO automations (id, mission_id, command_source_type, command_source_data,
-                                             trigger_type, trigger_data, variables, active, created_at,
-                                             last_triggered_at, retry_max_retries, retry_delay_seconds, retry_backoff_multiplier)
-                     VALUES (?, ?, 'library', ?, 'interval', ?, '{}', ?, ?, ?, 3, 60, 2.0)",
+                                             trigger_type, trigger_data, variables, active, stop_policy,
+                                             created_at, last_triggered_at, retry_max_retries,
+                                             retry_delay_seconds, retry_backoff_multiplier)
+                     VALUES (?, ?, 'library', ?, 'interval', ?, '{}', ?, 'never', ?, ?, 3, 60, 2.0)",
                     params![id, mission_id, command_source_data, trigger_data, active, created_at, last_triggered_at],
                 )
                 .map_err(|e| format!("Failed to migrate automation: {}", e))?;
@@ -622,6 +635,20 @@ impl SqliteMissionStore {
                 [],
             )
             .map_err(|e| format!("Failed to create automation webhook index: {}", e))?;
+        }
+
+        let has_stop_policy: bool = conn
+            .prepare("SELECT 1 FROM pragma_table_info('automations') WHERE name = 'stop_policy'")
+            .map_err(|e| format!("Failed to check stop_policy column: {}", e))?
+            .exists([])
+            .map_err(|e| format!("Failed to query table info: {}", e))?;
+        if !has_stop_policy {
+            tracing::info!("Running migration: adding 'stop_policy' column to automations table");
+            conn.execute(
+                "ALTER TABLE automations ADD COLUMN stop_policy TEXT NOT NULL DEFAULT 'never'",
+                [],
+            )
+            .map_err(|e| format!("Failed to add stop_policy column: {}", e))?;
         }
 
         Ok(())
@@ -1622,9 +1649,10 @@ impl MissionStore for SqliteMissionStore {
             let conn = conn.blocking_lock();
             conn.execute(
                 "INSERT INTO automations (id, mission_id, command_source_type, command_source_data,
-                                         trigger_type, trigger_data, variables, active, created_at,
-                                         last_triggered_at, retry_max_retries, retry_delay_seconds, retry_backoff_multiplier)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                         trigger_type, trigger_data, variables, active, stop_policy,
+                                         created_at, last_triggered_at, retry_max_retries,
+                                         retry_delay_seconds, retry_backoff_multiplier)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 params![
                     a.id.to_string(),
                     a.mission_id.to_string(),
@@ -1634,6 +1662,7 @@ impl MissionStore for SqliteMissionStore {
                     trigger_data,
                     variables_json,
                     if a.active { 1 } else { 0 },
+                    a.stop_policy.as_db_str(),
                     a.created_at,
                     a.last_triggered_at,
                     a.retry_config.max_retries as i64,
@@ -1658,7 +1687,7 @@ impl MissionStore for SqliteMissionStore {
             let conn = conn.blocking_lock();
             let mut stmt = conn
                 .prepare("SELECT id, mission_id, command_source_type, command_source_data,
-                                trigger_type, trigger_data, variables, active, created_at, last_triggered_at,
+                                trigger_type, trigger_data, variables, active, stop_policy, created_at, last_triggered_at,
                                 retry_max_retries, retry_delay_seconds, retry_backoff_multiplier
                          FROM automations WHERE mission_id = ? ORDER BY created_at DESC")
                 .map_err(|e| e.to_string())?;
@@ -1685,7 +1714,7 @@ impl MissionStore for SqliteMissionStore {
             let mut stmt = conn
                 .prepare(
                     "SELECT id, mission_id, command_source_type, command_source_data,
-                            trigger_type, trigger_data, variables, active, created_at, last_triggered_at,
+                            trigger_type, trigger_data, variables, active, stop_policy, created_at, last_triggered_at,
                             retry_max_retries, retry_delay_seconds, retry_backoff_multiplier
                      FROM automations WHERE active = 1 ORDER BY created_at DESC",
                 )
@@ -1714,7 +1743,7 @@ impl MissionStore for SqliteMissionStore {
             let result = conn
                 .query_row(
                     "SELECT id, mission_id, command_source_type, command_source_data,
-                            trigger_type, trigger_data, variables, active, created_at, last_triggered_at,
+                            trigger_type, trigger_data, variables, active, stop_policy, created_at, last_triggered_at,
                             retry_max_retries, retry_delay_seconds, retry_backoff_multiplier
                      FROM automations WHERE id = ?",
                     [id_str],
@@ -1819,7 +1848,7 @@ impl MissionStore for SqliteMissionStore {
             conn.execute(
                 "UPDATE automations SET command_source_type = ?, command_source_data = ?,
                                        trigger_type = ?, trigger_data = ?, variables = ?, active = ?,
-                                       last_triggered_at = ?, retry_max_retries = ?, retry_delay_seconds = ?,
+                                       stop_policy = ?, last_triggered_at = ?, retry_max_retries = ?, retry_delay_seconds = ?,
                                        retry_backoff_multiplier = ?
                  WHERE id = ?",
                 params![
@@ -1829,6 +1858,7 @@ impl MissionStore for SqliteMissionStore {
                     trigger_data,
                     variables_json,
                     if automation.active { 1 } else { 0 },
+                    automation.stop_policy.as_db_str(),
                     automation.last_triggered_at,
                     automation.retry_config.max_retries as i64,
                     automation.retry_config.retry_delay_seconds as i64,
@@ -1855,7 +1885,7 @@ impl MissionStore for SqliteMissionStore {
             let result = conn
                 .query_row(
                     "SELECT id, mission_id, command_source_type, command_source_data,
-                            trigger_type, trigger_data, variables, active, created_at, last_triggered_at,
+                            trigger_type, trigger_data, variables, active, stop_policy, created_at, last_triggered_at,
                             retry_max_retries, retry_delay_seconds, retry_backoff_multiplier
                      FROM automations
                      WHERE trigger_type = 'webhook' AND json_extract(trigger_data, '$.webhook_id') = ?",

@@ -21,6 +21,8 @@ export type TriggerType =
       };
     };
 
+export type StopPolicy = "never" | "on_mission_completed" | "on_terminal_any";
+
 export interface Automation {
   id: string;
   mission_id: string;
@@ -28,6 +30,7 @@ export interface Automation {
   trigger: TriggerType;
   variables?: Record<string, string>;
   active: boolean;
+  stop_policy?: StopPolicy;
   created_at: string;
   last_triggered_at?: string | null;
   retry_config?: {
@@ -66,6 +69,7 @@ export interface CreateAutomationInput {
   command_source: CommandSource;
   trigger: TriggerType;
   variables?: Record<string, string>;
+  stop_policy?: StopPolicy;
   start_immediately?: boolean;
 }
 
@@ -128,6 +132,7 @@ export async function updateAutomation(
     command_source?: CommandSource;
     trigger?: TriggerType;
     variables?: Record<string, string>;
+    stop_policy?: StopPolicy;
     active?: boolean;
   }
 ): Promise<Automation> {
