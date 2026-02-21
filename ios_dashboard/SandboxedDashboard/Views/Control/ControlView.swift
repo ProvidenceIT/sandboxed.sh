@@ -1676,8 +1676,12 @@ struct ControlView: View {
             if let content = data["content"] as? String,
                let id = data["id"] as? String {
                 let success = data["success"] as? Bool ?? true
-                let costCents = data["cost_cents"] as? Int ?? 0
-                let costSource = (data["cost_source"] as? String).flatMap(CostSource.init(rawValue:)) ?? .unknown
+                let costObj = data["cost"] as? [String: Any]
+                let costCents = data["cost_cents"] as? Int
+                    ?? costObj?["amount_cents"] as? Int
+                    ?? 0
+                let costSource = (data["cost_source"] as? String ?? costObj?["source"] as? String)
+                    .flatMap(CostSource.init(rawValue:)) ?? .unknown
                 let model = data["model"] as? String
 
                 // Parse shared_files if present
