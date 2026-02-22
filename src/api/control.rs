@@ -292,13 +292,42 @@ fn mission_is_terminal(status: MissionStatus) -> bool {
 
 fn stop_policy_matches_status(
     stop_policy: &mission_store::StopPolicy,
-    status: MissionStatus,
+    _status: MissionStatus,
+    consecutive_failures: u32,
 ) -> bool {
     match stop_policy {
         mission_store::StopPolicy::Never => false,
-        mission_store::StopPolicy::OnMissionCompleted => status == MissionStatus::Completed,
-        mission_store::StopPolicy::OnTerminalAny => mission_is_terminal(status),
+        mission_store::StopPolicy::OnConsecutiveFailures { count } => {
+            // Stop if we've had N consecutive failures
+            consecutive_failures >= *count
+        }
     }
+}
+
+async fn consecutive_failure_count_for_automation(
+    mission_store: &Arc<dyn MissionStore>,
+    automation: &mission_store::Automation,
+) -> u32 {
+    if !matches!(
+        automation.stop_policy,
+        mission_store::StopPolicy::OnConsecutiveFailures { .. }
+    ) {
+        return 0;
+    }
+
+    let executions = mission_store
+        .get_automation_executions(automation.id, Some(20))
+        .await
+        .unwrap_or_default();
+    let mut count = 0u32;
+    for exec in executions.iter().take(20) {
+        match exec.status {
+            mission_store::ExecutionStatus::Failed => count += 1,
+            mission_store::ExecutionStatus::Success => break,
+            _ => {}
+        }
+    }
+    count
 }
 
 pub(crate) async fn resolve_claudecode_default_model(
@@ -2615,7 +2644,14 @@ async fn automation_scheduler_loop(
                 }
             };
 
-            if stop_policy_matches_status(&automation.stop_policy, mission.status) {
+            let consecutive_failures =
+                consecutive_failure_count_for_automation(&mission_store, &automation).await;
+
+            if stop_policy_matches_status(
+                &automation.stop_policy,
+                mission.status,
+                consecutive_failures,
+            ) {
                 tracing::info!(
                     "Disabling automation {} due to stop policy {:?} (mission {} status {:?})",
                     automation.id,
@@ -2995,7 +3031,14 @@ async fn agent_finished_automation_messages(
 
     let mut eligible = Vec::with_capacity(active.len());
     for automation in active {
-        if stop_policy_matches_status(&automation.stop_policy, mission.status) {
+        let consecutive_failures =
+            consecutive_failure_count_for_automation(mission_store, &automation).await;
+
+        if stop_policy_matches_status(
+            &automation.stop_policy,
+            mission.status,
+            consecutive_failures,
+        ) {
             tracing::info!(
                 "Disabling agent_finished automation {} due to stop policy {:?} (mission {} status {:?})",
                 automation.id,
@@ -5948,6 +5991,8 @@ pub struct CreateAutomationRequest {
     pub retry_config: Option<mission_store::RetryConfig>,
     #[serde(default)]
     pub stop_policy: Option<mission_store::StopPolicy>,
+    #[serde(default)]
+    pub fresh_session: Option<mission_store::FreshSession>,
     /// When true, trigger the first execution immediately after creation.
     #[serde(default)]
     pub start_immediately: bool,
@@ -5960,6 +6005,7 @@ pub struct UpdateAutomationRequest {
     pub variables: Option<HashMap<String, String>>,
     pub retry_config: Option<mission_store::RetryConfig>,
     pub stop_policy: Option<mission_store::StopPolicy>,
+    pub fresh_session: Option<mission_store::FreshSession>,
     pub active: Option<bool>,
 }
 
@@ -6042,9 +6088,13 @@ pub async fn create_automation(
         variables: req.variables,
         active: true,
         stop_policy: req.stop_policy.unwrap_or(mission_store::StopPolicy::Never),
+        fresh_session: req
+            .fresh_session
+            .unwrap_or(mission_store::FreshSession::Keep),
         created_at: mission_store::now_string(),
         last_triggered_at,
         retry_config: req.retry_config.unwrap_or_default(),
+        consecutive_failures: 0,
     };
 
     let mut automation = control
@@ -6063,7 +6113,8 @@ pub async fn create_automation(
         )
     {
         if let Ok(Some(mission)) = control.mission_store.get_mission(mission_id).await {
-            if stop_policy_matches_status(&automation.stop_policy, mission.status) {
+            // Newly created automation has 0 consecutive failures
+            if stop_policy_matches_status(&automation.stop_policy, mission.status, 0) {
                 let mut updated = automation.clone();
                 updated.active = false;
                 if let Err(e) = control.mission_store.update_automation(updated).await {
@@ -6182,6 +6233,10 @@ pub async fn update_automation(
 
     if let Some(stop_policy) = req.stop_policy {
         automation.stop_policy = stop_policy;
+    }
+
+    if let Some(fresh_session) = req.fresh_session {
+        automation.fresh_session = fresh_session;
     }
 
     if let Some(active) = req.active {
@@ -6388,7 +6443,14 @@ pub async fn webhook_receiver(
             format!("Mission {} not found", mission_id),
         ))?;
 
-    if stop_policy_matches_status(&automation.stop_policy, mission.status) {
+    let consecutive_failures =
+        consecutive_failure_count_for_automation(&control.mission_store, &automation).await;
+
+    if stop_policy_matches_status(
+        &automation.stop_policy,
+        mission.status,
+        consecutive_failures,
+    ) {
         let mut updated = automation.clone();
         updated.active = false;
         if let Err(e) = control.mission_store.update_automation(updated).await {
@@ -6711,42 +6773,27 @@ Investigate <service/> failures.
     }
 
     #[test]
-    fn test_stop_policy_matches_completed_only_for_completed_policy() {
+    fn test_stop_policy_matches_consecutive_failures() {
+        // With count of 2, should match after 2 consecutive failures
         assert!(stop_policy_matches_status(
-            &mission_store::StopPolicy::OnMissionCompleted,
-            MissionStatus::Completed
+            &mission_store::StopPolicy::OnConsecutiveFailures { count: 2 },
+            MissionStatus::Failed,
+            2
         ));
         assert!(!stop_policy_matches_status(
-            &mission_store::StopPolicy::OnMissionCompleted,
-            MissionStatus::Failed
-        ));
-    }
-
-    #[test]
-    fn test_stop_policy_matches_any_terminal_for_terminal_policy() {
-        assert!(stop_policy_matches_status(
-            &mission_store::StopPolicy::OnTerminalAny,
-            MissionStatus::Completed
+            &mission_store::StopPolicy::OnConsecutiveFailures { count: 2 },
+            MissionStatus::Failed,
+            1
         ));
         assert!(stop_policy_matches_status(
-            &mission_store::StopPolicy::OnTerminalAny,
-            MissionStatus::Failed
-        ));
-        assert!(stop_policy_matches_status(
-            &mission_store::StopPolicy::OnTerminalAny,
-            MissionStatus::Interrupted
-        ));
-        assert!(stop_policy_matches_status(
-            &mission_store::StopPolicy::OnTerminalAny,
-            MissionStatus::Blocked
-        ));
-        assert!(stop_policy_matches_status(
-            &mission_store::StopPolicy::OnTerminalAny,
-            MissionStatus::NotFeasible
+            &mission_store::StopPolicy::OnConsecutiveFailures { count: 3 },
+            MissionStatus::Failed,
+            3
         ));
         assert!(!stop_policy_matches_status(
-            &mission_store::StopPolicy::OnTerminalAny,
-            MissionStatus::Active
+            &mission_store::StopPolicy::OnConsecutiveFailures { count: 3 },
+            MissionStatus::Failed,
+            2
         ));
     }
 
@@ -6754,11 +6801,13 @@ Investigate <service/> failures.
     fn test_stop_policy_never_never_matches() {
         assert!(!stop_policy_matches_status(
             &mission_store::StopPolicy::Never,
-            MissionStatus::Completed
+            MissionStatus::Completed,
+            0
         ));
         assert!(!stop_policy_matches_status(
             &mission_store::StopPolicy::Never,
-            MissionStatus::Failed
+            MissionStatus::Failed,
+            5
         ));
     }
 

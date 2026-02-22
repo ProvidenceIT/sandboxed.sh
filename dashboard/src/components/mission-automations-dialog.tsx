@@ -28,6 +28,7 @@ import {
   type CreateAutomationInput,
   type TriggerType,
   type StopPolicy,
+  type FreshSession,
   listMissionAutomations,
   createMissionAutomation,
   updateAutomation,
@@ -151,7 +152,8 @@ export function MissionAutomationsDialog({
   const [intervalValue, setIntervalValue] = useState('5');
   const [intervalUnit, setIntervalUnit] = useState<IntervalUnit>('minutes');
   const [startImmediately, setStartImmediately] = useState(true);
-  const [stopPolicy, setStopPolicy] = useState<StopPolicy>('on_mission_completed');
+  const [stopPolicy, setStopPolicy] = useState<StopPolicy>({ type: 'never' });
+  const [freshSession, setFreshSession] = useState<'always' | 'keep'>('keep');
   const [variables, setVariables] = useState<Array<{ key: string; value: string }>>([]);
   const [creating, setCreating] = useState(false);
   const [togglingId, setTogglingId] = useState<string | null>(null);
@@ -310,9 +312,11 @@ export function MissionAutomationsDialog({
   }, []);
 
   const getStopPolicyLabel = useCallback((policy?: StopPolicy) => {
-    if (!policy || policy === 'never') return 'Never';
-    if (policy === 'on_mission_completed') return 'On mission completed';
-    return 'On any terminal state';
+    if (!policy || policy.type === 'never') return 'Never';
+    if (policy.type === 'on_consecutive_failures') {
+      return `After ${policy.count} consecutive failures`;
+    }
+    return 'Never';
   }, []);
 
   // -- Data loading --
@@ -458,6 +462,7 @@ export function MissionAutomationsDialog({
       command_source,
       trigger,
       stop_policy: stopPolicy,
+      fresh_session: freshSession,
       ...(Object.keys(vars).length > 0 ? { variables: vars } : {}),
       start_immediately: startImmediately,
     };
@@ -476,7 +481,8 @@ export function MissionAutomationsDialog({
       setInlinePrompt('');
       setIntervalValue('5');
       setIntervalUnit('minutes');
-      setStopPolicy('on_mission_completed');
+      setStopPolicy({ type: 'never' });
+      setFreshSession('keep');
       setVariables([]);
       if (promptTimerRef.current) {
         clearTimeout(promptTimerRef.current);
@@ -856,23 +862,46 @@ export function MissionAutomationsDialog({
                 <div>
                   <label className="block text-xs text-white/50 mb-1.5">Stop policy</label>
                   <select
-                    value={stopPolicy}
-                    onChange={(e) => setStopPolicy(e.target.value as StopPolicy)}
+                    value={stopPolicy.type}
+                    onChange={(e) =>
+                      setStopPolicy(
+                        e.target.value === 'on_consecutive_failures'
+                          ? { type: 'on_consecutive_failures', count: 2 }
+                          : { type: 'never' }
+                      )
+                    }
                     className={cn(selectClass, 'w-full')}
                     style={selectStyle}
                   >
-                    <option value="on_mission_completed" className="bg-[#1a1a1a]">
-                      On mission completed (recommended)
-                    </option>
-                    <option value="on_terminal_any" className="bg-[#1a1a1a]">
-                      On any terminal state
-                    </option>
                     <option value="never" className="bg-[#1a1a1a]">
-                      Never
+                      Never (recommended)
+                    </option>
+                    <option value="on_consecutive_failures" className="bg-[#1a1a1a]">
+                      After 2 consecutive failures
                     </option>
                   </select>
                   <div className="mt-1 text-[11px] text-white/30">
-                    Auto-disables this automation when the mission reaches the selected terminal condition.
+                    Auto-disables this automation after repeated failures. Use "Never" for automations that should keep running.
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs text-white/50 mb-1.5">Session mode</label>
+                  <select
+                    value={freshSession || 'keep'}
+                    onChange={(e) => setFreshSession(e.target.value as 'always' | 'keep')}
+                    className={cn(selectClass, 'w-full')}
+                    style={selectStyle}
+                  >
+                    <option value="keep" className="bg-[#1a1a1a]">
+                      Keep session (default)
+                    </option>
+                    <option value="always" className="bg-[#1a1a1a]">
+                      Fresh session (clear context each run)
+                    </option>
+                  </select>
+                  <div className="mt-1 text-[11px] text-white/30">
+                    Fresh session clears all conversation history before each run.
                   </div>
                 </div>
 
@@ -1087,10 +1116,17 @@ export function MissionAutomationsDialog({
                               )}
                               <span>·</span>
                               <span>Last run {lastRunLabel}</span>
-                              {automation.stop_policy && automation.stop_policy !== 'never' && (
+                              {automation.stop_policy &&
+                                automation.stop_policy.type !== 'never' && (
                                 <>
                                   <span>·</span>
                                   <span>Stop: {getStopPolicyLabel(automation.stop_policy)}</span>
+                                </>
+                              )}
+                              {automation.fresh_session === 'always' && (
+                                <>
+                                  <span>·</span>
+                                  <span className="text-amber-400/70">Fresh session</span>
                                 </>
                               )}
                               {hasVars && (
