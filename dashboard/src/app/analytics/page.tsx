@@ -44,20 +44,25 @@ export default function AnalyticsPage() {
   const [loading, setLoading] = useState(true);
   const [timeRange, setTimeRange] = useState<"7d" | "30d" | "all">("7d");
 
+  // Compute ISO-8601 lower bound from the selected time range
+  const sinceDate = useMemo(() => {
+    if (timeRange === "all") return undefined;
+    const days = timeRange === "7d" ? 7 : 30;
+    return new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+  }, [timeRange]);
+
+  // Fetch missions, runs, and all-time stats once on mount
   useEffect(() => {
     async function fetchData() {
       try {
-        const [missionsData, runsData, statsData] = await Promise.all([
+        const [missionsData, runsData, allTimeStats] = await Promise.all([
           listMissions(),
           listRuns(100, 0),
           getStats(),
         ]);
         setMissions(missionsData);
         setRuns(runsData.runs);
-        setTotalCostCents(statsData.total_cost_cents);
-        setActualCostCents(statsData.actual_cost_cents ?? 0);
-        setEstimatedCostCents(statsData.estimated_cost_cents ?? 0);
-        setUnknownCostCents(statsData.unknown_cost_cents ?? 0);
+        setTotalCostCents(allTimeStats.total_cost_cents);
       } catch (err) {
         console.error("Failed to fetch analytics:", err);
         toast.error("Failed to load analytics");
@@ -67,6 +72,21 @@ export default function AnalyticsPage() {
     }
     fetchData();
   }, []);
+
+  // Re-fetch cost breakdown whenever the time range changes
+  useEffect(() => {
+    async function fetchPeriodStats() {
+      try {
+        const stats = await getStats(sinceDate);
+        setActualCostCents(stats.actual_cost_cents ?? 0);
+        setEstimatedCostCents(stats.estimated_cost_cents ?? 0);
+        setUnknownCostCents(stats.unknown_cost_cents ?? 0);
+      } catch {
+        // Silently fall back — the all-time total is still visible
+      }
+    }
+    fetchPeriodStats();
+  }, [sinceDate]);
 
   // Calculate cost by day
   const costByDay = useMemo((): CostByDay[] => {

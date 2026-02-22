@@ -149,8 +149,9 @@ export async function changePassword(
 }
 
 // Get statistics
-export async function getStats(): Promise<StatsResponse> {
-  return apiGet("/api/stats", "Failed to fetch stats");
+export async function getStats(since?: string): Promise<StatsResponse> {
+  const qs = since ? `?since=${encodeURIComponent(since)}` : "";
+  return apiGet(`/api/stats${qs}`, "Failed to fetch stats");
 }
 
 // List all tasks

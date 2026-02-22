@@ -1731,6 +1731,85 @@ impl MissionStore for SqliteMissionStore {
         Ok((actual, estimated, unknown))
     }
 
+    async fn get_total_cost_cents_since(&self, since: &str) -> Result<u64, String> {
+        let conn = self.conn.lock().await;
+        let query = r#"
+            WITH assistant_costs AS (
+                SELECT CAST(
+                    COALESCE(
+                        json_extract(metadata, '$.cost.amount_cents'),
+                        json_extract(metadata, '$.cost_cents'),
+                        0
+                    ) AS INTEGER
+                ) AS raw_cost
+                FROM mission_events
+                WHERE event_type = 'assistant_message'
+                  AND timestamp >= ?1
+            )
+            SELECT COALESCE(
+                SUM(CASE WHEN raw_cost > 0 THEN raw_cost ELSE 0 END),
+                0
+            ) as total_cost
+            FROM assistant_costs
+        "#;
+        let total: i64 = conn
+            .query_row(query, [since], |row| row.get(0))
+            .map_err(|e| e.to_string())?;
+        u64::try_from(total).map_err(|_| format!("negative aggregate cost is invalid: {total}"))
+    }
+
+    async fn get_cost_by_source_since(
+        &self,
+        since: &str,
+    ) -> Result<(u64, u64, u64), String> {
+        let conn = self.conn.lock().await;
+        let query = r#"
+            WITH source_costs AS (
+                SELECT
+                    CAST(
+                        COALESCE(
+                            json_extract(metadata, '$.cost.amount_cents'),
+                            json_extract(metadata, '$.cost_cents'),
+                            0
+                        ) AS INTEGER
+                    ) AS raw_cost,
+                    COALESCE(
+                        json_extract(metadata, '$.cost.source'),
+                        'unknown'
+                    ) AS source
+                FROM mission_events
+                WHERE event_type = 'assistant_message'
+                  AND timestamp >= ?1
+            )
+            SELECT
+                source,
+                COALESCE(SUM(CASE WHEN raw_cost > 0 THEN raw_cost ELSE 0 END), 0) AS total
+            FROM source_costs
+            GROUP BY source
+        "#;
+        let mut stmt = conn.prepare(query).map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([since], |row| {
+                let source: String = row.get(0)?;
+                let total: i64 = row.get(1)?;
+                Ok((source, total.max(0) as u64))
+            })
+            .map_err(|e| e.to_string())?;
+
+        let mut actual: u64 = 0;
+        let mut estimated: u64 = 0;
+        let mut unknown: u64 = 0;
+        for row in rows {
+            let (source, total) = row.map_err(|e| e.to_string())?;
+            match source.as_str() {
+                "actual" => actual = total,
+                "estimated" => estimated = total,
+                _ => unknown = unknown.saturating_add(total),
+            }
+        }
+        Ok((actual, estimated, unknown))
+    }
+
     async fn create_automation(&self, automation: Automation) -> Result<Automation, String> {
         let conn = self.conn.clone();
 
@@ -2475,5 +2554,92 @@ mod tests {
         assert_eq!(estimated, 50);
         // Unknown (10) + legacy (5) both go into the unknown bucket
         assert_eq!(unknown, 15);
+    }
+
+    #[tokio::test]
+    async fn get_cost_since_filters_by_timestamp() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = SqliteMissionStore::new(temp_dir.path().to_path_buf(), "test-user")
+            .await
+            .expect("sqlite store");
+        let mission = store
+            .create_mission(Some("Period cost mission"), None, None, None, None, None, None)
+            .await
+            .expect("mission");
+
+        let conn = store.conn.lock().await;
+        let query = r#"
+            INSERT INTO mission_events (
+                mission_id, sequence, event_type, timestamp, metadata
+            ) VALUES (?1, ?2, 'assistant_message', ?3, ?4)
+        "#;
+
+        // Old event — outside the "since" window
+        conn.execute(
+            query,
+            params![
+                mission.id.to_string(),
+                1i64,
+                "2026-02-01T00:00:00Z",
+                json!({
+                    "cost": { "amount_cents": 200, "source": "actual" }
+                })
+                .to_string()
+            ],
+        )
+        .expect("insert old actual");
+
+        // Recent events — inside the "since" window
+        conn.execute(
+            query,
+            params![
+                mission.id.to_string(),
+                2i64,
+                "2026-02-20T00:00:00Z",
+                json!({
+                    "cost": { "amount_cents": 30, "source": "actual" }
+                })
+                .to_string()
+            ],
+        )
+        .expect("insert recent actual");
+        conn.execute(
+            query,
+            params![
+                mission.id.to_string(),
+                3i64,
+                "2026-02-21T00:00:00Z",
+                json!({
+                    "cost": { "amount_cents": 15, "source": "estimated" }
+                })
+                .to_string()
+            ],
+        )
+        .expect("insert recent estimated");
+
+        drop(conn);
+
+        // All-time totals
+        let all_total = store
+            .get_total_cost_cents()
+            .await
+            .expect("all-time total");
+        assert_eq!(all_total, 245); // 200 + 30 + 15
+
+        // Period-filtered: since 2026-02-15 should only include the two recent events
+        let since = "2026-02-15T00:00:00Z";
+        let period_total = store
+            .get_total_cost_cents_since(since)
+            .await
+            .expect("period total");
+        assert_eq!(period_total, 45); // 30 + 15
+
+        let (actual, estimated, unknown) = store
+            .get_cost_by_source_since(since)
+            .await
+            .expect("period cost by source");
+        assert_eq!(actual, 30);
+        assert_eq!(estimated, 15);
+        assert_eq!(unknown, 0);
     }
 }
