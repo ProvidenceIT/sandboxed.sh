@@ -1084,7 +1084,7 @@ mod tests {
         .unwrap();
         let mut pending = HashMap::new();
         let results = convert_cli_event(event, &mut pending);
-        
+
         assert_eq!(results.len(), 1);
         match &results[0] {
             ExecutionEvent::TextDelta { content } => {
@@ -1108,7 +1108,7 @@ mod tests {
         .unwrap();
         let mut pending = HashMap::new();
         let results = convert_cli_event(event, &mut pending);
-        
+
         assert_eq!(results.len(), 1);
         match &results[0] {
             ExecutionEvent::Thinking { content } => {
@@ -1122,7 +1122,7 @@ mod tests {
     fn tool_call_stored_for_result_correlation() {
         // Tool calls must be tracked so results can be correlated
         let mut pending: HashMap<String, PendingToolCall> = HashMap::new();
-        
+
         // First, a tool call event
         let tool_call_event: CliEvent = serde_json::from_value(json!({
             "type": "assistant",
@@ -1141,10 +1141,13 @@ mod tests {
         }))
         .unwrap();
         let _results = convert_cli_event(tool_call_event, &mut pending);
-        
+
         // Verify tool call is pending
-        assert!(pending.contains_key("tool_abc"), "Tool call should be tracked for correlation");
-        
+        assert!(
+            pending.contains_key("tool_abc"),
+            "Tool call should be tracked for correlation"
+        );
+
         // Now the tool result with matching tool_use_id
         let tool_result_event: CliEvent = serde_json::from_value(json!({
             "type": "tool_result",
@@ -1184,7 +1187,7 @@ mod tests {
         .unwrap();
         let mut pending = HashMap::new();
         let results = convert_cli_event(event, &mut pending);
-        
+
         assert_eq!(results.len(), 1);
         match &results[0] {
             ExecutionEvent::Error { message } => {
