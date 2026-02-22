@@ -1064,4 +1064,105 @@ mod tests {
         let results = convert_cli_event(event, &mut pending);
         assert!(results.is_empty());
     }
+
+    #[test]
+    fn text_delta_does_not_contain_thinking_content() {
+        let event: CliEvent = serde_json::from_value(json!({
+            "type": "stream_event",
+            "session_id": "s1",
+            "event": {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {
+                    "type": "content_block_delta",
+                    "text": "Hello world"
+                }
+            }
+        }))
+        .unwrap();
+        let mut pending = HashMap::new();
+        let results = convert_cli_event(event, &mut pending);
+        assert_eq!(results.len(), 1);
+        match &results[0] {
+            ExecutionEvent::TextDelta { content } => {
+                assert_eq!(content, "Hello world");
+            }
+            ExecutionEvent::Thinking { .. } => {
+                panic!("Thinking content should not appear in TextDelta event");
+            }
+            other => panic!("Expected TextDelta, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn thinking_produces_thinking_event() {
+        let event: CliEvent = serde_json::from_value(json!({
+            "type": "stream_event",
+            "session_id": "s1",
+            "event": {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {
+                    "type": "thinking_delta",
+                    "thinking": "Let me think about this..."
+                }
+            }
+        }))
+        .unwrap();
+        let mut pending = HashMap::new();
+        let results = convert_cli_event(event, &mut pending);
+        assert_eq!(results.len(), 1);
+        match &results[0] {
+            ExecutionEvent::Thinking { content } => {
+                assert_eq!(content, "Let me think about this...");
+            }
+            ExecutionEvent::TextDelta { .. } => {
+                panic!("Thinking content should produce Thinking event, not TextDelta");
+            }
+            other => panic!("Expected Thinking, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn tool_call_stored_for_result_correlation() {
+        let event: CliEvent = serde_json::from_value(json!({
+            "type": "stream_event",
+            "session_id": "s1",
+            "event": {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": "tool_123",
+                    "name": "Bash"
+                }
+            }
+        }))
+        .unwrap();
+        let mut pending = HashMap::new();
+        let results = convert_cli_event(event, &mut pending);
+        assert!(results.is_empty());
+        assert_eq!(pending.get("tool_123"), Some(&"Bash".to_string()));
+    }
+
+    #[test]
+    fn error_result_preserves_message() {
+        let event: CliEvent = serde_json::from_value(json!({
+            "type": "result",
+            "subtype": "error",
+            "session_id": "s1",
+            "is_error": true,
+            "error": "Rate limit exceeded"
+        }))
+        .unwrap();
+        let mut pending = HashMap::new();
+        let results = convert_cli_event(event, &mut pending);
+        assert_eq!(results.len(), 1);
+        match &results[0] {
+            ExecutionEvent::Error { message } => {
+                assert_eq!(message, "Rate limit exceeded");
+            }
+            other => panic!("Expected Error, got {:?}", other),
+        }
+    }
 }
