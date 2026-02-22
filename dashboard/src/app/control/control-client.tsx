@@ -6365,7 +6365,7 @@ export default function ControlClient() {
             <div className="flex h-full items-center justify-center">
               <div className="text-center">
                 <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-indigo-500/10">
-                  {viewingMissionIsRunning ? (
+                  {viewingMissionIsRunning && activeMission?.status === "active" ? (
                     <Loader className="h-8 w-8 text-indigo-400 animate-spin" />
                   ) : (
                     <Bot className="h-8 w-8 text-indigo-400" />
@@ -6373,7 +6373,7 @@ export default function ControlClient() {
                 </div>
                 {missionLoading ? (
                   <Shimmer className="max-w-xs mx-auto" />
-                ) : viewingMissionIsRunning ? (
+                ) : viewingMissionIsRunning && activeMission?.status === "active" ? (
                   <>
                     <h2 className="text-lg font-medium text-white">
                       Agent is working...
@@ -6873,6 +6873,7 @@ export default function ControlClient() {
 
               {/* Show streaming indicator when running but no active thinking/phase visible inline */}
               {viewingMissionIsRunning &&
+                activeMission?.status === "active" &&
                 items.length > 0 &&
                 !items.some(
                   (it) =>
