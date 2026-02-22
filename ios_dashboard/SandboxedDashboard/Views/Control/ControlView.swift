@@ -1237,6 +1237,7 @@ struct ControlView: View {
             return nil
         }
 
+        BackendAgentService.invalidateCache()
         let data = await BackendAgentService.loadBackendsAndAgents()
 
         guard let agents = data.backendAgents[parsed.backend],
