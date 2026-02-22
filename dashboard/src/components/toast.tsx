@@ -135,6 +135,7 @@ function ToastItem({ toast, onDismiss, onShowDetails }: ToastItemProps) {
   const remainingRef = useRef<number>(toast.duration);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Initialize start time on mount
   useEffect(() => {
     startTimeRef.current = Date.now();
   }, []);

@@ -532,7 +532,7 @@ export function streamControl(
         if (value) {
           bytesRead += value.length;
         }
-        let chunk = decoder.decode(value, { stream: true });
+          const chunk = decoder.decode(value, { stream: true });
         if (buffer.endsWith("\r") && chunk.startsWith("\n")) {
           buffer = buffer.slice(0, -1);
         }

@@ -138,7 +138,7 @@ export function getTreeStats(root: AgentNode | null): {
   if (!root)
     return { total: 0, running: 0, completed: 0, failed: 0, pending: 0 };
 
-  let stats = {
+  const stats = {
     total: 1,
     running: root.status === "running" ? 1 : 0,
     completed: root.status === "completed" ? 1 : 0,

@@ -72,8 +72,10 @@ export function DesktopStream({
   const qualityRef = useRef(initialQuality);
 
   // Keep refs in sync with state
-  fpsRef.current = fps;
-  qualityRef.current = quality;
+  useEffect(() => {
+    fpsRef.current = fps;
+    qualityRef.current = quality;
+  }, [fps, quality]);
 
   // Build WebSocket URL - uses refs to get current values without causing reconnections
   const buildWsUrl = useCallback(() => {
