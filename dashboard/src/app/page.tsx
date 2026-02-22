@@ -41,7 +41,6 @@ import {
   getMissionTitle,
   type MissionCategory,
 } from '@/lib/mission-status';
-import { getStatusIcon } from '@/components/ui/status-icons';
 
 interface Column {
   id: MissionCategory;
@@ -70,7 +69,6 @@ function CompactMissionCard({
   onResume: (id: string) => void;
   onDelete: (id: string) => void;
 }) {
-  const Icon = isRunningForDisplay ? Loader : getStatusIcon(mission.status);
   const color = getMissionTextColor(mission.status, isRunningForDisplay);
   const title = getMissionTitle(mission);
   const isResumable = !isRunningForDisplay && mission.resumable &&
@@ -79,9 +77,15 @@ function CompactMissionCard({
   return (
     <div className="group rounded-md bg-white/[0.02] border border-white/[0.06] hover:border-white/[0.12] px-2.5 py-2 transition-colors">
       <div className="flex items-center gap-2 mb-1.5">
-        <Icon
-          className={cn('h-3.5 w-3.5 shrink-0', color, isRunningForDisplay && 'animate-spin')}
-        />
+        {isRunningForDisplay ? (
+          <Loader className={cn('h-3.5 w-3.5 shrink-0', color, 'animate-spin')} />
+        ) : mission.status === 'completed' ? (
+          <CheckCircle className={cn('h-3.5 w-3.5 shrink-0', color)} />
+        ) : mission.status === 'failed' ? (
+          <XCircle className={cn('h-3.5 w-3.5 shrink-0', color)} />
+        ) : (
+          <Clock className={cn('h-3.5 w-3.5 shrink-0', color)} />
+        )}
         <Link href={`/control?mission=${mission.id}`} className="flex-1 min-w-0">
           <p className="text-xs text-white/80 leading-snug truncate hover:text-white transition-colors">
             {title}
