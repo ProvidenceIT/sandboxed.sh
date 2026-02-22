@@ -10179,6 +10179,9 @@ pub async fn run_codex_turn(
                         success = error_message.is_none();
                         break;
                     }
+                    ExecutionEvent::SessionComplete { session_id: _, state } => {
+                        tracing::debug!("Session complete with state: {:?}", state);
+                    }
                 }
             }
             else => {
