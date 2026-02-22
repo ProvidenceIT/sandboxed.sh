@@ -1156,12 +1156,14 @@ mod tests {
         }))
         .unwrap();
         let results = convert_cli_event(tool_result_event, &mut pending);
-        
-        // Verify result is produced with correct id
+
         assert_eq!(results.len(), 1);
         match &results[0] {
             ExecutionEvent::ToolResult { id, name, .. } => {
-                assert_eq!(id, "tool_abc", "Tool result must be correlated with tool call");
+                assert_eq!(
+                    id, "tool_abc",
+                    "Tool result must be correlated with tool call"
+                );
                 assert_eq!(name, "bash");
             }
             _ => panic!("Expected ToolResult event"),
@@ -1186,7 +1188,10 @@ mod tests {
         assert_eq!(results.len(), 1);
         match &results[0] {
             ExecutionEvent::Error { message } => {
-                assert!(message.contains("rate limit"), "Error message must be preserved");
+                assert!(
+                    message.contains("rate limit"),
+                    "Error message must be preserved"
+                );
             }
             _ => panic!("Expected Error event"),
         }
