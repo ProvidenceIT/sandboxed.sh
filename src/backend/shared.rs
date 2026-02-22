@@ -1064,4 +1064,131 @@ mod tests {
         let results = convert_cli_event(event, &mut pending);
         assert!(results.is_empty());
     }
+
+    // ── Cross-harness invariant tests ─────────────────────────────────
+    // These tests verify behaviors that must be consistent across all harness backends.
+    // See issue #230: Reliability hardening - cross-harness invariants.
+
+    #[test]
+    fn text_delta_does_not_contain_thinking_content() {
+        // TextDelta should contain plain text, not thinking content
+        // Thinking should only appear in Thinking events, not TextDelta
+        let event: CliEvent = serde_json::from_value(json!({
+            "type": "content_block_delta",
+            "delta": {
+                "type": "text_delta",
+                "text": "Final output"
+            },
+            "session_id": "s1"
+        }))
+        .unwrap();
+        let mut pending = HashMap::new();
+        let results = convert_cli_event(event, &mut pending);
+        
+        assert_eq!(results.len(), 1);
+        match &results[0] {
+            ExecutionEvent::TextDelta { content } => {
+                assert_eq!(content, "Final output");
+            }
+            _ => panic!("Expected TextDelta event"),
+        }
+    }
+
+    #[test]
+    fn thinking_produces_thinking_event() {
+        // Thinking content should produce Thinking event, not TextDelta
+        let event: CliEvent = serde_json::from_value(json!({
+            "type": "content_block_delta",
+            "delta": {
+                "type": "thinking_delta",
+                "text": "Analyzing..."
+            },
+            "session_id": "s1"
+        }))
+        .unwrap();
+        let mut pending = HashMap::new();
+        let results = convert_cli_event(event, &mut pending);
+        
+        assert_eq!(results.len(), 1);
+        match &results[0] {
+            ExecutionEvent::Thinking { content } => {
+                assert_eq!(content, "Analyzing...");
+            }
+            other => panic!("Expected Thinking event, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn tool_call_stored_for_result_correlation() {
+        // Tool calls must be tracked so results can be correlated
+        let mut pending: HashMap<String, PendingToolCall> = HashMap::new();
+        
+        // First, a tool call event
+        let tool_call_event: CliEvent = serde_json::from_value(json!({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "tool_abc",
+                        "name": "bash",
+                        "input": {"command": "ls"}
+                    }
+                ]
+            },
+            "session_id": "s1"
+        }))
+        .unwrap();
+        let _results = convert_cli_event(tool_call_event, &mut pending);
+        
+        // Verify tool call is pending
+        assert!(pending.contains_key("tool_abc"), "Tool call should be tracked for correlation");
+        
+        // Now the tool result with matching tool_use_id
+        let tool_result_event: CliEvent = serde_json::from_value(json!({
+            "type": "tool_result",
+            "tool_use_id": "tool_abc",
+            "content": [
+                {"type": "text", "text": "file1.txt"}
+            ],
+            "session_id": "s1"
+        }))
+        .unwrap();
+        let results = convert_cli_event(tool_result_event, &mut pending);
+        
+        // Verify result is produced with correct id
+        assert_eq!(results.len(), 1);
+        match &results[0] {
+            ExecutionEvent::ToolResult { id, name, .. } => {
+                assert_eq!(id, "tool_abc", "Tool result must be correlated with tool call");
+                assert_eq!(name, "bash");
+            }
+            _ => panic!("Expected ToolResult event"),
+        }
+    }
+
+    #[test]
+    fn error_event_preserves_message() {
+        // Error events must preserve the error message for debugging
+        let event: CliEvent = serde_json::from_value(json!({
+            "type": "error",
+            "error": {
+                "type": "rate_limit",
+                "message": "API rate limit exceeded"
+            },
+            "session_id": "s1"
+        }))
+        .unwrap();
+        let mut pending = HashMap::new();
+        let results = convert_cli_event(event, &mut pending);
+        
+        assert_eq!(results.len(), 1);
+        match &results[0] {
+            ExecutionEvent::Error { message } => {
+                assert!(message.contains("rate limit"), "Error message must be preserved");
+            }
+            _ => panic!("Expected Error event"),
+        }
+    }
 }
