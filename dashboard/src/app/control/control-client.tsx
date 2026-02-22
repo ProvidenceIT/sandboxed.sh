@@ -270,6 +270,7 @@ type QuestionInfo = {
   question?: string;
   options?: QuestionOption[];
   multiple?: boolean;
+  inputType?: "text" | "number" | "email" | "url" | "password";
 };
 
 function parseQuestionArgs(args: unknown): QuestionInfo[] {
@@ -279,22 +280,31 @@ function parseQuestionArgs(args: unknown): QuestionInfo[] {
   return raw
     .map((entry) => (isRecord(entry) ? entry : null))
     .filter((entry): entry is Record<string, unknown> => Boolean(entry))
-    .map((entry) => ({
-      header: typeof entry["header"] === "string" ? entry["header"] : undefined,
-      question: typeof entry["question"] === "string" ? entry["question"] : undefined,
-      options: Array.isArray(entry["options"])
-        ? entry["options"]
-            .map((opt) => (isRecord(opt) ? opt : null))
-            .filter((opt): opt is Record<string, unknown> => Boolean(opt))
-            .map((opt) => ({
-              label: String(opt["label"] ?? ""),
-              description:
-                typeof opt["description"] === "string" ? opt["description"] : undefined,
-            }))
-            .filter((opt) => opt.label.length > 0)
-        : [],
-      multiple: Boolean(entry["multiple"] ?? entry["multiSelect"]),
-    }))
+    .map((entry) => {
+      const rawInputType = entry["inputType"] ?? entry["type"];
+      const inputType =
+        typeof rawInputType === "string" &&
+        ["text", "number", "email", "url", "password"].includes(rawInputType)
+          ? (rawInputType as QuestionInfo["inputType"])
+          : undefined;
+      return {
+        header: typeof entry["header"] === "string" ? entry["header"] : undefined,
+        question: typeof entry["question"] === "string" ? entry["question"] : undefined,
+        options: Array.isArray(entry["options"])
+          ? entry["options"]
+              .map((opt) => (isRecord(opt) ? opt : null))
+              .filter((opt): opt is Record<string, unknown> => Boolean(opt))
+              .map((opt) => ({
+                label: String(opt["label"] ?? ""),
+                description:
+                  typeof opt["description"] === "string" ? opt["description"] : undefined,
+              }))
+              .filter((opt) => opt.label.length > 0)
+          : [],
+        multiple: Boolean(entry["multiple"] ?? entry["multiSelect"]),
+        inputType,
+      };
+    })
     .filter((q) => (q.question?.length ?? 0) > 0);
 }
 
@@ -321,8 +331,21 @@ function QuestionToolItem({
 
   const canSubmit = useMemo(() => {
     if (questions.length === 0) return false;
-    return questions.every((_, idx) => (answers[idx] ?? []).length > 0);
-  }, [answers, questions]);
+    return questions.every((q, idx) => {
+      if (q.inputType || (q.options ?? []).length === 0) {
+        return (otherText[idx] ?? "").trim().length > 0;
+      }
+      const selections = answers[idx] ?? [];
+      if (selections.length === 0) return false;
+      const otherLabel = q.options?.find((opt) =>
+        opt.label.toLowerCase().includes("other")
+      )?.label;
+      if (otherLabel && selections.includes(otherLabel)) {
+        return (otherText[idx] ?? "").trim().length > 0;
+      }
+      return true;
+    });
+  }, [answers, questions, otherText]);
 
   const handleToggle = (idx: number, label: string, multiple: boolean) => {
     setAnswers((prev) => {
@@ -348,6 +371,10 @@ function QuestionToolItem({
     setSubmitting(true);
     try {
       const payload = questions.map((q, idx) => {
+        if (q.inputType || (q.options ?? []).length === 0) {
+          const text = otherText[idx]?.trim();
+          return text ? [text] : [];
+        }
         const selections = answers[idx] ?? [];
         if (!selections.length) return [];
         const otherLabel = q.options?.find((opt) =>
@@ -392,6 +419,31 @@ function QuestionToolItem({
                     {q.question}
                   </div>
                   <div className="space-y-2">
+                    {(q.inputType || (q.options ?? []).length === 0) && (
+                      <input
+                        type={q.inputType || "text"}
+                        value={otherText[idx] ?? ""}
+                        onChange={(e) =>
+                          setOtherText((prev) => ({
+                            ...prev,
+                            [idx]: e.target.value,
+                          }))
+                        }
+                        placeholder={
+                          q.inputType === "number"
+                            ? "Enter a number…"
+                            : q.inputType === "email"
+                              ? "Enter email address…"
+                              : q.inputType === "url"
+                                ? "Enter URL…"
+                                : q.inputType === "password"
+                                  ? "Enter value…"
+                                  : "Enter text…"
+                        }
+                        disabled={hasResult || submitting}
+                        className="w-full rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 text-sm text-white/80 focus:border-indigo-500/40 focus:outline-none"
+                      />
+                    )}
                     {(q.options ?? []).map((opt) => {
                       const checked = selections.has(opt.label);
                       return (
@@ -6310,7 +6362,7 @@ export default function ControlClient() {
             <div className="flex h-full items-center justify-center">
               <div className="text-center">
                 <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-indigo-500/10">
-                  {viewingMissionIsRunning ? (
+                  {viewingMissionIsRunning && activeMission?.status === "active" ? (
                     <Loader className="h-8 w-8 text-indigo-400 animate-spin" />
                   ) : (
                     <Bot className="h-8 w-8 text-indigo-400" />
@@ -6318,7 +6370,7 @@ export default function ControlClient() {
                 </div>
                 {missionLoading ? (
                   <Shimmer className="max-w-xs mx-auto" />
-                ) : viewingMissionIsRunning ? (
+                ) : viewingMissionIsRunning && activeMission?.status === "active" ? (
                   <>
                     <h2 className="text-lg font-medium text-white">
                       Agent is working...
@@ -6818,6 +6870,7 @@ export default function ControlClient() {
 
               {/* Show streaming indicator when running but no active thinking/phase visible inline */}
               {viewingMissionIsRunning &&
+                activeMission?.status === "active" &&
                 items.length > 0 &&
                 !items.some(
                   (it) =>
