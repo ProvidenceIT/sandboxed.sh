@@ -1038,6 +1038,10 @@ async fn exec_workspace_command(
                 rel_cwd.clone(),
             ];
 
+            // Set memory limit to prevent OOM killer issues during npm install, etc.
+            let memory_limit = crate::nspawn::effective_memory_limit();
+            nspawn_args.push(format!("--memory={}", memory_limit));
+
             // Check network isolation settings
             let use_shared_network = workspace.shared_network.unwrap_or(true);
             let tailscale_mode = workspace.tailscale_mode.unwrap_or(TailscaleMode::ExitNode);
