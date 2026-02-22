@@ -1589,9 +1589,12 @@ struct ControlView: View {
         let viewingId = viewingMissionId
         let currentId = currentMission?.id
 
-        // Only allow status events from any mission (for global state)
-        // All other events must match the mission we're viewing
-        if type != "status" {
+        // Allow status and mission-level metadata events from any mission (for global state).
+        // All other events must match the mission we're viewing.
+        let isGlobalEvent = type == "status"
+            || type == "mission_status_changed"
+            || type == "mission_title_changed"
+        if !isGlobalEvent {
             if let eventId = eventMissionId {
                 // Event has a mission_id
                 if let vId = viewingId {
@@ -1921,6 +1924,26 @@ struct ControlView: View {
                 }
 
                 // Refresh running missions list (live only)
+                if !isHistoricalReplay {
+                    Task { await refreshRunningMissions() }
+                }
+            }
+
+        case "mission_title_changed":
+            // Handle title updates (e.g., from LLM auto-title generation)
+            if let missionId = data["mission_id"] as? String,
+               let title = data["title"] as? String {
+                // Update the viewing mission title if it matches
+                if viewingMissionId == missionId {
+                    viewingMission?.title = title
+                }
+
+                // Update the current mission title if it matches
+                if currentMission?.id == missionId {
+                    currentMission?.title = title
+                }
+
+                // Refresh running missions list so the bar picks up the new title
                 if !isHistoricalReplay {
                     Task { await refreshRunningMissions() }
                 }

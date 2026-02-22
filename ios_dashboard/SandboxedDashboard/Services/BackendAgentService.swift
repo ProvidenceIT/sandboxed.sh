@@ -14,7 +14,10 @@ struct BackendAgentData {
     let backendAgents: [String: [BackendAgent]]
 }
 
-/// Shared service that centralizes backend/agent loading logic
+/// Shared service that centralizes backend/agent loading logic.
+/// `@MainActor` ensures all mutable static state (cache) is accessed
+/// exclusively on the main thread, eliminating data-race risk.
+@MainActor
 enum BackendAgentService {
     private static let api = APIService.shared
 
