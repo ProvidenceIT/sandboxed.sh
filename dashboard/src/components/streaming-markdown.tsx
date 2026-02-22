@@ -46,8 +46,13 @@ export const StreamingMarkdown = memo(function StreamingMarkdown({
   }, [content]);
 
   // Track when the last block was updated for stabilization
-  const lastUpdateRef = useRef<number>(Date.now());
+  const lastUpdateRef = useRef<number | undefined>(undefined);
   const [lastBlockStable, setLastBlockStable] = useState(false);
+
+  // Initialize lastUpdateRef on mount
+  useEffect(() => {
+    lastUpdateRef.current = Date.now();
+  }, []);
 
   // Get stable blocks (all except the last one during streaming)
   const stableBlocks = useMemo(() => {
@@ -72,12 +77,10 @@ export const StreamingMarkdown = memo(function StreamingMarkdown({
   // Stabilization timer for the last block
   useEffect(() => {
     if (!isStreaming || !streamingBlock) {
-      setLastBlockStable(false);
       return;
     }
 
     lastUpdateRef.current = Date.now();
-    setLastBlockStable(false);
 
     const timer = setTimeout(() => {
       setLastBlockStable(true);
@@ -85,6 +88,9 @@ export const StreamingMarkdown = memo(function StreamingMarkdown({
 
     return () => clearTimeout(timer);
   }, [streamingBlock, isStreaming, stabilizeDelay]);
+
+  // Reset stable state when streaming stops
+  const showStable = isStreaming ? lastBlockStable : true;
 
   // When not streaming, render everything as markdown
   if (!isStreaming) {
@@ -116,7 +122,7 @@ export const StreamingMarkdown = memo(function StreamingMarkdown({
 
       {/* Render streaming block */}
       {streamingBlock && (
-        lastBlockStable ? (
+        showStable ? (
           <MemoizedBlock
             key={`streaming-stable`}
             content={streamingBlock}

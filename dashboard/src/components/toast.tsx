@@ -131,9 +131,14 @@ interface ToastItemProps {
 function ToastItem({ toast, onDismiss, onShowDetails }: ToastItemProps) {
   const [isHovered, setIsHovered] = useState(false);
   const [isExiting, setIsExiting] = useState(false);
-  const startTimeRef = useRef<number>(Date.now());
+  const startTimeRef = useRef<number>(0);
   const remainingRef = useRef<number>(toast.duration);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Initialize start time on mount
+  useEffect(() => {
+    startTimeRef.current = Date.now();
+  }, []);
 
   const dismiss = useCallback(() => {
     if (isExiting) return;

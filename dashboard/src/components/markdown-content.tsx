@@ -760,7 +760,7 @@ export const MarkdownContent = memo(function MarkdownContent({
         );
       }
       // Default img rendering
-      // eslint-disable-next-line @next/next/no-img-element, jsx-a11y/alt-text
+      // eslint-disable-next-line @next/next/no-img-element
       return <img src={srcStr} alt={alt} {...props} className="max-w-full rounded" />;
     },
     a({ href, children, ...props }) {
