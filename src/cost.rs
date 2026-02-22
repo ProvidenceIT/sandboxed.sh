@@ -72,6 +72,17 @@ fn normalize_model(model: &str) -> &str {
         s if s.contains("gemini-1.5-pro") || s.contains("gemini-1-5-pro") => "gemini-1.5-pro",
         s if s.contains("gemini-1.5-flash") || s.contains("gemini-1-5-flash") => "gemini-1.5-flash",
 
+        // GLM/Zhipu AI models
+        s if s.contains("glm-5") || s.contains("glm5") => "glm-5",
+        s if s.contains("glm-4") || s.contains("glm4") => "glm-4.7",
+
+        // Minimax models
+        s if s.contains("minimax") && s.contains("m2.5") || s.contains("m2-5") => "minimax-m2.5",
+
+        // Cerebras models (Qwen-based)
+        s if s.contains("qwen-3") => "qwen-3-235b",
+        s if s.contains("gpt-oss") => "gpt-oss-120b",
+
         // Return as-is if no alias found
         _ => trimmed,
     }
@@ -265,6 +276,46 @@ pub fn pricing_for_model(model: &str) -> Option<ModelPricing> {
         "gemini-1.5-flash" => Some(ModelPricing {
             input_nano_per_token: 75,
             output_nano_per_token: 300,
+            cache_create_nano_per_token: None,
+            cache_read_nano_per_token: None,
+        }),
+
+        // GLM-5 (Zhipu AI): $0.50/1M input, $1.50/1M output
+        "glm-5" => Some(ModelPricing {
+            input_nano_per_token: 500,
+            output_nano_per_token: 1_500,
+            cache_create_nano_per_token: None,
+            cache_read_nano_per_token: None,
+        }),
+
+        // GLM-4.7 (Zhipu AI): $0.20/1M input, $0.60/1M output
+        "glm-4.7" => Some(ModelPricing {
+            input_nano_per_token: 200,
+            output_nano_per_token: 600,
+            cache_create_nano_per_token: None,
+            cache_read_nano_per_token: None,
+        }),
+
+        // MiniMax M2.5: $0.10/1M input, $0.30/1M output (competitive pricing)
+        "minimax-m2.5" => Some(ModelPricing {
+            input_nano_per_token: 100,
+            output_nano_per_token: 300,
+            cache_create_nano_per_token: None,
+            cache_read_nano_per_token: None,
+        }),
+
+        // Cerebras Qwen-3 235B: $0.10/1M input, $0.10/1M output (very competitive)
+        "qwen-3-235b" => Some(ModelPricing {
+            input_nano_per_token: 100,
+            output_nano_per_token: 100,
+            cache_create_nano_per_token: None,
+            cache_read_nano_per_token: None,
+        }),
+
+        // Cerebras GPT-OSS-120B: $0.10/1M input, $0.10/1M output
+        "gpt-oss-120b" => Some(ModelPricing {
+            input_nano_per_token: 100,
+            output_nano_per_token: 100,
             cache_create_nano_per_token: None,
             cache_read_nano_per_token: None,
         }),
