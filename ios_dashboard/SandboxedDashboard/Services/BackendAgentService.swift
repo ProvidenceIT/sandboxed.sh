@@ -18,8 +18,34 @@ struct BackendAgentData {
 enum BackendAgentService {
     private static let api = APIService.shared
 
-    /// Load all enabled backends and their agents
+    /// Cached result and timestamp to avoid redundant network calls
+    /// (e.g. when skip-agent-selection validates on every "New Mission" tap).
+    private static var cachedData: BackendAgentData?
+    private static var cacheTimestamp: Date?
+    private static let cacheTTL: TimeInterval = 30 // seconds
+
+    /// Load all enabled backends and their agents.
+    /// Returns a cached result when available and fresh (within `cacheTTL`).
     static func loadBackendsAndAgents() async -> BackendAgentData {
+        if let cached = cachedData,
+           let ts = cacheTimestamp,
+           Date().timeIntervalSince(ts) < cacheTTL {
+            return cached
+        }
+        let data = await fetchBackendsAndAgents()
+        cachedData = data
+        cacheTimestamp = Date()
+        return data
+    }
+
+    /// Force-reload bypassing the cache (e.g. when the user opens Settings).
+    static func invalidateCache() {
+        cachedData = nil
+        cacheTimestamp = nil
+    }
+
+    /// Actual network fetch (extracted from the previous loadBackendsAndAgents).
+    private static func fetchBackendsAndAgents() async -> BackendAgentData {
         // Load backends
         let backends: [Backend]
         do {

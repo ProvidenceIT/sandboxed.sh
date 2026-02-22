@@ -415,11 +415,15 @@ struct SettingsView: View {
     private func saveSettings() {
         let trimmedURL = serverURL.trimmingCharacters(in: .whitespacesAndNewlines)
         api.baseURL = trimmedURL
-        
+
         // Save mission preferences
         UserDefaults.standard.set(selectedDefaultAgent, forKey: "default_agent")
         UserDefaults.standard.set(skipAgentSelection, forKey: "skip_agent_selection")
-        
+
+        // Invalidate the cached backend/agent data so the next validation
+        // picks up any server URL or configuration changes.
+        BackendAgentService.invalidateCache()
+
         HapticService.success()
         dismiss()
     }

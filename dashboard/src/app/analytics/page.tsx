@@ -213,7 +213,7 @@ export default function AnalyticsPage() {
             {formatCents(periodTotalCost)} in selected period
           </div>
           {/* Cost source breakdown */}
-          {(actualCostCents > 0 || estimatedCostCents > 0) && (
+          {(actualCostCents > 0 || estimatedCostCents > 0 || unknownCostCents > 0) && (
             <div className="mt-2 pt-2 border-t border-white/[0.06] space-y-1">
               {actualCostCents > 0 && (
                 <div className="flex items-center justify-between text-xs">
