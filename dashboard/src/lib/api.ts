@@ -56,6 +56,9 @@ export interface StatsResponse {
   completed_tasks: number;
   failed_tasks: number;
   total_cost_cents: number;
+  actual_cost_cents: number;
+  estimated_cost_cents: number;
+  unknown_cost_cents: number;
   success_rate: number;
 }
 

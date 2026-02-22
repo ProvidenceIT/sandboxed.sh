@@ -441,6 +441,12 @@ pub trait MissionStore: Send + Sync {
         Ok(0)
     }
 
+    /// Get cost in cents grouped by source (actual, estimated, unknown).
+    /// Returns (actual, estimated, unknown) tuple.
+    async fn get_cost_by_source(&self) -> Result<(u64, u64, u64), String> {
+        Ok((0, 0, 0))
+    }
+
     // === Automation methods (default no-op for backward compatibility) ===
 
     /// Create an automation for a mission.

@@ -887,6 +887,13 @@ async fn get_stats(
         .await
         .unwrap_or(0);
 
+    // Get cost breakdown by source (actual vs estimated vs unknown)
+    let (actual_cost_cents, estimated_cost_cents, unknown_cost_cents) = control_state
+        .mission_store
+        .get_cost_by_source()
+        .await
+        .unwrap_or((0, 0, 0));
+
     let finished = completed_tasks + failed_tasks;
     let success_rate = if finished > 0 {
         completed_tasks as f64 / finished as f64
@@ -900,6 +907,9 @@ async fn get_stats(
         completed_tasks,
         failed_tasks,
         total_cost_cents,
+        actual_cost_cents,
+        estimated_cost_cents,
+        unknown_cost_cents,
         success_rate,
     })
 }

@@ -1676,6 +1676,61 @@ impl MissionStore for SqliteMissionStore {
         u64::try_from(total).map_err(|_| format!("negative aggregate cost is invalid: {total}"))
     }
 
+    async fn get_cost_by_source(&self) -> Result<(u64, u64, u64), String> {
+        let conn = self.conn.lock().await;
+
+        // Group costs by source provenance. Events may store cost in the
+        // normalized shape (cost.amount_cents + cost.source) or in the legacy
+        // flat shape (cost_cents, with no source — treated as unknown).
+        let query = r#"
+            WITH source_costs AS (
+                SELECT
+                    CAST(
+                        COALESCE(
+                            json_extract(metadata, '$.cost.amount_cents'),
+                            json_extract(metadata, '$.cost_cents'),
+                            0
+                        ) AS INTEGER
+                    ) AS raw_cost,
+                    COALESCE(
+                        json_extract(metadata, '$.cost.source'),
+                        'unknown'
+                    ) AS source
+                FROM mission_events
+                WHERE event_type = 'assistant_message'
+            )
+            SELECT
+                source,
+                COALESCE(SUM(CASE WHEN raw_cost > 0 THEN raw_cost ELSE 0 END), 0) AS total
+            FROM source_costs
+            GROUP BY source
+        "#;
+
+        let mut stmt = conn.prepare(query).map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |row| {
+                let source: String = row.get(0)?;
+                let total: i64 = row.get(1)?;
+                Ok((source, total.max(0) as u64))
+            })
+            .map_err(|e| e.to_string())?;
+
+        let mut actual: u64 = 0;
+        let mut estimated: u64 = 0;
+        let mut unknown: u64 = 0;
+
+        for row in rows {
+            let (source, total) = row.map_err(|e| e.to_string())?;
+            match source.as_str() {
+                "actual" => actual = total,
+                "estimated" => estimated = total,
+                _ => unknown = unknown.saturating_add(total),
+            }
+        }
+
+        Ok((actual, estimated, unknown))
+    }
+
     async fn create_automation(&self, automation: Automation) -> Result<Automation, String> {
         let conn = self.conn.clone();
 
@@ -2333,5 +2388,92 @@ mod tests {
             .await
             .expect("total cost should calculate");
         assert_eq!(total, 25);
+    }
+
+    #[tokio::test]
+    async fn get_cost_by_source_groups_by_provenance() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = SqliteMissionStore::new(temp_dir.path().to_path_buf(), "test-user")
+            .await
+            .expect("sqlite store");
+        let mission = store
+            .create_mission(Some("Cost source mission"), None, None, None, None, None, None)
+            .await
+            .expect("mission");
+
+        let conn = store.conn.lock().await;
+        let query = r#"
+            INSERT INTO mission_events (
+                mission_id, sequence, event_type, timestamp, metadata
+            ) VALUES (?1, ?2, 'assistant_message', ?3, ?4)
+        "#;
+
+        // Actual cost
+        conn.execute(
+            query,
+            params![
+                mission.id.to_string(),
+                1i64,
+                "2026-02-22T00:00:00Z",
+                json!({
+                    "cost": { "amount_cents": 100, "source": "actual", "currency": "USD" }
+                })
+                .to_string()
+            ],
+        )
+        .expect("insert actual");
+
+        // Estimated cost
+        conn.execute(
+            query,
+            params![
+                mission.id.to_string(),
+                2i64,
+                "2026-02-22T00:00:01Z",
+                json!({
+                    "cost": { "amount_cents": 50, "source": "estimated", "currency": "USD" }
+                })
+                .to_string()
+            ],
+        )
+        .expect("insert estimated");
+
+        // Unknown cost (explicit)
+        conn.execute(
+            query,
+            params![
+                mission.id.to_string(),
+                3i64,
+                "2026-02-22T00:00:02Z",
+                json!({
+                    "cost": { "amount_cents": 10, "source": "unknown", "currency": "USD" }
+                })
+                .to_string()
+            ],
+        )
+        .expect("insert unknown");
+
+        // Legacy cost (no source field → unknown)
+        conn.execute(
+            query,
+            params![
+                mission.id.to_string(),
+                4i64,
+                "2026-02-22T00:00:03Z",
+                json!({ "cost_cents": 5 }).to_string()
+            ],
+        )
+        .expect("insert legacy");
+
+        drop(conn);
+
+        let (actual, estimated, unknown) = store
+            .get_cost_by_source()
+            .await
+            .expect("cost by source should calculate");
+        assert_eq!(actual, 100);
+        assert_eq!(estimated, 50);
+        // Unknown (10) + legacy (5) both go into the unknown bucket
+        assert_eq!(unknown, 15);
     }
 }
