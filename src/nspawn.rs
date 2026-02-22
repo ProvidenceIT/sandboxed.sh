@@ -163,6 +163,7 @@ pub struct NspawnConfig {
     pub env: std::collections::HashMap<String, String>,
     pub binds: Vec<String>,
     pub capabilities: Vec<String>,
+    pub memory_limit: Option<String>,
 }
 
 impl Default for NspawnConfig {
@@ -175,6 +176,7 @@ impl Default for NspawnConfig {
             env: std::collections::HashMap::new(),
             binds: Vec::new(),
             capabilities: Vec::new(),
+            memory_limit: None,
         }
     }
 }
@@ -183,6 +185,30 @@ pub fn tailscale_enabled(env: &HashMap<String, String>) -> bool {
     env.iter().any(|(key, value)| {
         (key == "TS_AUTHKEY" || key == "TS_EXIT_NODE") && !value.trim().is_empty()
     })
+}
+
+/// Get the container memory limit from environment variable.
+/// Supports suffixes: G (GB), M (MB), K (KB), or no suffix (bytes).
+/// Default: 8G if not specified (to allow npm install to complete).
+/// Set to "0" or empty to disable memory limit entirely.
+pub fn get_memory_limit() -> Option<String> {
+    let env_var = std::env::var("SANDBOXED_SH_CONTAINER_MEMORY_LIMIT").ok()?;
+    let trimmed = env_var.trim();
+    if trimmed.is_empty() || trimmed == "0" {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+/// Get the default memory limit for containers (8GB for npm install).
+pub fn default_memory_limit() -> String {
+    "8G".to_string()
+}
+
+/// Get the effective memory limit to use.
+/// Returns the configured limit or the default (8G).
+pub fn effective_memory_limit() -> String {
+    get_memory_limit().unwrap_or_else(default_memory_limit)
 }
 
 pub fn apply_tailscale_to_config(config: &mut NspawnConfig, env: &HashMap<String, String>) {
@@ -577,6 +603,10 @@ pub async fn execute_in_container(
         cmd.arg("--ephemeral");
     }
 
+    if let Some(ref memory) = config.memory_limit {
+        cmd.arg(format!("--memory={}", memory));
+    }
+
     for capability in &config.capabilities {
         if capability.trim().is_empty() {
             continue;
@@ -664,6 +694,10 @@ pub async fn execute_in_container_streaming(
 
     if config.ephemeral {
         cmd.arg("--ephemeral");
+    }
+
+    if let Some(ref memory) = config.memory_limit {
+        cmd.arg(format!("--memory={}", memory));
     }
 
     for capability in &config.capabilities {
