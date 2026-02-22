@@ -86,6 +86,8 @@ pub struct CreateWorkspaceRequest {
     pub mcps: Vec<String>,
     /// Optional config profile to apply to this workspace.
     pub config_profile: Option<String>,
+    /// Container memory limit (e.g., "8G", "4G").
+    pub container_memory_limit: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -115,6 +117,8 @@ pub struct UpdateWorkspaceRequest {
     pub mcps: Option<Vec<String>>,
     /// Optional config profile to apply to this workspace.
     pub config_profile: Option<String>,
+    /// Container memory limit (e.g., "8G", "4G").
+    pub container_memory_limit: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -137,6 +141,7 @@ pub struct WorkspaceResponse {
     pub tailscale_mode: Option<TailscaleMode>,
     pub mcps: Vec<String>,
     pub config_profile: Option<String>,
+    pub container_memory_limit: Option<String>,
 }
 
 impl From<Workspace> for WorkspaceResponse {
@@ -160,6 +165,7 @@ impl From<Workspace> for WorkspaceResponse {
             tailscale_mode: w.tailscale_mode,
             mcps: w.mcps,
             config_profile: w.config_profile,
+            container_memory_limit: w.container_memory_limit,
         }
     }
 }
@@ -424,6 +430,12 @@ async fn create_workspace(
         }
     }
 
+    // Container memory limit from template (request overrides)
+    let container_memory_limit = req
+        .container_memory_limit
+        .clone()
+        .or_else(|| template_data.as_ref().and_then(|t| t.container_memory_limit.clone()));
+
     let mut workspace = match workspace_type {
         WorkspaceType::Host => Workspace {
             id: Uuid::new_v4(),
@@ -445,6 +457,7 @@ async fn create_workspace(
             tailscale_mode,
             mcps: mcps.clone(),
             config_profile: config_profile.clone(),
+            container_memory_limit: container_memory_limit.clone(),
         },
         WorkspaceType::Container => {
             let mut ws = Workspace::new_container(req.name, path);
@@ -459,6 +472,7 @@ async fn create_workspace(
             ws.tailscale_mode = tailscale_mode;
             ws.mcps = mcps;
             ws.config_profile = config_profile;
+            ws.container_memory_limit = container_memory_limit;
             ws
         }
     };
@@ -635,6 +649,16 @@ async fn update_workspace(
             workspace.config_profile = None;
         } else {
             workspace.config_profile = Some(trimmed.to_string());
+        }
+    }
+
+    // Update container_memory_limit if provided
+    if let Some(limit) = req.container_memory_limit {
+        let trimmed = limit.trim();
+        if trimmed.is_empty() {
+            workspace.container_memory_limit = None;
+        } else {
+            workspace.container_memory_limit = Some(trimmed.to_string());
         }
     }
 
@@ -1037,6 +1061,10 @@ async fn exec_workspace_command(
                 "--chdir".to_string(),
                 rel_cwd.clone(),
             ];
+
+            // Set memory limit to prevent OOM killer issues during npm install, etc.
+            let memory_limit = crate::nspawn::effective_memory_limit(workspace.container_memory_limit.as_deref());
+            nspawn_args.push(format!("--memory={}", memory_limit));
 
             // Check network isolation settings
             let use_shared_network = workspace.shared_network.unwrap_or(true);

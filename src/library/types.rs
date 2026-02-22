@@ -183,6 +183,10 @@ pub struct WorkspaceTemplate {
     /// Defaults to "default" if not specified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_profile: Option<String>,
+    /// Container memory limit for workspaces created from this template.
+    /// Examples: "8G", "4G", "16G". Set to "0" or empty to disable limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_memory_limit: Option<String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

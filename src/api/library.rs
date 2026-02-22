@@ -365,6 +365,9 @@ pub struct SaveWorkspaceTemplateRequest {
     /// Config profile to use for workspaces created from this template.
     #[serde(default)]
     pub config_profile: Option<String>,
+    /// Container memory limit for workspaces created from this template.
+    #[serde(default)]
+    pub container_memory_limit: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1204,6 +1207,7 @@ async fn save_workspace_template(
         tailscale_mode: req.tailscale_mode,
         mcps: req.mcps.unwrap_or_default(),
         config_profile: req.config_profile.clone(),
+        container_memory_limit: req.container_memory_limit.clone(),
     };
 
     library

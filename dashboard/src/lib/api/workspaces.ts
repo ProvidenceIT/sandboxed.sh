@@ -29,6 +29,7 @@ export interface Workspace {
   shared_network?: boolean | null;
   tailscale_mode?: TailscaleMode | null;
   config_profile?: string | null;
+  container_memory_limit?: string | null;
 }
 
 export type ContainerDistro =
@@ -91,6 +92,7 @@ export async function createWorkspace(data: {
   shared_network?: boolean | null;
   tailscale_mode?: TailscaleMode | null;
   config_profile?: string | null;
+  container_memory_limit?: string | null;
 }): Promise<Workspace> {
   return apiPost("/api/workspaces", data, "Failed to create workspace");
 }
@@ -108,6 +110,7 @@ export async function updateWorkspace(
     shared_network?: boolean | null;
     tailscale_mode?: TailscaleMode | null;
     config_profile?: string | null;
+    container_memory_limit?: string | null;
   }
 ): Promise<Workspace> {
   return apiPut(`/api/workspaces/${id}`, data, "Failed to update workspace");

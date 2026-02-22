@@ -174,6 +174,11 @@ pub struct Workspace {
     /// Defaults to "default" if not specified.
     #[serde(default)]
     pub config_profile: Option<String>,
+    /// Container memory limit (e.g., "8G", "4G", "2G").
+    /// Set to empty string or "0" to disable memory limit.
+    /// Defaults to "8G" if not specified.
+    #[serde(default)]
+    pub container_memory_limit: Option<String>,
 }
 
 impl Workspace {
@@ -199,6 +204,7 @@ impl Workspace {
             tailscale_mode: None,
             mcps: Vec::new(),
             config_profile: None,
+            container_memory_limit: None,
         }
     }
 
@@ -224,6 +230,7 @@ impl Workspace {
             shared_network: None,
             tailscale_mode: None,
             mcps: Vec::new(),
+            container_memory_limit: None,
         }
     }
 }

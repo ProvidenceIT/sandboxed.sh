@@ -18,6 +18,10 @@ use tokio::process::{Child, Command};
 use crate::nspawn;
 use crate::workspace::{use_nspawn_for_workspace, TailscaleMode, Workspace, WorkspaceType};
 
+fn get_container_memory_limit(workspace: &crate::workspace::Workspace) -> String {
+    nspawn::effective_memory_limit(workspace.container_memory_limit.as_deref())
+}
+
 fn select_container_resolv_conf() -> Option<PathBuf> {
     let default_path = PathBuf::from("/etc/resolv.conf");
     let content = fs::read_to_string(&default_path).ok()?;
@@ -600,6 +604,10 @@ impl WorkspaceExec {
                 cmd.arg("--console=pipe");
                 cmd.arg("--chdir").arg(&rel_cwd);
 
+                // Set memory limit to prevent OOM killer issues during npm install, etc.
+                let memory_limit = get_container_memory_limit(&self.workspace);
+                cmd.arg(format!("--memory={}", memory_limit));
+
                 // Ensure /root/context is available if Open Agent configured it.
                 let context_dir_name = std::env::var("SANDBOXED_SH_CONTEXT_DIR_NAME")
                     .ok()
@@ -910,6 +918,10 @@ impl WorkspaceExec {
                         cmd.arg("--timezone=off");
                         cmd.arg("--chdir");
                         cmd.arg(rel_cwd.clone());
+
+                        // Set memory limit to prevent OOM killer issues during npm install, etc.
+                        let memory_limit = get_container_memory_limit(&self.workspace);
+                        cmd.arg(format!("--memory={}", memory_limit));
 
                         // Ensure /root/context is available if Open Agent configured it.
                         let context_dir_name = std::env::var("SANDBOXED_SH_CONTEXT_DIR_NAME")

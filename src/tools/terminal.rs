@@ -1114,6 +1114,11 @@ async fn run_container_command(
         rel_str,
     ];
 
+    // Set memory limit to prevent OOM killer issues during npm install, etc.
+    // Use env-only fallback since terminal doesn't have workspace context.
+    let memory_limit = nspawn::effective_memory_limit_env_only();
+    args.push(format!("--memory={}", memory_limit));
+
     // Explicitly set HOME=/root inside the container.
     // The host process may have a different HOME (e.g., /var/lib/opencode for isolated OpenCode),
     // and nspawn inherits environment variables by default. Tools like `shard` use $HOME/.shard
