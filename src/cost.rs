@@ -62,7 +62,10 @@ fn normalize_model(model: &str) -> &str {
         s if s.contains("o3") && !s.contains("gpt-4o") => "o3",
         s if s.contains("o4-mini") => "o4-mini",
 
-        // Gemini models
+        // Gemini models (ordered most-specific first to avoid substring conflicts)
+        s if s.contains("gemini-3.1-pro") || s.contains("gemini-3-1-pro") => "gemini-3.1-pro",
+        s if s.contains("gemini-3") && s.contains("pro") => "gemini-3-pro",
+        s if s.contains("gemini-3") && s.contains("flash") => "gemini-3-flash",
         s if s.contains("gemini-2.5-pro") || s.contains("gemini-2-5-pro") => "gemini-2.5-pro",
         s if s.contains("gemini-2.5-flash") || s.contains("gemini-2-5-flash") => "gemini-2.5-flash",
         s if s.contains("gemini-2.0-flash") || s.contains("gemini-2-0-flash") => "gemini-2.0-flash",
@@ -202,6 +205,30 @@ pub fn pricing_for_model(model: &str) -> Option<ModelPricing> {
             cache_read_nano_per_token: Some(550),
         }),
 
+        // Gemini 3.1 Pro: $2/1M input, $12/1M output (<=200k context)
+        "gemini-3.1-pro" => Some(ModelPricing {
+            input_nano_per_token: 2_000,
+            output_nano_per_token: 12_000,
+            cache_create_nano_per_token: None,
+            cache_read_nano_per_token: None,
+        }),
+
+        // Gemini 3 Pro: $2/1M input, $12/1M output (<=200k context)
+        "gemini-3-pro" => Some(ModelPricing {
+            input_nano_per_token: 2_000,
+            output_nano_per_token: 12_000,
+            cache_create_nano_per_token: None,
+            cache_read_nano_per_token: None,
+        }),
+
+        // Gemini 3 Flash: assume same as 2.5 Flash until pricing confirmed
+        "gemini-3-flash" => Some(ModelPricing {
+            input_nano_per_token: 150,
+            output_nano_per_token: 600,
+            cache_create_nano_per_token: None,
+            cache_read_nano_per_token: None,
+        }),
+
         // Gemini 2.5 Pro: $1.25/1M input, $10/1M output (>200k context)
         "gemini-2.5-pro" => Some(ModelPricing {
             input_nano_per_token: 1_250,
@@ -314,6 +341,12 @@ mod tests {
         );
         assert_eq!(normalize_model("gpt-4o-2024-08-06"), "gpt-4o");
         assert_eq!(normalize_model("gemini-2.5-pro-preview"), "gemini-2.5-pro");
+        assert_eq!(
+            normalize_model("gemini-3.1-pro-preview"),
+            "gemini-3.1-pro"
+        );
+        assert_eq!(normalize_model("gemini-3-1-pro-preview"), "gemini-3.1-pro");
+        assert_eq!(normalize_model("gemini-3-pro-preview"), "gemini-3-pro");
     }
 
     #[test]
@@ -321,6 +354,9 @@ mod tests {
         assert!(pricing_for_model("claude-3-5-sonnet").is_some());
         assert!(pricing_for_model("gpt-4o").is_some());
         assert!(pricing_for_model("gemini-2.5-pro").is_some());
+        assert!(pricing_for_model("gemini-3.1-pro-preview").is_some());
+        assert!(pricing_for_model("gemini-3-pro-preview").is_some());
+        assert!(pricing_for_model("gemini-3-flash-preview").is_some());
     }
 
     #[test]
