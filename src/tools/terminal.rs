@@ -1115,7 +1115,8 @@ async fn run_container_command(
     ];
 
     // Set memory limit to prevent OOM killer issues during npm install, etc.
-    let memory_limit = nspawn::effective_memory_limit();
+    // Use env-only fallback since terminal doesn't have workspace context.
+    let memory_limit = nspawn::effective_memory_limit_env_only();
     args.push(format!("--memory={}", memory_limit));
 
     // Explicitly set HOME=/root inside the container.

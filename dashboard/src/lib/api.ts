@@ -1387,6 +1387,7 @@ export interface WorkspaceTemplate {
   shared_network?: boolean | null;
   tailscale_mode?: TailscaleMode | null;
   config_profile?: string;
+  container_memory_limit?: string | null;
 }
 
 export async function listWorkspaceTemplates(): Promise<WorkspaceTemplateSummary[]> {
@@ -1410,6 +1411,7 @@ export async function saveWorkspaceTemplate(
     shared_network?: boolean | null;
     tailscale_mode?: TailscaleMode | null;
     config_profile?: string;
+    container_memory_limit?: string;
   }
 ): Promise<void> {
   return libPut(`/api/library/workspace-template/${encodeURIComponent(name)}`, data, "Failed to save workspace template");
@@ -1434,6 +1436,7 @@ export async function renameWorkspaceTemplate(oldName: string, newName: string):
     shared_network: template.shared_network,
     tailscale_mode: template.tailscale_mode,
     config_profile: template.config_profile,
+    container_memory_limit: template.container_memory_limit,
   });
   // Delete old template
   await deleteWorkspaceTemplate(oldName);

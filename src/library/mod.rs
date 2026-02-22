@@ -60,6 +60,9 @@ struct WorkspaceTemplateConfig {
     /// Config profile to use for workspaces created from this template.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     config_profile: Option<String>,
+    /// Container memory limit for workspaces created from this template.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    container_memory_limit: Option<String>,
 }
 
 // Directory constants (OpenCode-aligned structure)
@@ -1266,6 +1269,7 @@ impl LibraryStore {
             tailscale_mode: config.tailscale_mode,
             mcps: config.mcps,
             config_profile: config.config_profile,
+            container_memory_limit: config.container_memory_limit,
         })
     }
 
@@ -1318,6 +1322,7 @@ impl LibraryStore {
             tailscale_mode: template.tailscale_mode,
             mcps: template.mcps.clone(),
             config_profile: template.config_profile.clone(),
+            container_memory_limit: template.container_memory_limit.clone(),
         };
 
         let content = serde_json::to_string_pretty(&config)?;

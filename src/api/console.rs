@@ -767,7 +767,7 @@ async fn handle_new_workspace_shell(
             cmd.arg("--quiet");
             cmd.arg("--timezone=off");
             // Set memory limit to prevent OOM killer issues during npm install, etc.
-            let memory_limit = nspawn::effective_memory_limit();
+            let memory_limit = nspawn::effective_memory_limit(workspace.container_memory_limit.as_deref());
             cmd.arg(format!("--memory={}", memory_limit));
             for arg in nspawn::tailscale_nspawn_extra_args(&workspace.env_vars) {
                 cmd.arg(arg);
