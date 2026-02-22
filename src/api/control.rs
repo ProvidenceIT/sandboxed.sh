@@ -5223,11 +5223,12 @@ async fn control_actor_loop(
                     }
 
                     // If the mission is idle now, enqueue any agent_finished automations after a short delay.
+                    // Skip if there are already queued messages (from other missions) to maintain FIFO order.
                     if let Some(mission_id) = completed_mission_id {
                         let already_queued_for_mission = queue
                             .iter()
                             .any(|(_id, _msg, _agent, target_mid)| *target_mid == Some(mission_id));
-                        if !already_queued_for_mission {
+                        if !already_queued_for_mission && queue.is_empty() {
                             // Small delay so the UI can display the completion before restarting.
                             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
                             let messages = agent_finished_automation_messages(
