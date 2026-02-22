@@ -7,9 +7,8 @@ interface RelativeTimeProps {
   className?: string;
 }
 
-function getRelativeTime(date: Date): string {
-  const now = new Date();
-  const diffMs = now.getTime() - date.getTime();
+function getRelativeTime(date: Date, nowMs: number): string {
+  const diffMs = nowMs - date.getTime();
   const diffSec = Math.floor(diffMs / 1000);
   const diffMin = Math.floor(diffSec / 60);
   const diffHour = Math.floor(diffMin / 60);
@@ -34,16 +33,20 @@ export function RelativeTime({ date, className }: RelativeTimeProps) {
   }, [date]);
 
   const dateObj = useMemo(() => new Date(timestamp), [timestamp]);
-  const [relativeTime, setRelativeTime] = useState(() => getRelativeTime(dateObj));
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  const relativeTime = useMemo(
+    () => getRelativeTime(dateObj, nowMs),
+    [dateObj, nowMs]
+  );
 
   // Update relative time periodically
   useEffect(() => {
     const interval = setInterval(() => {
-      setRelativeTime(getRelativeTime(dateObj));
+      setNowMs(Date.now());
     }, 60000); // Update every minute
 
     return () => clearInterval(interval);
-  }, [dateObj, timestamp]);
+  }, []);
 
   return (
     <span
@@ -54,8 +57,6 @@ export function RelativeTime({ date, className }: RelativeTimeProps) {
     </span>
   );
 }
-
-
 
 
 
