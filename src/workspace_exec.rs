@@ -21,7 +21,6 @@ use crate::workspace::{use_nspawn_for_workspace, TailscaleMode, Workspace, Works
 fn get_container_memory_limit(workspace: &crate::workspace::Workspace) -> String {
     nspawn::effective_memory_limit(workspace.container_memory_limit.as_deref())
 }
-}
 
 fn select_container_resolv_conf() -> Option<PathBuf> {
     let default_path = PathBuf::from("/etc/resolv.conf");
