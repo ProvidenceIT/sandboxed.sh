@@ -14,6 +14,14 @@ struct SettingsView: View {
     @State private var isTestingConnection = false
     @State private var connectionStatus: ConnectionStatus = .unknown
     @State private var showingSaveConfirmation = false
+    
+    // Default agent settings
+    @State private var backends: [Backend] = Backend.defaults
+    @State private var enabledBackendIds: Set<String> = ["opencode", "claudecode", "amp"]
+    @State private var backendAgents: [String: [BackendAgent]] = [:]
+    @State private var selectedDefaultAgent: String = ""
+    @State private var isLoadingAgents = true
+    @State private var skipAgentSelection = false
 
     private let api = APIService.shared
     private let originalURL: String
@@ -66,6 +74,8 @@ struct SettingsView: View {
         let currentURL = APIService.shared.baseURL
         _serverURL = State(initialValue: currentURL)
         originalURL = currentURL
+        _selectedDefaultAgent = State(initialValue: UserDefaults.standard.string(forKey: "default_agent") ?? "")
+        _skipAgentSelection = State(initialValue: UserDefaults.standard.bool(forKey: "skip_agent_selection"))
     }
 
     var body: some View {
@@ -135,6 +145,58 @@ struct SettingsView: View {
                             }
                         }
 
+                        // Mission Preferences Section
+                        VStack(alignment: .leading, spacing: 16) {
+                            Label("Mission Preferences", systemImage: "cpu")
+                                .font(.headline)
+                                .foregroundStyle(Theme.textPrimary)
+
+                            GlassCard(padding: 20, cornerRadius: 20) {
+                                VStack(alignment: .leading, spacing: 16) {
+                                    // Skip agent selection toggle
+                                    VStack(alignment: .leading, spacing: 8) {
+                                        HStack {
+                                            VStack(alignment: .leading, spacing: 4) {
+                                                Text("Skip Agent Selection")
+                                                    .font(.subheadline.weight(.medium))
+                                                    .foregroundStyle(Theme.textPrimary)
+                                                Text("Use default agent without prompting")
+                                                    .font(.caption)
+                                                    .foregroundStyle(Theme.textSecondary)
+                                            }
+                                            Spacer()
+                                            Toggle("", isOn: $skipAgentSelection)
+                                                .labelsHidden()
+                                                .tint(Theme.accent)
+                                        }
+                                    }
+                                    
+                                    Divider()
+                                        .background(Theme.border)
+                                    
+                                    // Default agent selection
+                                    VStack(alignment: .leading, spacing: 8) {
+                                        Text("Default Agent")
+                                            .font(.caption.weight(.medium))
+                                            .foregroundStyle(Theme.textSecondary)
+                                        
+                                        if isLoadingAgents {
+                                            HStack {
+                                                ProgressView()
+                                                    .scaleEffect(0.8)
+                                                Text("Loading agents...")
+                                                    .font(.subheadline)
+                                                    .foregroundStyle(Theme.textSecondary)
+                                            }
+                                            .padding(.vertical, 8)
+                                        } else {
+                                            defaultAgentPicker
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         // About Section
                         VStack(alignment: .leading, spacing: 16) {
                             Label("About", systemImage: "info.circle")
@@ -193,6 +255,132 @@ struct SettingsView: View {
         }
         .presentationDetents([.large])
         .presentationDragIndicator(.visible)
+        .task {
+            await loadAgents()
+        }
+    }
+    
+    // MARK: - Default Agent Picker
+    
+    private var defaultAgentPicker: some View {
+        VStack(spacing: 8) {
+            // None option (clear default)
+            defaultAgentRow(value: "", backendName: nil, agentName: "Always Ask")
+            
+            // Group agents by backend
+            ForEach(backends.filter { enabledBackendIds.contains($0.id) }) { backend in
+                let agents = backendAgents[backend.id] ?? []
+                if !agents.isEmpty {
+                    backendAgentSection(backend: backend, agents: agents)
+                }
+            }
+        }
+    }
+    
+    private func backendAgentSection(backend: Backend, agents: [BackendAgent]) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            // Backend header
+            HStack(spacing: 6) {
+                Image(systemName: backendIcon(for: backend.id))
+                    .font(.caption2)
+                    .foregroundStyle(backendColor(for: backend.id))
+                Text(backend.name)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(Theme.textSecondary)
+            }
+            .padding(.leading, 4)
+            .padding(.top, 4)
+            
+            // Agents
+            ForEach(agents) { agent in
+                let value = "\(backend.id):\(agent.id)"
+                defaultAgentRow(value: value, backendName: backend.name, agentName: agent.name)
+            }
+        }
+    }
+    
+    private func defaultAgentRow(value: String, backendName: String?, agentName: String) -> some View {
+        Button {
+            selectedDefaultAgent = value
+            HapticService.selectionChanged()
+        } label: {
+            HStack(spacing: 12) {
+                // Icon
+                ZStack {
+                    Circle()
+                        .fill(value.isEmpty ? Theme.textSecondary.opacity(0.15) : backendColor(for: CombinedAgent.parse(value)?.backend).opacity(0.15))
+                        .frame(width: 28, height: 28)
+                    
+                    Image(systemName: value.isEmpty ? "questionmark" : "person.fill")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(value.isEmpty ? Theme.textSecondary : backendColor(for: CombinedAgent.parse(value)?.backend))
+                }
+                
+                // Name
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(agentName)
+                        .font(.subheadline)
+                        .foregroundStyle(Theme.textPrimary)
+                    
+                    if let backendName = backendName {
+                        Text(backendName)
+                            .font(.caption2)
+                            .foregroundStyle(Theme.textSecondary)
+                    }
+                }
+                
+                Spacer()
+                
+                // Selection indicator
+                if selectedDefaultAgent == value {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 18))
+                        .foregroundStyle(Theme.accent)
+                }
+            }
+            .padding(8)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(selectedDefaultAgent == value ? Theme.accent.opacity(0.08) : Color.clear)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(selectedDefaultAgent == value ? Theme.accent.opacity(0.3) : Color.clear, lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+    
+    // MARK: - Helpers
+
+    private func backendIcon(for id: String?) -> String {
+        BackendAgentService.icon(for: id)
+    }
+
+    private func backendColor(for id: String?) -> Color {
+        BackendAgentService.color(for: id)
+    }
+
+    private func loadAgents() async {
+        isLoadingAgents = true
+        defer { isLoadingAgents = false }
+
+        let data = await BackendAgentService.loadBackendsAndAgents()
+        backends = data.backends
+        enabledBackendIds = data.enabledBackendIds
+        backendAgents = data.backendAgents
+
+        // Clear stale default if the saved agent no longer exists on the server.
+        // Only validate when we actually received agents for the backend —
+        // a nil/missing entry means the API was unreachable, so we keep the
+        // saved preference rather than falsely clearing it.
+        if !selectedDefaultAgent.isEmpty,
+           let parsed = CombinedAgent.parse(selectedDefaultAgent),
+           let agentsForBackend = data.backendAgents[parsed.backend] {
+            if !agentsForBackend.contains(where: { $0.id == parsed.agent }) {
+                selectedDefaultAgent = ""
+            }
+        }
     }
 
     private func testConnection() async {
@@ -227,6 +415,15 @@ struct SettingsView: View {
     private func saveSettings() {
         let trimmedURL = serverURL.trimmingCharacters(in: .whitespacesAndNewlines)
         api.baseURL = trimmedURL
+
+        // Save mission preferences
+        UserDefaults.standard.set(selectedDefaultAgent, forKey: "default_agent")
+        UserDefaults.standard.set(skipAgentSelection, forKey: "skip_agent_selection")
+
+        // Invalidate the cached backend/agent data so the next validation
+        // picks up any server URL or configuration changes.
+        BackendAgentService.invalidateCache()
+
         HapticService.success()
         dismiss()
     }

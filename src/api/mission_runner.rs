@@ -20,7 +20,7 @@ use tokio::sync::{broadcast, mpsc, OwnedSemaphorePermit, RwLock, Semaphore};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::agents::{AgentRef, AgentResult, CostSource, TerminalReason};
+use crate::agents::{AgentRef, AgentResult, TerminalReason};
 use crate::backend::claudecode::client::{ClaudeEvent, ContentBlock, StreamEvent};
 use crate::config::Config;
 use crate::mcp::McpRegistry;
@@ -65,6 +65,8 @@ struct OpencodeSseParseResult {
     /// The SSE stream indicated the session entered a retry state, meaning
     /// the model API call failed and OpenCode is retrying automatically.
     session_retry: bool,
+    /// Token usage extracted from response.completed events (input, output).
+    usage: Option<(u64, u64)>,
 }
 
 const CODEX_ACCOUNT_CONCURRENCY_LIMIT: usize = 5;
@@ -99,29 +101,8 @@ fn codex_account_semaphore_for_key(api_key: &str) -> Arc<Semaphore> {
         .clone()
 }
 
-fn resolve_cost_cents_and_source(
-    actual_cost_cents: Option<u64>,
-    model: Option<&str>,
-    usage: &crate::cost::TokenUsage,
-) -> (u64, CostSource) {
-    if let Some(actual) = actual_cost_cents {
-        return (actual, CostSource::Actual);
-    }
-
-    if usage.has_usage() {
-        if let Some(model_name) = model {
-            if crate::cost::pricing_for_model(model_name).is_some() {
-                return (
-                    crate::cost::cost_cents_from_usage(model_name, usage),
-                    CostSource::Estimated,
-                );
-            }
-            return (0, CostSource::Unknown);
-        }
-    }
-
-    (0, CostSource::Unknown)
-}
+/// Re-export the canonical cost resolver from the shared cost module.
+use crate::cost::resolve_cost_cents_and_source;
 
 fn preferred_model_for_cost<'a>(
     requested_model: Option<&'a str>,
@@ -588,6 +569,7 @@ fn parse_opencode_sse_event(
 
     let mut message_complete = false;
     let mut model: Option<String> = None;
+    let mut sse_usage: Option<(u64, u64)> = None;
     let event = match event_type {
         "response.output_text.delta" => {
             let delta = props
@@ -623,6 +605,34 @@ fn parse_opencode_sse_event(
                 "✅ response.completed - mission completing normally"
             );
             message_complete = true;
+            // Extract token usage from response.completed payload.
+            // OpenAI Responses API: { "response": { "usage": { "input_tokens": N, "output_tokens": N } } }
+            // Also check top-level usage for direct OpenCode responses.
+            let usage = props
+                .get("response")
+                .and_then(|r| r.get("usage"))
+                .or_else(|| props.get("usage"));
+            if let Some(usage_obj) = usage {
+                let input = usage_obj
+                    .get("input_tokens")
+                    .or_else(|| usage_obj.get("prompt_tokens"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let output = usage_obj
+                    .get("output_tokens")
+                    .or_else(|| usage_obj.get("completion_tokens"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                if input > 0 || output > 0 {
+                    tracing::info!(
+                        mission_id = %mission_id,
+                        input_tokens = input,
+                        output_tokens = output,
+                        "Extracted token usage from response.completed"
+                    );
+                    sse_usage = Some((input, output));
+                }
+            }
             None
         }
         "response.incomplete" => {
@@ -846,6 +856,7 @@ fn parse_opencode_sse_event(
         model,
         session_idle,
         session_retry,
+        usage: sse_usage,
     })
 }
 
@@ -7638,6 +7649,9 @@ pub async fn run_opencode_turn(
         has_google,
     );
     let mut model_used: Option<String> = None;
+    // Accumulate token usage from SSE response.completed events for cost estimation
+    let mut total_input_tokens: u64 = 0;
+    let mut total_output_tokens: u64 = 0;
     let agent_model = resolve_opencode_model_from_config(&opencode_config_dir_host, agent);
     if resolved_model.is_none() {
         resolved_model = agent_model.clone();
@@ -7915,6 +7929,10 @@ pub async fn run_opencode_turn(
     let sse_emitted_text = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let sse_done_sent = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let sse_error_message: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    // Shared accumulator for token usage extracted from SSE response.completed events.
+    // Updated only by the dedicated SSE curl task; the stdout parser uses local counters
+    // and only accumulates when the SSE task is absent (to avoid double-counting).
+    let sse_usage_tokens: Arc<Mutex<(u64, u64)>> = Arc::new(Mutex::new((0, 0)));
     let rate_limit_detected = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let sse_cancel = CancellationToken::new();
     let (sse_complete_tx, mut sse_complete_rx) = tokio::sync::watch::channel(false);
@@ -7952,6 +7970,7 @@ pub async fn run_opencode_turn(
         let last_activity = last_activity.clone();
         let text_output_tx = text_output_tx.clone();
         let sse_tool_depth_tx = sse_tool_depth_tx.clone();
+        let sse_usage_tokens = sse_usage_tokens.clone();
         let events_tx = events_tx.clone();
         let opencode_port = opencode_port.clone();
         let sse_host = std::env::var("SANDBOXED_SH_OPENCODE_SERVER_HOSTNAME")
@@ -8067,6 +8086,12 @@ pub async fn run_opencode_turn(
                                                 .unwrap_or_else(|e| e.into_inner());
                                             if guard.is_none() {
                                                 *guard = Some(session_id);
+                                            }
+                                        }
+                                        if let Some((input, output)) = parsed.usage {
+                                            if let Ok(mut guard) = sse_usage_tokens.lock() {
+                                                guard.0 = guard.0.saturating_add(input);
+                                                guard.1 = guard.1.saturating_add(output);
                                             }
                                         }
                                         if let Some(event) = parsed.event {
@@ -8743,6 +8768,16 @@ pub async fn run_opencode_turn(
                                 if let Some(model) = parsed.model {
                                     model_used = Some(model);
                                 }
+                                // Only accumulate usage from stdout when the dedicated SSE
+                                // curl task is not running.  When both paths are active they
+                                // can see the same `response.completed` event, which would
+                                // double-count tokens (and inflate cost estimates to ~2x).
+                                if sse_handle.is_none() {
+                                    if let Some((input, output)) = parsed.usage {
+                                        total_input_tokens = total_input_tokens.saturating_add(input);
+                                        total_output_tokens = total_output_tokens.saturating_add(output);
+                                    }
+                                }
                                 if let Some(event) = parsed.event {
                                     if let Ok(mut guard) = last_activity.lock() {
                                         *guard = std::time::Instant::now();
@@ -9138,6 +9173,37 @@ pub async fn run_opencode_turn(
             }
         }
     }
+
+    // Merge shared SSE usage from the curl task into local accumulators
+    if let Ok(guard) = sse_usage_tokens.lock() {
+        total_input_tokens = total_input_tokens.saturating_add(guard.0);
+        total_output_tokens = total_output_tokens.saturating_add(guard.1);
+    }
+
+    // Compute cost from accumulated token usage and model (if available)
+    if total_input_tokens > 0 || total_output_tokens > 0 {
+        let usage = crate::cost::TokenUsage {
+            input_tokens: total_input_tokens,
+            output_tokens: total_output_tokens,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        };
+        let (cost_cents, cost_source) =
+            resolve_cost_cents_and_source(None, model_used.as_deref(), &usage);
+        result.cost_cents = cost_cents;
+        result.cost_source = cost_source;
+        result = result.with_usage(usage);
+        tracing::info!(
+            mission_id = %mission_id,
+            input_tokens = total_input_tokens,
+            output_tokens = total_output_tokens,
+            cost_cents = cost_cents,
+            cost_source = ?cost_source,
+            model = ?model_used,
+            "OpenCode turn cost resolved from SSE usage"
+        );
+    }
+
     if let Some(model) = model_used {
         result = result.with_model(model);
     }
@@ -10047,6 +10113,8 @@ pub async fn run_codex_turn(
     let mut thinking_emitted = false;
     let mut thinking_done_emitted = false;
     let mut last_summary: Option<String> = None;
+    let mut total_input_tokens: u64 = 0;
+    let mut total_output_tokens: u64 = 0;
 
     loop {
         tokio::select! {
@@ -10098,6 +10166,10 @@ pub async fn run_codex_turn(
                         if !content.trim().is_empty() {
                             last_summary = Some(content);
                         }
+                    }
+                    ExecutionEvent::Usage { input_tokens, output_tokens } => {
+                        total_input_tokens = total_input_tokens.saturating_add(input_tokens);
+                        total_output_tokens = total_output_tokens.saturating_add(output_tokens);
                     }
                     ExecutionEvent::Error { message } => {
                         error_message = Some(message.clone());
@@ -10170,8 +10242,18 @@ Update it to the latest version (`npm install -g @openai/codex@latest`) and retr
         }
     }
 
+    let usage = crate::cost::TokenUsage {
+        input_tokens: total_input_tokens,
+        output_tokens: total_output_tokens,
+        cache_creation_input_tokens: None,
+        cache_read_input_tokens: None,
+    };
+
+    let model_for_cost = resolved_model.as_deref();
+    let (cost_cents, cost_source) = resolve_cost_cents_and_source(None, model_for_cost, &usage);
+
     let mut result = if success {
-        AgentResult::success(final_message, 0) // TODO: Calculate cost from Codex usage
+        AgentResult::success(final_message, cost_cents)
             .with_terminal_reason(TerminalReason::Completed)
     } else {
         // Distinguish provider concurrency exhaustion from classic rate limits.
@@ -10182,9 +10264,13 @@ Update it to the latest version (`npm install -g @openai/codex@latest`) and retr
         } else {
             TerminalReason::LlmError
         };
-        AgentResult::failure(final_message, 0).with_terminal_reason(reason)
+        AgentResult::failure(final_message, cost_cents).with_terminal_reason(reason)
     };
 
+    result = result.with_cost_source(cost_source);
+    if usage.has_usage() {
+        result = result.with_usage(usage);
+    }
     if let Some(m) = resolved_model.as_deref() {
         result = result.with_model(m.to_string());
     }
@@ -10847,6 +10933,7 @@ mod tests {
         assert!(parsed.model.is_none());
         assert!(!parsed.session_idle);
         assert!(!parsed.session_retry);
+        assert!(parsed.usage.is_none());
     }
 
     #[test]
@@ -10864,6 +10951,57 @@ mod tests {
         assert!(parsed.event.is_none());
         assert!(parsed.message_complete);
         assert!(parsed.model.is_none());
+        assert!(
+            parsed.usage.is_none(),
+            "no usage when response has no usage field"
+        );
+    }
+
+    #[test]
+    fn parse_opencode_sse_event_response_completed_extracts_usage() {
+        let mut state = OpencodeSseState::default();
+        let mission_id = Uuid::new_v4();
+        let data = json!({
+            "type": "response.completed",
+            "properties": {
+                "response": {
+                    "id": "resp_001",
+                    "status": "completed",
+                    "usage": {
+                        "input_tokens": 1500,
+                        "output_tokens": 350
+                    }
+                }
+            }
+        })
+        .to_string();
+
+        let parsed = parse_opencode_sse_event(&data, None, None, &mut state, mission_id)
+            .expect("event should parse");
+        assert!(parsed.message_complete);
+        assert_eq!(parsed.usage, Some((1500, 350)));
+    }
+
+    #[test]
+    fn parse_opencode_sse_event_response_completed_usage_with_prompt_tokens() {
+        let mut state = OpencodeSseState::default();
+        let mission_id = Uuid::new_v4();
+        // Some providers use prompt_tokens/completion_tokens naming
+        let data = json!({
+            "type": "response.completed",
+            "properties": {
+                "usage": {
+                    "prompt_tokens": 800,
+                    "completion_tokens": 200
+                }
+            }
+        })
+        .to_string();
+
+        let parsed = parse_opencode_sse_event(&data, None, None, &mut state, mission_id)
+            .expect("event should parse");
+        assert!(parsed.message_complete);
+        assert_eq!(parsed.usage, Some((800, 200)));
     }
 
     #[test]

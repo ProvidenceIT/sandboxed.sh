@@ -145,7 +145,7 @@ export function NewMissionDialog({
     () => listProviders({ includeAll: true }),
     { revalidateOnFocus: false, dedupingInterval: 60000 }
   );
-  const { data: backendModelOptions } = useSWR(
+  const { data: backendModelOptions, mutate: mutateBackendModelOptions } = useSWR(
     'backend-model-options',
     () => listBackendModelOptions({ includeAll: true }),
     { revalidateOnFocus: false, dedupingInterval: 60000 }
@@ -374,6 +374,13 @@ export function NewMissionDialog({
       document.removeEventListener('keydown', handleKeyDown);
     };
   }, [open, onClose]);
+
+  // Revalidate backend model options when dialog opens to pick up chain configuration changes
+  useEffect(() => {
+    if (open) {
+      mutateBackendModelOptions();
+    }
+  }, [open, mutateBackendModelOptions]);
 
   // Set initial values when dialog opens (only once per open)
   useEffect(() => {

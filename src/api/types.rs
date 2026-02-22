@@ -37,6 +37,11 @@ pub struct StatsResponse {
     /// Total cost spent in cents
     pub total_cost_cents: u64,
 
+    /// Cost breakdown by source provenance
+    pub actual_cost_cents: u64,
+    pub estimated_cost_cents: u64,
+    pub unknown_cost_cents: u64,
+
     /// Success rate (0.0 - 1.0)
     pub success_rate: f64,
 }

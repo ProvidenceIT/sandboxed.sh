@@ -38,20 +38,31 @@ export default function AnalyticsPage() {
   const [missions, setMissions] = useState<Mission[]>([]);
   const [runs, setRuns] = useState<Run[]>([]);
   const [totalCostCents, setTotalCostCents] = useState(0);
+  const [actualCostCents, setActualCostCents] = useState(0);
+  const [estimatedCostCents, setEstimatedCostCents] = useState(0);
+  const [unknownCostCents, setUnknownCostCents] = useState(0);
   const [loading, setLoading] = useState(true);
   const [timeRange, setTimeRange] = useState<"7d" | "30d" | "all">("7d");
 
+  // Compute ISO-8601 lower bound from the selected time range
+  const sinceDate = useMemo(() => {
+    if (timeRange === "all") return undefined;
+    const days = timeRange === "7d" ? 7 : 30;
+    return new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+  }, [timeRange]);
+
+  // Fetch missions, runs, and all-time stats once on mount
   useEffect(() => {
     async function fetchData() {
       try {
-        const [missionsData, runsData, statsData] = await Promise.all([
+        const [missionsData, runsData, allTimeStats] = await Promise.all([
           listMissions(),
           listRuns(100, 0),
           getStats(),
         ]);
         setMissions(missionsData);
         setRuns(runsData.runs);
-        setTotalCostCents(statsData.total_cost_cents);
+        setTotalCostCents(allTimeStats.total_cost_cents);
       } catch (err) {
         console.error("Failed to fetch analytics:", err);
         toast.error("Failed to load analytics");
@@ -61,6 +72,21 @@ export default function AnalyticsPage() {
     }
     fetchData();
   }, []);
+
+  // Re-fetch cost breakdown whenever the time range changes
+  useEffect(() => {
+    async function fetchPeriodStats() {
+      try {
+        const stats = await getStats(sinceDate);
+        setActualCostCents(stats.actual_cost_cents ?? 0);
+        setEstimatedCostCents(stats.estimated_cost_cents ?? 0);
+        setUnknownCostCents(stats.unknown_cost_cents ?? 0);
+      } catch {
+        // Silently fall back — the all-time total is still visible
+      }
+    }
+    fetchPeriodStats();
+  }, [sinceDate]);
 
   // Calculate cost by day
   const costByDay = useMemo((): CostByDay[] => {
@@ -206,6 +232,29 @@ export default function AnalyticsPage() {
           <div className="text-xs text-white/40 mt-1">
             {formatCents(periodTotalCost)} in selected period
           </div>
+          {/* Cost source breakdown */}
+          {(actualCostCents > 0 || estimatedCostCents > 0 || unknownCostCents > 0) && (
+            <div className="mt-2 pt-2 border-t border-white/[0.06] space-y-1">
+              {actualCostCents > 0 && (
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-emerald-400/70">Actual</span>
+                  <span className="font-mono text-emerald-400/70">{formatCents(actualCostCents)}</span>
+                </div>
+              )}
+              {estimatedCostCents > 0 && (
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-amber-300/70">Estimated</span>
+                  <span className="font-mono text-amber-300/70">{formatCents(estimatedCostCents)}</span>
+                </div>
+              )}
+              {unknownCostCents > 0 && (
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-white/30">Unknown</span>
+                  <span className="font-mono text-white/30">{formatCents(unknownCostCents)}</span>
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         <div className="bg-white/[0.02] border border-white/[0.06] rounded-xl p-4">

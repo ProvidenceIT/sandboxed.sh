@@ -72,7 +72,7 @@ struct MissionHistoryEntry: Codable, Identifiable {
 struct Mission: Codable, Identifiable, Hashable {
     let id: String
     var status: MissionStatus
-    let title: String?
+    var title: String?
     let workspaceId: String?
     let workspaceName: String?
     let agent: String?
@@ -245,6 +245,14 @@ struct RunningMissionInfo: Codable, Identifiable {
     /// Short identifier for the mission (first 8 chars of ID)
     var shortId: String {
         String(missionId.prefix(8)).uppercased()
+    }
+
+    /// Best available label: title (truncated) or short ID fallback
+    var displayLabel: String {
+        if let title = title, !title.isEmpty {
+            return title.count > 24 ? String(title.prefix(24)) + "…" : title
+        }
+        return shortId
     }
 }
 
