@@ -1169,7 +1169,7 @@ fn parse_sse_event(
                 })
             }
         }
-        "response.completed" | "response.incomplete" => {
+        "response.completed" => {
             // Extract token usage from the response object if present.
             // OpenAI Responses API sends usage in response.completed events:
             //   { "response": { "usage": { "input_tokens": N, "output_tokens": N } } }
@@ -1195,6 +1195,14 @@ fn parse_sse_event(
                     state.pending_usage = Some((input, output));
                 }
             }
+            Some(OpenCodeEvent::MessageComplete {
+                session_id: session_id.to_string(),
+            })
+        }
+        "response.incomplete" => {
+            // Do NOT extract usage from incomplete responses — some providers
+            // emit this before response.completed with overlapping usage data,
+            // which would double-count tokens via saturating_add.
             Some(OpenCodeEvent::MessageComplete {
                 session_id: session_id.to_string(),
             })
@@ -1511,5 +1519,479 @@ fn split_model(model: &str) -> Option<(String, String)> {
         None
     } else {
         Some((provider.to_string(), model_id.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Helper: create a default SseState for tests.
+    fn new_state() -> SseState {
+        SseState::default()
+    }
+
+    // ---------------------------------------------------------------
+    // response.completed — token usage extraction
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn response_completed_extracts_usage_from_response_object() {
+        let mut state = new_state();
+        let data = json!({
+            "type": "response.completed",
+            "properties": {
+                "response": {
+                    "usage": {
+                        "input_tokens": 100,
+                        "output_tokens": 50
+                    }
+                }
+            }
+        })
+        .to_string();
+
+        let event = parse_sse_event(&data, None, "sess-1", &mut state);
+        assert!(matches!(event, Some(OpenCodeEvent::MessageComplete { .. })));
+        assert_eq!(state.pending_usage, Some((100, 50)));
+    }
+
+    #[test]
+    fn response_completed_extracts_usage_with_prompt_tokens_alias() {
+        let mut state = new_state();
+        let data = json!({
+            "type": "response.completed",
+            "properties": {
+                "usage": {
+                    "prompt_tokens": 200,
+                    "completion_tokens": 80
+                }
+            }
+        })
+        .to_string();
+
+        let event = parse_sse_event(&data, None, "sess-1", &mut state);
+        assert!(matches!(event, Some(OpenCodeEvent::MessageComplete { .. })));
+        assert_eq!(state.pending_usage, Some((200, 80)));
+    }
+
+    #[test]
+    fn response_completed_without_usage_leaves_pending_none() {
+        let mut state = new_state();
+        let data = json!({
+            "type": "response.completed",
+            "properties": {}
+        })
+        .to_string();
+
+        let event = parse_sse_event(&data, None, "sess-1", &mut state);
+        assert!(matches!(event, Some(OpenCodeEvent::MessageComplete { .. })));
+        assert_eq!(state.pending_usage, None);
+    }
+
+    // ---------------------------------------------------------------
+    // response.incomplete — must NOT extract usage (regression test)
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn response_incomplete_does_not_extract_usage() {
+        let mut state = new_state();
+        // Even if the incomplete event carries usage data, we must ignore it
+        // to avoid double-counting when response.completed follows.
+        let data = json!({
+            "type": "response.incomplete",
+            "properties": {
+                "response": {
+                    "usage": {
+                        "input_tokens": 500,
+                        "output_tokens": 200
+                    }
+                }
+            }
+        })
+        .to_string();
+
+        let event = parse_sse_event(&data, None, "sess-1", &mut state);
+        assert!(matches!(event, Some(OpenCodeEvent::MessageComplete { .. })));
+        // Usage must remain None — this is the regression guard.
+        assert_eq!(state.pending_usage, None);
+    }
+
+    #[test]
+    fn incomplete_then_completed_counts_tokens_once() {
+        let mut state = new_state();
+
+        // First: response.incomplete with usage (should be ignored)
+        let incomplete = json!({
+            "type": "response.incomplete",
+            "properties": {
+                "response": {
+                    "usage": { "input_tokens": 300, "output_tokens": 100 }
+                }
+            }
+        })
+        .to_string();
+        parse_sse_event(&incomplete, None, "sess-1", &mut state);
+        assert_eq!(state.pending_usage, None);
+
+        // Then: response.completed with the same usage (should be recorded)
+        let completed = json!({
+            "type": "response.completed",
+            "properties": {
+                "response": {
+                    "usage": { "input_tokens": 300, "output_tokens": 100 }
+                }
+            }
+        })
+        .to_string();
+        parse_sse_event(&completed, None, "sess-1", &mut state);
+        assert_eq!(state.pending_usage, Some((300, 100)));
+    }
+
+    // ---------------------------------------------------------------
+    // response.output_text.delta — text streaming
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn text_delta_accumulates_in_buffer() {
+        let mut state = new_state();
+        let data1 = json!({
+            "type": "response.output_text.delta",
+            "properties": { "delta": "Hello " }
+        })
+        .to_string();
+        let data2 = json!({
+            "type": "response.output_text.delta",
+            "properties": { "delta": "world" }
+        })
+        .to_string();
+
+        let ev1 = parse_sse_event(&data1, None, "s1", &mut state);
+        assert!(matches!(&ev1, Some(OpenCodeEvent::TextDelta { content }) if content == "Hello "));
+
+        let ev2 = parse_sse_event(&data2, None, "s1", &mut state);
+        assert!(
+            matches!(&ev2, Some(OpenCodeEvent::TextDelta { content }) if content == "Hello world")
+        );
+    }
+
+    #[test]
+    fn text_delta_empty_returns_none() {
+        let mut state = new_state();
+        let data = json!({
+            "type": "response.output_text.delta",
+            "properties": { "delta": "" }
+        })
+        .to_string();
+
+        assert!(parse_sse_event(&data, None, "s1", &mut state).is_none());
+    }
+
+    // ---------------------------------------------------------------
+    // Session ID filtering
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn event_with_mismatched_session_id_is_skipped() {
+        let mut state = new_state();
+        let data = json!({
+            "type": "response.completed",
+            "properties": {
+                "sessionID": "other-session",
+                "response": {
+                    "usage": { "input_tokens": 10, "output_tokens": 5 }
+                }
+            }
+        })
+        .to_string();
+
+        let event = parse_sse_event(&data, None, "my-session", &mut state);
+        assert!(event.is_none());
+        assert_eq!(state.pending_usage, None);
+    }
+
+    #[test]
+    fn event_with_matching_session_id_is_accepted() {
+        let mut state = new_state();
+        let data = json!({
+            "type": "response.completed",
+            "properties": {
+                "sessionID": "my-session"
+            }
+        })
+        .to_string();
+
+        let event = parse_sse_event(&data, None, "my-session", &mut state);
+        assert!(matches!(event, Some(OpenCodeEvent::MessageComplete { .. })));
+    }
+
+    // ---------------------------------------------------------------
+    // Tool call events via Responses API
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn output_item_done_emits_tool_call() {
+        let mut state = new_state();
+        let data = json!({
+            "type": "response.output_item.done",
+            "properties": {
+                "item": {
+                    "type": "function_call",
+                    "call_id": "call_123",
+                    "name": "read_file",
+                    "arguments": "{\"path\":\"/tmp/test\"}"
+                }
+            }
+        })
+        .to_string();
+
+        let event = parse_sse_event(&data, None, "s1", &mut state);
+        match event {
+            Some(OpenCodeEvent::ToolCall { id, name, args }) => {
+                assert_eq!(id, "call_123");
+                assert_eq!(name, "read_file");
+                assert_eq!(args, json!({"path": "/tmp/test"}));
+            }
+            other => panic!("Expected ToolCall, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn duplicate_tool_call_is_suppressed() {
+        let mut state = new_state();
+        let data = json!({
+            "type": "response.output_item.done",
+            "properties": {
+                "item": {
+                    "type": "function_call",
+                    "call_id": "call_dup",
+                    "name": "run",
+                    "arguments": "{}"
+                }
+            }
+        })
+        .to_string();
+
+        let first = parse_sse_event(&data, None, "s1", &mut state);
+        assert!(matches!(first, Some(OpenCodeEvent::ToolCall { .. })));
+
+        let second = parse_sse_event(&data, None, "s1", &mut state);
+        assert!(second.is_none(), "Duplicate tool call should be suppressed");
+    }
+
+    #[test]
+    fn function_call_args_delta_accumulates() {
+        let mut state = new_state();
+
+        // First, register the tool via output_item.added
+        let added = json!({
+            "type": "response.output_item.added",
+            "properties": {
+                "item": {
+                    "type": "function_call",
+                    "call_id": "call_stream",
+                    "name": "bash"
+                }
+            }
+        })
+        .to_string();
+        parse_sse_event(&added, None, "s1", &mut state);
+
+        // Stream argument deltas
+        let delta1 = json!({
+            "type": "response.function_call_arguments.delta",
+            "properties": { "item_id": "call_stream", "delta": "{\"cmd\":" }
+        })
+        .to_string();
+        let delta2 = json!({
+            "type": "response.function_call_arguments.delta",
+            "properties": { "item_id": "call_stream", "delta": "\"ls\"}" }
+        })
+        .to_string();
+        parse_sse_event(&delta1, None, "s1", &mut state);
+        parse_sse_event(&delta2, None, "s1", &mut state);
+
+        // Finalize with output_item.done
+        let done = json!({
+            "type": "response.output_item.done",
+            "properties": {
+                "item": {
+                    "type": "function_call",
+                    "call_id": "call_stream",
+                    "name": "bash"
+                }
+            }
+        })
+        .to_string();
+        let event = parse_sse_event(&done, None, "s1", &mut state);
+        match event {
+            Some(OpenCodeEvent::ToolCall { args, .. }) => {
+                assert_eq!(args, json!({"cmd": "ls"}));
+            }
+            other => panic!("Expected ToolCall, got {:?}", other),
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Error events
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn error_event_extracts_message() {
+        let mut state = new_state();
+        let data = json!({
+            "type": "error",
+            "properties": { "message": "rate limit exceeded" }
+        })
+        .to_string();
+
+        let event = parse_sse_event(&data, None, "s1", &mut state);
+        match event {
+            Some(OpenCodeEvent::Error { message }) => {
+                assert_eq!(message, "rate limit exceeded");
+            }
+            other => panic!("Expected Error, got {:?}", other),
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Session idle / status events
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn session_idle_emits_message_complete() {
+        let mut state = new_state();
+        let data = json!({
+            "type": "session.idle",
+            "properties": {}
+        })
+        .to_string();
+
+        let event = parse_sse_event(&data, None, "s1", &mut state);
+        assert!(matches!(event, Some(OpenCodeEvent::MessageComplete { .. })));
+    }
+
+    #[test]
+    fn session_status_idle_emits_message_complete() {
+        let mut state = new_state();
+        let data = json!({
+            "type": "session.status",
+            "properties": { "status": "idle" }
+        })
+        .to_string();
+
+        let event = parse_sse_event(&data, None, "s1", &mut state);
+        assert!(matches!(event, Some(OpenCodeEvent::MessageComplete { .. })));
+    }
+
+    #[test]
+    fn session_status_non_idle_returns_none() {
+        let mut state = new_state();
+        let data = json!({
+            "type": "session.status",
+            "properties": { "status": "running" }
+        })
+        .to_string();
+
+        assert!(parse_sse_event(&data, None, "s1", &mut state).is_none());
+    }
+
+    // ---------------------------------------------------------------
+    // message.completed / assistant.message.completed
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn message_completed_emits_complete() {
+        let mut state = new_state();
+        let data = json!({ "type": "message.completed", "properties": {} }).to_string();
+        assert!(matches!(
+            parse_sse_event(&data, None, "s1", &mut state),
+            Some(OpenCodeEvent::MessageComplete { .. })
+        ));
+    }
+
+    #[test]
+    fn assistant_message_completed_emits_complete() {
+        let mut state = new_state();
+        let data = json!({ "type": "assistant.message.completed", "properties": {} }).to_string();
+        assert!(matches!(
+            parse_sse_event(&data, None, "s1", &mut state),
+            Some(OpenCodeEvent::MessageComplete { .. })
+        ));
+    }
+
+    // ---------------------------------------------------------------
+    // Event name fallback (event_name parameter)
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn event_type_from_event_name_parameter() {
+        let mut state = new_state();
+        // JSON has no "type" field — falls back to event_name arg
+        let data = json!({
+            "properties": { "message": "fallback error" }
+        })
+        .to_string();
+
+        let event = parse_sse_event(&data, Some("error"), "s1", &mut state);
+        assert!(matches!(event, Some(OpenCodeEvent::Error { .. })));
+    }
+
+    // ---------------------------------------------------------------
+    // Unknown event type — returns None
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn unknown_event_type_returns_none() {
+        let mut state = new_state();
+        let data = json!({
+            "type": "some.future.event",
+            "properties": {}
+        })
+        .to_string();
+
+        assert!(parse_sse_event(&data, None, "s1", &mut state).is_none());
+    }
+
+    // ---------------------------------------------------------------
+    // Malformed JSON — returns None
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn malformed_json_returns_none() {
+        let mut state = new_state();
+        assert!(parse_sse_event("not valid json", None, "s1", &mut state).is_none());
+    }
+
+    #[test]
+    fn multiline_json_is_repaired() {
+        let mut state = new_state();
+        let data = "{\n\"type\": \"session.idle\",\n\"properties\": {}\n}";
+        let event = parse_sse_event(data, None, "s1", &mut state);
+        assert!(matches!(event, Some(OpenCodeEvent::MessageComplete { .. })));
+    }
+
+    // ---------------------------------------------------------------
+    // split_model helper
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn split_model_valid() {
+        assert_eq!(
+            split_model("openai/gpt-4"),
+            Some(("openai".into(), "gpt-4".into()))
+        );
+    }
+
+    #[test]
+    fn split_model_no_slash() {
+        assert_eq!(split_model("gpt-4"), None);
+    }
+
+    #[test]
+    fn split_model_empty_parts() {
+        assert_eq!(split_model("/gpt-4"), None);
+        assert_eq!(split_model("openai/"), None);
     }
 }
