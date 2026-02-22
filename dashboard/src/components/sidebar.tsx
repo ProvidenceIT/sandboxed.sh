@@ -93,13 +93,22 @@ export function Sidebar() {
   // Auto-expand sections if we're on their subpages
   useEffect(() => {
     if (pathname.startsWith('/config')) {
-      setExpandedItems((prev) => new Set([...prev, 'Library']));
+      setExpandedItems((prev) => {
+        if (prev.has('Library')) return prev;
+        return new Set([...prev, 'Library']);
+      });
     }
     if (pathname.startsWith('/inspect')) {
-      setExpandedItems((prev) => new Set([...prev, 'Inspect']));
+      setExpandedItems((prev) => {
+        if (prev.has('Inspect')) return prev;
+        return new Set([...prev, 'Inspect']);
+      });
     }
     if (pathname.startsWith('/settings')) {
-      setExpandedItems((prev) => new Set([...prev, 'Settings']));
+      setExpandedItems((prev) => {
+        if (prev.has('Settings')) return prev;
+        return new Set([...prev, 'Settings']);
+      });
     }
   }, [pathname]);
 

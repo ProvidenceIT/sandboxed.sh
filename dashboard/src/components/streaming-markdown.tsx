@@ -46,7 +46,7 @@ export const StreamingMarkdown = memo(function StreamingMarkdown({
   }, [content]);
 
   // Track when the last block was updated for stabilization
-  const lastUpdateRef = useRef<number>(Date.now());
+  const lastUpdateRef = useRef<number>(0);
   const [lastBlockStable, setLastBlockStable] = useState(false);
 
   // Get stable blocks (all except the last one during streaming)

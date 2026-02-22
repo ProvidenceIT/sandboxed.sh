@@ -59,7 +59,6 @@ import {
   type UploadProgress,
   type Workspace,
   type DesktopSessionDetail,
-  type DesktopSessionStatus,
   type StoredEvent,
 } from "@/lib/api";
 import { QueueStrip, type QueueItem } from "@/components/queue-strip";
@@ -74,7 +73,6 @@ import {
   Ban,
   Clock,
   ChevronDown,
-  ChevronRight,
   ChevronUp,
   Target,
   Brain,
@@ -103,7 +101,6 @@ import {
   HelpCircle,
   PanelRightClose,
   PanelRight,
-  Wifi,
   WifiOff,
   AlertTriangle,
   Download,
@@ -158,19 +155,19 @@ function streamLog(level: StreamLogLevel, message: string, meta?: Record<string,
   const args = meta ? [prefix, message, meta] : [prefix, message];
   switch (level) {
     case "debug":
-      // eslint-disable-next-line no-console
+       
       console.debug(...args);
       break;
     case "info":
-      // eslint-disable-next-line no-console
+       
       console.info(...args);
       break;
     case "warn":
-      // eslint-disable-next-line no-console
+       
       console.warn(...args);
       break;
     case "error":
-      // eslint-disable-next-line no-console
+       
       console.error(...args);
       break;
   }
@@ -2944,7 +2941,7 @@ export default function ControlClient() {
   // Scroll to bottom synchronously before paint when items change.
   // This ensures the page appears at the bottom instantly when returning
   // to the control page (no visible scroll animation).
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+   
   useLayoutEffect(() => {
     if (items.length > 0 && isAtBottom) {
       scrollToBottomImmediate();
