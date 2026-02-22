@@ -1610,7 +1610,7 @@ async fn run_mission_turn(
     // Prepare user message and session ID (potentially with rotation)
     let (mut user_message, mut session_id) = (user_message, session_id);
 
-    if should_rotate && backend_id == "claudecode" {
+    if should_rotate && (backend_id == "claudecode" || backend_id == "opencode") {
         tracing::info!(
             mission_id = %mission_id,
             turn_count = turn_count,
@@ -1658,6 +1658,33 @@ async fn run_mission_turn(
             new_session_id = %new_session_id,
             summary_length = summary.len(),
             "Session rotated successfully"
+        );
+    } else if should_rotate && backend_id == "opencode" {
+        // OpenCode session rotation: inject summary to prevent OOM
+        tracing::info!(
+            mission_id = %mission_id,
+            turn_count = turn_count,
+            interval = SESSION_ROTATION_INTERVAL,
+            "Rotating OpenCode session to prevent OOM from unbounded context accumulation"
+        );
+
+        // Generate summary of recent work from history
+        let summary = generate_session_summary(&history, SESSION_ROTATION_INTERVAL);
+
+        // Inject summary into user message (OpenCode uses conversation history internally)
+        user_message = format!(
+            "## Session Rotated (Turn {})\n\n\
+             **Previous Work Summary:**\n{}\n\n\
+             ---\n\n\
+             ## Current Task\n\n\
+             {}",
+            turn_count, summary, user_message
+        );
+
+        tracing::info!(
+            mission_id = %mission_id,
+            summary_length = summary.len(),
+            "OpenCode session rotation prepared"
         );
     }
 
@@ -8922,20 +8949,35 @@ pub async fn run_opencode_turn(
     if let Ok(status) = exit_status {
         if !status.success() {
             had_error = true;
+            let formatted_status = format_exit_status(&status);
+            
+            // Add helpful hint for SIGKILL (likely OOM)
+            let sigkill_hint = if is_killed_by_signal(&status) {
+                " (this often indicates OOM - consider session rotation or reducing context)"
+            } else {
+                ""
+            };
+            
             if opencode_output_needs_fallback(&final_result) {
                 if let Some(err_msg) = stderr_error_message.lock().unwrap().clone() {
                     final_result = err_msg;
                 } else if let Ok(recent_lines) = stderr_recent_lines.lock() {
                     if let Some(last_stderr) = summarize_recent_opencode_stderr(&recent_lines) {
                         final_result = format!(
-                            "OpenCode CLI exited with status: {}. Last stderr: {}",
-                            status, last_stderr
+                            "OpenCode CLI exited with status: {}{}. Last stderr: {}",
+                            formatted_status, sigkill_hint, last_stderr
                         );
                     } else {
-                        final_result = format!("OpenCode CLI exited with status: {}", status);
+                        final_result = format!(
+                            "OpenCode CLI exited with status: {}{}",
+                            formatted_status, sigkill_hint
+                        );
                     }
                 } else {
-                    final_result = format!("OpenCode CLI exited with status: {}", status);
+                    final_result = format!(
+                        "OpenCode CLI exited with status: {}{}",
+                        formatted_status, sigkill_hint
+                    );
                 }
                 final_result_from_nonzero_exit = true;
             }
@@ -10276,6 +10318,12 @@ Update it to the latest version (`npm install -g @openai/codex@latest`) and retr
     }
 
     result
+}
+
+/// Check if exit status indicates the process was killed by a signal (SIGKILL = 9)
+fn is_killed_by_signal(status: &std::process::ExitStatus) -> bool {
+    use std::os::unix::process::ExitStatusExt;
+    status.signal() == Some(9)
 }
 
 /// Generate a concise summary of recent conversation turns for session rotation.
