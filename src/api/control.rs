@@ -290,16 +290,18 @@ fn mission_is_terminal(status: MissionStatus) -> bool {
     )
 }
 
-fn stop_policy_matches_status(
+async fn stop_policy_matches_status(
     stop_policy: &mission_store::StopPolicy,
     _status: MissionStatus,
     consecutive_failures: u32,
 ) -> bool {
     match stop_policy {
         mission_store::StopPolicy::Never => false,
-        mission_store::StopPolicy::OnConsecutiveFailures { count } => {
-            // Stop if we've had N consecutive failures
+        mission_store::StopPolicy::WhenFailingConsecutively { count } => {
             consecutive_failures >= *count
+        }
+        mission_store::StopPolicy::WhenAllIssuesClosedAndPRsMerged { repo } => {
+            check_github_all_issues_closed_and_prs_merged(repo).await
         }
     }
 }
@@ -310,7 +312,7 @@ async fn consecutive_failure_count_for_automation(
 ) -> u32 {
     if !matches!(
         automation.stop_policy,
-        mission_store::StopPolicy::OnConsecutiveFailures { .. }
+        mission_store::StopPolicy::WhenFailingConsecutively { .. }
     ) {
         return 0;
     }
@@ -328,6 +330,49 @@ async fn consecutive_failure_count_for_automation(
         }
     }
     count
+}
+
+async fn check_github_all_issues_closed_and_prs_merged(repo: &str) -> bool {
+    let client = reqwest::Client::new();
+    
+    let issues_url = format!("https://api.github.com/repos/{}/issues?state=open", repo);
+    let pulls_url = format!("https://api.github.com/repos/{}/pulls?state=open", repo);
+    
+    let check_repo = || async {
+        let issues_resp = client
+            .get(&issues_url)
+            .header("User-Agent", "sandboxed-sh")
+            .header("Accept", "application/vnd.github.v3+json")
+            .send()
+            .await;
+        
+        let pulls_resp = client
+            .get(&pulls_url)
+            .header("User-Agent", "sandboxed-sh")
+            .header("Accept", "application/vnd.github.v3+json")
+            .send()
+            .await;
+        
+        let has_open_issues = issues_resp
+            .as_ref()
+            .ok()
+            .and_then(|r| r.json::<serde_json::Value>().await.ok())
+            .map(|v| v.as_array().map(|a| !a.is_empty()).unwrap_or(false))
+            .unwrap_or(false);
+        
+        let has_open_prs = pulls_resp
+            .as_ref()
+            .ok()
+            .and_then(|r| r.json::<serde_json::Value>().await.ok())
+            .map(|v| v.as_array().map(|a| !a.is_empty()).unwrap_or(false))
+            .unwrap_or(false);
+        
+        !has_open_issues && !has_open_prs
+    };
+    
+    tokio::time::timeout(std::time::Duration::from_secs(10), check_repo())
+        .await
+        .unwrap_or(false)
 }
 
 pub(crate) async fn resolve_claudecode_default_model(
@@ -2651,7 +2696,7 @@ async fn automation_scheduler_loop(
                 &automation.stop_policy,
                 mission.status,
                 consecutive_failures,
-            ) {
+            ).await {
                 tracing::info!(
                     "Disabling automation {} due to stop policy {:?} (mission {} status {:?})",
                     automation.id,
@@ -3038,7 +3083,7 @@ async fn agent_finished_automation_messages(
             &automation.stop_policy,
             mission.status,
             consecutive_failures,
-        ) {
+        ).await {
             tracing::info!(
                 "Disabling agent_finished automation {} due to stop policy {:?} (mission {} status {:?})",
                 automation.id,
@@ -6114,7 +6159,7 @@ pub async fn create_automation(
     {
         if let Ok(Some(mission)) = control.mission_store.get_mission(mission_id).await {
             // Newly created automation has 0 consecutive failures
-            if stop_policy_matches_status(&automation.stop_policy, mission.status, 0) {
+            if stop_policy_matches_status(&automation.stop_policy, mission.status, 0).await {
                 let mut updated = automation.clone();
                 updated.active = false;
                 if let Err(e) = control.mission_store.update_automation(updated).await {
@@ -6450,7 +6495,7 @@ pub async fn webhook_receiver(
         &automation.stop_policy,
         mission.status,
         consecutive_failures,
-    ) {
+    ).await {
         let mut updated = automation.clone();
         updated.active = false;
         if let Err(e) = control.mission_store.update_automation(updated).await {
@@ -6772,43 +6817,42 @@ Investigate <service/> failures.
         );
     }
 
-    #[test]
-    fn test_stop_policy_matches_consecutive_failures() {
-        // With count of 2, should match after 2 consecutive failures
+    #[tokio::test]
+    async fn test_stop_policy_matches_consecutive_failures() {
         assert!(stop_policy_matches_status(
-            &mission_store::StopPolicy::OnConsecutiveFailures { count: 2 },
+            &mission_store::StopPolicy::WhenFailingConsecutively { count: 2 },
             MissionStatus::Failed,
             2
-        ));
+        ).await);
         assert!(!stop_policy_matches_status(
-            &mission_store::StopPolicy::OnConsecutiveFailures { count: 2 },
+            &mission_store::StopPolicy::WhenFailingConsecutively { count: 2 },
             MissionStatus::Failed,
             1
-        ));
+        ).await);
         assert!(stop_policy_matches_status(
-            &mission_store::StopPolicy::OnConsecutiveFailures { count: 3 },
+            &mission_store::StopPolicy::WhenFailingConsecutively { count: 3 },
             MissionStatus::Failed,
             3
-        ));
+        ).await);
         assert!(!stop_policy_matches_status(
-            &mission_store::StopPolicy::OnConsecutiveFailures { count: 3 },
+            &mission_store::StopPolicy::WhenFailingConsecutively { count: 3 },
             MissionStatus::Failed,
             2
-        ));
+        ).await);
     }
 
-    #[test]
-    fn test_stop_policy_never_never_matches() {
+    #[tokio::test]
+    async fn test_stop_policy_never_never_matches() {
         assert!(!stop_policy_matches_status(
             &mission_store::StopPolicy::Never,
             MissionStatus::Completed,
             0
-        ));
+        ).await);
         assert!(!stop_policy_matches_status(
             &mission_store::StopPolicy::Never,
             MissionStatus::Failed,
             5
-        ));
+        ).await);
     }
 
     #[tokio::test]
