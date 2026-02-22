@@ -7951,7 +7951,8 @@ pub async fn run_opencode_turn(
     let sse_done_sent = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let sse_error_message: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     // Shared accumulator for token usage extracted from SSE response.completed events.
-    // Updated by both the dedicated SSE curl task and the stdout parser.
+    // Updated only by the dedicated SSE curl task; the stdout parser uses local counters
+    // and only accumulates when the SSE task is absent (to avoid double-counting).
     let sse_usage_tokens: Arc<Mutex<(u64, u64)>> = Arc::new(Mutex::new((0, 0)));
     let rate_limit_detected = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let sse_cancel = CancellationToken::new();
@@ -8788,9 +8789,15 @@ pub async fn run_opencode_turn(
                                 if let Some(model) = parsed.model {
                                     model_used = Some(model);
                                 }
-                                if let Some((input, output)) = parsed.usage {
-                                    total_input_tokens = total_input_tokens.saturating_add(input);
-                                    total_output_tokens = total_output_tokens.saturating_add(output);
+                                // Only accumulate usage from stdout when the dedicated SSE
+                                // curl task is not running.  When both paths are active they
+                                // can see the same `response.completed` event, which would
+                                // double-count tokens (and inflate cost estimates to ~2x).
+                                if sse_handle.is_none() {
+                                    if let Some((input, output)) = parsed.usage {
+                                        total_input_tokens = total_input_tokens.saturating_add(input);
+                                        total_output_tokens = total_output_tokens.saturating_add(output);
+                                    }
                                 }
                                 if let Some(event) = parsed.event {
                                     if let Ok(mut guard) = last_activity.lock() {
