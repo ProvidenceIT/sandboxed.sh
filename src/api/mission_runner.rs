@@ -1554,11 +1554,12 @@ async fn run_mission_turn(
     // Prepare user message and session ID (potentially with rotation)
     let (mut user_message, mut session_id) = (user_message, session_id);
 
-    if should_rotate && backend_id == "claudecode" {
+    if should_rotate && (backend_id == "claudecode" || backend_id == "opencode") {
         tracing::info!(
             mission_id = %mission_id,
             turn_count = turn_count,
             interval = SESSION_ROTATION_INTERVAL,
+            backend = %backend_id,
             "Rotating session to prevent OOM from unbounded context accumulation"
         );
 
@@ -1586,19 +1587,22 @@ async fn run_mission_turn(
 
         session_id = Some(new_session_id.clone());
 
-        // Delete the session marker file to force a fresh session
-        let session_marker = mission_work_dir.join(".claude-session-initiated");
-        if session_marker.exists() {
-            if let Err(e) = std::fs::remove_file(&session_marker) {
-                tracing::warn!(
-                    error = %e,
-                    "Failed to remove session marker during rotation"
-                );
+        // Delete the session marker file to force a fresh session (Claude Code only)
+        if backend_id == "claudecode" {
+            let session_marker = mission_work_dir.join(".claude-session-initiated");
+            if session_marker.exists() {
+                if let Err(e) = std::fs::remove_file(&session_marker) {
+                    tracing::warn!(
+                        error = %e,
+                        "Failed to remove session marker during rotation"
+                    );
+                }
             }
         }
 
         tracing::info!(
             mission_id = %mission_id,
+            backend = %backend_id,
             new_session_id = %new_session_id,
             summary_length = summary.len(),
             "Session rotated successfully"
@@ -1791,6 +1795,7 @@ async fn run_mission_turn(
                 events_tx.clone(),
                 cancel,
                 &config.working_dir,
+                session_id.as_deref(),
             )
             .await
         }
@@ -7341,6 +7346,7 @@ pub async fn run_opencode_turn(
     events_tx: broadcast::Sender<AgentEvent>,
     cancel: CancellationToken,
     app_working_dir: &std::path::Path,
+    session_id: Option<&str>,
 ) -> AgentResult {
     use super::ai_providers::{
         ensure_anthropic_oauth_token_valid, ensure_google_oauth_token_valid,
@@ -7349,6 +7355,14 @@ pub async fn run_opencode_turn(
     use std::collections::{HashMap, VecDeque};
     use std::sync::{Arc, Mutex};
     use tokio::io::{AsyncBufReadExt, BufReader};
+
+    // DEBUG: Log session_id being passed to OpenCode turn
+    tracing::debug!(
+        mission_id = %mission_id,
+        session_id = ?session_id,
+        message_len = message.len(),
+        "OpenCode turn starting with session_id"
+    );
 
     // Determine CLI runner: prefer backend config, then env var, then try bunx/npx
     // We use 'bunx oh-my-opencode run' or 'npx oh-my-opencode run' for per-workspace execution.
@@ -8857,6 +8871,15 @@ pub async fn run_opencode_turn(
         .unwrap_or_else(|e| e.into_inner())
         .clone();
     let session_id = session_id.or_else(|| extract_opencode_session_id(&final_result));
+
+    // DEBUG: Log session_id extraction for debugging session resets
+    tracing::debug!(
+        mission_id = %mission_id,
+        session_id_captured = ?session_id,
+        has_stored_message = session_id.as_ref().map(|id| load_latest_opencode_assistant_message(workspace, id).is_some()).unwrap_or(false),
+        "OpenCode session_id extraction debug"
+    );
+
     let stored_message = session_id
         .as_deref()
         .and_then(|id| load_latest_opencode_assistant_message(workspace, id));
