@@ -117,6 +117,7 @@ impl OpenCodeAgent {
             },
             OpenCodeEvent::MessageComplete { .. } => return, // Don't forward completion marker
             OpenCodeEvent::TurnSummary { .. } => return,     // Summary is handled elsewhere
+            OpenCodeEvent::Usage { .. } => return,           // Usage tracked at runner level
         };
 
         match events_tx.send(agent_event) {
@@ -446,6 +447,8 @@ impl Agent for OpenCodeAgent {
         // Process streaming events with cancellation support
         let mut saw_sse_event = false;
         let mut sse_text_buffer = String::new();
+        let mut total_input_tokens: u64 = 0;
+        let mut total_output_tokens: u64 = 0;
         let mut message_handle = message_handle;
         let mut response_result = None;
         let response = if let Some(cancel) = ctx.cancel_token.clone() {
@@ -484,6 +487,10 @@ impl Agent for OpenCodeAgent {
                                         &directory,
                                         ctx,
                                     );
+                                }
+                                if let OpenCodeEvent::Usage { input_tokens, output_tokens } = &oc_event {
+                                    total_input_tokens = total_input_tokens.saturating_add(*input_tokens);
+                                    total_output_tokens = total_output_tokens.saturating_add(*output_tokens);
                                 }
                                 self.forward_event(&oc_event, ctx);
                                 if matches!(oc_event, OpenCodeEvent::MessageComplete { .. }) {
@@ -546,6 +553,10 @@ impl Agent for OpenCodeAgent {
                                         &directory,
                                         ctx,
                                     );
+                                }
+                                if let OpenCodeEvent::Usage { input_tokens, output_tokens } = &oc_event {
+                                    total_input_tokens = total_input_tokens.saturating_add(*input_tokens);
+                                    total_output_tokens = total_output_tokens.saturating_add(*output_tokens);
                                 }
                                 self.forward_event(&oc_event, ctx);
                                 if matches!(oc_event, OpenCodeEvent::MessageComplete { .. }) {
@@ -686,12 +697,27 @@ impl Agent for OpenCodeAgent {
             _ => None,
         };
 
+        // Compute cost from accumulated token usage via the shared resolver
+        let (cost_cents, cost_source, token_usage) = if total_input_tokens > 0 || total_output_tokens > 0 {
+            let usage = crate::cost::TokenUsage {
+                input_tokens: total_input_tokens,
+                output_tokens: total_output_tokens,
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: None,
+            };
+            let (cents, source) =
+                crate::cost::resolve_cost_cents_and_source(None, model_used.as_deref(), &usage);
+            (cents, source, Some(usage))
+        } else {
+            (0, crate::agents::types::CostSource::Unknown, None)
+        };
+
         AgentResult {
             success: true,
             output,
-            cost_cents: 0,
-            cost_source: crate::agents::types::CostSource::Unknown,
-            usage: None,
+            cost_cents,
+            cost_source,
+            usage: token_usage,
             model_used,
             data: Some(json!({
                 "agent": "OpenCodeAgent",

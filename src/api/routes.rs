@@ -818,10 +818,19 @@ async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
     })
 }
 
+/// Optional query parameters for the stats endpoint.
+#[derive(Debug, Deserialize)]
+pub struct StatsQuery {
+    /// ISO-8601 lower bound for cost aggregation (e.g. "2026-02-15T00:00:00Z").
+    /// When omitted the endpoint returns all-time totals.
+    since: Option<String>,
+}
+
 /// Get system statistics.
 async fn get_stats(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthUser>,
+    Query(params): Query<StatsQuery>,
 ) -> Json<StatsResponse> {
     // Legacy tasks
     let tasks = state.tasks.read().await;
@@ -880,12 +889,33 @@ async fn get_stats(
     let completed_tasks = legacy_completed + mission_completed;
     let failed_tasks = legacy_failed + mission_failed;
 
-    // Get total cost from mission store (aggregates from all assistant_message events)
-    let total_cost_cents = control_state
-        .mission_store
-        .get_total_cost_cents()
-        .await
-        .unwrap_or(0);
+    // Get cost totals, optionally filtered by a time-range lower bound.
+    let (total_cost_cents, actual_cost_cents, estimated_cost_cents, unknown_cost_cents) =
+        if let Some(ref since) = params.since {
+            let total = control_state
+                .mission_store
+                .get_total_cost_cents_since(since)
+                .await
+                .unwrap_or(0);
+            let (a, e, u) = control_state
+                .mission_store
+                .get_cost_by_source_since(since)
+                .await
+                .unwrap_or((0, 0, 0));
+            (total, a, e, u)
+        } else {
+            let total = control_state
+                .mission_store
+                .get_total_cost_cents()
+                .await
+                .unwrap_or(0);
+            let (a, e, u) = control_state
+                .mission_store
+                .get_cost_by_source()
+                .await
+                .unwrap_or((0, 0, 0));
+            (total, a, e, u)
+        };
 
     let finished = completed_tasks + failed_tasks;
     let success_rate = if finished > 0 {
@@ -900,6 +930,9 @@ async fn get_stats(
         completed_tasks,
         failed_tasks,
         total_cost_cents,
+        actual_cost_cents,
+        estimated_cost_cents,
+        unknown_cost_cents,
         success_rate,
     })
 }

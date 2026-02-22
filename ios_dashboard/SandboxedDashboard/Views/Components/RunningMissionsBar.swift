@@ -79,8 +79,8 @@ struct RunningMissionsBar: View {
                     .fill(Theme.success)
                     .frame(width: 6, height: 6)
                 
-                // Mission ID
-                Text(String(mission.id.prefix(8)).uppercased())
+                // Mission title or short ID
+                Text(mission.displayTitle)
                     .font(.caption.weight(.medium))
                     .foregroundStyle(Theme.textPrimary)
                     .lineLimit(1)
@@ -145,8 +145,8 @@ struct RunningMissionsBar: View {
                             }
                         }
 
-                    // Mission ID
-                    Text(mission.shortId)
+                    // Mission title or short ID
+                    Text(mission.displayLabel)
                         .font(.caption.weight(.medium))
                         .foregroundStyle(Theme.textPrimary)
                         .lineLimit(1)

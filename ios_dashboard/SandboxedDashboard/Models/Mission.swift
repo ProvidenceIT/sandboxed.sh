@@ -246,6 +246,14 @@ struct RunningMissionInfo: Codable, Identifiable {
     var shortId: String {
         String(missionId.prefix(8)).uppercased()
     }
+
+    /// Best available label: title (truncated) or short ID fallback
+    var displayLabel: String {
+        if let title = title, !title.isEmpty {
+            return title.count > 24 ? String(title.prefix(24)) + "…" : title
+        }
+        return shortId
+    }
 }
 
 struct ParallelConfig: Codable {

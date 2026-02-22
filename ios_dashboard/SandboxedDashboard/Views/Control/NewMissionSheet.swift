@@ -415,21 +415,11 @@ struct NewMissionSheet: View {
     }
     
     private func backendIcon(for id: String) -> String {
-        switch id {
-        case "opencode": return "terminal"
-        case "claudecode": return "brain"
-        case "amp": return "bolt.fill"
-        default: return "cpu"
-        }
+        BackendAgentService.icon(for: id)
     }
-    
+
     private func backendColor(for id: String) -> Color {
-        switch id {
-        case "opencode": return Theme.success
-        case "claudecode": return Theme.accent
-        case "amp": return Color.orange
-        default: return Theme.textSecondary
-        }
+        BackendAgentService.color(for: id)
     }
     
     private func filterProviders(for backend: String?) -> [Provider] {
@@ -445,53 +435,33 @@ struct NewMissionSheet: View {
     private func loadData() async {
         isLoading = true
         defer { isLoading = false }
-        
-        // Load backends
-        do {
-            backends = try await api.listBackends()
-        } catch {
-            backends = Backend.defaults
-        }
-        
-        // Load backend configs to check enabled status
-        var enabled = Set<String>()
-        for backend in backends {
-            do {
-                let config = try await api.getBackendConfig(backendId: backend.id)
-                if config.isEnabled {
-                    enabled.insert(backend.id)
-                }
-            } catch {
-                // Default to enabled if we can't fetch config
-                enabled.insert(backend.id)
-            }
-        }
-        enabledBackendIds = enabled
-        
-        // Load agents for each enabled backend
-        for backendId in enabled {
-            do {
-                let agents = try await api.listBackendAgents(backendId: backendId)
-                backendAgents[backendId] = agents
-            } catch {
-                // Use defaults for Amp if API fails
-                if backendId == "amp" {
-                    backendAgents[backendId] = [
-                        BackendAgent(id: "smart", name: "Smart Mode"),
-                        BackendAgent(id: "rush", name: "Rush Mode")
-                    ]
-                }
-            }
-        }
-        
-        // Set default agent (prefer Sisyphus in OpenCode, then first available)
-        // Use agent.id for CLI value, not display name
+
+        let data = await BackendAgentService.loadBackendsAndAgents()
+        backends = data.backends
+        enabledBackendIds = data.enabledBackendIds
+        backendAgents = data.backendAgents
+
+        // Set default agent (prefer saved default, then Sisyphus in OpenCode, then first available)
         if selectedAgentValue.isEmpty {
-            if let sisyphus = backendAgents["opencode"]?.first(where: { $0.name == "Sisyphus" }) {
-                selectedAgentValue = "opencode:\(sisyphus.id)"
-            } else if let firstBackend = backends.first(where: { enabledBackendIds.contains($0.id) }),
-                      let firstAgent = backendAgents[firstBackend.id]?.first {
-                selectedAgentValue = "\(firstBackend.id):\(firstAgent.id)"
+            // First check for saved default agent
+            if let savedDefault = UserDefaults.standard.string(forKey: "default_agent"), !savedDefault.isEmpty {
+                let parsed = CombinedAgent.parse(savedDefault)
+                // Verify the saved agent still exists
+                if let backendId = parsed?.backend,
+                   let agentId = parsed?.agent,
+                   backendAgents[backendId]?.contains(where: { $0.id == agentId }) == true {
+                    selectedAgentValue = savedDefault
+                }
+            }
+            
+            // Fall back to Sisyphus or first available
+            if selectedAgentValue.isEmpty {
+                if let sisyphus = backendAgents["opencode"]?.first(where: { $0.name == "Sisyphus" }) {
+                    selectedAgentValue = "opencode:\(sisyphus.id)"
+                } else if let firstBackend = backends.first(where: { enabledBackendIds.contains($0.id) }),
+                          let firstAgent = backendAgents[firstBackend.id]?.first {
+                    selectedAgentValue = "\(firstBackend.id):\(firstAgent.id)"
+                }
             }
         }
         

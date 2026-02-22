@@ -422,6 +422,15 @@ function OverviewPageContent() {
               <StatsCard
                 title="Total Cost"
                 value={formatCents(stats?.total_cost_cents ?? 0)}
+                subtitle={
+                  (stats?.actual_cost_cents ?? 0) > 0 && (stats?.estimated_cost_cents ?? 0) > 0
+                    ? "mixed"
+                    : (stats?.actual_cost_cents ?? 0) > 0
+                    ? "actual"
+                    : (stats?.estimated_cost_cents ?? 0) > 0
+                    ? "est."
+                    : undefined
+                }
                 icon={DollarSign}
               />
             </>

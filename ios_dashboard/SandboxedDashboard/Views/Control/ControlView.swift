@@ -191,7 +191,11 @@ struct ControlView: View {
                     Button {
                         Task {
                             await workspaceState.loadWorkspaces()
-                            showNewMissionSheet = true
+                            if let options = await getValidatedDefaultAgentOptions() {
+                                await createNewMission(options: options)
+                            } else {
+                                showNewMissionSheet = true
+                            }
                         }
                     } label: {
                         Label("New Mission", systemImage: "plus")
@@ -384,7 +388,11 @@ struct ControlView: View {
                     showMissionSwitcher = false
                     Task {
                         await workspaceState.loadWorkspaces()
-                        showNewMissionSheet = true
+                        if let options = await getValidatedDefaultAgentOptions() {
+                            await createNewMission(options: options)
+                        } else {
+                            showNewMissionSheet = true
+                        }
                     }
                 },
                 onDismiss: {
@@ -888,7 +896,7 @@ struct ControlView: View {
         messages = mission.history.enumerated().map { index, entry in
             ChatMessage(
                 id: "\(mission.id)-\(index)",
-                type: entry.isUser ? .user : .assistant(success: true, costCents: 0, model: nil, sharedFiles: nil),
+                type: entry.isUser ? .user : .assistant(success: true, costCents: 0, costSource: .unknown, model: nil, sharedFiles: nil),
                 content: entry.content
             )
         }
@@ -1214,6 +1222,35 @@ struct ControlView: View {
             print("Failed to resume mission: \(error)")
             HapticService.error()
         }
+    }
+    
+    // MARK: - Default Agent Helper
+    
+    private func getValidatedDefaultAgentOptions() async -> NewMissionOptions? {
+        let skipAgentSelection = UserDefaults.standard.bool(forKey: "skip_agent_selection")
+        let defaultAgent = UserDefaults.standard.string(forKey: "default_agent")
+
+        guard skipAgentSelection,
+              let savedDefault = defaultAgent,
+              !savedDefault.isEmpty,
+              let parsed = CombinedAgent.parse(savedDefault) else {
+            return nil
+        }
+
+        BackendAgentService.invalidateCache()
+        let data = await BackendAgentService.loadBackendsAndAgents()
+
+        guard let agents = data.backendAgents[parsed.backend],
+              agents.contains(where: { $0.id == parsed.agent }) else {
+            return nil
+        }
+
+        return NewMissionOptions(
+            workspaceId: workspaceState.selectedWorkspace?.id,
+            agent: parsed.agent,
+            modelOverride: nil,
+            backend: parsed.backend
+        )
     }
     
     // MARK: - Backend Helpers
@@ -1553,9 +1590,12 @@ struct ControlView: View {
         let viewingId = viewingMissionId
         let currentId = currentMission?.id
 
-        // Only allow status events from any mission (for global state)
-        // All other events must match the mission we're viewing
-        if type != "status" {
+        // Allow status and mission-level metadata events from any mission (for global state).
+        // All other events must match the mission we're viewing.
+        let isGlobalEvent = type == "status"
+            || type == "mission_status_changed"
+            || type == "mission_title_changed"
+        if !isGlobalEvent {
             if let eventId = eventMissionId {
                 // Event has a mission_id
                 if let vId = viewingId {
@@ -1640,7 +1680,12 @@ struct ControlView: View {
             if let content = data["content"] as? String,
                let id = data["id"] as? String {
                 let success = data["success"] as? Bool ?? true
-                let costCents = data["cost_cents"] as? Int ?? 0
+                let costObj = data["cost"] as? [String: Any]
+                let costCents = data["cost_cents"] as? Int
+                    ?? costObj?["amount_cents"] as? Int
+                    ?? 0
+                let costSource = (data["cost_source"] as? String ?? costObj?["source"] as? String)
+                    .flatMap(CostSource.init(rawValue:)) ?? .unknown
                 let model = data["model"] as? String
 
                 // Parse shared_files if present
@@ -1668,7 +1713,7 @@ struct ControlView: View {
 
                 let message = ChatMessage(
                     id: id,
-                    type: .assistant(success: success, costCents: costCents, model: model, sharedFiles: sharedFiles),
+                    type: .assistant(success: success, costCents: costCents, costSource: costSource, model: model, sharedFiles: sharedFiles),
                     content: content
                 )
                 messages.append(message)
@@ -1885,6 +1930,26 @@ struct ControlView: View {
                 }
             }
 
+        case "mission_title_changed":
+            // Handle title updates (e.g., from LLM auto-title generation)
+            if let missionId = data["mission_id"] as? String,
+               let title = data["title"] as? String {
+                // Update the viewing mission title if it matches
+                if viewingMissionId == missionId {
+                    viewingMission?.title = title
+                }
+
+                // Update the current mission title if it matches
+                if currentMission?.id == missionId {
+                    currentMission?.title = title
+                }
+
+                // Refresh running missions list so the bar picks up the new title
+                if !isHistoricalReplay {
+                    Task { await refreshRunningMissions() }
+                }
+            }
+
         default:
             break
         }
@@ -1998,7 +2063,7 @@ private struct MessageBubble: View {
         HStack(alignment: .top, spacing: 8) {
             VStack(alignment: .leading, spacing: 8) {
                 // Status header for assistant messages
-                if case .assistant(let success, _, _, _) = message.type {
+                if case .assistant(let success, _, _, _, _) = message.type {
                     HStack(spacing: 6) {
                         Image(systemName: success ? "checkmark.circle.fill" : "xmark.circle.fill")
                             .font(.caption2)
@@ -2015,7 +2080,18 @@ private struct MessageBubble: View {
                                 .foregroundStyle(Theme.textMuted)
                             Text(cost)
                                 .font(.caption2.monospaced())
-                                .foregroundStyle(Theme.success)
+                                .foregroundStyle(message.costIsEstimated ? Theme.textSecondary : Theme.success)
+                            if let badge = message.costSourceLabel {
+                                Text(badge)
+                                    .font(.system(size: 8, weight: .medium))
+                                    .textCase(.uppercase)
+                                    .tracking(0.4)
+                                    .foregroundStyle(Theme.textMuted)
+                                    .padding(.horizontal, 4)
+                                    .padding(.vertical, 2)
+                                    .background(Color.white.opacity(0.08))
+                                    .clipShape(RoundedRectangle(cornerRadius: 3))
+                            }
                         }
 
                         Text("•")

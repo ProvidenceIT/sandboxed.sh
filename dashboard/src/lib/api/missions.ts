@@ -3,6 +3,8 @@
  */
 
 import { apiGet, apiPost, apiFetch } from "./core";
+import { isAutoTitleEnabled } from "../llm-settings";
+import { generateMissionTitle } from "../llm";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -221,4 +223,43 @@ export async function resumeMission(
     throw new Error(`Failed to resume mission: ${text}`);
   }
   return res.json();
+}
+
+// ---------------------------------------------------------------------------
+// Title management
+// ---------------------------------------------------------------------------
+
+/** Rename a mission via the backend API. */
+export async function updateMissionTitle(
+  id: string,
+  title: string
+): Promise<void> {
+  return apiPost(
+    `/api/control/missions/${id}/title`,
+    { title },
+    "Failed to update mission title"
+  );
+}
+
+/**
+ * Auto-generate a mission title using the configured LLM provider.
+ * Fires-and-forgets: errors are silently ignored so it never disrupts the UI.
+ * Returns the generated title if successful, null otherwise.
+ */
+export async function autoGenerateMissionTitle(
+  missionId: string,
+  userMessage: string,
+  assistantReply: string
+): Promise<string | null> {
+  if (!isAutoTitleEnabled()) return null;
+  try {
+    const title = await generateMissionTitle(userMessage, assistantReply);
+    if (title) {
+      await updateMissionTitle(missionId, title);
+      return title;
+    }
+  } catch {
+    // Silent failure — title generation is best-effort
+  }
+  return null;
 }

@@ -40,6 +40,7 @@ import {
   getRunningMissions,
   isNetworkError,
   cancelMission,
+  autoGenerateMissionTitle,
   listWorkspaces,
   getHealth,
   listDesktopSessions,
@@ -2857,6 +2858,7 @@ export default function ControlClient() {
   const currentMissionRef = useRef<Mission | null>(null);
   const viewingMissionRef = useRef<Mission | null>(null);
   const submittingRef = useRef(false); // Guard against double-submission
+  const autoTitleAttemptedRef = useRef<Set<string>>(new Set()); // Track missions we've tried to auto-title
 
   // Keep refs in sync with state
   useEffect(() => {
@@ -4769,6 +4771,41 @@ export default function ControlClient() {
           ...prev,
           phase: "idle",
         }));
+
+        // Auto-generate mission title on first successful assistant response (LLM-powered, best-effort).
+        // Use viewingMissionIdRef (not currentMissionRef) to target the correct mission —
+        // events are already filtered by viewingId, so this matches the event's mission.
+        const targetMissionId = viewingMissionIdRef.current;
+        const targetMission = viewingMissionRef.current;
+        if (
+          targetMissionId &&
+          !isFailure &&
+          !targetMission?.title &&
+          !autoTitleAttemptedRef.current.has(targetMissionId)
+        ) {
+          autoTitleAttemptedRef.current.add(targetMissionId);
+          const assistantContent = String(data["content"] ?? "");
+          // Use itemsRef for synchronous read — avoids side effects in state updaters
+          // and prevents double-firing in React StrictMode.
+          const firstUser = itemsRef.current.find((it) => it.kind === "user");
+          if (firstUser && firstUser.kind === "user") {
+            autoGenerateMissionTitle(
+              targetMissionId,
+              firstUser.content,
+              assistantContent
+            ).then((title) => {
+              if (title) {
+                // Update local mission state so the UI reflects the new title immediately
+                setCurrentMission((m) =>
+                  m?.id === targetMissionId ? { ...m, title } : m
+                );
+                setViewingMission((m) =>
+                  m?.id === targetMissionId ? { ...m, title } : m
+                );
+              }
+            });
+          }
+        }
         return;
       }
 
@@ -5799,8 +5836,8 @@ export default function ControlClient() {
                       <span className="text-white/40">·</span>
                     </>
                   )}
-                  <span className="text-sm font-medium text-white/70 truncate max-w-[140px] sm:max-w-[180px]">
-                    {getMissionShortName(activeMission.id)}
+                  <span className="text-sm font-medium text-white/70 truncate max-w-[140px] sm:max-w-[180px]" title={activeMission.title ?? undefined}>
+                    {activeMission.title || getMissionShortName(activeMission.id)}
                   </span>
                 </>
               ) : (
