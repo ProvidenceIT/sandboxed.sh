@@ -38,9 +38,6 @@ export function RelativeTime({ date, className }: RelativeTimeProps) {
 
   // Update relative time periodically
   useEffect(() => {
-    // Update immediately in case timestamp changed
-    setRelativeTime(getRelativeTime(dateObj));
-
     const interval = setInterval(() => {
       setRelativeTime(getRelativeTime(dateObj));
     }, 60000); // Update every minute

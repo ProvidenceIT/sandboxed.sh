@@ -692,7 +692,7 @@ export default function SecretsPage() {
         ) : !hasSecrets ? (
           <div className="p-8 text-center">
             <p className="text-sm text-white/50">
-              No secrets stored. Click "Add Secret" to store credentials.
+              No secrets stored. Click &quot;Add Secret&quot; to store credentials.
             </p>
           </div>
         ) : (
@@ -1056,7 +1056,7 @@ export default function SecretsPage() {
                   <div className="py-4 text-center">
                     <p className="text-sm text-white/50 mb-2">No encryption key configured.</p>
                     <p className="text-xs text-white/40">
-                      Click "Set Key" to configure an encryption key for skill content.
+                      Click &quot;Set Key&quot; to configure an encryption key for skill content.
                     </p>
                   </div>
                 )}

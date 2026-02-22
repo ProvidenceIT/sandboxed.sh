@@ -39,10 +39,10 @@ export const LLM_PROVIDERS: Record<
     baseUrl: "https://api.cerebras.ai/v1",
     defaultModel: "qwen-3-235b-a22b-instruct-2507",
     models: [
-      "qwen-3-235b-a22b-instruct-2507",
       "gpt-oss-120b",
       "zai-glm-4.7",
       "llama3.1-8b",
+      "qwen-3-235b-a22b-instruct-2507",
     ],
   },
   groq: {

@@ -229,26 +229,25 @@ export function MissionAutomationsDialog({
       setCommandName(name);
       commandNameRef.current = name;
       libraryCommandContentRef.current = '';
-      const cmd = commandsByName.get(name);
-      if (cmd?.params?.length) {
-        addAutoVariables(cmd.params.map((p) => p.name));
-      } else if (name) {
-        // Fetch full command content to extract <variable/> placeholders
-        const capturedName = name;
-        getLibraryCommand(name)
-          .then((full) => {
-            // Guard against stale response if user changed selection
-            if (commandNameRef.current !== capturedName) return;
-            libraryCommandContentRef.current = full.content;
-            const fromParams = full.params?.map((p) => p.name) ?? [];
-            const fromContent = extractPromptVariables(full.content);
-            const all = [...new Set([...fromParams, ...fromContent])];
-            if (all.length > 0) addAutoVariables(all);
-          })
-          .catch(() => {});
+      if (!name) {
+        return;
       }
+      // Always fetch full command content to get the latest variables
+      // This ensures we pick up any changes made to the command since the last cache refresh
+      const capturedName = name;
+      getLibraryCommand(name)
+        .then((full) => {
+          // Guard against stale response if user changed selection
+          if (commandNameRef.current !== capturedName) return;
+          libraryCommandContentRef.current = full.content;
+          const fromParams = full.params?.map((p) => p.name) ?? [];
+          const fromContent = extractPromptVariables(full.content);
+          const all = [...new Set([...fromParams, ...fromContent])];
+          if (all.length > 0) addAutoVariables(all);
+        })
+        .catch(() => {});
     },
-    [commandsByName, addAutoVariables]
+    [addAutoVariables]
   );
 
   const handleSourceTypeChange = useCallback(

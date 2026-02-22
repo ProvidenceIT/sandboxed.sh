@@ -725,6 +725,7 @@ impl Agent for OpenCodeAgent {
                 "session_id": session.id,
             })),
             terminal_reason: Some(TerminalReason::Completed),
+            diagnostics: None,
         }
     }
 }
@@ -812,6 +813,7 @@ impl OpenCodeAgent {
                 "session_id": session_id,
             })),
             terminal_reason: Some(TerminalReason::Completed),
+            diagnostics: None,
         }
     }
 }

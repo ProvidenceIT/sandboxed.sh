@@ -95,6 +95,9 @@ pub struct AgentResult {
 
     /// Reason why execution terminated (if not successful completion)
     pub terminal_reason: Option<TerminalReason>,
+
+    /// Diagnostic information about termination (issue #230)
+    pub diagnostics: Option<TerminationDiagnostics>,
 }
 
 impl AgentResult {
@@ -109,6 +112,7 @@ impl AgentResult {
             model_used: None,
             data: None,
             terminal_reason: None,
+            diagnostics: None,
         }
     }
 
@@ -123,6 +127,7 @@ impl AgentResult {
             model_used: None,
             data: None,
             terminal_reason: None,
+            diagnostics: None,
         }
     }
 
@@ -155,6 +160,12 @@ impl AgentResult {
         self.terminal_reason = Some(reason);
         self
     }
+
+    /// Add diagnostic information about termination.
+    pub fn with_diagnostics(mut self, diagnostics: TerminationDiagnostics) -> Self {
+        self.diagnostics = Some(diagnostics);
+        self
+    }
 }
 
 /// Reason why agent execution terminated.
@@ -176,6 +187,20 @@ pub enum TerminalReason {
     RateLimited,
     /// Provider rejected turn due to concurrent mission capacity exhaustion
     CapacityLimited,
+}
+
+/// Diagnostic information about mission termination (issue #230).
+/// Helps with reliability hardening by providing structured exit information.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TerminationDiagnostics {
+    /// Which timer triggered termination (if any)
+    pub timer_triggered: Option<String>,
+    /// Last timestamp of output/activity (epoch millis)
+    pub last_output_activity_ms: Option<i64>,
+    /// Last timestamp of protocol/heartbeat activity (epoch millis)
+    pub last_protocol_activity_ms: Option<i64>,
+    /// Wall-clock time since mission start (millis)
+    pub total_runtime_ms: Option<i64>,
 }
 
 /// Errors that can occur in agent operations.
