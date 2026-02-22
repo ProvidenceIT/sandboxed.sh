@@ -697,7 +697,7 @@ impl Agent for OpenCodeAgent {
             _ => None,
         };
 
-        // Compute cost from accumulated token usage
+        // Compute cost from accumulated token usage via the shared resolver
         let (cost_cents, cost_source, token_usage) = if total_input_tokens > 0 || total_output_tokens > 0 {
             let usage = crate::cost::TokenUsage {
                 input_tokens: total_input_tokens,
@@ -705,18 +705,8 @@ impl Agent for OpenCodeAgent {
                 cache_creation_input_tokens: None,
                 cache_read_input_tokens: None,
             };
-            let model_for_cost = model_used.as_deref();
-            let estimated = if let Some(model_name) = model_for_cost {
-                if crate::cost::pricing_for_model(model_name).is_some() {
-                    let cents = crate::cost::cost_cents_from_usage(model_name, &usage);
-                    Some((cents, crate::agents::types::CostSource::Estimated))
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-            let (cents, source) = estimated.unwrap_or((0, crate::agents::types::CostSource::Unknown));
+            let (cents, source) =
+                crate::cost::resolve_cost_cents_and_source(None, model_used.as_deref(), &usage);
             (cents, source, Some(usage))
         } else {
             (0, crate::agents::types::CostSource::Unknown, None)

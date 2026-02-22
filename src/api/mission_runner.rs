@@ -20,7 +20,7 @@ use tokio::sync::{broadcast, mpsc, OwnedSemaphorePermit, RwLock, Semaphore};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::agents::{AgentRef, AgentResult, CostSource, TerminalReason};
+use crate::agents::{AgentRef, AgentResult, TerminalReason};
 use crate::backend::claudecode::client::{ClaudeEvent, ContentBlock, StreamEvent};
 use crate::config::Config;
 use crate::mcp::McpRegistry;
@@ -101,29 +101,8 @@ fn codex_account_semaphore_for_key(api_key: &str) -> Arc<Semaphore> {
         .clone()
 }
 
-fn resolve_cost_cents_and_source(
-    actual_cost_cents: Option<u64>,
-    model: Option<&str>,
-    usage: &crate::cost::TokenUsage,
-) -> (u64, CostSource) {
-    if let Some(actual) = actual_cost_cents {
-        return (actual, CostSource::Actual);
-    }
-
-    if usage.has_usage() {
-        if let Some(model_name) = model {
-            if crate::cost::pricing_for_model(model_name).is_some() {
-                return (
-                    crate::cost::cost_cents_from_usage(model_name, usage),
-                    CostSource::Estimated,
-                );
-            }
-            return (0, CostSource::Unknown);
-        }
-    }
-
-    (0, CostSource::Unknown)
-}
+/// Re-export the canonical cost resolver from the shared cost module.
+use crate::cost::resolve_cost_cents_and_source;
 
 fn preferred_model_for_cost<'a>(
     requested_model: Option<&'a str>,
