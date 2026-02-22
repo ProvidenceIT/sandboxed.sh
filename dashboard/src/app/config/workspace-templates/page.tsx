@@ -66,6 +66,7 @@ const buildSnapshot = (data: {
   sharedNetwork: boolean | null;
   tailscaleMode: TailscaleMode | null;
   configProfile: string | null;
+  containerMemoryLimit: string | null;
 }) =>
   JSON.stringify({
     description: data.description,
@@ -77,6 +78,7 @@ const buildSnapshot = (data: {
     sharedNetwork: data.sharedNetwork,
     tailscaleMode: data.tailscaleMode,
     configProfile: data.configProfile,
+    containerMemoryLimit: data.containerMemoryLimit,
   });
 
 export default function WorkspaceTemplatesPage() {
@@ -120,6 +122,7 @@ export default function WorkspaceTemplatesPage() {
   const [sharedNetwork, setSharedNetwork] = useState<boolean | null>(null);
   const [tailscaleMode, setTailscaleMode] = useState<TailscaleMode | null>(null);
   const [configProfile, setConfigProfile] = useState<string | null>(null);
+  const [containerMemoryLimit, setContainerMemoryLimit] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
 
@@ -161,8 +164,9 @@ export default function WorkspaceTemplatesPage() {
         sharedNetwork,
         tailscaleMode,
         configProfile,
+        containerMemoryLimit,
       }),
-    [description, distro, selectedSkills, envRows, selectedInitScripts, initScript, sharedNetwork, tailscaleMode, configProfile]
+    [description, distro, selectedSkills, envRows, selectedInitScripts, initScript, sharedNetwork, tailscaleMode, configProfile, containerMemoryLimit]
   );
 
   useEffect(() => {
@@ -268,6 +272,7 @@ export default function WorkspaceTemplatesPage() {
       setSharedNetwork(template.shared_network ?? null);
       setTailscaleMode(template.tailscale_mode ?? null);
       setConfigProfile(template.config_profile ?? null);
+      setContainerMemoryLimit(template.container_memory_limit ?? null);
       baselineRef.current = buildSnapshot({
         description: template.description || '',
         distro: template.distro || '',
@@ -278,6 +283,7 @@ export default function WorkspaceTemplatesPage() {
         sharedNetwork: template.shared_network ?? null,
         tailscaleMode: template.tailscale_mode ?? null,
         configProfile: template.config_profile ?? null,
+        containerMemoryLimit: template.container_memory_limit ?? null,
       });
       setDirty(false);
     } catch (err) {
@@ -317,6 +323,7 @@ export default function WorkspaceTemplatesPage() {
         shared_network: sharedNetwork,
         tailscale_mode: tailscaleMode,
         config_profile: configProfile ?? undefined,
+        container_memory_limit: containerMemoryLimit ?? undefined,
       });
       baselineRef.current = snapshot;
       setDirty(false);
@@ -368,6 +375,7 @@ export default function WorkspaceTemplatesPage() {
       setSharedNetwork(null);
       setTailscaleMode(null);
       setConfigProfile(null);
+      setContainerMemoryLimit(null);
       setDirty(false);
       await loadTemplates();
     } catch (err) {
@@ -942,6 +950,36 @@ set -e
                             {option.label}
                           </option>
                         ))}
+                      </select>
+                    </div>
+
+                    <div className="rounded-xl bg-white/[0.02] border border-white/[0.05] p-4">
+                      <div className="flex items-center gap-2 mb-2">
+                        <label className="text-xs text-white/40">Container Memory Limit</label>
+                      </div>
+                      <p className="text-[10px] text-white/25 mb-3">
+                        Memory limit for container workspaces. Set higher if npm install fails with OOM.
+                      </p>
+                      <select
+                        value={containerMemoryLimit || ''}
+                        onChange={(e) => setContainerMemoryLimit(e.target.value || null)}
+                        className="w-full px-3 py-2 rounded-lg bg-black/20 border border-white/[0.06] text-xs text-white focus:outline-none focus:border-indigo-500/50 appearance-none cursor-pointer"
+                        style={{
+                          backgroundImage:
+                            "url(\"data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3e%3cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3e%3c/svg%3e\")",
+                          backgroundPosition: 'right 0.75rem center',
+                          backgroundRepeat: 'no-repeat',
+                          backgroundSize: '1.25em 1.25em',
+                        }}
+                      >
+                        <option value="">Default (8GB)</option>
+                        <option value="4G">4GB</option>
+                        <option value="6G">6GB</option>
+                        <option value="8G">8GB</option>
+                        <option value="12G">12GB</option>
+                        <option value="16G">16GB</option>
+                        <option value="32G">32GB</option>
+                        <option value="0">No limit</option>
                       </select>
                     </div>
 

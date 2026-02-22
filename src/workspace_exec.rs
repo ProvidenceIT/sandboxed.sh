@@ -18,8 +18,9 @@ use tokio::process::{Child, Command};
 use crate::nspawn;
 use crate::workspace::{use_nspawn_for_workspace, TailscaleMode, Workspace, WorkspaceType};
 
-fn get_container_memory_limit() -> String {
-    nspawn::effective_memory_limit()
+fn get_container_memory_limit(workspace: &crate::workspace::Workspace) -> String {
+    nspawn::effective_memory_limit(workspace.container_memory_limit.as_deref())
+}
 }
 
 fn select_container_resolv_conf() -> Option<PathBuf> {
@@ -605,7 +606,7 @@ impl WorkspaceExec {
                 cmd.arg("--chdir").arg(&rel_cwd);
 
                 // Set memory limit to prevent OOM killer issues during npm install, etc.
-                let memory_limit = get_container_memory_limit();
+                let memory_limit = get_container_memory_limit(&self.workspace);
                 cmd.arg(format!("--memory={}", memory_limit));
 
                 // Ensure /root/context is available if Open Agent configured it.
@@ -920,7 +921,7 @@ impl WorkspaceExec {
                         cmd.arg(rel_cwd.clone());
 
                         // Set memory limit to prevent OOM killer issues during npm install, etc.
-                        let memory_limit = get_container_memory_limit();
+                        let memory_limit = get_container_memory_limit(&self.workspace);
                         cmd.arg(format!("--memory={}", memory_limit));
 
                         // Ensure /root/context is available if Open Agent configured it.

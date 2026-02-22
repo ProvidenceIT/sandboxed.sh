@@ -205,12 +205,24 @@ pub fn default_memory_limit() -> String {
     "8G".to_string()
 }
 
-/// Get the effective memory limit to use.
-/// Returns the configured limit or the default (8G).
-pub fn effective_memory_limit() -> String {
+/// If workspace_memory_limit is provided and not empty/0, use it.
+/// Otherwise, check the environment variable.
+/// If neither is set, return the default (8G).
+pub fn effective_memory_limit(workspace_memory_limit: Option<&str>) -> String {
+    if let Some(limit) = workspace_memory_limit {
+        let trimmed = limit.trim();
+        if !trimmed.is_empty() && trimmed != "0" {
+            return trimmed.to_string();
+        }
+    }
     get_memory_limit().unwrap_or_else(default_memory_limit)
 }
 
+/// Legacy function for backward compatibility.
+/// Returns the effective memory limit using only the environment variable.
+pub fn effective_memory_limit_env_only() -> String {
+    effective_memory_limit(None)
+}
 pub fn apply_tailscale_to_config(config: &mut NspawnConfig, env: &HashMap<String, String>) {
     if !tailscale_enabled(env) {
         return;
