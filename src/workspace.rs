@@ -4113,6 +4113,7 @@ echo "[sandboxed] Harness bootstrap done"
 
     let config = nspawn::NspawnConfig {
         env: workspace.env_vars.clone(),
+        memory_limit: Some(nspawn::effective_memory_limit()),
         ..Default::default()
     };
 
@@ -4237,6 +4238,7 @@ async fn run_workspace_init_script(
 
     let config = nspawn::NspawnConfig {
         env: workspace.env_vars.clone(),
+        memory_limit: Some(nspawn::effective_memory_limit()),
         ..Default::default()
     };
 
