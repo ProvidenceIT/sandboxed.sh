@@ -414,6 +414,16 @@ fn default_providers_config() -> ProvidersConfig {
                 description: "Gemini models via Google OAuth".to_string(),
                 models: vec![
                     ProviderModel {
+                        id: "gemini-3.1-pro".to_string(),
+                        name: "Gemini 3.1 Pro".to_string(),
+                        description: Some("Latest state-of-the-art reasoning and multimodal".to_string()),
+                    },
+                    ProviderModel {
+                        id: "gemini-3.1-flash".to_string(),
+                        name: "Gemini 3.1 Flash".to_string(),
+                        description: Some("Latest fast frontier-class performance".to_string()),
+                    },
+                    ProviderModel {
                         id: "gemini-3-pro-preview".to_string(),
                         name: "Gemini 3 Pro Preview".to_string(),
                         description: Some("State-of-the-art reasoning and multimodal".to_string()),

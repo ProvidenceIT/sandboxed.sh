@@ -63,6 +63,10 @@ fn normalize_model(model: &str) -> &str {
         s if s.contains("o4-mini") => "o4-mini",
 
         // Gemini models
+        s if s.contains("gemini-3.1-pro") || s.contains("gemini-3-1-pro") => "gemini-3.1-pro",
+        s if s.contains("gemini-3.1-flash") || s.contains("gemini-3-1-flash") => "gemini-3.1-flash",
+        s if s.contains("gemini-3-pro-preview") || s.contains("gemini-3-pro") => "gemini-3.1-pro",
+        s if s.contains("gemini-3-flash-preview") || s.contains("gemini-3-flash") => "gemini-3.1-flash",
         s if s.contains("gemini-2.5-pro") || s.contains("gemini-2-5-pro") => "gemini-2.5-pro",
         s if s.contains("gemini-2.5-flash") || s.contains("gemini-2-5-flash") => "gemini-2.5-flash",
         s if s.contains("gemini-2.0-flash") || s.contains("gemini-2-0-flash") => "gemini-2.0-flash",
@@ -200,6 +204,22 @@ pub fn pricing_for_model(model: &str) -> Option<ModelPricing> {
             output_nano_per_token: 4_400,
             cache_create_nano_per_token: None,
             cache_read_nano_per_token: Some(550),
+        }),
+
+        // Gemini 3.1 Pro: $2.50/1M input, $15/1M output (latest premium model)
+        "gemini-3.1-pro" => Some(ModelPricing {
+            input_nano_per_token: 2_500,
+            output_nano_per_token: 15_000,
+            cache_create_nano_per_token: None,
+            cache_read_nano_per_token: None,
+        }),
+
+        // Gemini 3.1 Flash: $0.20/1M input, $0.80/1M output (latest fast model)
+        "gemini-3.1-flash" => Some(ModelPricing {
+            input_nano_per_token: 200,
+            output_nano_per_token: 800,
+            cache_create_nano_per_token: None,
+            cache_read_nano_per_token: None,
         }),
 
         // Gemini 2.5 Pro: $1.25/1M input, $10/1M output (>200k context)
