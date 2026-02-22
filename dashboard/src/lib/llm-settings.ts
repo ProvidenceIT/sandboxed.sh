@@ -25,7 +25,7 @@ const DEFAULTS: LLMConfig = {
   provider: "cerebras",
   baseUrl: "https://api.cerebras.ai/v1",
   apiKey: "",
-  model: "llama3.1-8b",
+  model: "qwen-3-235b-a22b-instruct-2507",
   autoTitle: true,
 };
 
@@ -37,7 +37,7 @@ export const LLM_PROVIDERS: Record<
   cerebras: {
     name: "Cerebras",
     baseUrl: "https://api.cerebras.ai/v1",
-    defaultModel: "llama3.1-8b",
+    defaultModel: "qwen-3-235b-a22b-instruct-2507",
     models: [
       "gpt-oss-120b",
       "zai-glm-4.7",
