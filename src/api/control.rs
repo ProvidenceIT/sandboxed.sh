@@ -855,11 +855,62 @@ fn mission_moment_relevance_score(role: &str, content: &str, search_query: &str)
 }
 
 fn mission_moment_rationale(role: &str, content: &str, search_query: &str) -> String {
-    let normalized_query = normalize_metadata_text(search_query);
+    let query_terms = match build_search_query_terms(search_query) {
+        Some(query_terms) => query_terms,
+        None => return format!("Keyword match in {} message", role),
+    };
+
+    let phrase_queries = if query_terms.phrase_queries.is_empty() {
+        vec![if query_terms.normalized_core_query.is_empty() {
+            query_terms.normalized_query.clone()
+        } else {
+            query_terms.normalized_core_query.clone()
+        }]
+    } else {
+        query_terms.phrase_queries.clone()
+    };
+
     let normalized_content = normalize_metadata_text(content);
-    if !normalized_query.is_empty() && normalized_content.contains(&normalized_query) {
-        return format!("Exact phrase match in {} message", role);
+    if phrase_queries
+        .iter()
+        .any(|phrase_query| !phrase_query.is_empty() && normalized_content.contains(phrase_query))
+    {
+        return format!("Phrase match in {} message", role);
     }
+
+    let content_tokens = search_token_set(content);
+    let mut matched_terms = Vec::new();
+    for group in &query_terms.query_groups {
+        let mut best_candidate: Option<(&str, f64)> = None;
+        for candidate in group {
+            for token in &content_tokens {
+                let strength = search_token_match_strength(token, candidate)
+                    .max(search_token_match_strength(candidate, token));
+                if strength <= 0.0 {
+                    continue;
+                }
+                match best_candidate {
+                    Some((_, best_strength)) if best_strength >= strength => {}
+                    _ => best_candidate = Some((candidate.as_str(), strength)),
+                }
+            }
+        }
+        if let Some((candidate, _)) = best_candidate {
+            matched_terms.push(candidate.to_string());
+        }
+    }
+
+    if !matched_terms.is_empty() {
+        matched_terms.sort();
+        matched_terms.dedup();
+        let matched_summary = matched_terms
+            .into_iter()
+            .take(3)
+            .collect::<Vec<_>>()
+            .join(", ");
+        return format!("Matched {} in {} message", matched_summary, role);
+    }
+
     format!("Keyword match in {} message", role)
 }
 
@@ -9116,6 +9167,28 @@ And the report:
             "sid timeout",
         );
         assert!(score > 0.0);
+    }
+
+    #[test]
+    fn test_mission_moment_rationale_prefers_phrase_match_with_expansion() {
+        let rationale = mission_moment_rationale(
+            "assistant",
+            "The issue was in session id parsing for cookie state.",
+            "sid parsing",
+        );
+        assert_eq!(rationale, "Phrase match in assistant message");
+    }
+
+    #[test]
+    fn test_mission_moment_rationale_lists_matched_terms() {
+        let rationale = mission_moment_rationale(
+            "assistant",
+            "The auth flow kept failing because login credentials expired.",
+            "why did signin fail",
+        );
+        assert!(rationale.starts_with("Matched "));
+        assert!(rationale.ends_with(" in assistant message"));
+        assert!(rationale.contains("fail"));
     }
 
     #[test]
