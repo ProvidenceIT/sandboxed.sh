@@ -171,13 +171,31 @@ fn extract_short_description_from_history(
     history: &[(String, String)],
     max_len: usize,
 ) -> Option<String> {
-    let source = history
+    history
         .iter()
         .find(|(role, _)| role == "user")
-        .or_else(|| history.iter().find(|(role, _)| role == "assistant"))
-        .map(|(_, content)| content.as_str())?;
+        .and_then(|(_, content)| extract_short_description_from_content(content, max_len))
+        .or_else(|| {
+            history
+                .iter()
+                .find(|(role, _)| role == "assistant")
+                .and_then(|(_, content)| extract_short_description_from_content(content, max_len))
+        })
+}
 
-    let lines: Vec<&str> = source.lines().collect();
+fn extract_short_description_from_role(
+    history: &[(String, String)],
+    role: &str,
+    max_len: usize,
+) -> Option<String> {
+    history
+        .iter()
+        .find(|(entry_role, _)| entry_role == role)
+        .and_then(|(_, content)| extract_short_description_from_content(content, max_len))
+}
+
+fn extract_short_description_from_content(content: &str, max_len: usize) -> Option<String> {
+    let lines: Vec<&str> = content.lines().collect();
     let mut inside_fenced_block = false;
     let mut first_line: Option<&str> = None;
     for idx in 0..lines.len() {
@@ -1081,8 +1099,13 @@ async fn generate_mission_metadata_updates(
         .unwrap_or(true);
     let should_refresh = force_refresh || history.len().is_multiple_of(10);
     let has_assistant_reply = history.iter().any(|(role, _)| role == "assistant");
+    let should_bootstrap_from_first_assistant = title_missing && has_assistant_reply;
 
-    if !title_missing && !short_description_missing && !should_refresh {
+    if !title_missing
+        && !short_description_missing
+        && !should_refresh
+        && !should_bootstrap_from_first_assistant
+    {
         return (None, None);
     }
 
@@ -1123,8 +1146,16 @@ async fn generate_mission_metadata_updates(
         None => None,
     };
 
-    let short_description_candidate = if short_description_missing || should_refresh {
-        extract_short_description_from_history(history, 160)
+    let short_description_candidate = if short_description_missing
+        || should_refresh
+        || should_bootstrap_from_first_assistant
+    {
+        if should_bootstrap_from_first_assistant && !short_description_missing && !should_refresh {
+            extract_short_description_from_role(history, "assistant", 160)
+                .or_else(|| extract_short_description_from_history(history, 160))
+        } else {
+            extract_short_description_from_history(history, 160)
+        }
     } else {
         None
     };
@@ -8573,6 +8604,58 @@ And the report:
         assert_eq!(
             updated_short_description.as_deref(),
             Some("Investigate oauth callback timeout in production")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_generate_mission_metadata_updates_upgrades_existing_short_description_from_assistant(
+    ) {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = store
+            .create_mission(None, None, None, None, None, None, None)
+            .await
+            .expect("create mission");
+        store
+            .update_mission_metadata(
+                mission.id,
+                None,
+                Some(Some("Hi")),
+                Some(Some(METADATA_SOURCE_BACKEND_HEURISTIC)),
+                None,
+                Some(Some(METADATA_VERSION_V1)),
+            )
+            .await
+            .expect("seed short description");
+        let mission = store
+            .get_mission(mission.id)
+            .await
+            .expect("get mission")
+            .expect("mission exists");
+        let history = vec![
+            ("user".to_string(), "Hi".to_string()),
+            (
+                "assistant".to_string(),
+                "Investigate oauth callback timeout root cause and retry behavior.".to_string(),
+            ),
+        ];
+
+        let (updated_title, updated_short_description) = generate_mission_metadata_updates(
+            &store,
+            mission.id,
+            &mission,
+            &history,
+            history.first().map(|(_, content)| content.as_str()),
+            false,
+        )
+        .await;
+
+        assert_eq!(
+            updated_title.as_deref(),
+            Some("Investigate oauth callback timeout root cause and retry behavior.")
+        );
+        assert_eq!(
+            updated_short_description.as_deref(),
+            Some("Investigate oauth callback timeout root cause and retry behavior.")
         );
     }
 
