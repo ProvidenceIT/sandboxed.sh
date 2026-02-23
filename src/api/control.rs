@@ -1368,11 +1368,17 @@ async fn generate_mission_metadata_updates(
 
     let mut updated_short_description: Option<String> = None;
     if let Some(candidate_short_description) = short_description_candidate {
-        let should_update = mission
-            .short_description
-            .as_deref()
-            .map(|existing| has_significant_metadata_drift(existing, &candidate_short_description))
-            .unwrap_or(true);
+        let should_update = if should_bootstrap_short_description_from_first_assistant {
+            true
+        } else {
+            mission
+                .short_description
+                .as_deref()
+                .map(|existing| {
+                    has_significant_metadata_drift(existing, &candidate_short_description)
+                })
+                .unwrap_or(true)
+        };
         if should_update {
             let differs_from_existing = mission
                 .short_description
@@ -9245,6 +9251,61 @@ And the report:
             .expect("mission exists");
         let history = vec![
             ("user".to_string(), "Hi".to_string()),
+            (
+                "assistant".to_string(),
+                "Investigate oauth callback timeout root cause and retry behavior.".to_string(),
+            ),
+        ];
+
+        let (updated_title, updated_short_description) = generate_mission_metadata_updates(
+            &store,
+            mission.id,
+            &mission,
+            &history,
+            history.first().map(|(_, content)| content.as_str()),
+            false,
+        )
+        .await;
+
+        assert_eq!(
+            updated_title.as_deref(),
+            Some("Investigate oauth callback timeout root cause and retry behavior.")
+        );
+        assert_eq!(
+            updated_short_description.as_deref(),
+            Some("Investigate oauth callback timeout root cause and retry behavior.")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_generate_mission_metadata_updates_bootstrap_short_description_prefers_first_assistant_even_when_overlap_is_high(
+    ) {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = store
+            .create_mission(None, None, None, None, None, None, None)
+            .await
+            .expect("create mission");
+        store
+            .update_mission_metadata(
+                mission.id,
+                None,
+                Some(Some("Investigate oauth callback timeout root cause")),
+                Some(Some(METADATA_SOURCE_BACKEND_HEURISTIC)),
+                None,
+                Some(Some(METADATA_VERSION_V1)),
+            )
+            .await
+            .expect("seed short description");
+        let mission = store
+            .get_mission(mission.id)
+            .await
+            .expect("get mission")
+            .expect("mission exists");
+        let history = vec![
+            (
+                "user".to_string(),
+                "Investigate oauth callback timeout root cause".to_string(),
+            ),
             (
                 "assistant".to_string(),
                 "Investigate oauth callback timeout root cause and retry behavior.".to_string(),
