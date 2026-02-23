@@ -3574,7 +3574,7 @@ private struct MissionSwitcherSheet: View {
 
         var score = 0.0
         for queryToken in queryTokens {
-            let strength = queryToken == normalizedQuery ? 1.0 : groupMatchStrength(expandQueryGroup(token: queryToken), in: candidateTokens)
+            let strength = groupMatchStrength(expandQueryGroup(token: queryToken), in: candidateTokens)
             if strength <= 0 { return 0 }
             score += strength * 4.0
         }
