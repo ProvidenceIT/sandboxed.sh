@@ -1537,6 +1537,15 @@ fn record_metadata_refresh_baseline(mission_id: Uuid, conversational_count: usiz
     baselines.insert(mission_id, conversational_count);
 }
 
+fn record_metadata_refresh_baseline_from_mission(mission_id: Uuid, mission: &Mission) {
+    let conversational_count = mission
+        .history
+        .iter()
+        .filter(|entry| entry.role == "user" || entry.role == "assistant")
+        .count();
+    record_metadata_refresh_baseline(mission_id, conversational_count);
+}
+
 async fn refresh_mission_metadata_from_store(
     mission_store: &Arc<dyn MissionStore>,
     events_tx: &broadcast::Sender<AgentEvent>,
@@ -6125,6 +6134,7 @@ async fn control_actor_loop(
                             });
                             match mission_store.get_mission(id).await {
                                 Ok(Some(updated)) => {
+                                    record_metadata_refresh_baseline_from_mission(id, &updated);
                                     emit_mission_metadata_updated_event(&events_tx, id, &updated);
                                 }
                                 Ok(None) => {
@@ -10400,6 +10410,72 @@ And the report:
         ));
         assert!(should_refresh_metadata_by_cadence(
             mission.id, &mission, 14, false
+        ));
+
+        clear_mission_metadata_refresh_state(mission.id);
+    }
+
+    #[tokio::test]
+    async fn test_record_metadata_refresh_baseline_from_mission_rebases_manual_title_updates() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = store
+            .create_mission(Some("Existing mission"), None, None, None, None, None, None)
+            .await
+            .expect("create mission");
+        store
+            .update_mission_history(
+                mission.id,
+                &[
+                    MissionHistoryEntry {
+                        role: "user".to_string(),
+                        content: "one".to_string(),
+                    },
+                    MissionHistoryEntry {
+                        role: "assistant".to_string(),
+                        content: "two".to_string(),
+                    },
+                    MissionHistoryEntry {
+                        role: "tool".to_string(),
+                        content: "{}".to_string(),
+                    },
+                    MissionHistoryEntry {
+                        role: "assistant".to_string(),
+                        content: "three".to_string(),
+                    },
+                ],
+            )
+            .await
+            .expect("seed history");
+        store
+            .update_mission_metadata(
+                mission.id,
+                Some(Some("Existing mission")),
+                Some(Some("Existing short description")),
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("seed metadata");
+        let mission = store
+            .get_mission(mission.id)
+            .await
+            .expect("get mission")
+            .expect("mission exists");
+
+        clear_mission_metadata_refresh_state(mission.id);
+        record_metadata_refresh_baseline(mission.id, 0);
+
+        record_metadata_refresh_baseline_from_mission(mission.id, &mission);
+
+        assert!(!should_refresh_metadata_by_cadence(
+            mission.id, &mission, 11, false
+        ));
+        assert!(!should_refresh_metadata_by_cadence(
+            mission.id, &mission, 12, false
+        ));
+        assert!(should_refresh_metadata_by_cadence(
+            mission.id, &mission, 13, false
         ));
 
         clear_mission_metadata_refresh_state(mission.id);
