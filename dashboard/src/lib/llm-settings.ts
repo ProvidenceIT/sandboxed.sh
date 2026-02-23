@@ -25,7 +25,7 @@ const DEFAULTS: LLMConfig = {
   provider: "cerebras",
   baseUrl: "https://api.cerebras.ai/v1",
   apiKey: "",
-  model: "llama-4-scout-17b-16e-instruct",
+  model: "gpt-oss-120b-cs",
   autoTitle: true,
 };
 
@@ -37,12 +37,17 @@ export const LLM_PROVIDERS: Record<
   cerebras: {
     name: "Cerebras",
     baseUrl: "https://api.cerebras.ai/v1",
-    defaultModel: "llama-4-scout-17b-16e-instruct",
+    defaultModel: "gpt-oss-120b-cs",
     models: [
-      "llama-4-scout-17b-16e-instruct",
-      "llama-4-maverick-17b-128e-instruct",
-      "llama3.3-70b",
+      "gpt-oss-120b-cs",
+      "zai-glm-4.6-cs",
     ],
+  },
+  zai: {
+    name: "Z.AI",
+    baseUrl: "https://open.bigmodel.cn/api/paas/v4",
+    defaultModel: "glm-4.7",
+    models: ["glm-4.7", "glm-4.6", "glm-4.5", "glm-4.6v-flash"],
   },
   groq: {
     name: "Groq",
