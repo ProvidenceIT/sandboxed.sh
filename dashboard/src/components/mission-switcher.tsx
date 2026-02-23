@@ -46,15 +46,17 @@ function getMissionDisplayName(
   return parts.join(' · ');
 }
 
-function getMissionCardTitle(mission: Mission): string {
-  return getMissionTitle(mission, { maxLength: 80, fallback: getMissionShortName(mission.id) }).trim();
+function getMissionCardTitle(mission: Mission): string | null {
+  const title = getMissionTitle(mission, { maxLength: 80, fallback: '' }).trim();
+  if (!title) return null;
+  return title;
 }
 
 function getMissionCardDescription(mission: Mission): string | null {
   const shortDescription = mission.short_description?.trim();
   if (!shortDescription) return null;
 
-  const title = getMissionCardTitle(mission);
+  const title = getMissionCardTitle(mission) ?? '';
   if (title.toLowerCase() === shortDescription.toLowerCase()) return null;
   return shortDescription;
 }
@@ -66,7 +68,7 @@ function getMissionBackendLabel(mission: Mission): string {
 }
 
 function getMissionSearchText(mission: Mission): string {
-  const title = getMissionCardTitle(mission);
+  const title = getMissionCardTitle(mission) ?? '';
   const shortDescription = mission.short_description?.trim() ?? '';
   const backend = mission.backend?.trim() ?? '';
   const status = mission.status ?? '';
@@ -332,6 +334,8 @@ export function MissionSwitcher({
                 const isStalled = Boolean(stallInfo);
                 const isSeverlyStalled = stallInfo?.severity === 'severe';
                 const isLoading = loadingMissionId === item.id;
+                const cardTitle = mission ? getMissionCardTitle(mission) : null;
+                const cardDescription = mission ? getMissionCardDescription(mission) : null;
 
                 return (
                   <div key={item.id}>
@@ -400,12 +404,14 @@ export function MissionSwitcher({
                         </div>
                         {mission && (
                           <>
-                            <p className="text-xs text-white/55 truncate mt-0.5">
-                              {getMissionCardTitle(mission)}
-                            </p>
-                            {getMissionCardDescription(mission) && (
+                            {cardTitle && (
+                              <p className="text-xs text-white/55 truncate mt-0.5">
+                                {cardTitle}
+                              </p>
+                            )}
+                            {cardDescription && (
                               <p className="text-[11px] text-white/40 truncate">
-                                {getMissionCardDescription(mission)}
+                                {cardDescription}
                               </p>
                             )}
                           </>
