@@ -1618,6 +1618,16 @@ struct ControlView: View {
         }
     }
 
+    private func updateRecentMission(
+        id missionId: String,
+        _ mutate: (inout Mission) -> Void
+    ) {
+        guard let index = recentMissions.firstIndex(where: { $0.id == missionId }) else {
+            return
+        }
+        mutate(&recentMissions[index])
+    }
+
     private func startPollingRunningMissions() {
         pollingTask = Task {
             while !Task.isCancelled {
@@ -2075,6 +2085,10 @@ struct ControlView: View {
                     currentMission?.status = newStatus
                 }
 
+                updateRecentMission(id: missionId) { mission in
+                    mission.status = newStatus
+                }
+
                 // Refresh running missions list (live only)
                 if !isHistoricalReplay {
                     Task { await refreshRunningMissions() }
@@ -2093,6 +2107,10 @@ struct ControlView: View {
                 // Update the current mission title if it matches
                 if currentMission?.id == missionId {
                     currentMission?.title = title
+                }
+
+                updateRecentMission(id: missionId) { mission in
+                    mission.title = title
                 }
 
                 // Refresh running missions list so the bar picks up the new title
@@ -2132,6 +2150,15 @@ struct ControlView: View {
                     if hasMetadataSource { currentMission?.metadataSource = metadataSource }
                     if hasMetadataModel { currentMission?.metadataModel = metadataModel }
                     if hasMetadataVersion { currentMission?.metadataVersion = metadataVersion }
+                }
+
+                updateRecentMission(id: missionId) { mission in
+                    if hasTitle { mission.title = title }
+                    if hasShortDescription { mission.shortDescription = shortDescription }
+                    if hasMetadataUpdatedAt { mission.metadataUpdatedAt = metadataUpdatedAt }
+                    if hasMetadataSource { mission.metadataSource = metadataSource }
+                    if hasMetadataModel { mission.metadataModel = metadataModel }
+                    if hasMetadataVersion { mission.metadataVersion = metadataVersion }
                 }
 
                 if !isHistoricalReplay {
