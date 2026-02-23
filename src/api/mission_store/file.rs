@@ -14,6 +14,8 @@ use tokio::fs;
 use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
+const METADATA_SOURCE_USER: &str = "user";
+
 #[derive(Debug, Serialize, Deserialize, Default)]
 struct MissionStoreSnapshot {
     missions: HashMap<Uuid, Mission>,
@@ -107,13 +109,21 @@ impl MissionStore for FileMissionStore {
         config_profile: Option<&str>,
     ) -> Result<Mission, String> {
         let now = now_string();
+        let metadata_source = title.and_then(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(METADATA_SOURCE_USER.to_string())
+            }
+        });
         let mission = Mission {
             id: Uuid::new_v4(),
             status: MissionStatus::Pending,
             title: title.map(|s| s.to_string()),
             short_description: None,
             metadata_updated_at: None,
-            metadata_source: None,
+            metadata_source,
             metadata_model: None,
             metadata_version: None,
             workspace_id: workspace_id.unwrap_or(crate::workspace::DEFAULT_WORKSPACE_ID),
@@ -538,5 +548,39 @@ mod tests {
             metadata_updated_at >= seeded_metadata_updated_at,
             "manual title update should advance metadata timestamp"
         );
+    }
+
+    #[tokio::test]
+    async fn create_mission_marks_user_metadata_source_when_title_is_provided() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = FileMissionStore::new(temp_dir.path().to_path_buf(), "test-user")
+            .await
+            .expect("file store");
+
+        let titled = store
+            .create_mission(
+                Some("User titled mission"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("create titled mission");
+        assert_eq!(titled.metadata_source.as_deref(), Some("user"));
+
+        let untitled = store
+            .create_mission(None, None, None, None, None, None, None)
+            .await
+            .expect("create untitled mission");
+        assert_eq!(untitled.metadata_source, None);
+
+        let blank_titled = store
+            .create_mission(Some("  "), None, None, None, None, None, None)
+            .await
+            .expect("create blank titled mission");
+        assert_eq!(blank_titled.metadata_source, None);
     }
 }
