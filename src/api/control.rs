@@ -374,6 +374,93 @@ fn search_token_set(text: &str) -> HashSet<String> {
         .collect()
 }
 
+fn is_search_stopword(token: &str) -> bool {
+    matches!(
+        token,
+        "a" | "an"
+            | "and"
+            | "at"
+            | "did"
+            | "do"
+            | "does"
+            | "for"
+            | "from"
+            | "how"
+            | "i"
+            | "in"
+            | "is"
+            | "it"
+            | "me"
+            | "my"
+            | "of"
+            | "on"
+            | "or"
+            | "our"
+            | "please"
+            | "show"
+            | "that"
+            | "the"
+            | "this"
+            | "to"
+            | "us"
+            | "was"
+            | "we"
+            | "what"
+            | "when"
+            | "where"
+            | "which"
+            | "who"
+            | "why"
+            | "with"
+            | "you"
+            | "your"
+    )
+}
+
+#[derive(Debug, Clone)]
+struct SearchQueryTerms {
+    normalized_query: String,
+    normalized_core_query: String,
+    query_groups: Vec<Vec<String>>,
+}
+
+fn build_search_query_terms(search_query: &str) -> Option<SearchQueryTerms> {
+    let normalized_query = normalize_metadata_text(search_query);
+    if normalized_query.is_empty() {
+        return None;
+    }
+
+    let query_tokens: Vec<&str> = normalized_query.split_whitespace().collect();
+    if query_tokens.is_empty() {
+        return None;
+    }
+
+    let mut filtered_tokens: Vec<&str> = query_tokens
+        .iter()
+        .copied()
+        .filter(|token| !is_search_stopword(token))
+        .collect();
+    if filtered_tokens.is_empty() {
+        filtered_tokens = query_tokens.clone();
+    }
+    let normalized_core_query = filtered_tokens.join(" ");
+
+    let query_groups: Vec<Vec<String>> = filtered_tokens
+        .iter()
+        .map(|token| expand_search_query_group(token))
+        .filter(|group| !group.is_empty())
+        .collect();
+    if query_groups.is_empty() {
+        return None;
+    }
+
+    Some(SearchQueryTerms {
+        normalized_query,
+        normalized_core_query,
+        query_groups,
+    })
+}
+
 fn group_match_strength_for_token_set(group: &[String], token_set: &HashSet<String>) -> f64 {
     let mut best = 0.0;
     for candidate in group {
@@ -398,10 +485,14 @@ fn mission_search_relevance_score(
     search_query: &str,
     workspace_label: Option<&str>,
 ) -> f64 {
-    let normalized_query = normalize_metadata_text(search_query);
-    if normalized_query.is_empty() {
+    let Some(query_terms) = build_search_query_terms(search_query) else {
         return 0.0;
-    }
+    };
+    let phrase_query = if query_terms.normalized_core_query.is_empty() {
+        &query_terms.normalized_query
+    } else {
+        &query_terms.normalized_core_query
+    };
 
     let title = mission.title.as_deref().unwrap_or("").trim();
     let short_description = mission.short_description.as_deref().unwrap_or("").trim();
@@ -417,19 +508,6 @@ fn mission_search_relevance_score(
         return 0.0;
     }
 
-    let query_tokens: Vec<&str> = normalized_query.split_whitespace().collect();
-    if query_tokens.is_empty() {
-        return 0.0;
-    }
-    let query_groups: Vec<Vec<String>> = query_tokens
-        .iter()
-        .map(|token| expand_search_query_group(token))
-        .filter(|group| !group.is_empty())
-        .collect();
-    if query_groups.is_empty() {
-        return 0.0;
-    }
-
     let fields = [
         (5.0, search_token_set(display_name)),
         (8.0, search_token_set(title)),
@@ -440,7 +518,7 @@ fn mission_search_relevance_score(
     ];
 
     let mut score = 0.0;
-    for group in &query_groups {
+    for group in &query_terms.query_groups {
         let mut best_group_score: f64 = 0.0;
         for (weight, token_set) in &fields {
             let strength = group_match_strength_for_token_set(group, token_set);
@@ -461,7 +539,7 @@ fn mission_search_relevance_score(
         (normalize_metadata_text(&combined), 5.0),
     ];
     for (target, boost) in phrase_boost_targets {
-        if !target.is_empty() && target.contains(&normalized_query) {
+        if !target.is_empty() && target.contains(phrase_query) {
             score += boost;
         }
     }
@@ -495,32 +573,23 @@ fn mission_moment_snippet(content: &str, max_chars: usize) -> String {
 }
 
 fn mission_moment_relevance_score(role: &str, content: &str, search_query: &str) -> f64 {
-    let normalized_query = normalize_metadata_text(search_query);
-    if normalized_query.is_empty() {
+    let Some(query_terms) = build_search_query_terms(search_query) else {
         return 0.0;
-    }
+    };
+    let phrase_query = if query_terms.normalized_core_query.is_empty() {
+        &query_terms.normalized_query
+    } else {
+        &query_terms.normalized_core_query
+    };
     let normalized_content = normalize_metadata_text(content);
     if normalized_content.is_empty() {
-        return 0.0;
-    }
-
-    let query_tokens: Vec<&str> = normalized_query.split_whitespace().collect();
-    if query_tokens.is_empty() {
-        return 0.0;
-    }
-    let query_groups: Vec<Vec<String>> = query_tokens
-        .iter()
-        .map(|token| expand_search_query_group(token))
-        .filter(|group| !group.is_empty())
-        .collect();
-    if query_groups.is_empty() {
         return 0.0;
     }
 
     let content_tokens = search_token_set(content);
     let role_tokens = search_token_set(role);
     let mut score = 0.0;
-    for group in &query_groups {
+    for group in &query_terms.query_groups {
         let content_strength = group_match_strength_for_token_set(group, &content_tokens);
         let role_strength = group_match_strength_for_token_set(group, &role_tokens);
         let best = (content_strength * 8.0).max(role_strength * 1.5);
@@ -530,7 +599,7 @@ fn mission_moment_relevance_score(role: &str, content: &str, search_query: &str)
         score += best;
     }
 
-    if normalized_content.contains(&normalized_query) {
+    if normalized_content.contains(phrase_query) {
         score += 10.0;
     }
     score
@@ -8507,6 +8576,43 @@ And the report:
     }
 
     #[test]
+    fn test_mission_search_relevance_score_ignores_natural_language_stopwords() {
+        let now = mission_store::now_string();
+        let mission = Mission {
+            id: Uuid::new_v4(),
+            status: MissionStatus::Completed,
+            title: Some("Fix session id timeout handling".to_string()),
+            short_description: Some("Root cause was stale session id parsing".to_string()),
+            metadata_updated_at: None,
+            metadata_source: None,
+            metadata_model: None,
+            metadata_version: None,
+            workspace_id: crate::workspace::DEFAULT_WORKSPACE_ID,
+            workspace_name: Some("Sandboxed".to_string()),
+            agent: None,
+            model_override: None,
+            model_effort: None,
+            backend: "codex".to_string(),
+            config_profile: None,
+            history: Vec::new(),
+            created_at: now.clone(),
+            updated_at: now,
+            interrupted_at: None,
+            resumable: false,
+            desktop_sessions: Vec::new(),
+            session_id: None,
+            terminal_reason: None,
+        };
+
+        let score = mission_search_relevance_score(
+            &mission,
+            "where did we fix the session id timeout",
+            mission.workspace_name.as_deref(),
+        );
+        assert!(score > 0.0);
+    }
+
+    #[test]
     fn test_mission_moment_relevance_score_prefers_exact_phrase_match() {
         let exact = mission_moment_relevance_score(
             "assistant",
@@ -8529,6 +8635,16 @@ And the report:
             "kubernetes autoscaling",
         );
         assert_eq!(score, 0.0);
+    }
+
+    #[test]
+    fn test_mission_moment_relevance_score_ignores_natural_language_stopwords() {
+        let score = mission_moment_relevance_score(
+            "assistant",
+            "We fixed the session id timeout by normalizing the cookie key.",
+            "show me where we fixed the session id timeout",
+        );
+        assert!(score > 0.0);
     }
 
     #[test]
