@@ -177,13 +177,6 @@ function streamLog(level: StreamLogLevel, message: string, meta?: Record<string,
   }
 }
 
-function normalizeSearchText(text: string): string {
-  return text
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}\s]/gu, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
 import {
   OptionList,
   OptionListErrorBoundary,
@@ -199,7 +192,7 @@ import { useLocalStorage } from "@/hooks/use-local-storage";
 import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
 import { DesktopStream } from "@/components/desktop-stream";
 import { NewMissionDialog } from "@/components/new-mission-dialog";
-import { MissionSwitcher } from "@/components/mission-switcher";
+import { MissionSwitcher, normalizeMetadataText } from "@/components/mission-switcher";
 
 import type { SharedFile } from "@/lib/api";
 
@@ -4381,11 +4374,11 @@ export default function ControlClient() {
         historyIndex += 1;
       }
 
-      const normalizedSnippet = normalizeSearchText(snippet ?? "");
+      const normalizedSnippet = normalizeMetadataText(snippet ?? "");
       if (!normalizedSnippet) return null;
       const best = itemsRef.current.find((item) => {
         if (item.kind !== "user" && item.kind !== "assistant") return false;
-        return normalizeSearchText(item.content).includes(normalizedSnippet);
+        return normalizeMetadataText(item.content).includes(normalizedSnippet);
       });
       return best?.id ?? null;
     },

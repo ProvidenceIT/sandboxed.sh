@@ -408,6 +408,10 @@ struct ControlView: View {
                         }
                     }
                 },
+                onFollowUpMission: { mission in
+                    showMissionSwitcher = false
+                    Task { await createFollowUpMission(from: mission) }
+                },
                 onDismiss: {
                     showMissionSwitcher = false
                 }
@@ -1209,7 +1213,6 @@ struct ControlView: View {
         }
     }
 
-    
     private func setMissionStatus(_ status: MissionStatus) async {
         guard let mission = viewingMission else { return }
         
@@ -1262,7 +1265,7 @@ struct ControlView: View {
                 workspaceId: sourceMission.workspaceId,
                 title: nil,
                 agent: sourceMission.agent,
-                modelOverride: nil,
+                modelOverride: sourceMission.modelOverride,
                 backend: sourceMission.backend
             )
             currentMission = mission
@@ -3516,7 +3519,7 @@ private struct MissionSwitcherSheet: View {
     }
 
     @ViewBuilder
-    private func missionSection(_ title: String, missions: [Mission]) -> some View {
+    private func missionSection(_ title: String, missions: [Mission], allowsFollowUp: Bool = false) -> some View {
         if !missions.isEmpty {
             Section(title) {
                 ForEach(missions) { mission in
@@ -3579,7 +3582,7 @@ private struct MissionSwitcherSheet: View {
                 }
 
                 missionSection("Active & Pending", missions: activeOrPendingMissions)
-                missionSection("Completed", missions: completedMissions)
+                missionSection("Completed", missions: completedMissions, allowsFollowUp: true)
                 missionSection("Failed", missions: failedMissions)
                 missionSection("Interrupted", missions: interruptedMissions)
 
@@ -3943,6 +3946,7 @@ private struct MissionRow: View {
     let onSelect: () -> Void
     let onQuickAction: ((MissionQuickAction) -> Void)?
     let onCancel: (() -> Void)?
+    let onFollowUp: (() -> Void)?
 
     private var shortId: String {
         String(missionId.prefix(8))
@@ -4083,6 +4087,22 @@ private struct MissionRow: View {
                     } label: {
                         Image(systemName: "xmark.circle.fill")
                             .foregroundStyle(Theme.textMuted)
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                if let onFollowUp = onFollowUp {
+                    Button {
+                        onFollowUp()
+                        HapticService.lightTap()
+                    } label: {
+                        Text("Follow-up")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(Theme.accent)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Theme.accent.opacity(0.12))
+                            .clipShape(Capsule())
                     }
                     .buttonStyle(.plain)
                 }
