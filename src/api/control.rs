@@ -146,24 +146,26 @@ fn activity_label_from_tool_call(tool_name: &str, args: &serde_json::Value) -> S
 /// Returns the first substantive line, cleaned of markdown formatting.
 fn extract_title_from_assistant(content: &str) -> Option<String> {
     let lines: Vec<&str> = content.lines().collect();
-    let mut inside_fenced_block = false;
+    let mut inside_fenced_block: Option<char> = None;
     let mut first_line: Option<&str> = None;
     for idx in 0..lines.len() {
         let line = lines[idx].trim();
-        if line.starts_with("```") {
-            if inside_fenced_block {
-                inside_fenced_block = false;
+        if let Some(fence_char) = markdown_fence_char(line) {
+            if inside_fenced_block == Some(fence_char) {
+                inside_fenced_block = None;
                 continue;
             }
-            let has_closing_fence = lines[(idx + 1)..]
-                .iter()
-                .any(|candidate| candidate.trim().starts_with("```"));
-            if has_closing_fence {
-                inside_fenced_block = true;
+            if inside_fenced_block.is_none() {
+                let has_closing_fence = lines[(idx + 1)..]
+                    .iter()
+                    .any(|candidate| markdown_fence_char(candidate.trim()) == Some(fence_char));
+                if has_closing_fence {
+                    inside_fenced_block = Some(fence_char);
+                }
+                continue;
             }
-            continue;
         }
-        if !inside_fenced_block && !line.is_empty() {
+        if inside_fenced_block.is_none() && !line.is_empty() {
             first_line = Some(line);
             break;
         }
@@ -216,24 +218,26 @@ fn extract_short_description_from_role(
 
 fn extract_short_description_from_content(content: &str, max_len: usize) -> Option<String> {
     let lines: Vec<&str> = content.lines().collect();
-    let mut inside_fenced_block = false;
+    let mut inside_fenced_block: Option<char> = None;
     let mut first_line: Option<&str> = None;
     for idx in 0..lines.len() {
         let line = lines[idx].trim();
-        if line.starts_with("```") {
-            if inside_fenced_block {
-                inside_fenced_block = false;
+        if let Some(fence_char) = markdown_fence_char(line) {
+            if inside_fenced_block == Some(fence_char) {
+                inside_fenced_block = None;
                 continue;
             }
-            let has_closing_fence = lines[(idx + 1)..]
-                .iter()
-                .any(|candidate| candidate.trim().starts_with("```"));
-            if has_closing_fence {
-                inside_fenced_block = true;
+            if inside_fenced_block.is_none() {
+                let has_closing_fence = lines[(idx + 1)..]
+                    .iter()
+                    .any(|candidate| markdown_fence_char(candidate.trim()) == Some(fence_char));
+                if has_closing_fence {
+                    inside_fenced_block = Some(fence_char);
+                }
+                continue;
             }
-            continue;
         }
-        if !inside_fenced_block && !line.is_empty() {
+        if inside_fenced_block.is_none() && !line.is_empty() {
             first_line = Some(line);
             break;
         }
@@ -251,6 +255,16 @@ fn extract_short_description_from_content(content: &str, max_len: usize) -> Opti
         Some(format!("{}...", &collapsed[..safe_end]))
     } else {
         Some(collapsed)
+    }
+}
+
+fn markdown_fence_char(line: &str) -> Option<char> {
+    if line.starts_with("```") {
+        Some('`')
+    } else if line.starts_with("~~~") {
+        Some('~')
+    } else {
+        None
     }
 }
 
@@ -9961,6 +9975,16 @@ And the report:
     }
 
     #[test]
+    fn test_extract_short_description_from_history_skips_tilde_fenced_code_blocks() {
+        let history = vec![(
+            "user".to_string(),
+            "~~~python\nprint('hi')\n~~~\nDescribe retry strategy".to_string(),
+        )];
+        let extracted = extract_short_description_from_history(&history, 160);
+        assert_eq!(extracted.as_deref(), Some("Describe retry strategy"));
+    }
+
+    #[test]
     fn test_extract_short_description_from_history_handles_unclosed_fence() {
         let history = vec![(
             "user".to_string(),
@@ -9982,6 +10006,13 @@ And the report:
     fn test_extract_title_from_assistant_returns_none_for_code_only_message() {
         let title = extract_title_from_assistant("```bash\necho test\n```");
         assert_eq!(title, None);
+    }
+
+    #[test]
+    fn test_extract_title_from_assistant_skips_tilde_fenced_code_blocks() {
+        let title =
+            extract_title_from_assistant("~~~json\n{\"ok\":true}\n~~~\n# Final status summary");
+        assert_eq!(title.as_deref(), Some("Final status summary"));
     }
 
     #[test]
