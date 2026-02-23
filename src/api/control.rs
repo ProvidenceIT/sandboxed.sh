@@ -793,6 +793,7 @@ async fn apply_generated_mission_metadata_updates(
     mission_id: Uuid,
     generated_title: Option<String>,
     generated_short_description: Option<String>,
+    metadata_model: Option<&str>,
 ) {
     if generated_title.is_none() && generated_short_description.is_none() {
         return;
@@ -815,7 +816,7 @@ async fn apply_generated_mission_metadata_updates(
             title_to_write.as_deref().map(Some),
             generated_short_description.as_deref().map(Some),
             Some(Some(METADATA_SOURCE_BACKEND_HEURISTIC)),
-            None,
+            metadata_model.map(Some),
             Some(Some(METADATA_VERSION_V1)),
         )
         .await
@@ -899,6 +900,7 @@ async fn refresh_mission_metadata_for_milestone(
         mission_id,
         generated_title,
         generated_short_description,
+        mission.model_override.as_deref(),
     )
     .await;
 }
@@ -4414,6 +4416,7 @@ async fn control_actor_loop(
                     mid,
                     generated_title,
                     generated_short_description,
+                    mission.model_override.as_deref(),
                 )
                 .await;
             }
@@ -5911,6 +5914,7 @@ async fn control_actor_loop(
                                             mid,
                                             generated_title,
                                             generated_short_description,
+                                            mission.model_override.as_deref(),
                                         )
                                         .await;
                                     }
@@ -8100,8 +8104,17 @@ And the report:
     #[tokio::test]
     async fn test_refresh_mission_metadata_for_milestone_updates_store_and_emits_event() {
         let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let model_override = "openai/gpt-5";
         let mission = store
-            .create_mission(Some("Legacy title"), None, None, None, None, None, None)
+            .create_mission(
+                Some("Legacy title"),
+                None,
+                None,
+                Some(model_override),
+                None,
+                None,
+                None,
+            )
             .await
             .expect("create mission");
         store
@@ -8158,11 +8171,18 @@ And the report:
             refreshed.metadata_version.as_deref(),
             Some(METADATA_VERSION_V1)
         );
+        assert_eq!(refreshed.metadata_model.as_deref(), Some(model_override));
 
         let mut saw_metadata_event = false;
         while let Ok(event) = events_rx.try_recv() {
-            if let AgentEvent::MissionMetadataUpdated { mission_id, .. } = event {
+            if let AgentEvent::MissionMetadataUpdated {
+                mission_id,
+                metadata_model,
+                ..
+            } = event
+            {
                 if mission_id == mission.id {
+                    assert_eq!(metadata_model.as_deref(), Some(model_override));
                     saw_metadata_event = true;
                     break;
                 }
