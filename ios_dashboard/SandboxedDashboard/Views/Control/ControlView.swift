@@ -408,10 +408,6 @@ struct ControlView: View {
                         }
                     }
                 },
-                onFollowUpMission: { mission in
-                    showMissionSwitcher = false
-                    Task { await createFollowUpMission(from: mission) }
-                },
                 onDismiss: {
                     showMissionSwitcher = false
                 }
