@@ -5337,6 +5337,76 @@ export default function ControlClient() {
         }
       }
 
+      if (event.type === "mission_title_changed" && isRecord(data)) {
+        const missionId = typeof data["mission_id"] === "string" ? data["mission_id"] : undefined;
+        const title = typeof data["title"] === "string" ? data["title"] : undefined;
+        if (missionId && title !== undefined) {
+          if (currentMissionRef.current?.id === missionId) {
+            setCurrentMission((prev) => (prev ? { ...prev, title } : prev));
+          }
+          if (viewingMissionRef.current?.id === missionId) {
+            setViewingMission((prev) => (prev ? { ...prev, title } : prev));
+          }
+        }
+      }
+
+      if (event.type === "mission_metadata_updated" && isRecord(data)) {
+        const missionId = typeof data["mission_id"] === "string" ? data["mission_id"] : undefined;
+        if (missionId) {
+          const title =
+            data["title"] === null
+              ? null
+              : typeof data["title"] === "string"
+                ? data["title"]
+                : undefined;
+          const shortDescription =
+            data["short_description"] === null
+              ? null
+              : typeof data["short_description"] === "string"
+                ? data["short_description"]
+                : undefined;
+          const metadataUpdatedAt =
+            data["metadata_updated_at"] === null
+              ? null
+              : typeof data["metadata_updated_at"] === "string"
+                ? data["metadata_updated_at"]
+                : undefined;
+
+          if (currentMissionRef.current?.id === missionId) {
+            setCurrentMission((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    ...(title !== undefined ? { title } : {}),
+                    ...(shortDescription !== undefined
+                      ? { short_description: shortDescription }
+                      : {}),
+                    ...(metadataUpdatedAt !== undefined
+                      ? { metadata_updated_at: metadataUpdatedAt }
+                      : {}),
+                  }
+                : prev
+            );
+          }
+          if (viewingMissionRef.current?.id === missionId) {
+            setViewingMission((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    ...(title !== undefined ? { title } : {}),
+                    ...(shortDescription !== undefined
+                      ? { short_description: shortDescription }
+                      : {}),
+                    ...(metadataUpdatedAt !== undefined
+                      ? { metadata_updated_at: metadataUpdatedAt }
+                      : {}),
+                  }
+                : prev
+            );
+          }
+        }
+      }
+
       // Handle progress updates
       if (event.type === "progress" && isRecord(data)) {
         const progressMissionId =

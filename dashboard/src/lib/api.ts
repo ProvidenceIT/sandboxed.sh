@@ -354,6 +354,18 @@ export type ControlAgentEvent =
       result: unknown;
       mission_id?: string;
     }
+  | {
+      type: "mission_title_changed";
+      mission_id: string;
+      title: string;
+    }
+  | {
+      type: "mission_metadata_updated";
+      mission_id: string;
+      title?: string | null;
+      short_description?: string | null;
+      metadata_updated_at?: string | null;
+    }
   | { type: "error"; message: string; mission_id?: string };
 
 export async function postControlMessage(
