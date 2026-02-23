@@ -96,12 +96,30 @@ export type MissionHealth =
   | { status: "missing_deliverables"; missing: string[] }
   | { status: "unexpected_end"; reason: string };
 
+export interface MissionSearchResult {
+  mission: Mission;
+  relevance_score: number;
+}
+
 // ---------------------------------------------------------------------------
 // API Functions
 // ---------------------------------------------------------------------------
 
 export async function listMissions(): Promise<Mission[]> {
   return apiGet("/api/control/missions", "Failed to fetch missions");
+}
+
+export async function searchMissions(
+  query: string,
+  options?: { limit?: number }
+): Promise<MissionSearchResult[]> {
+  const params = new URLSearchParams();
+  params.set("q", query);
+  if (options?.limit) params.set("limit", String(options.limit));
+  return apiGet(
+    `/api/control/missions/search?${params.toString()}`,
+    "Failed to search missions"
+  );
 }
 
 export async function getMission(id: string): Promise<Mission> {
