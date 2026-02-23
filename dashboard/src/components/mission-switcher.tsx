@@ -53,6 +53,15 @@ function getMissionDescription(mission: Mission): string {
   return getMissionTitle(mission, { maxLength: 60, fallback: '' });
 }
 
+function getMissionSearchText(mission: Mission): string {
+  const title = getMissionTitle(mission, { maxLength: 60, fallback: '' }).trim();
+  const shortDescription = mission.short_description?.trim() ?? '';
+
+  if (!shortDescription) return title;
+  if (!title || title === shortDescription) return shortDescription;
+  return `${title} ${shortDescription}`;
+}
+
 export function MissionSwitcher({
   open,
   onClose,
@@ -143,7 +152,7 @@ export function MissionSwitcher({
     return allItems.filter((item) => {
       if (!item.mission) return false;
       const name = getMissionDisplayName(item.mission, workspaceNameById).toLowerCase();
-      const desc = getMissionDescription(item.mission).toLowerCase();
+      const desc = getMissionSearchText(item.mission).toLowerCase();
       return name.includes(query) || desc.includes(query);
     });
   }, [allItems, searchQuery, workspaceNameById]);
