@@ -551,6 +551,9 @@ struct ControlView: View {
                     isInputFocused = false
                 }
                 .onChange(of: messages.count) { _, _ in
+                    if let pendingFocusedMessageId {
+                        scheduleMessageFocusRetry(proxy: proxy, targetId: pendingFocusedMessageId)
+                    }
                     // Only auto-scroll on message count change if we're at bottom AND not loading historical messages
                     // This prevents the jarring animated scroll when loading cached/historical conversations
                     if isAtBottom && !isLoadingHistory {
@@ -566,10 +569,7 @@ struct ControlView: View {
                 }
                 .onChange(of: pendingFocusedMessageId) { _, targetId in
                     guard let targetId else { return }
-                    withAnimation(.easeInOut(duration: 0.25)) {
-                        proxy.scrollTo(targetId, anchor: .center)
-                    }
-                    pendingFocusedMessageId = nil
+                    scheduleMessageFocusRetry(proxy: proxy, targetId: targetId)
                 }
                 .overlay(alignment: .bottom) {
                     // Scroll to bottom button
@@ -1313,6 +1313,36 @@ struct ControlView: View {
             return normalizeSearchText(message.content).contains(normalizedSnippet)
         }
         return best?.id
+    }
+
+    private func scheduleMessageFocusRetry(
+        proxy: ScrollViewProxy,
+        targetId: String,
+        attempt: Int = 0
+    ) {
+        guard pendingFocusedMessageId == targetId else { return }
+
+        let canFocusNow = messages.contains { $0.id == targetId }
+        if canFocusNow {
+            withAnimation(.easeInOut(duration: 0.25)) {
+                proxy.scrollTo(targetId, anchor: .center)
+            }
+            // Keep trying a couple more frames so late-mounted rows still get focused.
+            if attempt >= 2 {
+                pendingFocusedMessageId = nil
+                return
+            }
+        }
+
+        let maxAttempts = 10
+        guard attempt < maxAttempts else {
+            pendingFocusedMessageId = nil
+            return
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+            self.scheduleMessageFocusRetry(proxy: proxy, targetId: targetId, attempt: attempt + 1)
+        }
     }
 
     private func openFailingToolCall(for missionId: String) async {

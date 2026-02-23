@@ -300,23 +300,41 @@ fn has_significant_metadata_drift(existing: &str, candidate: &str) -> bool {
 
 fn mission_search_synonyms(token: &str) -> &'static [&'static str] {
     match token {
+        "api" => &["endpoint", "http", "rest", "rpc"],
         "auth" => &["login", "signin", "oauth", "credential", "credentials"],
         "blocked" => &["stalled", "waiting"],
         "bug" => &["issue", "error", "fix", "problem"],
+        "ci" => &["pipeline", "build", "integration", "tests"],
         "crash" => &["panic", "exception", "failure"],
+        "db" => &["database", "sql", "sqlite", "postgres"],
+        "cd" => &["deploy", "release", "rollout", "ship"],
         "deploy" => &["release", "rollout", "ship"],
         "error" => &["bug", "issue", "failure"],
         "failed" => &["error", "failure"],
         "fix" => &["bug", "issue", "error", "repair"],
         "issue" => &["bug", "error", "problem", "fix"],
         "login" => &["auth", "signin", "oauth", "credentials"],
-        "performance" => &["perf", "slow", "latency", "optimize"],
         "perf" => &["performance", "slow", "latency", "optimize"],
+        "performance" => &["perf", "slow", "latency", "optimize"],
         "release" => &["deploy", "rollout", "ship"],
+        "sid" => &["session", "id", "sessionid", "cookie", "token"],
         "signin" => &["login", "auth", "oauth", "credentials"],
         "slow" => &["performance", "latency", "timeout", "stall"],
+        "sso" => &["signin", "login", "auth", "oauth"],
         "stalled" => &["blocked", "waiting", "timeout"],
         "timeout" => &["slow", "latency", "stalled", "hang"],
+        "ui" => &["ux", "interface", "frontend"],
+        "ux" => &["ui", "interface", "frontend"],
+        _ => &[],
+    }
+}
+
+fn mission_search_phrase_expansions(token: &str) -> &'static [&'static str] {
+    match token {
+        "ci" => &["continuous integration"],
+        "cd" => &["continuous deployment"],
+        "sid" => &["session id"],
+        "sso" => &["single sign on"],
         _ => &[],
     }
 }
@@ -422,6 +440,7 @@ struct SearchQueryTerms {
     normalized_query: String,
     normalized_core_query: String,
     query_groups: Vec<Vec<String>>,
+    phrase_queries: Vec<String>,
 }
 
 fn build_search_query_terms(search_query: &str) -> Option<SearchQueryTerms> {
@@ -454,10 +473,24 @@ fn build_search_query_terms(search_query: &str) -> Option<SearchQueryTerms> {
         return None;
     }
 
+    let mut phrase_queries = Vec::new();
+    phrase_queries.push(normalized_core_query.clone());
+    for token in &filtered_tokens {
+        for phrase in mission_search_phrase_expansions(token) {
+            let normalized_phrase = normalize_metadata_text(phrase);
+            if !normalized_phrase.is_empty() {
+                phrase_queries.push(normalized_phrase);
+            }
+        }
+    }
+    phrase_queries.sort();
+    phrase_queries.dedup();
+
     Some(SearchQueryTerms {
         normalized_query,
         normalized_core_query,
         query_groups,
+        phrase_queries,
     })
 }
 
@@ -488,10 +521,14 @@ fn mission_search_relevance_score(
     let Some(query_terms) = build_search_query_terms(search_query) else {
         return 0.0;
     };
-    let phrase_query = if query_terms.normalized_core_query.is_empty() {
-        &query_terms.normalized_query
+    let phrase_queries = if query_terms.phrase_queries.is_empty() {
+        vec![if query_terms.normalized_core_query.is_empty() {
+            query_terms.normalized_query.clone()
+        } else {
+            query_terms.normalized_core_query.clone()
+        }]
     } else {
-        &query_terms.normalized_core_query
+        query_terms.phrase_queries.clone()
     };
 
     let title = mission.title.as_deref().unwrap_or("").trim();
@@ -539,7 +576,13 @@ fn mission_search_relevance_score(
         (normalize_metadata_text(&combined), 5.0),
     ];
     for (target, boost) in phrase_boost_targets {
-        if !target.is_empty() && target.contains(phrase_query) {
+        if target.is_empty() {
+            continue;
+        }
+        if phrase_queries
+            .iter()
+            .any(|phrase_query| !phrase_query.is_empty() && target.contains(phrase_query))
+        {
             score += boost;
         }
     }
@@ -576,10 +619,14 @@ fn mission_moment_relevance_score(role: &str, content: &str, search_query: &str)
     let Some(query_terms) = build_search_query_terms(search_query) else {
         return 0.0;
     };
-    let phrase_query = if query_terms.normalized_core_query.is_empty() {
-        &query_terms.normalized_query
+    let phrase_queries = if query_terms.phrase_queries.is_empty() {
+        vec![if query_terms.normalized_core_query.is_empty() {
+            query_terms.normalized_query.clone()
+        } else {
+            query_terms.normalized_core_query.clone()
+        }]
     } else {
-        &query_terms.normalized_core_query
+        query_terms.phrase_queries.clone()
     };
     let normalized_content = normalize_metadata_text(content);
     if normalized_content.is_empty() {
@@ -599,7 +646,10 @@ fn mission_moment_relevance_score(role: &str, content: &str, search_query: &str)
         score += best;
     }
 
-    if normalized_content.contains(phrase_query) {
+    if phrase_queries
+        .iter()
+        .any(|phrase_query| !phrase_query.is_empty() && normalized_content.contains(phrase_query))
+    {
         score += 10.0;
     }
     score
@@ -8474,6 +8524,43 @@ And the report:
     }
 
     #[test]
+    fn test_mission_search_relevance_score_supports_abbreviation_query_expansion() {
+        let now = mission_store::now_string();
+        let mission = Mission {
+            id: Uuid::new_v4(),
+            status: MissionStatus::Completed,
+            title: Some("Fix session id timeout handling".to_string()),
+            short_description: Some("Normalize cookie session id parsing".to_string()),
+            metadata_updated_at: None,
+            metadata_source: None,
+            metadata_model: None,
+            metadata_version: None,
+            workspace_id: crate::workspace::DEFAULT_WORKSPACE_ID,
+            workspace_name: Some("Sandboxed".to_string()),
+            agent: None,
+            model_override: None,
+            model_effort: None,
+            backend: "codex".to_string(),
+            config_profile: None,
+            history: Vec::new(),
+            created_at: now.clone(),
+            updated_at: now,
+            interrupted_at: None,
+            resumable: false,
+            desktop_sessions: Vec::new(),
+            session_id: None,
+            terminal_reason: None,
+        };
+
+        let score = mission_search_relevance_score(
+            &mission,
+            "sid timeout",
+            mission.workspace_name.as_deref(),
+        );
+        assert!(score > 0.0);
+    }
+
+    #[test]
     fn test_mission_search_relevance_score_returns_zero_for_non_matching_query() {
         let now = mission_store::now_string();
         let mission = Mission {
@@ -8578,6 +8665,16 @@ And the report:
             "assistant",
             "We fixed the session id timeout by normalizing the cookie key.",
             "show me where we fixed the session id timeout",
+        );
+        assert!(score > 0.0);
+    }
+
+    #[test]
+    fn test_mission_moment_relevance_score_supports_abbreviation_query_expansion() {
+        let score = mission_moment_relevance_score(
+            "assistant",
+            "We fixed the session id timeout by normalizing the cookie key.",
+            "sid timeout",
         );
         assert!(score > 0.0);
     }
