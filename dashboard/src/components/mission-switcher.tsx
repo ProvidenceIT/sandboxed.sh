@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, useMemo, useCallback } from 'react';
 import { Search, XCircle, Check, Loader2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { type Mission, type RunningMissionInfo } from '@/lib/api';
+import { searchMissions, type Mission, type RunningMissionInfo } from '@/lib/api';
 import { getMissionShortName } from '@/lib/mission-display';
 import { STATUS_LABELS, getMissionDotColor, getMissionTitle } from '@/lib/mission-status';
 
@@ -217,6 +217,43 @@ function getMissionSearchCacheKey(
   ].join('|');
 }
 
+function mapServerMissionSearchScores(results: Array<{ mission: Mission; relevance_score: number }>): Map<string, number> {
+  const scoreByMissionId = new Map<string, number>();
+  for (const result of results) {
+    const missionId = result.mission?.id;
+    if (!missionId) continue;
+    scoreByMissionId.set(missionId, result.relevance_score ?? 0);
+  }
+  return scoreByMissionId;
+}
+
+export function getMissionSearchScore(
+  mission: Mission,
+  normalizedQuery: string,
+  cache: Map<string, number>,
+  workspaceNameById?: Record<string, string>,
+  serverScoreByMissionId?: Map<string, number> | null
+): number {
+  const serverScore = serverScoreByMissionId?.get(mission.id);
+  if (typeof serverScore === 'number') {
+    return serverScore;
+  }
+
+  const cacheKey = getMissionSearchCacheKey(mission, normalizedQuery, workspaceNameById);
+  let localScore = cache.get(cacheKey);
+  if (localScore === undefined) {
+    localScore = missionSearchRelevanceScore(mission, normalizedQuery, workspaceNameById);
+    cache.set(cacheKey, localScore);
+    if (cache.size > 1000) {
+      const oldestKey = cache.keys().next().value;
+      if (oldestKey) {
+        cache.delete(oldestKey);
+      }
+    }
+  }
+  return localScore;
+}
+
 export function missionSearchRelevanceScore(
   mission: Mission,
   searchQuery: string,
@@ -307,7 +344,12 @@ export function MissionSwitcher({
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [loadingMissionId, setLoadingMissionId] = useState<string | null>(null);
+  const [serverScoreByMissionId, setServerScoreByMissionId] = useState<Map<string, number> | null>(
+    null
+  );
+  const [serverSearchLoading, setServerSearchLoading] = useState(false);
   const searchScoreCacheRef = useRef<Map<string, number>>(new Map());
+  const latestSearchRequestIdRef = useRef(0);
 
   // Handle mission selection with loading state
   const handleSelect = useCallback(async (missionId: string) => {
@@ -373,6 +415,40 @@ export function MissionSwitcher({
     return items;
   }, [missions, currentMissionId, runningMissions, runningMissionIds, recentMissions]);
 
+  useEffect(() => {
+    if (!open) return;
+    const normalizedQuery = normalizeMetadataText(searchQuery);
+    if (!normalizedQuery) {
+      setServerScoreByMissionId(null);
+      setServerSearchLoading(false);
+      return;
+    }
+
+    const requestId = latestSearchRequestIdRef.current + 1;
+    latestSearchRequestIdRef.current = requestId;
+    let cancelled = false;
+    setServerSearchLoading(true);
+
+    void searchMissions(normalizedQuery, { limit: 100 })
+      .then((results) => {
+        if (cancelled || latestSearchRequestIdRef.current !== requestId) return;
+        setServerScoreByMissionId(mapServerMissionSearchScores(results));
+      })
+      .catch((error) => {
+        if (cancelled || latestSearchRequestIdRef.current !== requestId) return;
+        console.warn('Mission search endpoint unavailable, falling back to local scoring:', error);
+        setServerScoreByMissionId(null);
+      })
+      .finally(() => {
+        if (cancelled || latestSearchRequestIdRef.current !== requestId) return;
+        setServerSearchLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [open, searchQuery]);
+
   // Filter items by search query
   const filteredItems = useMemo(() => {
     const normalizedQuery = normalizeMetadataText(searchQuery);
@@ -381,18 +457,13 @@ export function MissionSwitcher({
     const cache = searchScoreCacheRef.current;
     const scored = allItems.flatMap((item) => {
       if (!item.mission) return [];
-      const cacheKey = getMissionSearchCacheKey(item.mission, normalizedQuery, workspaceNameById);
-      let score = cache.get(cacheKey);
-      if (score === undefined) {
-        score = missionSearchRelevanceScore(item.mission, normalizedQuery, workspaceNameById);
-        cache.set(cacheKey, score);
-        if (cache.size > 1000) {
-          const oldestKey = cache.keys().next().value;
-          if (oldestKey) {
-            cache.delete(oldestKey);
-          }
-        }
-      }
+      const score = getMissionSearchScore(
+        item.mission,
+        normalizedQuery,
+        cache,
+        workspaceNameById,
+        serverScoreByMissionId
+      );
       if (score <= 0) return [];
       return [{ item, score }];
     });
@@ -403,7 +474,7 @@ export function MissionSwitcher({
       return bUpdatedAt.localeCompare(aUpdatedAt);
     });
     return scored.map(({ item }) => item);
-  }, [allItems, searchQuery, workspaceNameById]);
+  }, [allItems, searchQuery, workspaceNameById, serverScoreByMissionId]);
 
   useEffect(() => {
     searchScoreCacheRef.current.clear();
@@ -518,6 +589,9 @@ export function MissionSwitcher({
             placeholder="Search missions..."
             className="flex-1 bg-transparent text-sm text-white placeholder:text-white/40 focus:outline-none"
           />
+          {serverSearchLoading && searchQuery.trim() ? (
+            <Loader2 className="h-3.5 w-3.5 text-white/40 animate-spin shrink-0" />
+          ) : null}
           <div className="flex items-center gap-1 text-[10px] text-white/30">
             <kbd className="px-1.5 py-0.5 rounded bg-white/[0.06] font-mono">
               esc

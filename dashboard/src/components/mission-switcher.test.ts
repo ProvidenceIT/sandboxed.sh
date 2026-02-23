@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { Mission } from '@/lib/api';
 import {
+  getMissionSearchScore,
   getMissionCardDescription,
   getMissionCardTitle,
   getMissionSearchText,
@@ -135,5 +136,36 @@ describe('mission switcher search helpers', () => {
 
     expect(missionSearchRelevanceScore(mission, 'database migration')).toBe(0);
     expect(missionMatchesSearchQuery(mission, 'database migration')).toBe(false);
+  });
+
+  it('prefers backend search score when available', () => {
+    const mission = buildMission({
+      id: 'mission-42',
+      title: 'Investigate flaky auth callback',
+      short_description: 'Analyze timeout and retries',
+    });
+
+    const localCache = new Map<string, number>();
+    const serverScores = new Map<string, number>([['mission-42', 77]]);
+    const score = getMissionSearchScore(mission, 'auth timeout', localCache, undefined, serverScores);
+
+    expect(score).toBe(77);
+    expect(localCache.size).toBe(0);
+  });
+
+  it('falls back to local score when backend score is unavailable', () => {
+    const mission = buildMission({
+      id: 'mission-99',
+      title: 'Fix session timeout regression',
+      short_description: 'Reproduce timeout on refresh',
+    });
+
+    const localCache = new Map<string, number>();
+    const first = getMissionSearchScore(mission, 'timeout', localCache);
+    const second = getMissionSearchScore(mission, 'timeout', localCache);
+
+    expect(first).toBeGreaterThan(0);
+    expect(second).toBe(first);
+    expect(localCache.size).toBeGreaterThan(0);
   });
 });
