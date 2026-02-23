@@ -4366,7 +4366,7 @@ export default function ControlClient() {
       if (entryIndex < 0) return null;
 
       let historyIndex = 0;
-      for (const item of itemsRef.current) {
+      for (const item of groupedItems) {
         if (item.kind !== "user" && item.kind !== "assistant") continue;
         if (historyIndex === entryIndex) {
           return item.id;
@@ -4376,13 +4376,15 @@ export default function ControlClient() {
 
       const normalizedSnippet = normalizeMetadataText(snippet ?? "");
       if (!normalizedSnippet) return null;
-      const best = itemsRef.current.find((item) => {
-        if (item.kind !== "user" && item.kind !== "assistant") return false;
-        return normalizeMetadataText(item.content).includes(normalizedSnippet);
-      });
-      return best?.id ?? null;
+      for (const item of groupedItems) {
+        if (item.kind !== "user" && item.kind !== "assistant") continue;
+        if (normalizeMetadataText(item.content).includes(normalizedSnippet)) {
+          return item.id;
+        }
+      }
+      return null;
     },
-    []
+    [groupedItems]
   );
 
   const focusChatItem = useCallback(
@@ -4442,7 +4444,7 @@ export default function ControlClient() {
       const query =
         focus === "failure"
           ? "failing tool call error"
-          : normalizeSearchText(searchParams.get("query") ?? "");
+          : normalizeMetadataText(searchParams.get("query") ?? "");
       if (!query) {
         toast.error("Missing moment query");
         router.replace(`/control?mission=${missionFromQuery}`, { scroll: false });

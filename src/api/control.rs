@@ -2756,6 +2756,9 @@ async fn mission_search_recency_fingerprint(
         mission.id.hash(&mut hasher);
         mission.updated_at.hash(&mut hasher);
         mission.metadata_updated_at.hash(&mut hasher);
+        mission.title.hash(&mut hasher);
+        mission.short_description.hash(&mut hasher);
+        mission.workspace_name.hash(&mut hasher);
     }
     Ok(hasher.finish())
 }
@@ -9133,7 +9136,7 @@ And the report:
             .await
             .expect("older mission should be created");
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        let _newer_mission = store
+        let newer_mission = store
             .create_mission(Some("Newer mission"), None, None, None, None, None, None)
             .await
             .expect("newer mission should be created");
@@ -9153,6 +9156,13 @@ And the report:
             )
             .await
             .expect("metadata update should succeed");
+
+        // Ensure older_mission is non-head at read time.
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        store
+            .update_mission_title(newer_mission.id, "Newer mission touched")
+            .await
+            .expect("title update should succeed");
 
         let after = mission_search_recency_fingerprint(&store)
             .await

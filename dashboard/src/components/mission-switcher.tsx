@@ -740,6 +740,14 @@ export function MissionSwitcher({
     setSelectedIndex(0);
   }, [searchQuery]);
 
+  // Keep selected index in bounds when async rescoring changes list size.
+  useEffect(() => {
+    setSelectedIndex((prev) => {
+      if (filteredItems.length <= 0) return 0;
+      return Math.min(prev, filteredItems.length - 1);
+    });
+  }, [filteredItems.length]);
+
   // Handle keyboard navigation
   useEffect(() => {
     if (!open) return;
