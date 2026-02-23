@@ -469,6 +469,104 @@ fn mission_search_relevance_score(
     score
 }
 
+#[derive(Debug, Clone)]
+struct MissionMomentMatch {
+    entry_index: usize,
+    role: String,
+    snippet: String,
+    rationale: String,
+    relevance_score: f64,
+}
+
+fn mission_moment_snippet(content: &str, max_chars: usize) -> String {
+    let collapsed = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        return String::new();
+    }
+    if collapsed.chars().count() <= max_chars {
+        return collapsed;
+    }
+    let mut result = String::new();
+    for ch in collapsed.chars().take(max_chars) {
+        result.push(ch);
+    }
+    result.push('…');
+    result
+}
+
+fn mission_moment_relevance_score(role: &str, content: &str, search_query: &str) -> f64 {
+    let normalized_query = normalize_metadata_text(search_query);
+    if normalized_query.is_empty() {
+        return 0.0;
+    }
+    let normalized_content = normalize_metadata_text(content);
+    if normalized_content.is_empty() {
+        return 0.0;
+    }
+
+    let query_tokens: Vec<&str> = normalized_query.split_whitespace().collect();
+    if query_tokens.is_empty() {
+        return 0.0;
+    }
+    let query_groups: Vec<Vec<String>> = query_tokens
+        .iter()
+        .map(|token| expand_search_query_group(token))
+        .filter(|group| !group.is_empty())
+        .collect();
+    if query_groups.is_empty() {
+        return 0.0;
+    }
+
+    let content_tokens = search_token_set(content);
+    let role_tokens = search_token_set(role);
+    let mut score = 0.0;
+    for group in &query_groups {
+        let content_strength = group_match_strength_for_token_set(group, &content_tokens);
+        let role_strength = group_match_strength_for_token_set(group, &role_tokens);
+        let best = (content_strength * 8.0).max(role_strength * 1.5);
+        if best <= 0.0 {
+            return 0.0;
+        }
+        score += best;
+    }
+
+    if normalized_content.contains(&normalized_query) {
+        score += 10.0;
+    }
+    score
+}
+
+fn mission_moment_rationale(role: &str, content: &str, search_query: &str) -> String {
+    let normalized_query = normalize_metadata_text(search_query);
+    let normalized_content = normalize_metadata_text(content);
+    if !normalized_query.is_empty() && normalized_content.contains(&normalized_query) {
+        return format!("Exact phrase match in {} message", role);
+    }
+    format!("Keyword match in {} message", role)
+}
+
+fn best_mission_moment(mission: &Mission, search_query: &str) -> Option<MissionMomentMatch> {
+    let mut best: Option<MissionMomentMatch> = None;
+    for (idx, entry) in mission.history.iter().enumerate() {
+        let score = mission_moment_relevance_score(&entry.role, &entry.content, search_query);
+        if score <= 0.0 {
+            continue;
+        }
+        let candidate = MissionMomentMatch {
+            entry_index: idx,
+            role: entry.role.clone(),
+            snippet: mission_moment_snippet(&entry.content, 180),
+            rationale: mission_moment_rationale(&entry.role, &entry.content, search_query),
+            relevance_score: score,
+        };
+        match &best {
+            Some(existing) if existing.relevance_score >= candidate.relevance_score => {}
+            _ => best = Some(candidate),
+        }
+    }
+    best
+}
+
 async fn disambiguate_generated_title(
     mission_store: &Arc<dyn MissionStore>,
     mission_id: Uuid,
@@ -2280,8 +2378,8 @@ pub struct SearchMissionsQuery {
 #[derive(Debug, Deserialize)]
 pub struct SearchMissionMomentsQuery {
     pub q: String,
-    pub limit: Option<usize>,
     pub mission_id: Option<Uuid>,
+    pub limit: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2324,66 +2422,6 @@ fn mission_search_freshness_key(missions: &[Mission], page_size: usize) -> u64 {
         mission.workspace_name.hash(&mut hasher);
     }
     hasher.finish()
-}
-
-fn mission_query_groups(search_query: &str) -> Vec<Vec<String>> {
-    let normalized_query = normalize_metadata_text(search_query);
-    if normalized_query.is_empty() {
-        return Vec::new();
-    }
-    normalized_query
-        .split_whitespace()
-        .map(expand_search_query_group)
-        .filter(|group| !group.is_empty())
-        .collect()
-}
-
-fn mission_moment_relevance_score(
-    content: &str,
-    role: &str,
-    normalized_query: &str,
-    query_groups: &[Vec<String>],
-) -> f64 {
-    let normalized_content = normalize_metadata_text(content);
-    if normalized_content.is_empty() || normalized_query.is_empty() || query_groups.is_empty() {
-        return 0.0;
-    }
-
-    let content_tokens = search_token_set(&normalized_content);
-    let mut score = 0.0;
-    for group in query_groups {
-        let strength = group_match_strength_for_token_set(group, &content_tokens);
-        if strength <= 0.0 {
-            return 0.0;
-        }
-        score += strength * 9.0;
-    }
-
-    if normalized_content.contains(normalized_query) {
-        score += 12.0;
-    }
-
-    if role == "assistant" {
-        score += 1.5;
-    } else if role == "user" {
-        score += 1.0;
-    }
-
-    score
-}
-
-fn mission_moment_snippet(content: &str) -> String {
-    const MAX_SNIPPET_LEN: usize = 180;
-    let collapsed = content.split_whitespace().collect::<Vec<_>>().join(" ");
-    if collapsed.len() <= MAX_SNIPPET_LEN {
-        return collapsed;
-    }
-    let end = safe_truncate_index(&collapsed, MAX_SNIPPET_LEN);
-    format!("{}...", &collapsed[..end])
-}
-
-fn mission_moment_rationale(role: &str, query: &str) -> String {
-    format!("Matched {} context for \"{}\"", role, query.trim())
 }
 
 /// Search missions with semantic-aware ranking.
@@ -2478,7 +2516,7 @@ pub async fn search_missions(
     Ok(Json(scored))
 }
 
-/// Search mission history for jump-to-moment navigation anchors.
+/// Search mission history and return the best matching moment per mission.
 pub async fn search_mission_moments(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<AuthUser>,
@@ -2489,65 +2527,65 @@ pub async fn search_mission_moments(
         return Ok(Json(Vec::new()));
     }
 
-    let normalized_query = normalize_metadata_text(query);
-    let query_groups = mission_query_groups(query);
-    if normalized_query.is_empty() || query_groups.is_empty() {
-        return Ok(Json(Vec::new()));
-    }
-
-    let limit = params.limit.unwrap_or(20).clamp(1, 50);
+    let limit = params.limit.unwrap_or(10).clamp(1, 50);
     let control = control_for_user(&state, &user).await;
-    let missions = if let Some(mission_id) = params.mission_id {
-        match control
+
+    let mut missions: Vec<Mission> = if let Some(mission_id) = params.mission_id {
+        let Some(mission) = control
             .mission_store
             .get_mission(mission_id)
             .await
             .map_err(internal_error)?
-        {
-            Some(mut mission) => {
-                populate_workspace_names(&state, std::slice::from_mut(&mut mission)).await;
-                vec![mission]
-            }
-            None => Vec::new(),
-        }
+        else {
+            return Ok(Json(Vec::new()));
+        };
+        vec![mission]
     } else {
-        list_missions_for_search(&state, &control, query, limit).await?
+        const SEARCH_PAGE_SIZE: usize = 100;
+        const SEARCH_MAX_SCAN: usize = 2_000;
+        let mut all = Vec::new();
+        let mut offset = 0usize;
+        while offset < SEARCH_MAX_SCAN {
+            let page = control
+                .mission_store
+                .list_missions(SEARCH_PAGE_SIZE, offset)
+                .await
+                .map_err(internal_error)?;
+            if page.is_empty() {
+                break;
+            }
+            let page_len = page.len();
+            all.extend(page);
+            if page_len < SEARCH_PAGE_SIZE {
+                break;
+            }
+            offset += SEARCH_PAGE_SIZE;
+        }
+        if offset >= SEARCH_MAX_SCAN {
+            tracing::warn!(
+                "Mission moment search scan hit cap ({} missions); some older missions may not be searched",
+                SEARCH_MAX_SCAN
+            );
+        }
+        all
     };
 
-    let mut results = Vec::new();
-    for mission in missions {
-        let mut best: Option<(usize, String, String, f64)> = None;
-        for (entry_index, entry) in mission.history.iter().enumerate() {
-            let score = mission_moment_relevance_score(
-                &entry.content,
-                &entry.role,
-                &normalized_query,
-                &query_groups,
-            );
-            if score <= 0.0 {
-                continue;
-            }
-            if best.as_ref().is_none_or(|current| score > current.3) {
-                best = Some((
-                    entry_index,
-                    entry.role.clone(),
-                    mission_moment_snippet(&entry.content),
-                    score,
-                ));
-            }
-        }
+    populate_workspace_names(&state, &mut missions).await;
 
-        if let Some((entry_index, role, snippet, score)) = best {
-            results.push(MissionMomentSearchResult {
+    let mut results: Vec<MissionMomentSearchResult> = missions
+        .into_iter()
+        .filter_map(|mission| {
+            let best = best_mission_moment(&mission, query)?;
+            Some(MissionMomentSearchResult {
                 mission,
-                entry_index,
-                role: role.clone(),
-                snippet,
-                rationale: mission_moment_rationale(&role, query),
-                relevance_score: score,
-            });
-        }
-    }
+                entry_index: best.entry_index,
+                role: best.role,
+                snippet: best.snippet,
+                rationale: best.rationale,
+                relevance_score: best.relevance_score,
+            })
+        })
+        .collect();
 
     results.sort_by(|a, b| {
         b.relevance_score
@@ -2556,7 +2594,6 @@ pub async fn search_mission_moments(
             .then_with(|| a.entry_index.cmp(&b.entry_index))
     });
     results.truncate(limit);
-
     Ok(Json(results))
 }
 
@@ -8352,6 +8389,39 @@ And the report:
     }
 
     #[test]
+    fn test_mission_moment_relevance_score_prefers_exact_phrase_match() {
+        let exact = mission_moment_relevance_score(
+            "assistant",
+            "Root cause was a session id timeout in OAuth callback handling.",
+            "session id timeout",
+        );
+        let loose = mission_moment_relevance_score(
+            "assistant",
+            "Investigating OAuth callback handling and login failures.",
+            "session id timeout",
+        );
+        assert!(exact > loose);
+    }
+
+    #[test]
+    fn test_mission_moment_relevance_score_returns_zero_for_unrelated_query() {
+        let score = mission_moment_relevance_score(
+            "assistant",
+            "Investigate payment webhook retry loop",
+            "kubernetes autoscaling",
+        );
+        assert_eq!(score, 0.0);
+    }
+
+    #[test]
+    fn test_mission_moment_snippet_truncates_utf8_safely() {
+        let source = "Fix résumé parser by preserving naïve unicode handling in results";
+        let snippet = mission_moment_snippet(source, 18);
+        assert!(snippet.ends_with('…'));
+        assert!(snippet.chars().count() <= 19);
+    }
+
+    #[test]
     fn test_mission_search_query_hash_normalizes_equivalent_queries() {
         let hash_a = mission_search_query_hash("Login Timeout");
         let hash_b = mission_search_query_hash(" login   timeout ");
@@ -8395,51 +8465,6 @@ And the report:
         let after = mission_search_freshness_key(&[mission], 100);
 
         assert_ne!(before, after);
-    }
-
-    #[test]
-    fn test_mission_moment_relevance_score_prefers_phrase_match() {
-        let query = "timeout root cause";
-        let normalized_query = normalize_metadata_text(query);
-        let query_groups = mission_query_groups(query);
-
-        let exact = mission_moment_relevance_score(
-            "Found timeout root cause in webhook retry handling.",
-            "assistant",
-            &normalized_query,
-            &query_groups,
-        );
-        let weak = mission_moment_relevance_score(
-            "Investigating retries and failures.",
-            "assistant",
-            &normalized_query,
-            &query_groups,
-        );
-
-        assert!(exact > weak);
-    }
-
-    #[test]
-    fn test_mission_moment_relevance_score_returns_zero_for_unrelated_content() {
-        let query = "session id fix";
-        let normalized_query = normalize_metadata_text(query);
-        let query_groups = mission_query_groups(query);
-
-        let score = mission_moment_relevance_score(
-            "Updated dashboard typography and color tokens.",
-            "assistant",
-            &normalized_query,
-            &query_groups,
-        );
-        assert_eq!(score, 0.0);
-    }
-
-    #[test]
-    fn test_mission_moment_snippet_truncates_safely() {
-        let long_text = "A".repeat(400);
-        let snippet = mission_moment_snippet(&long_text);
-        assert!(snippet.len() <= 183);
-        assert!(snippet.ends_with("..."));
     }
 
     #[test]
