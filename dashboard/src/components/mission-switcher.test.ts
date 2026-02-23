@@ -6,6 +6,7 @@ import {
   getMissionCardTitle,
   getMissionSearchText,
   missionMatchesSearchQuery,
+  missionSearchRelevanceScore,
 } from './mission-switcher';
 
 function buildMission(overrides: Partial<Mission> = {}): Mission {
@@ -58,5 +59,37 @@ describe('mission switcher search helpers', () => {
 
     expect(missionMatchesSearchQuery(mission, 'login callback')).toBe(true);
     expect(missionMatchesSearchQuery(mission, 'signin token')).toBe(true);
+  });
+
+  it('ranks exact title phrase matches above weaker synonym matches', () => {
+    const exactMission = buildMission({
+      title: 'Login timeout when refreshing session',
+      short_description: 'Timeout occurs after token refresh',
+      updated_at: '2026-01-10T00:00:00Z',
+    });
+    const synonymMission = buildMission({
+      id: 'mission-2',
+      title: 'Authentication latency investigation',
+      short_description: 'Investigate slow oauth callback exchanges',
+      updated_at: '2026-01-11T00:00:00Z',
+    });
+
+    const query = 'login timeout';
+    const exactScore = missionSearchRelevanceScore(exactMission, query);
+    const synonymScore = missionSearchRelevanceScore(synonymMission, query);
+
+    expect(exactScore).toBeGreaterThan(synonymScore);
+    expect(exactScore).toBeGreaterThan(0);
+    expect(synonymScore).toBeGreaterThan(0);
+  });
+
+  it('keeps non-matching missions at zero relevance', () => {
+    const mission = buildMission({
+      title: 'Refactor CSS variables',
+      short_description: 'Tighten spacing and typography in dashboard',
+    });
+
+    expect(missionSearchRelevanceScore(mission, 'database migration')).toBe(0);
+    expect(missionMatchesSearchQuery(mission, 'database migration')).toBe(false);
   });
 });
