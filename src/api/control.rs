@@ -2238,6 +2238,7 @@ pub struct MissionSearchResult {
 
 #[derive(Debug, Clone)]
 pub struct MissionSearchCacheEntry {
+    pub cached_at: std::time::Instant,
     pub freshness_key: u64,
     pub results: Vec<MissionSearchResult>,
 }
@@ -2273,10 +2274,26 @@ pub async fn search_missions(
     }
 
     let limit = params.limit.unwrap_or(20).clamp(1, 100);
+    let query_hash = mission_search_query_hash(query);
     let control = control_for_user(&state, &user).await;
+    if let Some(cached_results) = {
+        const MISSION_SEARCH_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+        let cache = control.mission_search_cache.read().await;
+        cache.get(&query_hash).and_then(|entry| {
+            if entry.cached_at.elapsed() <= MISSION_SEARCH_CACHE_TTL {
+                Some(entry.results.clone())
+            } else {
+                None
+            }
+        })
+    } {
+        let mut results = cached_results;
+        results.truncate(limit);
+        return Ok(Json(results));
+    }
+
     let page_size = (limit.saturating_mul(5)).clamp(50, 200);
     let missions = list_missions_for_search(&state, &control, query, limit).await?;
-    let query_hash = mission_search_query_hash(query);
     let freshness_key = mission_search_freshness_key(&missions, page_size);
 
     if let Some(cached_results) = {
@@ -2326,6 +2343,7 @@ pub async fn search_missions(
         cache.insert(
             query_hash,
             MissionSearchCacheEntry {
+                cached_at: std::time::Instant::now(),
                 freshness_key,
                 results: scored.clone(),
             },

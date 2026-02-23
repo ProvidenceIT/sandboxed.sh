@@ -444,25 +444,28 @@ export function MissionSwitcher({
     const requestId = latestSearchRequestIdRef.current + 1;
     latestSearchRequestIdRef.current = requestId;
     let cancelled = false;
-    setServerSearchLoading(true);
-
-    void searchMissions(normalizedQuery, { limit: 100 })
-      .then((results) => {
-        if (cancelled || latestSearchRequestIdRef.current !== requestId) return;
-        setServerScoreByMissionId(mapServerMissionSearchScores(results));
-      })
-      .catch((error) => {
-        if (cancelled || latestSearchRequestIdRef.current !== requestId) return;
-        console.warn('Mission search endpoint unavailable, falling back to local scoring:', error);
-        setServerScoreByMissionId(null);
-      })
-      .finally(() => {
-        if (cancelled || latestSearchRequestIdRef.current !== requestId) return;
-        setServerSearchLoading(false);
-      });
+    const debounce = window.setTimeout(() => {
+      if (cancelled || latestSearchRequestIdRef.current !== requestId) return;
+      setServerSearchLoading(true);
+      void searchMissions(normalizedQuery, { limit: 100 })
+        .then((results) => {
+          if (cancelled || latestSearchRequestIdRef.current !== requestId) return;
+          setServerScoreByMissionId(mapServerMissionSearchScores(results));
+        })
+        .catch((error) => {
+          if (cancelled || latestSearchRequestIdRef.current !== requestId) return;
+          console.warn('Mission search endpoint unavailable, falling back to local scoring:', error);
+          setServerScoreByMissionId(null);
+        })
+        .finally(() => {
+          if (cancelled || latestSearchRequestIdRef.current !== requestId) return;
+          setServerSearchLoading(false);
+        });
+    }, 120);
 
     return () => {
       cancelled = true;
+      window.clearTimeout(debounce);
     };
   }, [open, searchQuery]);
 
