@@ -182,7 +182,7 @@ fn extract_short_description_from_history(
         .find(|line| !line.is_empty() && !line.starts_with("```"))?;
 
     let collapsed = first_line.split_whitespace().collect::<Vec<_>>().join(" ");
-    if collapsed.len() < 8 {
+    if collapsed.is_empty() {
         return None;
     }
 
@@ -7074,6 +7074,13 @@ And the report:
 
         let disambiguated = disambiguate_generated_title(&store, existing.id, "Fix flaky CI").await;
         assert_eq!(disambiguated, "Fix flaky CI (3)");
+    }
+
+    #[test]
+    fn test_extract_short_description_from_history_allows_short_messages() {
+        let history = vec![("user".to_string(), "Hi".to_string())];
+        let extracted = extract_short_description_from_history(&history, 160);
+        assert_eq!(extracted.as_deref(), Some("Hi"));
     }
 
     #[test]
