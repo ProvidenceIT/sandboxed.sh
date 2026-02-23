@@ -1187,7 +1187,12 @@ async fn generate_mission_metadata_updates(
         .as_ref()
         .map(|d| d.trim().is_empty())
         .unwrap_or(true);
-    let should_refresh = force_refresh || history.len().is_multiple_of(10);
+    let conversational_message_count = history
+        .iter()
+        .filter(|(role, _)| role == "user" || role == "assistant")
+        .count();
+    let should_refresh = force_refresh
+        || (conversational_message_count > 0 && conversational_message_count.is_multiple_of(10));
     let has_assistant_reply = history.iter().any(|(role, _)| role == "assistant");
     let should_bootstrap_title_from_first_assistant = title_missing && has_assistant_reply;
     let should_bootstrap_short_description_from_first_assistant =
@@ -9590,6 +9595,123 @@ And the report:
         assert!(
             !saw_metadata_event,
             "metadata refresh should not run before cadence threshold when force_refresh is false"
+        );
+
+        let refreshed = store
+            .get_mission(mission.id)
+            .await
+            .expect("get mission")
+            .expect("mission exists");
+        assert_eq!(refreshed.title.as_deref(), Some("Existing mission title"));
+        assert_eq!(
+            refreshed.short_description.as_deref(),
+            Some("Existing mission short description")
+        );
+        assert_eq!(
+            refreshed.metadata_updated_at.as_deref(),
+            Some(seeded_updated_at.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_schedule_mission_metadata_refresh_ignores_non_conversational_entries_for_cadence()
+    {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = store
+            .create_mission(None, None, None, None, None, None, None)
+            .await
+            .expect("create mission");
+        store
+            .update_mission_metadata(
+                mission.id,
+                Some(Some("Existing mission title")),
+                Some(Some("Existing mission short description")),
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("seed metadata");
+        let seeded = store
+            .get_mission(mission.id)
+            .await
+            .expect("get mission")
+            .expect("mission exists");
+        let seeded_updated_at = seeded
+            .metadata_updated_at
+            .clone()
+            .expect("seed metadata timestamp");
+        store
+            .update_mission_history(
+                mission.id,
+                &[
+                    MissionHistoryEntry {
+                        role: "user".to_string(),
+                        content: "Initial request".to_string(),
+                    },
+                    MissionHistoryEntry {
+                        role: "assistant".to_string(),
+                        content: "Initial response".to_string(),
+                    },
+                    MissionHistoryEntry {
+                        role: "tool".to_string(),
+                        content: "tool_call: inspect logs".to_string(),
+                    },
+                    MissionHistoryEntry {
+                        role: "user".to_string(),
+                        content: "Follow-up request".to_string(),
+                    },
+                    MissionHistoryEntry {
+                        role: "assistant".to_string(),
+                        content: "Follow-up response".to_string(),
+                    },
+                    MissionHistoryEntry {
+                        role: "tool".to_string(),
+                        content: "tool_result: log output".to_string(),
+                    },
+                    MissionHistoryEntry {
+                        role: "user".to_string(),
+                        content: "Investigate retries".to_string(),
+                    },
+                    MissionHistoryEntry {
+                        role: "assistant".to_string(),
+                        content: "Retries are triggered by 502s".to_string(),
+                    },
+                    MissionHistoryEntry {
+                        role: "user".to_string(),
+                        content: "Patch retry jitter".to_string(),
+                    },
+                    MissionHistoryEntry {
+                        role: "assistant".to_string(),
+                        content: "Added jitter and bounded retries".to_string(),
+                    },
+                ],
+            )
+            .await
+            .expect("seed history");
+
+        let (events_tx, mut events_rx) = broadcast::channel::<AgentEvent>(16);
+        schedule_mission_metadata_refresh(&store, &events_tx, mission.id, false);
+
+        let saw_metadata_event =
+            tokio::time::timeout(std::time::Duration::from_millis(300), async {
+                loop {
+                    match events_rx.recv().await {
+                        Ok(AgentEvent::MissionMetadataUpdated { mission_id, .. })
+                            if mission_id == mission.id =>
+                        {
+                            break true;
+                        }
+                        Ok(_) => continue,
+                        Err(_) => break false,
+                    }
+                }
+            })
+            .await
+            .unwrap_or(false);
+        assert!(
+            !saw_metadata_event,
+            "metadata refresh should not run when only non-conversational entries push history length to cadence boundary"
         );
 
         let refreshed = store
