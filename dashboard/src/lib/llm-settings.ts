@@ -67,6 +67,39 @@ export const LLM_PROVIDERS: Record<
   },
 };
 
+interface CerebrasPublicModel {
+  id?: string;
+  deprecated?: boolean;
+}
+
+interface CerebrasPublicModelsResponse {
+  data?: CerebrasPublicModel[];
+}
+
+/**
+ * Fetch the live Cerebras model catalog from their public endpoint.
+ * Falls back to static presets if request/parsing fails.
+ */
+export async function fetchLiveCerebrasModels(): Promise<string[]> {
+  const res = await fetch("https://api.cerebras.ai/public/v1/models");
+  if (!res.ok) {
+    throw new Error(`Failed to fetch Cerebras models (${res.status})`);
+  }
+
+  const payload = (await res.json()) as CerebrasPublicModelsResponse;
+  const ids = (payload.data ?? [])
+    .filter((m) => typeof m.id === "string" && m.id.length > 0 && !m.deprecated)
+    .map((m) => m.id as string);
+
+  const uniqueSorted = Array.from(new Set(ids)).sort((a, b) =>
+    a.localeCompare(b)
+  );
+  if (uniqueSorted.length === 0) {
+    throw new Error("Cerebras catalog returned no models");
+  }
+  return uniqueSorted;
+}
+
 export function readLLMConfig(): LLMConfig {
   if (typeof window === "undefined") return DEFAULTS;
   try {

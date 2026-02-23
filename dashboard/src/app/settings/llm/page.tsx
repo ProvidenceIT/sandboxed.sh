@@ -6,6 +6,7 @@ import {
   readLLMConfig,
   writeLLMConfig,
   LLM_PROVIDERS,
+  fetchLiveCerebrasModels,
   type LLMConfig,
 } from '@/lib/llm-settings';
 import { generateMissionTitle } from '@/lib/llm';
@@ -21,6 +22,12 @@ import { cn } from '@/lib/utils';
 
 export default function LLMSettingsPage() {
   const [config, setConfig] = useState<LLMConfig | null>(null);
+  const [providerModels, setProviderModels] = useState<Record<string, string[]>>(
+    () =>
+      Object.fromEntries(
+        Object.entries(LLM_PROVIDERS).map(([id, provider]) => [id, provider.models])
+      )
+  );
   const [showApiKey, setShowApiKey] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<string | null>(null);
@@ -28,6 +35,35 @@ export default function LLMSettingsPage() {
   useEffect(() => {
     setConfig(readLLMConfig());
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadLiveCerebrasModels = async () => {
+      try {
+        const models = await fetchLiveCerebrasModels();
+        if (!cancelled) {
+          setProviderModels((prev) => ({ ...prev, cerebras: models }));
+        }
+      } catch {
+        // Keep static fallback list when live fetch fails.
+      }
+    };
+
+    void loadLiveCerebrasModels();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!config) return;
+    const options = providerModels[config.provider];
+    if (!options || options.length === 0) return;
+    if (options.includes(config.model)) return;
+    const next = { ...config, model: options[0] };
+    setConfig(next);
+    writeLLMConfig(next);
+  }, [config, providerModels]);
 
   if (!config) return null;
 
@@ -40,10 +76,11 @@ export default function LLMSettingsPage() {
   const handleProviderChange = (provider: string) => {
     const preset = LLM_PROVIDERS[provider];
     if (preset) {
+      const liveModels = providerModels[provider] ?? preset.models;
       save({
         provider,
         baseUrl: preset.baseUrl,
-        model: preset.defaultModel,
+        model: liveModels[0] ?? preset.defaultModel,
       });
     } else {
       save({ provider });
@@ -84,7 +121,8 @@ export default function LLMSettingsPage() {
   };
 
   const providerInfo = LLM_PROVIDERS[config.provider];
-  const modelOptions = providerInfo?.models ?? [];
+  const modelOptions =
+    providerModels[config.provider] ?? providerInfo?.models ?? [];
 
   return (
     <div className="flex-1 flex flex-col items-center p-6 overflow-auto">
