@@ -2283,9 +2283,26 @@ pub struct SearchMissionsQuery {
     pub limit: Option<usize>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SearchMissionMomentsQuery {
+    pub q: String,
+    pub limit: Option<usize>,
+    pub mission_id: Option<Uuid>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct MissionSearchResult {
     pub mission: Mission,
+    pub relevance_score: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MissionMomentSearchResult {
+    pub mission: Mission,
+    pub entry_index: usize,
+    pub role: String,
+    pub snippet: String,
+    pub rationale: String,
     pub relevance_score: f64,
 }
 
@@ -2313,6 +2330,66 @@ fn mission_search_freshness_key(missions: &[Mission], page_size: usize) -> u64 {
         mission.workspace_name.hash(&mut hasher);
     }
     hasher.finish()
+}
+
+fn mission_query_groups(search_query: &str) -> Vec<Vec<String>> {
+    let normalized_query = normalize_metadata_text(search_query);
+    if normalized_query.is_empty() {
+        return Vec::new();
+    }
+    normalized_query
+        .split_whitespace()
+        .map(expand_search_query_group)
+        .filter(|group| !group.is_empty())
+        .collect()
+}
+
+fn mission_moment_relevance_score(
+    content: &str,
+    role: &str,
+    normalized_query: &str,
+    query_groups: &[Vec<String>],
+) -> f64 {
+    let normalized_content = normalize_metadata_text(content);
+    if normalized_content.is_empty() || normalized_query.is_empty() || query_groups.is_empty() {
+        return 0.0;
+    }
+
+    let content_tokens = search_token_set(&normalized_content);
+    let mut score = 0.0;
+    for group in query_groups {
+        let strength = group_match_strength_for_token_set(group, &content_tokens);
+        if strength <= 0.0 {
+            return 0.0;
+        }
+        score += strength * 9.0;
+    }
+
+    if normalized_content.contains(normalized_query) {
+        score += 12.0;
+    }
+
+    if role == "assistant" {
+        score += 1.5;
+    } else if role == "user" {
+        score += 1.0;
+    }
+
+    score
+}
+
+fn mission_moment_snippet(content: &str) -> String {
+    const MAX_SNIPPET_LEN: usize = 180;
+    let collapsed = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.len() <= MAX_SNIPPET_LEN {
+        return collapsed;
+    }
+    let end = safe_truncate_index(&collapsed, MAX_SNIPPET_LEN);
+    format!("{}...", &collapsed[..end])
+}
+
+fn mission_moment_rationale(role: &str, query: &str) -> String {
+    format!("Matched {} context for \"{}\"", role, query.trim())
 }
 
 /// Search missions with semantic-aware ranking.
@@ -2405,6 +2482,88 @@ pub async fn search_missions(
 
     scored.truncate(limit);
     Ok(Json(scored))
+}
+
+/// Search mission history for jump-to-moment navigation anchors.
+pub async fn search_mission_moments(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+    Query(params): Query<SearchMissionMomentsQuery>,
+) -> Result<Json<Vec<MissionMomentSearchResult>>, (StatusCode, String)> {
+    let query = params.q.trim();
+    if query.is_empty() {
+        return Ok(Json(Vec::new()));
+    }
+
+    let normalized_query = normalize_metadata_text(query);
+    let query_groups = mission_query_groups(query);
+    if normalized_query.is_empty() || query_groups.is_empty() {
+        return Ok(Json(Vec::new()));
+    }
+
+    let limit = params.limit.unwrap_or(20).clamp(1, 50);
+    let control = control_for_user(&state, &user).await;
+    let missions = if let Some(mission_id) = params.mission_id {
+        match control
+            .mission_store
+            .get_mission(mission_id)
+            .await
+            .map_err(internal_error)?
+        {
+            Some(mut mission) => {
+                populate_workspace_names(&state, std::slice::from_mut(&mut mission)).await;
+                vec![mission]
+            }
+            None => Vec::new(),
+        }
+    } else {
+        list_missions_for_search(&state, &control, query, limit).await?
+    };
+
+    let mut results = Vec::new();
+    for mission in missions {
+        let mut best: Option<(usize, String, String, f64)> = None;
+        for (entry_index, entry) in mission.history.iter().enumerate() {
+            let score = mission_moment_relevance_score(
+                &entry.content,
+                &entry.role,
+                &normalized_query,
+                &query_groups,
+            );
+            if score <= 0.0 {
+                continue;
+            }
+            if best.as_ref().is_none_or(|current| score > current.3) {
+                best = Some((
+                    entry_index,
+                    entry.role.clone(),
+                    mission_moment_snippet(&entry.content),
+                    score,
+                ));
+            }
+        }
+
+        if let Some((entry_index, role, snippet, score)) = best {
+            results.push(MissionMomentSearchResult {
+                mission,
+                entry_index,
+                role: role.clone(),
+                snippet,
+                rationale: mission_moment_rationale(&role, query),
+                relevance_score: score,
+            });
+        }
+    }
+
+    results.sort_by(|a, b| {
+        b.relevance_score
+            .total_cmp(&a.relevance_score)
+            .then_with(|| b.mission.updated_at.cmp(&a.mission.updated_at))
+            .then_with(|| a.entry_index.cmp(&b.entry_index))
+    });
+    results.truncate(limit);
+
+    Ok(Json(results))
 }
 
 /// Get a specific mission.
@@ -8275,6 +8434,51 @@ And the report:
         let after = mission_search_freshness_key(&[mission], 100);
 
         assert_ne!(before, after);
+    }
+
+    #[test]
+    fn test_mission_moment_relevance_score_prefers_phrase_match() {
+        let query = "timeout root cause";
+        let normalized_query = normalize_metadata_text(query);
+        let query_groups = mission_query_groups(query);
+
+        let exact = mission_moment_relevance_score(
+            "Found timeout root cause in webhook retry handling.",
+            "assistant",
+            &normalized_query,
+            &query_groups,
+        );
+        let weak = mission_moment_relevance_score(
+            "Investigating retries and failures.",
+            "assistant",
+            &normalized_query,
+            &query_groups,
+        );
+
+        assert!(exact > weak);
+    }
+
+    #[test]
+    fn test_mission_moment_relevance_score_returns_zero_for_unrelated_content() {
+        let query = "session id fix";
+        let normalized_query = normalize_metadata_text(query);
+        let query_groups = mission_query_groups(query);
+
+        let score = mission_moment_relevance_score(
+            "Updated dashboard typography and color tokens.",
+            "assistant",
+            &normalized_query,
+            &query_groups,
+        );
+        assert_eq!(score, 0.0);
+    }
+
+    #[test]
+    fn test_mission_moment_snippet_truncates_safely() {
+        let long_text = "A".repeat(400);
+        let snippet = mission_moment_snippet(&long_text);
+        assert!(snippet.len() <= 183);
+        assert!(snippet.ends_with("..."));
     }
 
     #[test]
