@@ -3,9 +3,9 @@
 import { useEffect, useRef, useState, useMemo, useCallback } from 'react';
 import { Search, XCircle, Check, Loader2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { type Mission, type MissionStatus, type RunningMissionInfo } from '@/lib/api';
+import { type Mission, type RunningMissionInfo } from '@/lib/api';
 import { getMissionShortName } from '@/lib/mission-display';
-import { STATUS_DOT_COLORS, STATUS_LABELS, getMissionDotColor, getMissionTitle } from '@/lib/mission-status';
+import { STATUS_LABELS, getMissionDotColor, getMissionTitle } from '@/lib/mission-status';
 
 interface MissionSwitcherProps {
   open: boolean;
@@ -46,20 +46,36 @@ function getMissionDisplayName(
   return parts.join(' · ');
 }
 
-function getMissionDescription(mission: Mission): string {
-  if (mission.short_description?.trim()) {
-    return mission.short_description.trim();
-  }
-  return getMissionTitle(mission, { maxLength: 60, fallback: '' });
+function getMissionCardTitle(mission: Mission): string {
+  return getMissionTitle(mission, { maxLength: 80, fallback: getMissionShortName(mission.id) }).trim();
+}
+
+function getMissionCardDescription(mission: Mission): string | null {
+  const shortDescription = mission.short_description?.trim();
+  if (!shortDescription) return null;
+
+  const title = getMissionCardTitle(mission);
+  if (title.toLowerCase() === shortDescription.toLowerCase()) return null;
+  return shortDescription;
+}
+
+function getMissionBackendLabel(mission: Mission): string {
+  const backend = mission.backend?.trim();
+  if (!backend) return 'default';
+  return backend;
 }
 
 function getMissionSearchText(mission: Mission): string {
-  const title = getMissionTitle(mission, { maxLength: 60, fallback: '' }).trim();
+  const title = getMissionCardTitle(mission);
   const shortDescription = mission.short_description?.trim() ?? '';
+  const backend = mission.backend?.trim() ?? '';
+  const status = mission.status ?? '';
 
-  if (!shortDescription) return title;
-  if (!title || title === shortDescription) return shortDescription;
-  return `${title} ${shortDescription}`;
+  if (!shortDescription) return [title, backend, status].filter(Boolean).join(' ');
+  if (!title || title === shortDescription) {
+    return [shortDescription, backend, status].filter(Boolean).join(' ');
+  }
+  return `${title} ${shortDescription} ${backend} ${status}`;
 }
 
 export function MissionSwitcher({
@@ -242,8 +258,6 @@ export function MissionSwitcher({
 
   if (!open) return null;
 
-  const hasRunning = runningMissions.length > 0;
-  const hasRecent = recentMissions.length > 0;
   const hasCurrent =
     currentMissionId && !runningMissionIds.has(currentMissionId);
 
@@ -342,10 +356,6 @@ export function MissionSwitcher({
                         e.preventDefault();
                         handleSelect(item.id);
                       }}
-                      onContextMenu={(e) => {
-                        // Allow default right-click behavior for "Open in new tab"
-                        // Don't prevent default - let browser handle right-click menu
-                      }}
                       className={cn(
                         'group flex items-center gap-3 px-3 py-2 mx-2 rounded-lg cursor-pointer transition-colors no-underline',
                         isSelected
@@ -388,10 +398,17 @@ export function MissionSwitcher({
                             </span>
                           )}
                         </div>
-                        {mission && getMissionDescription(mission) && (
-                          <p className="text-xs text-white/40 truncate mt-0.5">
-                            {getMissionDescription(mission)}
-                          </p>
+                        {mission && (
+                          <>
+                            <p className="text-xs text-white/55 truncate mt-0.5">
+                              {getMissionCardTitle(mission)}
+                            </p>
+                            {getMissionCardDescription(mission) && (
+                              <p className="text-[11px] text-white/40 truncate">
+                                {getMissionCardDescription(mission)}
+                              </p>
+                            )}
+                          </>
                         )}
                       </div>
 
@@ -402,7 +419,7 @@ export function MissionSwitcher({
                           : isRunning
                           ? runningInfo?.state || 'running'
                           : mission
-                          ? STATUS_LABELS[mission.status]
+                          ? `${STATUS_LABELS[mission.status]} · ${getMissionBackendLabel(mission)}`
                           : ''}
                       </span>
 
