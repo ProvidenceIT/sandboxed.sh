@@ -178,6 +178,9 @@ fn extract_title_from_assistant(content: &str) -> Option<String> {
     if cleaned.len() < 5 {
         return None;
     }
+    if is_unsuccessful_assistant_summary(cleaned) {
+        return None;
+    }
 
     let max_len = cleaned.len().min(100);
     let safe_end = safe_truncate_index(cleaned, max_len);
@@ -186,6 +189,20 @@ fn extract_title_from_assistant(content: &str) -> Option<String> {
     } else {
         Some(cleaned.to_string())
     }
+}
+
+fn is_unsuccessful_assistant_summary(text: &str) -> bool {
+    let normalized = normalize_metadata_text(text);
+    if normalized.is_empty() {
+        return true;
+    }
+    normalized.starts_with("error")
+        || normalized.starts_with("failed")
+        || normalized.starts_with("exception")
+        || normalized.starts_with("traceback")
+        || normalized.starts_with("i am sorry")
+        || normalized.starts_with("im sorry")
+        || normalized.starts_with("sorry")
 }
 
 /// Extract a concise short description from the first user or assistant message.
@@ -203,17 +220,6 @@ fn extract_short_description_from_history(
                 .find(|(role, _)| role == "assistant")
                 .and_then(|(_, content)| extract_short_description_from_content(content, max_len))
         })
-}
-
-fn extract_short_description_from_role(
-    history: &[(String, String)],
-    role: &str,
-    max_len: usize,
-) -> Option<String> {
-    history
-        .iter()
-        .find(|(entry_role, _)| entry_role == role)
-        .and_then(|(_, content)| extract_short_description_from_content(content, max_len))
 }
 
 fn extract_short_description_from_recent_role(
@@ -234,6 +240,19 @@ fn extract_short_description_from_recent_history(
 ) -> Option<String> {
     extract_short_description_from_recent_role(history, "assistant", max_len)
         .or_else(|| extract_short_description_from_recent_role(history, "user", max_len))
+}
+
+fn extract_short_description_from_first_successful_assistant(
+    history: &[(String, String)],
+    max_len: usize,
+) -> Option<String> {
+    history
+        .iter()
+        .filter(|(entry_role, _)| entry_role == "assistant")
+        .find_map(|(_, content)| {
+            extract_short_description_from_content(content, max_len)
+                .filter(|candidate| !is_unsuccessful_assistant_summary(candidate))
+        })
 }
 
 fn extract_short_description_from_content(content: &str, max_len: usize) -> Option<String> {
@@ -1333,7 +1352,7 @@ async fn generate_mission_metadata_updates(
         || should_bootstrap_short_description_from_first_assistant
     {
         if should_bootstrap_short_description_from_first_assistant {
-            extract_short_description_from_role(history, "assistant", 160)
+            extract_short_description_from_first_successful_assistant(history, 160)
                 .or_else(|| extract_short_description_from_history(history, 160))
         } else if should_refresh {
             extract_short_description_from_recent_history(history, 160)
@@ -9072,6 +9091,49 @@ And the report:
         assert_eq!(
             updated_short_description.as_deref(),
             Some("Initial root cause hypothesis: oauth callback host mismatch.")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_generate_mission_metadata_updates_bootstrap_uses_first_successful_assistant_response(
+    ) {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = store
+            .create_mission(None, None, None, None, None, None, None)
+            .await
+            .expect("create mission");
+        let history = vec![
+            (
+                "user".to_string(),
+                "Fix oauth callback failures on mobile safari".to_string(),
+            ),
+            (
+                "assistant".to_string(),
+                "Error: unable to complete analysis because logs are missing.".to_string(),
+            ),
+            (
+                "assistant".to_string(),
+                "Identified root cause: callback URL host mismatch in production.".to_string(),
+            ),
+        ];
+
+        let (updated_title, updated_short_description) = generate_mission_metadata_updates(
+            &store,
+            mission.id,
+            &mission,
+            &history,
+            history.first().map(|(_, content)| content.as_str()),
+            false,
+        )
+        .await;
+
+        assert_eq!(
+            updated_title.as_deref(),
+            Some("Identified root cause: callback URL host mismatch in production.")
+        );
+        assert_eq!(
+            updated_short_description.as_deref(),
+            Some("Identified root cause: callback URL host mismatch in production.")
         );
     }
 

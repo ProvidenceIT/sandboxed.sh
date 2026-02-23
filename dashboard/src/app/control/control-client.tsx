@@ -1779,8 +1779,10 @@ function parseSubagentResult(result: unknown): {
 // Memoized to prevent re-renders when parent state changes
 const SubagentToolItem = memo(function SubagentToolItem({
   item,
+  highlighted = false,
 }: {
   item: Extract<ChatItem, { kind: "tool" }>;
+  highlighted?: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
@@ -1827,7 +1829,14 @@ const SubagentToolItem = memo(function SubagentToolItem({
   );
 
   return (
-    <div className="my-3">
+    <div
+      id={`chat-item-${item.id}`}
+      data-chat-item-id={item.id}
+      className={cn(
+        "my-3 rounded-xl transition-colors",
+        highlighted && "ring-1 ring-amber-400/70 bg-amber-500/10"
+      )}
+    >
       {/* Main card */}
       <div
         className={cn(
@@ -7374,7 +7383,13 @@ export default function ControlClient() {
 
                   // Subagent/background task tools get enhanced rendering
                   if (isSubagentTool(item.name)) {
-                  return <SubagentToolItem key={item.id} item={item} />;
+                    return (
+                      <SubagentToolItem
+                        key={item.id}
+                        item={item}
+                        highlighted={highlightedItemId === item.id}
+                      />
+                    );
                   }
 
                   // Non-UI tools use the collapsible ToolCallItem component
