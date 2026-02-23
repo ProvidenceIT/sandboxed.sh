@@ -4375,11 +4375,18 @@ export default function ControlClient() {
       if (entryIndex < 0) return null;
 
       const historyEntrySpan = (item: GroupedItem): number => {
-        if (item.kind === "user" || item.kind === "assistant" || item.kind === "tool") {
+        if (item.kind === "user" || item.kind === "assistant") {
           return 1;
         }
+        if (item.kind === "tool") {
+          // Backend moment indices may count both tool_call and tool_result rows.
+          return item.result === undefined ? 1 : 2;
+        }
         if (item.kind === "tool_group") {
-          return item.tools.length;
+          return item.tools.reduce(
+            (count, tool) => count + (tool.result === undefined ? 1 : 2),
+            0
+          );
         }
         return 0;
       };
@@ -4457,10 +4464,17 @@ export default function ControlClient() {
         const groupedIndex = groupedItems.findIndex((item) => {
           const span =
             item.kind === "tool_group"
-              ? item.tools.length
-              : item.kind === "user" || item.kind === "assistant" || item.kind === "tool"
-                ? 1
-                : 0;
+              ? item.tools.reduce(
+                  (count, tool) => count + (tool.result === undefined ? 1 : 2),
+                  0
+                )
+              : item.kind === "tool"
+                ? item.result === undefined
+                  ? 1
+                  : 2
+                : item.kind === "user" || item.kind === "assistant"
+                  ? 1
+                  : 0;
           if (span <= 0) {
             return false;
           }

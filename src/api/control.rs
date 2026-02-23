@@ -323,6 +323,9 @@ static MISSION_METADATA_REFRESH_TASKS: std::sync::LazyLock<
     std::sync::Mutex<HashMap<Uuid, MetadataRefreshTaskEntry>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 static MISSION_METADATA_REFRESH_TASK_ID: AtomicU64 = AtomicU64::new(1);
+static MISSION_METADATA_REFRESH_BASELINES: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<Uuid, usize>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
 fn register_metadata_refresh_task(
     tasks: &mut HashMap<Uuid, MetadataRefreshTaskEntry>,
@@ -1206,7 +1209,7 @@ async fn generate_mission_metadata_updates(
     mission: &Mission,
     history: &[(String, String)],
     fallback_user_content: Option<&str>,
-    force_refresh: bool,
+    should_refresh: bool,
 ) -> (Option<String>, Option<String>) {
     if history.is_empty() {
         return (None, None);
@@ -1224,12 +1227,6 @@ async fn generate_mission_metadata_updates(
         .unwrap_or(true);
     let title_user_managed =
         mission.metadata_source.as_deref() == Some(METADATA_SOURCE_USER) && !title_missing;
-    let conversational_message_count = history
-        .iter()
-        .filter(|(role, _)| role == "user" || role == "assistant")
-        .count();
-    let should_refresh = force_refresh
-        || (conversational_message_count > 0 && conversational_message_count.is_multiple_of(10));
     let has_assistant_reply = history.iter().any(|(role, _)| role == "assistant");
     let should_bootstrap_title_from_first_assistant = title_missing && has_assistant_reply;
     let should_bootstrap_short_description_from_first_assistant =
@@ -1360,9 +1357,9 @@ async fn apply_generated_mission_metadata_updates(
     generated_short_description: Option<String>,
     metadata_source_update: Option<Option<&str>>,
     metadata_model: Option<&str>,
-) {
+) -> bool {
     if generated_title.is_none() && generated_short_description.is_none() {
-        return;
+        return false;
     }
 
     let _title_update_guard = if generated_title.is_some() {
@@ -1388,7 +1385,7 @@ async fn apply_generated_mission_metadata_updates(
         .await
     {
         tracing::warn!("Failed to update mission metadata: {}", err);
-        return;
+        return false;
     }
 
     match mission_store.get_mission(mission_id).await {
@@ -1416,6 +1413,48 @@ async fn apply_generated_mission_metadata_updates(
             tracing::warn!("Failed to reload mission metadata after update: {}", err);
         }
     }
+    true
+}
+
+fn conversational_message_count(history: &[(String, String)]) -> usize {
+    history
+        .iter()
+        .filter(|(role, _)| role == "user" || role == "assistant")
+        .count()
+}
+
+fn should_refresh_metadata_by_cadence(
+    mission_id: Uuid,
+    mission: &Mission,
+    conversational_count: usize,
+    force_refresh: bool,
+) -> bool {
+    if force_refresh {
+        return true;
+    }
+    if conversational_count == 0 {
+        return false;
+    }
+
+    let mut baselines = MISSION_METADATA_REFRESH_BASELINES
+        .lock()
+        .expect("metadata refresh baseline lock poisoned");
+    let baseline = baselines.entry(mission_id).or_insert_with(|| {
+        if mission.metadata_updated_at.is_some() {
+            conversational_count
+        } else {
+            0
+        }
+    });
+
+    conversational_count.saturating_sub(*baseline) >= 10
+}
+
+fn record_metadata_refresh_baseline(mission_id: Uuid, conversational_count: usize) {
+    let mut baselines = MISSION_METADATA_REFRESH_BASELINES
+        .lock()
+        .expect("metadata refresh baseline lock poisoned");
+    baselines.insert(mission_id, conversational_count);
 }
 
 async fn refresh_mission_metadata_from_store(
@@ -1452,6 +1491,13 @@ async fn refresh_mission_metadata_from_store(
         .iter()
         .find(|(role, _)| role == "user")
         .map(|(_, content)| content.as_str());
+    let conversational_count = conversational_message_count(&history_pairs);
+    let should_refresh = should_refresh_metadata_by_cadence(
+        mission_id,
+        &mission,
+        conversational_count,
+        force_refresh,
+    );
 
     let (generated_title, generated_short_description) = generate_mission_metadata_updates(
         mission_store,
@@ -1459,7 +1505,7 @@ async fn refresh_mission_metadata_from_store(
         &mission,
         &history_pairs,
         fallback_user_content,
-        force_refresh,
+        should_refresh,
     )
     .await;
     let metadata_source_update = if generated_title.is_none()
@@ -1474,7 +1520,7 @@ async fn refresh_mission_metadata_from_store(
     } else {
         Some(Some(METADATA_SOURCE_BACKEND_HEURISTIC))
     };
-    apply_generated_mission_metadata_updates(
+    let metadata_updated = apply_generated_mission_metadata_updates(
         mission_store,
         events_tx,
         mission_id,
@@ -1484,6 +1530,9 @@ async fn refresh_mission_metadata_from_store(
         mission.model_override.as_deref(),
     )
     .await;
+    if should_refresh || metadata_updated {
+        record_metadata_refresh_baseline(mission_id, conversational_count);
+    }
 }
 
 fn schedule_mission_metadata_refresh(
@@ -9397,7 +9446,7 @@ And the report:
             &mission,
             &history,
             history.first().map(|(_, content)| content.as_str()),
-            false,
+            true,
         )
         .await;
 
@@ -10029,6 +10078,87 @@ And the report:
         assert_eq!(
             refreshed.metadata_updated_at.as_deref(),
             Some(seeded_updated_at.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_schedule_mission_metadata_refresh_uses_last_refresh_baseline_not_global_modulo() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = store
+            .create_mission(Some("Legacy title"), None, None, None, None, None, None)
+            .await
+            .expect("create mission");
+
+        let mut history: Vec<MissionHistoryEntry> = Vec::new();
+        for idx in 0..27 {
+            let role = if idx % 2 == 0 { "user" } else { "assistant" };
+            history.push(MissionHistoryEntry {
+                role: role.to_string(),
+                content: format!("history entry {}", idx),
+            });
+        }
+        store
+            .update_mission_history(mission.id, &history)
+            .await
+            .expect("seed history");
+
+        let (forced_events_tx, _forced_events_rx) = broadcast::channel::<AgentEvent>(16);
+        refresh_mission_metadata_for_milestone(&store, &forced_events_tx, mission.id).await;
+
+        let after_forced = store
+            .get_mission(mission.id)
+            .await
+            .expect("get mission")
+            .expect("mission exists");
+        let forced_timestamp = after_forced
+            .metadata_updated_at
+            .clone()
+            .expect("forced refresh should set metadata timestamp");
+
+        for idx in 27..30 {
+            let role = if idx % 2 == 0 { "user" } else { "assistant" };
+            history.push(MissionHistoryEntry {
+                role: role.to_string(),
+                content: format!("post-forced history entry {}", idx),
+            });
+        }
+        store
+            .update_mission_history(mission.id, &history)
+            .await
+            .expect("update history");
+
+        let (events_tx, mut events_rx) = broadcast::channel::<AgentEvent>(16);
+        schedule_mission_metadata_refresh(&store, &events_tx, mission.id, false);
+
+        let saw_metadata_event =
+            tokio::time::timeout(std::time::Duration::from_millis(300), async {
+                loop {
+                    match events_rx.recv().await {
+                        Ok(AgentEvent::MissionMetadataUpdated { mission_id, .. })
+                            if mission_id == mission.id =>
+                        {
+                            break true;
+                        }
+                        Ok(_) => continue,
+                        Err(_) => break false,
+                    }
+                }
+            })
+            .await
+            .unwrap_or(false);
+        assert!(
+            !saw_metadata_event,
+            "metadata refresh should not run only 3 conversational turns after a forced refresh"
+        );
+
+        let refreshed = store
+            .get_mission(mission.id)
+            .await
+            .expect("get mission")
+            .expect("mission exists");
+        assert_eq!(
+            refreshed.metadata_updated_at.as_deref(),
+            Some(forced_timestamp.as_str())
         );
     }
 
