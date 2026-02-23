@@ -117,6 +117,23 @@ export function getMissionSearchText(mission: Mission): string {
   return textParts.join(' ');
 }
 
+export function getRunningMissionSearchText(runningInfo: RunningMissionInfo): string {
+  return [runningInfo.mission_id, getMissionShortName(runningInfo.mission_id), runningInfo.state]
+    .filter(Boolean)
+    .join(' ');
+}
+
+export function runningMissionMatchesSearchQuery(
+  runningInfo: RunningMissionInfo,
+  searchQuery: string
+): boolean {
+  const normalizedQuery = normalizeMetadataText(searchQuery);
+  if (!normalizedQuery) return true;
+  const normalizedText = normalizeMetadataText(getRunningMissionSearchText(runningInfo));
+  if (!normalizedText) return false;
+  return normalizedText.includes(normalizedQuery);
+}
+
 const SEARCH_SYNONYMS: Record<string, string[]> = {
   auth: ['login', 'signin', 'oauth', 'credential', 'credentials'],
   blocked: ['stalled', 'waiting'],
@@ -456,7 +473,12 @@ export function MissionSwitcher({
 
     const cache = searchScoreCacheRef.current;
     const scored = allItems.flatMap((item) => {
-      if (!item.mission) return [];
+      if (!item.mission) {
+        if (!item.runningInfo || !runningMissionMatchesSearchQuery(item.runningInfo, normalizedQuery)) {
+          return [];
+        }
+        return [{ item, score: 0.1 }];
+      }
       const score = getMissionSearchScore(
         item.mission,
         normalizedQuery,

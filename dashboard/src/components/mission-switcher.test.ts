@@ -5,9 +5,11 @@ import {
   getMissionSearchScore,
   getMissionCardDescription,
   getMissionCardTitle,
+  getRunningMissionSearchText,
   getMissionSearchText,
   missionMatchesSearchQuery,
   missionSearchRelevanceScore,
+  runningMissionMatchesSearchQuery,
 } from './mission-switcher';
 
 function buildMission(overrides: Partial<Mission> = {}): Mission {
@@ -167,5 +169,22 @@ describe('mission switcher search helpers', () => {
     expect(first).toBeGreaterThan(0);
     expect(second).toBe(first);
     expect(localCache.size).toBeGreaterThan(0);
+  });
+
+  it('keeps running missions searchable even without hydrated mission metadata', () => {
+    const runningInfo = {
+      mission_id: 'mission-running-123',
+      state: 'running',
+      queue_len: 0,
+      history_len: 12,
+      seconds_since_activity: 3,
+      health: { status: 'healthy' as const },
+      expected_deliverables: 0,
+    };
+
+    expect(getRunningMissionSearchText(runningInfo)).toContain('mission-running-123');
+    expect(runningMissionMatchesSearchQuery(runningInfo, 'running')).toBe(true);
+    expect(runningMissionMatchesSearchQuery(runningInfo, 'mission-running-123')).toBe(true);
+    expect(runningMissionMatchesSearchQuery(runningInfo, 'no-match-term')).toBe(false);
   });
 });
