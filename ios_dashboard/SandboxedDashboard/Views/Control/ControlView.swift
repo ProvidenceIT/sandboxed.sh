@@ -26,6 +26,7 @@ struct ControlView: View {
     @State private var copiedMessageId: String?
     @State private var shouldScrollImmediately = false
     @State private var isLoadingHistory = false  // Track when loading historical messages to prevent animated scroll
+    @State private var pendingFocusedMessageId: String?
 
     // Connection state for SSE stream - starts as disconnected until first event received
     @State private var connectionState: ConnectionState = .disconnected
@@ -389,6 +390,10 @@ struct ControlView: View {
                     showMissionSwitcher = false
                     Task { await createFollowUpMission(from: mission) }
                 },
+                onOpenFailureMission: { missionId in
+                    showMissionSwitcher = false
+                    Task { await openFailingToolCall(for: missionId) }
+                },
                 onCancelMission: { missionId in
                     Task { await cancelMission(id: missionId) }
                 },
@@ -558,6 +563,13 @@ struct ControlView: View {
                         shouldScrollToBottom = false
                         shouldScrollImmediately = false
                     }
+                }
+                .onChange(of: pendingFocusedMessageId) { _, targetId in
+                    guard let targetId else { return }
+                    withAnimation(.easeInOut(duration: 0.25)) {
+                        proxy.scrollTo(targetId, anchor: .center)
+                    }
+                    pendingFocusedMessageId = nil
                 }
                 .overlay(alignment: .bottom) {
                     // Scroll to bottom button
@@ -1264,6 +1276,71 @@ struct ControlView: View {
             HapticService.success()
         } catch {
             print("Failed to create follow-up mission: \(error)")
+            HapticService.error()
+        }
+    }
+
+    private func normalizeSearchText(_ text: String) -> String {
+        let lowered = text.lowercased()
+        let scalars = lowered.unicodeScalars.map { scalar -> Character in
+            if CharacterSet.alphanumerics.contains(scalar) || CharacterSet.whitespacesAndNewlines.contains(scalar) {
+                return Character(scalar)
+            }
+            return " "
+        }
+        return String(scalars)
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
+    }
+
+    private func findMessageIdForEntryIndex(_ entryIndex: Int, snippet: String?) -> String? {
+        guard entryIndex >= 0 else { return nil }
+
+        var historyIndex = 0
+        for message in messages where message.isUser || message.isAssistant {
+            if historyIndex == entryIndex {
+                return message.id
+            }
+            historyIndex += 1
+        }
+
+        guard let snippet, !snippet.isEmpty else { return nil }
+        let normalizedSnippet = normalizeSearchText(snippet)
+        guard !normalizedSnippet.isEmpty else { return nil }
+
+        let best = messages.first { message in
+            guard message.isUser || message.isAssistant else { return false }
+            return normalizeSearchText(message.content).contains(normalizedSnippet)
+        }
+        return best?.id
+    }
+
+    private func openFailingToolCall(for missionId: String) async {
+        if viewingMissionId != missionId {
+            await switchToMission(id: missionId)
+        }
+
+        do {
+            let results = try await api.searchMissionMoments(
+                query: "failing tool call error",
+                limit: 1,
+                missionId: missionId
+            )
+            guard let best = results.first else {
+                print("No failure moment found for mission \(missionId)")
+                HapticService.error()
+                return
+            }
+
+            if let targetId = findMessageIdForEntryIndex(best.entryIndex, snippet: best.snippet) {
+                pendingFocusedMessageId = targetId
+                HapticService.selectionChanged()
+            } else {
+                print("Failed to locate failure moment in loaded history for mission \(missionId)")
+                HapticService.error()
+            }
+        } catch {
+            print("Failed to open failing tool call: \(error)")
             HapticService.error()
         }
     }
@@ -3290,10 +3367,11 @@ private struct ToolGroupView: View {
 
 // MARK: - Mission Switcher Sheet
 
-private enum MissionQuickAction {
+private enum MissionQuickAction: Hashable {
     case resume
     case `continue`
     case retry
+    case openFailure
     case followUp
 
     var label: String {
@@ -3301,6 +3379,7 @@ private enum MissionQuickAction {
         case .resume: return "Resume"
         case .continue: return "Continue"
         case .retry: return "Retry"
+        case .openFailure: return "Open Failure"
         case .followUp: return "Follow-up"
         }
     }
@@ -3309,6 +3388,7 @@ private enum MissionQuickAction {
         switch self {
         case .resume, .continue: return "play.circle.fill"
         case .retry: return "arrow.clockwise.circle.fill"
+        case .openFailure: return "wrench.and.screwdriver.fill"
         case .followUp: return "plus.bubble.fill"
         }
     }
@@ -3323,6 +3403,7 @@ private struct MissionSwitcherSheet: View {
     let onSelectMission: (String) -> Void
     let onResumeMission: (String) -> Void
     let onFollowUpMission: (Mission) -> Void
+    let onOpenFailureMission: (String) -> Void
     let onCancelMission: (String) -> Void
     let onCreateNewMission: () -> Void
     let onDismiss: () -> Void
@@ -3401,10 +3482,10 @@ private struct MissionSwitcherSheet: View {
                         isRunning: false,
                         runningState: nil,
                         isViewing: viewingMissionId == mission.id,
-                        quickAction: missionQuickAction(for: mission),
+                        quickActions: missionQuickActions(for: mission),
                         onSelect: { onSelectMission(mission.id) },
-                        onQuickAction: {
-                            handleQuickAction(for: mission)
+                        onQuickAction: { action in
+                            handleQuickAction(action, for: mission)
                         },
                         onCancel: nil
                     )
@@ -3440,7 +3521,7 @@ private struct MissionSwitcherSheet: View {
                                 isRunning: true,
                                 runningState: info.state,
                                 isViewing: viewingMissionId == info.missionId,
-                                quickAction: nil,
+                                quickActions: [],
                                 onSelect: { onSelectMission(info.missionId) },
                                 onQuickAction: nil,
                                 onCancel: { onCancelMission(info.missionId) }
@@ -3672,32 +3753,35 @@ private struct MissionSwitcherSheet: View {
         return score
     }
 
-    private func missionQuickAction(for mission: Mission) -> MissionQuickAction? {
-        if mission.status == .completed {
-            return .followUp
+    private func missionQuickActions(for mission: Mission) -> [MissionQuickAction] {
+        var actions: [MissionQuickAction] = []
+        if mission.status == .failed {
+            actions.append(.openFailure)
         }
-
         if mission.resumable {
             switch mission.status {
             case .interrupted:
-                return .resume
+                actions.append(.resume)
             case .blocked:
-                return .continue
+                actions.append(.continue)
             case .failed, .notFeasible:
-                return .retry
+                actions.append(.retry)
             default:
                 break
             }
         }
-
-        return nil
+        if mission.status != .active {
+            actions.append(.followUp)
+        }
+        return actions
     }
 
-    private func handleQuickAction(for mission: Mission) {
-        guard let action = missionQuickAction(for: mission) else { return }
+    private func handleQuickAction(_ action: MissionQuickAction, for mission: Mission) {
         switch action {
         case .resume, .continue, .retry:
             onResumeMission(mission.id)
+        case .openFailure:
+            onOpenFailureMission(mission.id)
         case .followUp:
             onFollowUpMission(mission)
         }
@@ -3716,9 +3800,9 @@ private struct MissionRow: View {
     let isRunning: Bool
     let runningState: String?
     let isViewing: Bool
-    let quickAction: MissionQuickAction?
+    let quickActions: [MissionQuickAction]
     let onSelect: () -> Void
-    let onQuickAction: (() -> Void)?
+    let onQuickAction: ((MissionQuickAction) -> Void)?
     let onCancel: (() -> Void)?
 
     private var shortId: String {
@@ -3834,20 +3918,22 @@ private struct MissionRow: View {
                         .clipShape(Capsule())
                 }
 
-                if let quickAction, let onQuickAction {
-                    Button {
-                        onQuickAction()
-                        HapticService.lightTap()
-                    } label: {
-                        Label(quickAction.label, systemImage: quickAction.icon)
-                            .font(.caption2.weight(.semibold))
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(Theme.accent.opacity(0.14))
-                            .foregroundStyle(Theme.accent)
-                            .clipShape(Capsule())
+                if !quickActions.isEmpty, let onQuickAction {
+                    ForEach(quickActions, id: \.self) { action in
+                        Button {
+                            onQuickAction(action)
+                            HapticService.lightTap()
+                        } label: {
+                            Label(action.label, systemImage: action.icon)
+                                .font(.caption2.weight(.semibold))
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(Theme.accent.opacity(0.14))
+                                .foregroundStyle(Theme.accent)
+                                .clipShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
                 }
 
                 // Cancel button for running missions

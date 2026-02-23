@@ -276,6 +276,24 @@ struct RunningMissionInfo: Codable, Identifiable {
     }
 }
 
+struct MissionMomentSearchResult: Codable {
+    let mission: Mission
+    let entryIndex: Int
+    let role: String
+    let snippet: String
+    let rationale: String
+    let relevanceScore: Double
+
+    enum CodingKeys: String, CodingKey {
+        case mission
+        case entryIndex = "entry_index"
+        case role
+        case snippet
+        case rationale
+        case relevanceScore = "relevance_score"
+    }
+}
+
 struct ParallelConfig: Codable {
     let maxParallelMissions: Int
     let runningCount: Int
