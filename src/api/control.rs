@@ -6297,7 +6297,7 @@ async fn control_actor_loop(
                                                 &mission_store,
                                                 &events_tx,
                                                 mid,
-                                                true,
+                                                false,
                                             );
                                         }
                                     }
@@ -8926,6 +8926,99 @@ And the report:
         assert_eq!(
             refreshed.short_description.as_deref(),
             Some("Investigate websocket reconnect loop")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_schedule_mission_metadata_refresh_skips_non_cadence_updates_without_force_refresh(
+    ) {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = store
+            .create_mission(None, None, None, None, None, None, None)
+            .await
+            .expect("create mission");
+        store
+            .update_mission_metadata(
+                mission.id,
+                Some(Some("Existing mission title")),
+                Some(Some("Existing mission short description")),
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("seed metadata");
+        let seeded = store
+            .get_mission(mission.id)
+            .await
+            .expect("get mission")
+            .expect("mission exists");
+        let seeded_updated_at = seeded
+            .metadata_updated_at
+            .clone()
+            .expect("seed metadata timestamp");
+        store
+            .update_mission_history(
+                mission.id,
+                &[
+                    MissionHistoryEntry {
+                        role: "user".to_string(),
+                        content: "Initial request".to_string(),
+                    },
+                    MissionHistoryEntry {
+                        role: "assistant".to_string(),
+                        content: "Initial response".to_string(),
+                    },
+                    MissionHistoryEntry {
+                        role: "user".to_string(),
+                        content: "Follow-up request".to_string(),
+                    },
+                    MissionHistoryEntry {
+                        role: "assistant".to_string(),
+                        content: "Refined response".to_string(),
+                    },
+                ],
+            )
+            .await
+            .expect("seed history");
+
+        let (events_tx, mut events_rx) = broadcast::channel::<AgentEvent>(16);
+        schedule_mission_metadata_refresh(&store, &events_tx, mission.id, false);
+
+        let saw_metadata_event =
+            tokio::time::timeout(std::time::Duration::from_millis(300), async {
+                loop {
+                    match events_rx.recv().await {
+                        Ok(AgentEvent::MissionMetadataUpdated { mission_id, .. })
+                            if mission_id == mission.id =>
+                        {
+                            break true;
+                        }
+                        Ok(_) => continue,
+                        Err(_) => break false,
+                    }
+                }
+            })
+            .await
+            .unwrap_or(false);
+        assert!(
+            !saw_metadata_event,
+            "metadata refresh should not run before cadence threshold when force_refresh is false"
+        );
+
+        let refreshed = store
+            .get_mission(mission.id)
+            .await
+            .expect("get mission")
+            .expect("mission exists");
+        assert_eq!(refreshed.title.as_deref(), Some("Existing mission title"));
+        assert_eq!(
+            refreshed.short_description.as_deref(),
+            Some("Existing mission short description")
+        );
+        assert_eq!(
+            refreshed.metadata_updated_at.as_deref(),
+            Some(seeded_updated_at.as_str())
         );
     }
 
