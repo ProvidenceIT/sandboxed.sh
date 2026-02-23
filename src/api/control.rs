@@ -270,41 +270,74 @@ async fn disambiguate_generated_title(
     mission_id: Uuid,
     title: &str,
 ) -> String {
+    const TITLE_DEDUPE_PAGE_SIZE: usize = 200;
+    const TITLE_DEDUPE_MAX_SCAN: usize = 5_000;
+
     let base_title = title.trim();
     if base_title.is_empty() {
         return title.to_string();
     }
 
-    let missions = match mission_store.list_missions(200, 0).await {
-        Ok(missions) => missions,
-        Err(err) => {
-            tracing::warn!("Failed to load mission titles for dedupe guard: {}", err);
-            return base_title.to_string();
-        }
-    };
-
     let mut exact_titles = HashSet::new();
     let mut canonical_titles = HashSet::new();
-    for mission in missions {
-        if mission.id == mission_id {
-            continue;
-        }
-        if let Some(existing_title) = mission.title {
-            let normalized = normalize_metadata_text(&existing_title);
-            if !normalized.is_empty() {
-                exact_titles.insert(normalized);
+
+    let mut offset = 0;
+    while offset < TITLE_DEDUPE_MAX_SCAN {
+        let missions = match mission_store
+            .list_missions(TITLE_DEDUPE_PAGE_SIZE, offset)
+            .await
+        {
+            Ok(missions) => missions,
+            Err(err) => {
+                tracing::warn!("Failed to load mission titles for dedupe guard: {}", err);
+                return base_title.to_string();
             }
-            let canonical = canonical_title_key(&existing_title);
-            if !canonical.is_empty() {
-                canonical_titles.insert(canonical);
+        };
+
+        if missions.is_empty() {
+            break;
+        }
+
+        for mission in &missions {
+            if mission.id == mission_id {
+                continue;
+            }
+            if let Some(existing_title) = &mission.title {
+                let normalized = normalize_metadata_text(existing_title);
+                if !normalized.is_empty() {
+                    exact_titles.insert(normalized);
+                }
+                let canonical = canonical_title_key(existing_title);
+                if !canonical.is_empty() {
+                    canonical_titles.insert(canonical);
+                }
             }
         }
+
+        if missions.len() < TITLE_DEDUPE_PAGE_SIZE {
+            break;
+        }
+        offset += TITLE_DEDUPE_PAGE_SIZE;
+    }
+
+    if offset >= TITLE_DEDUPE_MAX_SCAN {
+        tracing::warn!(
+            "Title dedupe scan hit cap ({} missions); duplicates may still exist",
+            TITLE_DEDUPE_MAX_SCAN
+        );
     }
 
     let candidate_exact = normalize_metadata_text(base_title);
+    if candidate_exact.is_empty() {
+        return base_title.to_string();
+    }
     let candidate_canonical = canonical_title_key(base_title);
-    if !exact_titles.contains(&candidate_exact) && !canonical_titles.contains(&candidate_canonical)
-    {
+    let has_duplicate = if candidate_canonical.is_empty() {
+        exact_titles.contains(&candidate_exact)
+    } else {
+        exact_titles.contains(&candidate_exact) || canonical_titles.contains(&candidate_canonical)
+    };
+    if !has_duplicate {
         return base_title.to_string();
     }
 
@@ -325,7 +358,7 @@ async fn generate_mission_metadata_updates(
     history: &[(String, String)],
     fallback_user_content: Option<&str>,
 ) -> (Option<String>, Option<String>) {
-    if history.len() < 2 {
+    if history.is_empty() {
         return (None, None);
     }
 
@@ -339,7 +372,7 @@ async fn generate_mission_metadata_updates(
         .as_ref()
         .map(|d| d.trim().is_empty())
         .unwrap_or(true);
-    let should_refresh = history.len() % 10 == 0;
+    let should_refresh = history.len().is_multiple_of(10);
 
     if !title_missing && !short_description_missing && !should_refresh {
         return (None, None);
@@ -7074,6 +7107,64 @@ And the report:
 
         let disambiguated = disambiguate_generated_title(&store, existing.id, "Fix flaky CI").await;
         assert_eq!(disambiguated, "Fix flaky CI (3)");
+    }
+
+    #[tokio::test]
+    async fn test_disambiguate_generated_title_scans_beyond_first_page() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        store
+            .create_mission(
+                Some("Need unique title"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("create mission");
+
+        let mut probe_id = Uuid::nil();
+        for idx in 0..205 {
+            let mission = store
+                .create_mission(
+                    Some(&format!("Filler {}", idx)),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .expect("create mission");
+            if idx == 204 {
+                probe_id = mission.id;
+            }
+        }
+
+        let disambiguated =
+            disambiguate_generated_title(&store, probe_id, "Need unique title").await;
+        assert_eq!(disambiguated, "Need unique title (2)");
+    }
+
+    #[tokio::test]
+    async fn test_generate_mission_metadata_updates_populates_short_description_from_first_message()
+    {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = store
+            .create_mission(None, None, None, None, None, None, None)
+            .await
+            .expect("create mission");
+        let history = vec![("user".to_string(), "Hi".to_string())];
+
+        let (updated_title, updated_short_description) =
+            generate_mission_metadata_updates(&store, mission.id, &mission, &history, Some("Hi"))
+                .await;
+
+        assert_eq!(updated_title.as_deref(), Some("Hi"));
+        assert_eq!(updated_short_description.as_deref(), Some("Hi"));
     }
 
     #[test]
