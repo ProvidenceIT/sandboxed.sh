@@ -383,6 +383,23 @@ fn complete_metadata_refresh_task(
     }
 }
 
+fn clear_mission_metadata_refresh_state(mission_id: Uuid) {
+    let stale_task = {
+        let mut tasks = MISSION_METADATA_REFRESH_TASKS
+            .lock()
+            .expect("metadata refresh task registry lock poisoned");
+        tasks.remove(&mission_id)
+    };
+    if let Some(stale_task) = stale_task {
+        stale_task.handle.abort();
+    }
+
+    let mut baselines = MISSION_METADATA_REFRESH_BASELINES
+        .lock()
+        .expect("metadata refresh baseline lock poisoned");
+    baselines.remove(&mission_id);
+}
+
 fn normalize_raw_title_for_dedupe(text: &str) -> String {
     text.split_whitespace()
         .collect::<Vec<_>>()
@@ -3983,6 +4000,7 @@ pub async fn delete_mission(
         .map_err(internal_error)?;
 
     if deleted {
+        clear_mission_metadata_refresh_state(mission_id);
         Ok(Json(serde_json::json!({
             "ok": true,
             "deleted": mission_id
@@ -10334,6 +10352,69 @@ And the report:
 
         complete_metadata_refresh_task(&mut tasks, mission_id, 42);
         assert!(tasks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_clear_mission_metadata_refresh_state_removes_task_and_baseline() {
+        let mission_id = Uuid::new_v4();
+        let other_mission_id = Uuid::new_v4();
+
+        clear_mission_metadata_refresh_state(mission_id);
+
+        let task = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        });
+
+        {
+            let mut tasks = MISSION_METADATA_REFRESH_TASKS
+                .lock()
+                .expect("metadata refresh task registry lock poisoned");
+            tasks.insert(
+                mission_id,
+                MetadataRefreshTaskEntry {
+                    handle: task,
+                    force_refresh: false,
+                    task_id: 1,
+                },
+            );
+            tasks.insert(
+                other_mission_id,
+                MetadataRefreshTaskEntry {
+                    handle: tokio::spawn(async {
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    }),
+                    force_refresh: false,
+                    task_id: 2,
+                },
+            );
+        }
+
+        {
+            let mut baselines = MISSION_METADATA_REFRESH_BASELINES
+                .lock()
+                .expect("metadata refresh baseline lock poisoned");
+            baselines.insert(mission_id, 10);
+            baselines.insert(other_mission_id, 20);
+        }
+
+        clear_mission_metadata_refresh_state(mission_id);
+
+        {
+            let tasks = MISSION_METADATA_REFRESH_TASKS
+                .lock()
+                .expect("metadata refresh task registry lock poisoned");
+            assert!(!tasks.contains_key(&mission_id));
+            assert!(tasks.contains_key(&other_mission_id));
+        }
+        {
+            let baselines = MISSION_METADATA_REFRESH_BASELINES
+                .lock()
+                .expect("metadata refresh baseline lock poisoned");
+            assert!(!baselines.contains_key(&mission_id));
+            assert_eq!(baselines.get(&other_mission_id), Some(&20usize));
+        }
+
+        clear_mission_metadata_refresh_state(other_mission_id);
     }
 
     #[test]
