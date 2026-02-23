@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState, useMemo, useCallback } from 'react';
-import { Search, XCircle, Check, Loader2 } from 'lucide-react';
+import { Search, XCircle, Check, Loader2, RotateCcw } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { searchMissions, type Mission, type RunningMissionInfo } from '@/lib/api';
 import { getMissionShortName } from '@/lib/mission-display';
@@ -17,6 +17,7 @@ interface MissionSwitcherProps {
   workspaceNameById?: Record<string, string>;
   onSelectMission: (missionId: string) => Promise<void> | void;
   onCancelMission: (missionId: string) => void;
+  onResumeMission?: (missionId: string) => Promise<void> | void;
   onRefresh?: () => void;
 }
 
@@ -93,6 +94,38 @@ function getMissionBackendLabel(mission: Mission): string {
 
 function getMissionStatusLabel(mission: Mission): string {
   return STATUS_LABELS[mission.status] ?? mission.status ?? 'Unknown';
+}
+
+export interface MissionQuickAction {
+  action: 'resume';
+  label: string;
+  title: string;
+}
+
+export function getMissionQuickAction(mission: Mission, isRunning: boolean): MissionQuickAction | null {
+  if (isRunning || !mission.resumable) return null;
+  switch (mission.status) {
+    case 'blocked':
+      return {
+        action: 'resume',
+        label: 'Continue',
+        title: 'Continue mission',
+      };
+    case 'failed':
+      return {
+        action: 'resume',
+        label: 'Retry',
+        title: 'Retry mission',
+      };
+    case 'interrupted':
+      return {
+        action: 'resume',
+        label: 'Resume',
+        title: 'Resume mission',
+      };
+    default:
+      return null;
+  }
 }
 
 export function getMissionSearchText(mission: Mission): string {
@@ -353,6 +386,7 @@ export function MissionSwitcher({
   workspaceNameById,
   onSelectMission,
   onCancelMission,
+  onResumeMission,
   onRefresh,
 }: MissionSwitcherProps) {
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -659,6 +693,7 @@ export function MissionSwitcher({
                 const isViewing = item.id === viewingMissionId;
                 const isRunning = item.type === 'running';
                 const runningInfo = item.runningInfo;
+                const missionQuickAction = mission ? getMissionQuickAction(mission, isRunning) : null;
 
                 const stallInfo =
                   isRunning && runningInfo?.health?.status === 'stalled'
@@ -780,6 +815,20 @@ export function MissionSwitcher({
                           title="Cancel mission"
                         >
                           <XCircle className="h-4 w-4" />
+                        </button>
+                      )}
+                      {missionQuickAction && onResumeMission && !isLoading && (
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void onResumeMission(item.id);
+                            onClose();
+                          }}
+                          className="px-1.5 py-0.5 rounded opacity-0 group-hover:opacity-100 hover:bg-white/[0.08] text-[10px] text-white/40 hover:text-emerald-300 transition-all shrink-0 inline-flex items-center gap-1"
+                          title={missionQuickAction.title}
+                        >
+                          <RotateCcw className="h-3 w-3" />
+                          {missionQuickAction.label}
                         </button>
                       )}
                     </a>
