@@ -3457,17 +3457,29 @@ private struct MissionSwitcherSheet: View {
         Set(runningMissions.map { $0.missionId })
     }
 
+    private var missionById: [String: Mission] {
+        Dictionary(uniqueKeysWithValues: recentMissions.map { ($0.id, $0) })
+    }
+
     private var filteredRunning: [RunningMissionInfo] {
         if normalizedSearchQuery.isEmpty {
             return runningMissions
         }
         return runningMissions
             .compactMap { info -> (RunningMissionInfo, Double)? in
-                let score = runningMissionSearchScore(info, query: normalizedSearchQuery)
+                let missionScore = missionById[info.missionId]
+                    .map { missionSearchRelevanceScore($0, query: normalizedSearchQuery) } ?? 0
+                let runningScore = runningMissionSearchScore(info, query: normalizedSearchQuery)
+                let score = max(missionScore, runningScore)
                 return score > 0 ? (info, score) : nil
             }
             .sorted { lhs, rhs in
                 if lhs.1 == rhs.1 {
+                    let lhsUpdated = missionById[lhs.0.missionId]?.updatedDate ?? .distantPast
+                    let rhsUpdated = missionById[rhs.0.missionId]?.updatedDate ?? .distantPast
+                    if lhsUpdated != rhsUpdated {
+                        return lhsUpdated > rhsUpdated
+                    }
                     return lhs.0.missionId < rhs.0.missionId
                 }
                 return lhs.1 > rhs.1
@@ -3562,13 +3574,14 @@ private struct MissionSwitcherSheet: View {
                 if !filteredRunning.isEmpty {
                     Section("Running") {
                         ForEach(filteredRunning, id: \.missionId) { info in
+                            let mission = missionById[info.missionId]
                             MissionRow(
                                 missionId: info.missionId,
-                                displayName: nil,
-                                title: info.title,
-                                shortDescription: nil,
-                                backend: nil,
-                                status: .active,
+                                displayName: mission.map { missionDisplayName(for: $0) },
+                                title: mission?.displayTitle ?? info.title,
+                                shortDescription: mission.flatMap { missionCardDescription(for: $0) },
+                                backend: mission?.backend,
+                                status: mission?.status ?? .active,
                                 isRunning: true,
                                 runningState: info.state,
                                 isViewing: viewingMissionId == info.missionId,
