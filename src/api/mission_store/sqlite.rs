@@ -167,7 +167,7 @@ CREATE TABLE IF NOT EXISTS automations (
     trigger_data TEXT NOT NULL,
     variables TEXT NOT NULL DEFAULT '{}',
     active INTEGER NOT NULL DEFAULT 1,
-    stop_policy TEXT NOT NULL DEFAULT 'never',
+    stop_policy TEXT NOT NULL DEFAULT 'consecutive_failures:2',
     fresh_session TEXT NOT NULL DEFAULT 'keep',
     created_at TEXT NOT NULL,
     last_triggered_at TEXT,
@@ -661,7 +661,7 @@ impl SqliteMissionStore {
                     trigger_data TEXT NOT NULL,
                     variables TEXT NOT NULL DEFAULT '{}',
                     active INTEGER NOT NULL DEFAULT 1,
-                    stop_policy TEXT NOT NULL DEFAULT 'never',
+                    stop_policy TEXT NOT NULL DEFAULT 'consecutive_failures:2',
                     created_at TEXT NOT NULL,
                     last_triggered_at TEXT,
                     retry_max_retries INTEGER NOT NULL DEFAULT 3,
@@ -724,7 +724,7 @@ impl SqliteMissionStore {
                                              trigger_type, trigger_data, variables, active, stop_policy,
                                              fresh_session, created_at, last_triggered_at, retry_max_retries,
                                              retry_delay_seconds, retry_backoff_multiplier)
-                     VALUES (?, ?, 'library', ?, 'interval', ?, '{}', ?, 'never', 'keep', ?, ?, 3, 60, 2.0)",
+                     VALUES (?, ?, 'library', ?, 'interval', ?, '{}', ?, 'consecutive_failures:2', 'keep', ?, ?, 3, 60, 2.0)",
                     params![id, mission_id, command_source_data, trigger_data, active, created_at, last_triggered_at],
                 )
                 .map_err(|e| format!("Failed to migrate automation: {}", e))?;
@@ -795,7 +795,7 @@ impl SqliteMissionStore {
         if !has_stop_policy {
             tracing::info!("Running migration: adding 'stop_policy' column to automations table");
             conn.execute(
-                "ALTER TABLE automations ADD COLUMN stop_policy TEXT NOT NULL DEFAULT 'never'",
+                "ALTER TABLE automations ADD COLUMN stop_policy TEXT NOT NULL DEFAULT 'consecutive_failures:2'",
                 [],
             )
             .map_err(|e| format!("Failed to add stop_policy column: {}", e))?;

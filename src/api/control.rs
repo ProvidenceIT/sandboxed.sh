@@ -8279,7 +8279,9 @@ pub async fn create_automation(
         trigger,
         variables: req.variables,
         active: true,
-        stop_policy: req.stop_policy.unwrap_or(mission_store::StopPolicy::Never),
+        stop_policy: req
+            .stop_policy
+            .unwrap_or(mission_store::StopPolicy::WhenFailingConsecutively { count: 2 }),
         fresh_session: req
             .fresh_session
             .unwrap_or(mission_store::FreshSession::Keep),

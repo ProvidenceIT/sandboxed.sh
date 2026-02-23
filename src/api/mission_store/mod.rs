@@ -154,7 +154,7 @@ pub enum TriggerType {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StopPolicy {
-    /// Never auto-disable this automation (default).
+    /// Never auto-disable this automation.
     Never,
     /// Auto-disable after N consecutive failures.
     WhenFailingConsecutively {
@@ -181,7 +181,9 @@ pub enum FreshSession {
 }
 
 fn default_stop_policy() -> StopPolicy {
-    StopPolicy::Never
+    StopPolicy::WhenFailingConsecutively {
+        count: default_failure_count(),
+    }
 }
 
 fn default_failure_count() -> u32 {
