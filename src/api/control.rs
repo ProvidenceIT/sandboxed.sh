@@ -319,6 +319,18 @@ fn register_metadata_refresh_task(
     }
 }
 
+fn should_skip_metadata_refresh_schedule(
+    tasks: &mut HashMap<Uuid, MetadataRefreshTaskEntry>,
+    mission_id: Uuid,
+    force_refresh: bool,
+) -> bool {
+    tasks.retain(|_, existing| !existing.handle.is_finished());
+    matches!(
+        tasks.get(&mission_id),
+        Some(existing) if existing.force_refresh && !force_refresh
+    )
+}
+
 fn complete_metadata_refresh_task(
     tasks: &mut HashMap<Uuid, MetadataRefreshTaskEntry>,
     mission_id: Uuid,
@@ -1412,6 +1424,15 @@ fn schedule_mission_metadata_refresh(
     mission_id: Uuid,
     force_refresh: bool,
 ) {
+    {
+        let mut tasks = MISSION_METADATA_REFRESH_TASKS
+            .lock()
+            .expect("metadata refresh task registry lock poisoned");
+        if should_skip_metadata_refresh_schedule(&mut tasks, mission_id, force_refresh) {
+            return;
+        }
+    }
+
     let task_id = MISSION_METADATA_REFRESH_TASK_ID.fetch_add(1, Ordering::Relaxed);
     let mission_store = Arc::clone(mission_store);
     let events_tx = events_tx.clone();
@@ -1453,6 +1474,15 @@ fn schedule_mission_metadata_refresh_for_milestone(
     events_tx: &broadcast::Sender<AgentEvent>,
     mission_id: Uuid,
 ) {
+    {
+        let mut tasks = MISSION_METADATA_REFRESH_TASKS
+            .lock()
+            .expect("metadata refresh task registry lock poisoned");
+        if should_skip_metadata_refresh_schedule(&mut tasks, mission_id, true) {
+            return;
+        }
+    }
+
     let task_id = MISSION_METADATA_REFRESH_TASK_ID.fetch_add(1, Ordering::Relaxed);
     let mission_store = Arc::clone(mission_store);
     let events_tx = events_tx.clone();
@@ -9693,6 +9723,46 @@ And the report:
         if let Some(active) = tasks.remove(&mission_id) {
             active.handle.abort();
         }
+    }
+
+    #[tokio::test]
+    async fn test_should_skip_metadata_refresh_schedule_rejects_non_forced_when_forced_in_flight() {
+        let mission_id = Uuid::new_v4();
+        let mut tasks: HashMap<Uuid, MetadataRefreshTaskEntry> = HashMap::new();
+
+        let forced = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        });
+        let registration = register_metadata_refresh_task(&mut tasks, mission_id, true, 1, forced);
+        assert!(registration.superseded.is_none());
+
+        assert!(should_skip_metadata_refresh_schedule(
+            &mut tasks, mission_id, false
+        ));
+        assert!(!should_skip_metadata_refresh_schedule(
+            &mut tasks, mission_id, true
+        ));
+
+        if let Some(active) = tasks.remove(&mission_id) {
+            active.handle.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_should_skip_metadata_refresh_schedule_drops_finished_tasks() {
+        let mission_id = Uuid::new_v4();
+        let mut tasks: HashMap<Uuid, MetadataRefreshTaskEntry> = HashMap::new();
+
+        let finished = tokio::spawn(async {});
+        let registration =
+            register_metadata_refresh_task(&mut tasks, mission_id, true, 1, finished);
+        assert!(registration.superseded.is_none());
+        tokio::task::yield_now().await;
+
+        assert!(!should_skip_metadata_refresh_schedule(
+            &mut tasks, mission_id, false
+        ));
+        assert!(tasks.is_empty());
     }
 
     #[tokio::test]
