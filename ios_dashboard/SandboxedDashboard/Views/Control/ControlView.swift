@@ -3467,10 +3467,11 @@ private struct MissionSwitcherSheet: View {
         }
         return runningMissions
             .compactMap { info -> (RunningMissionInfo, Double)? in
-                let missionScore = missionById[info.missionId]
-                    .map { missionSearchRelevanceScore($0, query: normalizedSearchQuery) } ?? 0
-                let runningScore = runningMissionSearchScore(info, query: normalizedSearchQuery)
-                let score = max(missionScore, runningScore)
+                let score = runningMissionSearchScore(
+                    info,
+                    query: normalizedSearchQuery,
+                    linkedMission: missionById[info.missionId]
+                )
                 return score > 0 ? (info, score) : nil
             }
             .sorted { lhs, rhs in
@@ -3548,7 +3549,7 @@ private struct MissionSwitcherSheet: View {
     }
 
     @ViewBuilder
-    private func missionSection(_ title: String, missions: [Mission], allowsFollowUp: Bool = false) -> some View {
+    private func missionSection(_ title: String, missions: [Mission]) -> some View {
         if !missions.isEmpty {
             Section(title) {
                 ForEach(missions) { mission in
@@ -3598,7 +3599,7 @@ private struct MissionSwitcherSheet: View {
                                 title: mission?.displayTitle ?? info.title,
                                 shortDescription: mission.flatMap { missionCardDescription(for: $0) },
                                 backend: mission?.backend,
-                                status: mission?.status ?? .active,
+                                status: .active,
                                 isRunning: true,
                                 runningState: info.state,
                                 isViewing: viewingMissionId == info.missionId,
@@ -3612,7 +3613,7 @@ private struct MissionSwitcherSheet: View {
                 }
 
                 missionSection("Active & Pending", missions: activeOrPendingMissions)
-                missionSection("Completed", missions: completedMissions, allowsFollowUp: true)
+                missionSection("Completed", missions: completedMissions)
                 missionSection("Failed", missions: failedMissions)
                 missionSection("Interrupted", missions: interruptedMissions)
 
@@ -3936,7 +3937,11 @@ private struct MissionSwitcherSheet: View {
         return score
     }
 
-    private func runningMissionSearchScore(_ mission: RunningMissionInfo, query: String) -> Double {
+    private func runningMissionSearchScore(
+        _ mission: RunningMissionInfo,
+        query: String,
+        linkedMission: Mission?
+    ) -> Double {
         guard let queryTerms = buildSearchQueryTerms(query) else { return 0 }
         let phraseQueries = queryTerms.phraseQueries.isEmpty
             ? [queryTerms.normalizedCoreQuery.isEmpty ? queryTerms.normalizedQuery : queryTerms.normalizedCoreQuery]
@@ -3958,7 +3963,9 @@ private struct MissionSwitcherSheet: View {
         }) {
             score += 6
         }
-        return score
+
+        let metadataScore = linkedMission.map { missionSearchRelevanceScore($0, query: query) } ?? 0
+        return max(score, metadataScore)
     }
 
     private func missionQuickActions(for mission: Mission) -> [MissionQuickAction] {
@@ -4012,7 +4019,6 @@ private struct MissionRow: View {
     let onSelect: () -> Void
     let onQuickAction: ((MissionQuickAction) -> Void)?
     let onCancel: (() -> Void)?
-    let onFollowUp: (() -> Void)?
 
     private var shortId: String {
         String(missionId.prefix(8))
@@ -4153,22 +4159,6 @@ private struct MissionRow: View {
                     } label: {
                         Image(systemName: "xmark.circle.fill")
                             .foregroundStyle(Theme.textMuted)
-                    }
-                    .buttonStyle(.plain)
-                }
-
-                if let onFollowUp = onFollowUp {
-                    Button {
-                        onFollowUp()
-                        HapticService.lightTap()
-                    } label: {
-                        Text("Follow-up")
-                            .font(.caption2.weight(.semibold))
-                            .foregroundStyle(Theme.accent)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(Theme.accent.opacity(0.12))
-                            .clipShape(Capsule())
                     }
                     .buttonStyle(.plain)
                 }
