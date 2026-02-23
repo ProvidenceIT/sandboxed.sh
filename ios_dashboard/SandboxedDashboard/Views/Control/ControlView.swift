@@ -3718,6 +3718,7 @@ private struct MissionSwitcherSheet: View {
         let normalizedQuery: String
         let normalizedCoreQuery: String
         let queryGroups: [[String]]
+        let phraseQueries: [String]
     }
 
     private func buildSearchQueryTerms(_ query: String) -> SearchQueryTerms? {
@@ -3736,10 +3737,22 @@ private struct MissionSwitcherSheet: View {
             .filter { !$0.isEmpty }
         if queryGroups.isEmpty { return nil }
 
+        var phraseQueries = Set<String>()
+        phraseQueries.insert(normalizedCoreQuery)
+        for token in effectiveTokens {
+            for phrase in phraseExpansions(for: token) {
+                let normalizedPhrase = normalizeMetadataText(phrase)
+                if !normalizedPhrase.isEmpty {
+                    phraseQueries.insert(normalizedPhrase)
+                }
+            }
+        }
+
         return SearchQueryTerms(
             normalizedQuery: normalizedQuery,
             normalizedCoreQuery: normalizedCoreQuery,
-            queryGroups: queryGroups
+            queryGroups: queryGroups,
+            phraseQueries: Array(phraseQueries)
         )
     }
 
@@ -3784,10 +3797,14 @@ private struct MissionSwitcherSheet: View {
 
     private func expandQueryGroup(token: String) -> [String] {
         let synonyms: [String: [String]] = [
+            "api": ["endpoint", "http", "rest", "rpc"],
             "auth": ["login", "signin", "oauth", "credential", "credentials"],
             "blocked": ["stalled", "waiting"],
             "bug": ["issue", "error", "fix", "problem"],
+            "cd": ["deploy", "release", "rollout", "ship"],
+            "ci": ["pipeline", "build", "integration", "tests"],
             "crash": ["panic", "exception", "failure"],
+            "db": ["database", "sql", "sqlite", "postgres"],
             "deploy": ["release", "rollout", "ship"],
             "error": ["bug", "issue", "failure"],
             "failed": ["error", "failure"],
@@ -3797,10 +3814,14 @@ private struct MissionSwitcherSheet: View {
             "performance": ["perf", "slow", "latency", "optimize"],
             "perf": ["performance", "slow", "latency", "optimize"],
             "release": ["deploy", "rollout", "ship"],
+            "sid": ["session", "id", "sessionid", "cookie", "token"],
             "signin": ["login", "auth", "oauth", "credentials"],
             "slow": ["performance", "latency", "timeout", "stall"],
+            "sso": ["signin", "login", "auth", "oauth"],
             "stalled": ["blocked", "waiting", "timeout"],
             "timeout": ["slow", "latency", "stalled", "hang"],
+            "ui": ["ux", "interface", "frontend"],
+            "ux": ["ui", "interface", "frontend"],
         ]
 
         let normalized = normalizeMetadataText(token)
@@ -3814,6 +3835,17 @@ private struct MissionSwitcherSheet: View {
             }
         }
         return Array(group)
+    }
+
+    private func phraseExpansions(for token: String) -> [String] {
+        let normalized = normalizeMetadataText(token)
+        let expansions: [String: [String]] = [
+            "cd": ["continuous deployment"],
+            "ci": ["continuous integration"],
+            "sid": ["session id"],
+            "sso": ["single sign on"],
+        ]
+        return expansions[normalized] ?? []
     }
 
     private func tokenMatchStrength(token: String, candidate: String) -> Double {
@@ -3852,9 +3884,9 @@ private struct MissionSwitcherSheet: View {
 
     private func missionSearchRelevanceScore(_ mission: Mission, query: String) -> Double {
         guard let queryTerms = buildSearchQueryTerms(query) else { return 0 }
-        let phraseQuery = queryTerms.normalizedCoreQuery.isEmpty
-            ? queryTerms.normalizedQuery
-            : queryTerms.normalizedCoreQuery
+        let phraseQueries = queryTerms.phraseQueries.isEmpty
+            ? [queryTerms.normalizedCoreQuery.isEmpty ? queryTerms.normalizedQuery : queryTerms.normalizedCoreQuery]
+            : queryTerms.phraseQueries
 
         let displayName = missionDisplayName(for: mission)
         let title = mission.displayTitle
@@ -3894,7 +3926,9 @@ private struct MissionSwitcherSheet: View {
             (normalizeMetadataText(combined), 5),
         ]
         for target in phraseTargets where !target.text.isEmpty {
-            if target.text.contains(phraseQuery) {
+            if phraseQueries.contains(where: { phraseQuery in
+                !phraseQuery.isEmpty && target.text.contains(phraseQuery)
+            }) {
                 score += target.boost
             }
         }
@@ -3904,9 +3938,9 @@ private struct MissionSwitcherSheet: View {
 
     private func runningMissionSearchScore(_ mission: RunningMissionInfo, query: String) -> Double {
         guard let queryTerms = buildSearchQueryTerms(query) else { return 0 }
-        let phraseQuery = queryTerms.normalizedCoreQuery.isEmpty
-            ? queryTerms.normalizedQuery
-            : queryTerms.normalizedCoreQuery
+        let phraseQueries = queryTerms.phraseQueries.isEmpty
+            ? [queryTerms.normalizedCoreQuery.isEmpty ? queryTerms.normalizedQuery : queryTerms.normalizedCoreQuery]
+            : queryTerms.phraseQueries
 
         let title = mission.title ?? ""
         let combined = "\(mission.missionId) \(title) \(mission.state)"
@@ -3919,7 +3953,9 @@ private struct MissionSwitcherSheet: View {
             if strength <= 0 { return 0 }
             score += strength * 4.0
         }
-        if normalizeMetadataText(combined).contains(phraseQuery) {
+        if phraseQueries.contains(where: { phraseQuery in
+            !phraseQuery.isEmpty && normalizeMetadataText(combined).contains(phraseQuery)
+        }) {
             score += 6
         }
         return score
