@@ -273,6 +273,18 @@ const METADATA_SOURCE_BACKEND_HEURISTIC: &str = "backend_heuristic";
 const METADATA_VERSION_V1: &str = "v1";
 static MISSION_TITLE_UPDATE_LOCK: std::sync::LazyLock<Mutex<()>> =
     std::sync::LazyLock::new(|| Mutex::new(()));
+static MISSION_METADATA_REFRESH_TASKS: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<Uuid, tokio::task::JoinHandle<()>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+fn register_metadata_refresh_task(
+    tasks: &mut HashMap<Uuid, tokio::task::JoinHandle<()>>,
+    mission_id: Uuid,
+    handle: tokio::task::JoinHandle<()>,
+) -> Option<tokio::task::JoinHandle<()>> {
+    tasks.retain(|_, existing| !existing.is_finished());
+    tasks.insert(mission_id, handle)
+}
 
 fn normalize_raw_title_for_dedupe(text: &str) -> String {
     text.split_whitespace()
@@ -1355,10 +1367,19 @@ fn schedule_mission_metadata_refresh(
 ) {
     let mission_store = Arc::clone(mission_store);
     let events_tx = events_tx.clone();
-    let _background_refresh = tokio::spawn(async move {
+    let background_refresh = tokio::spawn(async move {
         refresh_mission_metadata_from_store(&mission_store, &events_tx, mission_id, force_refresh)
             .await;
     });
+    let replaced_task = {
+        let mut tasks = MISSION_METADATA_REFRESH_TASKS
+            .lock()
+            .expect("metadata refresh task registry lock poisoned");
+        register_metadata_refresh_task(&mut tasks, mission_id, background_refresh)
+    };
+    if let Some(existing) = replaced_task {
+        existing.abort();
+    }
 }
 
 async fn refresh_mission_metadata_for_milestone(
@@ -1376,9 +1397,18 @@ fn schedule_mission_metadata_refresh_for_milestone(
 ) {
     let mission_store = Arc::clone(mission_store);
     let events_tx = events_tx.clone();
-    let _background_refresh = tokio::spawn(async move {
+    let background_refresh = tokio::spawn(async move {
         refresh_mission_metadata_for_milestone(&mission_store, &events_tx, mission_id).await;
     });
+    let replaced_task = {
+        let mut tasks = MISSION_METADATA_REFRESH_TASKS
+            .lock()
+            .expect("metadata refresh task registry lock poisoned");
+        register_metadata_refresh_task(&mut tasks, mission_id, background_refresh)
+    };
+    if let Some(existing) = replaced_task {
+        existing.abort();
+    }
 }
 
 /// Error returned when the control session command channel is closed.
@@ -9220,6 +9250,43 @@ And the report:
             refreshed.metadata_updated_at.as_deref(),
             Some(seeded_updated_at.as_str())
         );
+    }
+
+    #[tokio::test]
+    async fn test_register_metadata_refresh_task_replaces_existing_task_for_same_mission() {
+        let mission_id = Uuid::new_v4();
+        let mut tasks: HashMap<Uuid, tokio::task::JoinHandle<()>> = HashMap::new();
+
+        let first = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        });
+        let first_task_id = first.id();
+        let replaced = register_metadata_refresh_task(&mut tasks, mission_id, first);
+        assert!(replaced.is_none());
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(
+            tasks.get(&mission_id).map(|handle| handle.id()),
+            Some(first_task_id)
+        );
+
+        let second = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        });
+        let second_task_id = second.id();
+        let replaced = register_metadata_refresh_task(&mut tasks, mission_id, second);
+        let replaced = replaced.expect("expected previous task to be replaced");
+        assert_eq!(replaced.id(), first_task_id);
+        replaced.abort();
+
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(
+            tasks.get(&mission_id).map(|handle| handle.id()),
+            Some(second_task_id)
+        );
+
+        if let Some(active) = tasks.remove(&mission_id) {
+            active.abort();
+        }
     }
 
     #[test]
