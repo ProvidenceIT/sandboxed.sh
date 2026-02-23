@@ -4610,6 +4610,65 @@ export default function ControlClient() {
     [router]
   );
 
+  const buildFollowUpPrompt = useCallback((mission: Mission) => {
+    const sourceLabel =
+      mission.title?.trim()
+      || mission.short_description?.trim()
+      || `mission ${getMissionShortName(mission.id)}`;
+    return `Follow up on "${sourceLabel}".\n\nSummarize current progress briefly, then continue with the next concrete steps.`;
+  }, []);
+
+  const handleFollowUpMissionById = useCallback(
+    async (missionId: string) => {
+      const activeMission = viewingMission ?? currentMission;
+      const cachedMission =
+        recentMissions.find((mission) => mission.id === missionId)
+        ?? (activeMission?.id === missionId ? activeMission : null);
+
+      try {
+        setMissionLoading(true);
+        const sourceMission = cachedMission ?? (await getMission(missionId));
+        if (!sourceMission) {
+          toast.error("Source mission not found");
+          return;
+        }
+
+        const followUpMission = await createMission({
+          workspaceId: sourceMission.workspace_id,
+          agent: sourceMission.agent,
+          modelOverride: sourceMission.model_override,
+          modelEffort: sourceMission.model_effort,
+          backend: sourceMission.backend,
+        });
+
+        pendingMissionNavRef.current = followUpMission.id;
+        setCurrentMission(followUpMission);
+        setViewingMission(followUpMission);
+        setViewingMissionId(followUpMission.id);
+        setItems([]);
+        setHasDesktopSession(false);
+        setInput(buildFollowUpPrompt(sourceMission));
+        setShowMissionSwitcher(false);
+        router.replace(`/control?mission=${followUpMission.id}`, { scroll: false });
+        refreshRecentMissions();
+        toast.success("Follow-up mission created");
+      } catch (err) {
+        console.error("Failed to create follow-up mission:", err);
+        toast.error("Failed to create follow-up mission");
+      } finally {
+        setMissionLoading(false);
+      }
+    },
+    [
+      viewingMission,
+      currentMission,
+      recentMissions,
+      buildFollowUpPrompt,
+      router,
+      refreshRecentMissions,
+    ]
+  );
+
   // Debouncing for thinking updates to reduce re-renders during streaming
   const pendingThinkingRef = useRef<{
     content: string;
@@ -6108,6 +6167,7 @@ export default function ControlClient() {
         onCancelMission={handleCancelMission}
         onResumeMission={handleResumeMissionById}
         onOpenFailingToolCall={handleOpenFailingToolCallById}
+        onFollowUpMission={handleFollowUpMissionById}
         onRefresh={refreshRecentMissions}
       />
 

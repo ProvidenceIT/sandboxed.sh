@@ -11,6 +11,8 @@ import {
   loadMission,
   cancelMission,
   resumeMission,
+  createMission,
+  getMission,
   type Mission,
   type RunningMissionInfo,
 } from '@/lib/api';
@@ -111,6 +113,28 @@ export function MissionSwitcherProvider({ children }: { children: React.ReactNod
     router.push(`/control?mission=${missionId}&focus=failure`);
   }, [router]);
 
+  const handleFollowUpMission = useCallback(async (missionId: string) => {
+    try {
+      const sourceMission = missions.find((mission) => mission.id === missionId) ?? (await getMission(missionId));
+      if (!sourceMission) {
+        toast.error('Source mission not found');
+        return;
+      }
+
+      const followUpMission = await createMission({
+        workspaceId: sourceMission.workspace_id,
+        agent: sourceMission.agent,
+        modelOverride: sourceMission.model_override,
+        modelEffort: sourceMission.model_effort,
+        backend: sourceMission.backend,
+      });
+      toast.success('Follow-up mission created');
+      router.push(`/control?mission=${followUpMission.id}`);
+    } catch {
+      toast.error('Failed to create follow-up mission');
+    }
+  }, [missions, router]);
+
   const contextValue = useMemo(() => ({
     open: () => setIsOpen(true),
     close: () => setIsOpen(false),
@@ -133,6 +157,7 @@ export function MissionSwitcherProvider({ children }: { children: React.ReactNod
           onCancelMission={handleCancelMission}
           onResumeMission={handleResumeMission}
           onOpenFailingToolCall={handleOpenFailingToolCall}
+          onFollowUpMission={handleFollowUpMission}
           onRefresh={handleRefresh}
         />
       )}

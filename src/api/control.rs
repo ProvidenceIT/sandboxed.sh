@@ -2309,12 +2309,18 @@ async fn populate_workspace_names(state: &Arc<AppState>, missions: &mut [Mission
     }
 }
 
+#[derive(Debug, Clone)]
+struct MissionSearchCandidate {
+    mission: Mission,
+    relevance_score: f64,
+}
+
 async fn list_missions_for_search(
     state: &Arc<AppState>,
     control: &ControlState,
     query: &str,
     limit: usize,
-) -> Result<Vec<Mission>, (StatusCode, String)> {
+) -> Result<Vec<MissionSearchCandidate>, (StatusCode, String)> {
     const SEARCH_PAGE_SIZE_MIN: usize = 50;
     const SEARCH_PAGE_SIZE_MAX: usize = 200;
     const SEARCH_TARGET_MATCH_MULTIPLIER: usize = 8;
@@ -2341,15 +2347,18 @@ async fn list_missions_for_search(
         populate_workspace_names(state, &mut page).await;
         let page_len = page.len();
         let mut matched_in_page = 0usize;
-        for mission in &page {
-            if mission_search_relevance_score(mission, query, mission.workspace_name.as_deref())
-                > 0.0
-            {
+        for mission in page {
+            let relevance_score =
+                mission_search_relevance_score(&mission, query, mission.workspace_name.as_deref());
+            if relevance_score > 0.0 {
                 matched_in_page += 1;
             }
+            all.push(MissionSearchCandidate {
+                mission,
+                relevance_score,
+            });
         }
         matched_total += matched_in_page;
-        all.extend(page);
         if page_len < page_size {
             break;
         }
@@ -2411,11 +2420,12 @@ fn mission_search_query_hash(query: &str) -> u64 {
     hasher.finish()
 }
 
-fn mission_search_freshness_key(missions: &[Mission], page_size: usize) -> u64 {
+fn mission_search_freshness_key(missions: &[MissionSearchCandidate], page_size: usize) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     missions.len().hash(&mut hasher);
     page_size.hash(&mut hasher);
-    for mission in missions {
+    for candidate in missions {
+        let mission = &candidate.mission;
         mission.id.hash(&mut hasher);
         mission.updated_at.hash(&mut hasher);
         mission.metadata_updated_at.hash(&mut hasher);
@@ -2455,8 +2465,8 @@ pub async fn search_missions(
     }
 
     let page_size = (limit.saturating_mul(5)).clamp(50, 200);
-    let missions = list_missions_for_search(&state, &control, query, limit).await?;
-    let freshness_key = mission_search_freshness_key(&missions, page_size);
+    let mission_candidates = list_missions_for_search(&state, &control, query, limit).await?;
+    let freshness_key = mission_search_freshness_key(&mission_candidates, page_size);
 
     if let Some(cached_results) = {
         let cache = control.mission_search_cache.read().await;
@@ -2473,15 +2483,13 @@ pub async fn search_missions(
         return Ok(Json(results));
     }
 
-    let mut scored: Vec<MissionSearchResult> = missions
+    let mut scored: Vec<MissionSearchResult> = mission_candidates
         .into_iter()
-        .filter_map(|mission| {
-            let score =
-                mission_search_relevance_score(&mission, query, mission.workspace_name.as_deref());
-            if score > 0.0 {
+        .filter_map(|candidate| {
+            if candidate.relevance_score > 0.0 {
                 Some(MissionSearchResult {
-                    mission,
-                    relevance_score: score,
+                    mission: candidate.mission,
+                    relevance_score: candidate.relevance_score,
                 })
             } else {
                 None
@@ -8523,11 +8531,23 @@ And the report:
             session_id: None,
             terminal_reason: None,
         };
-        let before = mission_search_freshness_key(&[mission.clone()], 100);
+        let before = mission_search_freshness_key(
+            &[MissionSearchCandidate {
+                mission: mission.clone(),
+                relevance_score: 1.0,
+            }],
+            100,
+        );
 
         mission.short_description = Some("Handle webhook retries and alerting".to_string());
         mission.metadata_updated_at = Some("2099-01-01T00:00:00Z".to_string());
-        let after = mission_search_freshness_key(&[mission], 100);
+        let after = mission_search_freshness_key(
+            &[MissionSearchCandidate {
+                mission,
+                relevance_score: 1.0,
+            }],
+            100,
+        );
 
         assert_ne!(before, after);
     }
