@@ -3493,14 +3493,7 @@ private struct MissionSwitcherSheet: View {
             return nonRunning
         }
 
-        if backendSearchQuery == normalizedSearchQuery {
-            let byId = Dictionary(uniqueKeysWithValues: nonRunning.map { ($0.id, $0) })
-            return backendSearchResults
-                .compactMap { result in byId[result.mission.id] ?? result.mission }
-                .filter { !runningMissionIds.contains($0.id) }
-        }
-
-        return nonRunning
+        let localMatches: [Mission] = nonRunning
             .compactMap { mission -> (Mission, Double)? in
                 let score = missionSearchRelevanceScore(mission, query: normalizedSearchQuery)
                 return score > 0 ? (mission, score) : nil
@@ -3512,6 +3505,30 @@ private struct MissionSwitcherSheet: View {
                 return lhs.1 > rhs.1
             }
             .map(\.0)
+
+        if backendSearchQuery == normalizedSearchQuery {
+            let byId = Dictionary(uniqueKeysWithValues: nonRunning.map { ($0.id, $0) })
+            var merged: [Mission] = []
+            var seen = Set<String>()
+
+            for result in backendSearchResults {
+                let mission = byId[result.mission.id] ?? result.mission
+                guard !runningMissionIds.contains(mission.id) else { continue }
+                if seen.insert(mission.id).inserted {
+                    merged.append(mission)
+                }
+            }
+
+            for mission in localMatches {
+                if seen.insert(mission.id).inserted {
+                    merged.append(mission)
+                }
+            }
+
+            return merged
+        }
+
+        return localMatches
     }
 
     private var activeOrPendingMissions: [Mission] {
