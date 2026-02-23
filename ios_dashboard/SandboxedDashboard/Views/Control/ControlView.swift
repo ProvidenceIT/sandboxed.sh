@@ -3644,6 +3644,42 @@ private struct MissionSwitcherSheet: View {
             .joined(separator: " ")
     }
 
+    private let searchStopwords: Set<String> = [
+        "a", "an", "and", "at", "did", "do", "does", "for", "from", "how",
+        "i", "in", "is", "it", "me", "my", "of", "on", "or", "our", "please",
+        "show", "that", "the", "this", "to", "us", "was", "we", "what", "when",
+        "where", "which", "who", "why", "with", "you", "your",
+    ]
+
+    private struct SearchQueryTerms {
+        let normalizedQuery: String
+        let normalizedCoreQuery: String
+        let queryGroups: [[String]]
+    }
+
+    private func buildSearchQueryTerms(_ query: String) -> SearchQueryTerms? {
+        let normalizedQuery = normalizeMetadataText(query)
+        if normalizedQuery.isEmpty { return nil }
+
+        let queryTokens = normalizedQuery.split(separator: " ").map(String.init)
+        if queryTokens.isEmpty { return nil }
+
+        let filteredTokens = queryTokens.filter { !searchStopwords.contains($0) }
+        let effectiveTokens = filteredTokens.isEmpty ? queryTokens : filteredTokens
+        let normalizedCoreQuery = effectiveTokens.joined(separator: " ")
+
+        let queryGroups = effectiveTokens
+            .map(expandQueryGroup)
+            .filter { !$0.isEmpty }
+        if queryGroups.isEmpty { return nil }
+
+        return SearchQueryTerms(
+            normalizedQuery: normalizedQuery,
+            normalizedCoreQuery: normalizedCoreQuery,
+            queryGroups: queryGroups
+        )
+    }
+
     private func missionWorkspaceLabel(for mission: Mission) -> String? {
         guard let workspaceName = mission.workspaceName?.trimmingCharacters(in: .whitespacesAndNewlines),
               !workspaceName.isEmpty else {
@@ -3752,8 +3788,10 @@ private struct MissionSwitcherSheet: View {
     }
 
     private func missionSearchRelevanceScore(_ mission: Mission, query: String) -> Double {
-        let normalizedQuery = normalizeMetadataText(query)
-        if normalizedQuery.isEmpty { return 0 }
+        guard let queryTerms = buildSearchQueryTerms(query) else { return 0 }
+        let phraseQuery = queryTerms.normalizedCoreQuery.isEmpty
+            ? queryTerms.normalizedQuery
+            : queryTerms.normalizedCoreQuery
 
         let displayName = missionDisplayName(for: mission)
         let title = mission.displayTitle
@@ -3763,13 +3801,6 @@ private struct MissionSwitcherSheet: View {
         let combined = "\(displayName) \(mission.id) \(title) \(shortDescription) \(backend) \(status)"
         let normalizedCombined = normalizeMetadataText(combined)
         if normalizedCombined.isEmpty { return 0 }
-
-        let groups = normalizedQuery
-            .split(separator: " ")
-            .map(String.init)
-            .map(expandQueryGroup)
-            .filter { !$0.isEmpty }
-        if groups.isEmpty { return 0 }
 
         let fields: [(weight: Double, tokens: Set<String>)] = [
             (5, tokenSet(from: displayName)),
@@ -3781,7 +3812,7 @@ private struct MissionSwitcherSheet: View {
         ]
 
         var score = 0.0
-        for group in groups {
+        for group in queryTerms.queryGroups {
             var bestGroupScore = 0.0
             for field in fields {
                 let strength = groupMatchStrength(group, in: field.tokens)
@@ -3800,7 +3831,7 @@ private struct MissionSwitcherSheet: View {
             (normalizeMetadataText(combined), 5),
         ]
         for target in phraseTargets where !target.text.isEmpty {
-            if target.text.contains(normalizedQuery) {
+            if target.text.contains(phraseQuery) {
                 score += target.boost
             }
         }
@@ -3809,22 +3840,23 @@ private struct MissionSwitcherSheet: View {
     }
 
     private func runningMissionSearchScore(_ mission: RunningMissionInfo, query: String) -> Double {
-        let normalizedQuery = normalizeMetadataText(query)
-        if normalizedQuery.isEmpty { return 0 }
+        guard let queryTerms = buildSearchQueryTerms(query) else { return 0 }
+        let phraseQuery = queryTerms.normalizedCoreQuery.isEmpty
+            ? queryTerms.normalizedQuery
+            : queryTerms.normalizedCoreQuery
 
         let title = mission.title ?? ""
         let combined = "\(mission.missionId) \(title) \(mission.state)"
-        let queryTokens = Set(normalizedQuery.split(separator: " ").map(String.init))
         let candidateTokens = tokenSet(from: combined)
-        if queryTokens.isEmpty || candidateTokens.isEmpty { return 0 }
+        if candidateTokens.isEmpty { return 0 }
 
         var score = 0.0
-        for queryToken in queryTokens {
-            let strength = groupMatchStrength(expandQueryGroup(token: queryToken), in: candidateTokens)
+        for group in queryTerms.queryGroups {
+            let strength = groupMatchStrength(group, in: candidateTokens)
             if strength <= 0 { return 0 }
             score += strength * 4.0
         }
-        if normalizeMetadataText(combined).contains(normalizedQuery) {
+        if normalizeMetadataText(combined).contains(phraseQuery) {
             score += 6
         }
         return score
