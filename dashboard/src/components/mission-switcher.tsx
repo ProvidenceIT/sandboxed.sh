@@ -112,15 +112,19 @@ export interface MissionQuickAction {
   title: string;
 }
 
+export function getRunningMissionQuickActions(): MissionQuickAction[] {
+  return [
+    {
+      action: 'follow_up',
+      label: 'Follow-up',
+      title: 'Start a follow-up mission from this context',
+    },
+  ];
+}
+
 export function getMissionQuickActions(mission: Mission, isRunning: boolean): MissionQuickAction[] {
   if (isRunning) {
-    return [
-      {
-        action: 'follow_up',
-        label: 'Follow-up',
-        title: 'Start a follow-up mission from this context',
-      },
-    ];
+    return getRunningMissionQuickActions();
   }
 
   const actions: MissionQuickAction[] = [];
@@ -908,7 +912,11 @@ export function MissionSwitcher({
                 const isViewing = item.id === viewingMissionId;
                 const isRunning = item.type === 'running';
                 const runningInfo = item.runningInfo;
-                const missionQuickActions = mission ? getMissionQuickActions(mission, isRunning) : [];
+                const missionQuickActions = mission
+                  ? getMissionQuickActions(mission, isRunning)
+                  : isRunning
+                    ? getRunningMissionQuickActions()
+                    : [];
 
                 const stallInfo =
                   isRunning && runningInfo?.health?.status === 'stalled'

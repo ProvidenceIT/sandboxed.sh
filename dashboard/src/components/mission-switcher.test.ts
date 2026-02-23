@@ -6,6 +6,7 @@ import {
   getMissionCardDescription,
   getMissionCardTitle,
   getMissionQuickActions,
+  getRunningMissionQuickActions,
   getRunningMissionSearchText,
   getMissionSearchText,
   missionMatchesSearchQuery,
@@ -274,6 +275,10 @@ describe('mission switcher search helpers', () => {
   it('exposes follow-up quick action for running missions', () => {
     const mission = buildMission({ status: 'active', resumable: true });
     expect(getMissionQuickActions(mission, true).map((a) => a.label)).toEqual(['Follow-up']);
+  });
+
+  it('exposes follow-up quick action for running rows without hydrated mission metadata', () => {
+    expect(getRunningMissionQuickActions().map((a) => a.label)).toEqual(['Follow-up']);
   });
 
   it('still exposes failure jump action for non-resumable failed missions', () => {

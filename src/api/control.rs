@@ -1439,6 +1439,21 @@ fn schedule_mission_metadata_refresh_for_milestone(
     }
 }
 
+fn status_requires_metadata_milestone_refresh(status: MissionStatus) -> bool {
+    !matches!(status, MissionStatus::Pending | MissionStatus::Active)
+}
+
+fn maybe_schedule_mission_metadata_refresh_for_status(
+    mission_store: &Arc<dyn MissionStore>,
+    events_tx: &broadcast::Sender<AgentEvent>,
+    mission_id: Uuid,
+    status: MissionStatus,
+) {
+    if status_requires_metadata_milestone_refresh(status) {
+        schedule_mission_metadata_refresh_for_milestone(mission_store, events_tx, mission_id);
+    }
+}
+
 /// Error returned when the control session command channel is closed.
 fn session_unavailable<T>(_: T) -> (StatusCode, String) {
     (
@@ -4050,6 +4065,12 @@ fn spawn_control_session(
                                 e
                             );
                         } else {
+                            maybe_schedule_mission_metadata_refresh_for_status(
+                                &store,
+                                &tx,
+                                mission.id,
+                                MissionStatus::Interrupted,
+                            );
                             let _ = tx.send(AgentEvent::MissionStatusChanged {
                                 mission_id: mission.id,
                                 status: MissionStatus::Interrupted,
@@ -4193,6 +4214,12 @@ async fn stale_mission_cleanup_loop(
                                     e
                                 );
                             } else {
+                                maybe_schedule_mission_metadata_refresh_for_status(
+                                    &mission_store,
+                                    &events_tx,
+                                    mission.id,
+                                    MissionStatus::Interrupted,
+                                );
                                 let _ = events_tx.send(AgentEvent::MissionStatusChanged {
                                     mission_id: mission.id,
                                     status: MissionStatus::Interrupted,
@@ -4233,6 +4260,12 @@ async fn stale_mission_cleanup_loop(
                     {
                         tracing::warn!("Failed to auto-close stale mission {}: {}", mission.id, e);
                     } else {
+                        maybe_schedule_mission_metadata_refresh_for_status(
+                            &mission_store,
+                            &events_tx,
+                            mission.id,
+                            MissionStatus::Completed,
+                        );
                         let _ = events_tx.send(AgentEvent::MissionStatusChanged {
                             mission_id: mission.id,
                             status: MissionStatus::Completed,
@@ -5801,6 +5834,12 @@ async fn control_actor_loop(
                             .update_mission_status(id, new_status)
                             .await;
                         if result.is_ok() {
+                            maybe_schedule_mission_metadata_refresh_for_status(
+                                &mission_store,
+                                &events_tx,
+                                id,
+                                new_status,
+                            );
                             let _ = events_tx.send(AgentEvent::MissionStatusChanged {
                                 mission_id: id,
                                 status: new_status,
@@ -5907,6 +5946,13 @@ async fn control_actor_loop(
                                 tracing::warn!(
                                     "Failed to update cancelled parallel mission status: {}",
                                     e
+                                );
+                            } else {
+                                maybe_schedule_mission_metadata_refresh_for_status(
+                                    &mission_store,
+                                    &events_tx,
+                                    mission_id,
+                                    MissionStatus::Interrupted,
                                 );
                             }
                             let _ = events_tx.send(AgentEvent::Error {
@@ -6036,6 +6082,12 @@ async fn control_actor_loop(
                                 {
                                     tracing::warn!("Failed to resume mission {}: {}", mission_id, e);
                                 } else {
+                                    maybe_schedule_mission_metadata_refresh_for_status(
+                                        &mission_store,
+                                        &events_tx,
+                                        mission_id,
+                                        MissionStatus::Active,
+                                    );
                                     // Send status changed event so UI updates
                                     let _ = events_tx.send(AgentEvent::MissionStatusChanged {
                                         mission_id,
@@ -6171,6 +6223,12 @@ async fn control_actor_loop(
                                     .await
                                     .is_ok()
                                 {
+                                    maybe_schedule_mission_metadata_refresh_for_status(
+                                        &mission_store,
+                                        &events_tx,
+                                        mission_id,
+                                        MissionStatus::Interrupted,
+                                    );
                                     interrupted_ids.push(mission_id);
                                     tracing::info!("Marked mission {} as interrupted", mission_id);
                                 }
@@ -6208,6 +6266,12 @@ async fn control_actor_loop(
                                 .await
                                 .is_ok()
                             {
+                                maybe_schedule_mission_metadata_refresh_for_status(
+                                    &mission_store,
+                                    &events_tx,
+                                    *mission_id,
+                                    MissionStatus::Interrupted,
+                                );
                                 interrupted_ids.push(*mission_id);
                                 tracing::info!("Marked parallel mission {} as interrupted", mission_id);
                             }
@@ -6339,10 +6403,11 @@ async fn control_actor_loop(
                                 .await
                                 .is_ok()
                             {
-                                schedule_mission_metadata_refresh_for_milestone(
+                                maybe_schedule_mission_metadata_refresh_for_status(
                                     &mission_store,
                                     &events_tx,
                                     id,
+                                    new_status,
                                 );
                                 // Generate and store mission summary
                                 if let Some(ref summary_text) = summary {
@@ -6495,6 +6560,12 @@ async fn control_actor_loop(
                                                     {
                                                         tracing::warn!("Failed to auto-complete mission: {}", e);
                                                     } else {
+                                                        maybe_schedule_mission_metadata_refresh_for_status(
+                                                            &mission_store,
+                                                            &events_tx,
+                                                            mission_id,
+                                                            new_status,
+                                                        );
                                                         // Send status change event - the actual completion content
                                                         // is already in the assistant_message event, so we just provide
                                                         // a clean summary based on how the mission ended
@@ -6661,6 +6732,12 @@ async fn control_actor_loop(
                                 {
                                     tracing::warn!("Failed to update mission status after join error: {}", e);
                                 } else {
+                                    maybe_schedule_mission_metadata_refresh_for_status(
+                                        &mission_store,
+                                        &events_tx,
+                                        mission_id,
+                                        MissionStatus::Failed,
+                                    );
                                     let _ = events_tx.send(AgentEvent::MissionStatusChanged {
                                         mission_id,
                                         status: MissionStatus::Failed,
@@ -7000,10 +7077,11 @@ async fn control_actor_loop(
                                                     e
                                                 );
                                             } else {
-                                                schedule_mission_metadata_refresh_for_milestone(
+                                                maybe_schedule_mission_metadata_refresh_for_status(
                                                     &mission_store,
                                                     &events_tx,
                                                     *mission_id,
+                                                    new_status,
                                                 );
                                                 let _ = events_tx.send(AgentEvent::MissionStatusChanged {
                                                     mission_id: *mission_id,
@@ -9122,6 +9200,191 @@ And the report:
         assert_eq!(
             refreshed.short_description.as_deref(),
             Some("Investigate websocket reconnect loop")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_maybe_schedule_mission_metadata_refresh_for_status_forces_terminal_statuses() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = store
+            .create_mission(Some("Legacy title"), None, None, None, None, None, None)
+            .await
+            .expect("create mission");
+        store
+            .update_mission_metadata(
+                mission.id,
+                Some(Some("Legacy title")),
+                Some(Some("Legacy short description")),
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("seed metadata");
+        store
+            .update_mission_history(
+                mission.id,
+                &[
+                    MissionHistoryEntry {
+                        role: "user".to_string(),
+                        content: "Investigate websocket reconnect loop".to_string(),
+                    },
+                    MissionHistoryEntry {
+                        role: "assistant".to_string(),
+                        content: "Checking ingress timeout settings".to_string(),
+                    },
+                    MissionHistoryEntry {
+                        role: "assistant".to_string(),
+                        content: "Investigate websocket reconnect loop root cause".to_string(),
+                    },
+                ],
+            )
+            .await
+            .expect("seed history");
+
+        let (events_tx, mut events_rx) = broadcast::channel::<AgentEvent>(16);
+        maybe_schedule_mission_metadata_refresh_for_status(
+            &store,
+            &events_tx,
+            mission.id,
+            MissionStatus::Completed,
+        );
+
+        let saw_metadata_event = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                match events_rx.recv().await {
+                    Ok(AgentEvent::MissionMetadataUpdated { mission_id, .. })
+                        if mission_id == mission.id =>
+                    {
+                        break true;
+                    }
+                    Ok(_) => continue,
+                    Err(_) => break false,
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for metadata refresh event");
+        assert!(
+            saw_metadata_event,
+            "expected mission_metadata_updated event"
+        );
+
+        let refreshed = store
+            .get_mission(mission.id)
+            .await
+            .expect("get mission")
+            .expect("mission exists");
+        assert_eq!(
+            refreshed.title.as_deref(),
+            Some("Investigate websocket reconnect loop root cause")
+        );
+        assert_eq!(
+            refreshed.short_description.as_deref(),
+            Some("Investigate websocket reconnect loop")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_maybe_schedule_mission_metadata_refresh_for_status_skips_non_milestone_statuses()
+    {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = store
+            .create_mission(
+                Some("Existing mission title"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("create mission");
+        store
+            .update_mission_metadata(
+                mission.id,
+                Some(Some("Existing mission title")),
+                Some(Some("Existing mission short description")),
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("seed metadata");
+        let seeded = store
+            .get_mission(mission.id)
+            .await
+            .expect("get mission")
+            .expect("mission exists");
+        let seeded_updated_at = seeded
+            .metadata_updated_at
+            .clone()
+            .expect("seed metadata timestamp");
+
+        store
+            .update_mission_history(
+                mission.id,
+                &[
+                    MissionHistoryEntry {
+                        role: "user".to_string(),
+                        content: "Investigate websocket reconnect loop".to_string(),
+                    },
+                    MissionHistoryEntry {
+                        role: "assistant".to_string(),
+                        content: "Investigate websocket reconnect loop root cause".to_string(),
+                    },
+                    MissionHistoryEntry {
+                        role: "assistant".to_string(),
+                        content: "Collecting additional traces".to_string(),
+                    },
+                ],
+            )
+            .await
+            .expect("seed history");
+
+        let (events_tx, mut events_rx) = broadcast::channel::<AgentEvent>(16);
+        maybe_schedule_mission_metadata_refresh_for_status(
+            &store,
+            &events_tx,
+            mission.id,
+            MissionStatus::Active,
+        );
+
+        let saw_metadata_event =
+            tokio::time::timeout(std::time::Duration::from_millis(250), async {
+                loop {
+                    match events_rx.recv().await {
+                        Ok(AgentEvent::MissionMetadataUpdated { mission_id, .. })
+                            if mission_id == mission.id =>
+                        {
+                            break true;
+                        }
+                        Ok(_) => continue,
+                        Err(_) => break false,
+                    }
+                }
+            })
+            .await
+            .unwrap_or(false);
+        assert!(
+            !saw_metadata_event,
+            "did not expect metadata refresh for non-milestone status"
+        );
+
+        let refreshed = store
+            .get_mission(mission.id)
+            .await
+            .expect("get mission")
+            .expect("mission exists");
+        assert_eq!(refreshed.title.as_deref(), Some("Existing mission title"));
+        assert_eq!(
+            refreshed.short_description.as_deref(),
+            Some("Existing mission short description")
+        );
+        assert_eq!(
+            refreshed.metadata_updated_at.as_deref(),
+            Some(seeded_updated_at.as_str())
         );
     }
 

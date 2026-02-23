@@ -1282,7 +1282,10 @@ struct ControlView: View {
     private func normalizeSearchText(_ text: String) -> String {
         let lowered = text.lowercased()
         let scalars = lowered.unicodeScalars.map { scalar -> Character in
-            if CharacterSet.alphanumerics.contains(scalar) || CharacterSet.whitespacesAndNewlines.contains(scalar) {
+            if scalar.properties.isAlphabetic
+                || scalar.properties.numericType != nil
+                || CharacterSet.whitespacesAndNewlines.contains(scalar)
+            {
                 return Character(scalar)
             }
             return " "
@@ -3736,7 +3739,10 @@ private struct MissionSwitcherSheet: View {
     private func normalizeMetadataText(_ text: String) -> String {
         let lowered = text.lowercased()
         let scalars = lowered.unicodeScalars.map { scalar -> Character in
-            if CharacterSet.alphanumerics.contains(scalar) || CharacterSet.whitespacesAndNewlines.contains(scalar) {
+            if scalar.properties.isAlphabetic
+                || scalar.properties.numericType != nil
+                || CharacterSet.whitespacesAndNewlines.contains(scalar)
+            {
                 return Character(scalar)
             }
             return " "
