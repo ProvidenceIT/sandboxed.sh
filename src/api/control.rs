@@ -165,6 +165,36 @@ fn extract_title_from_assistant(content: &str) -> Option<String> {
     }
 }
 
+/// Extract a concise short description from the first user or assistant message.
+fn extract_short_description_from_history(
+    history: &[(String, String)],
+    max_len: usize,
+) -> Option<String> {
+    let source = history
+        .iter()
+        .find(|(role, _)| role == "user")
+        .or_else(|| history.iter().find(|(role, _)| role == "assistant"))
+        .map(|(_, content)| content.as_str())?;
+
+    let first_line = source
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with("```"))?;
+
+    let collapsed = first_line.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.len() < 8 {
+        return None;
+    }
+
+    let max_len = collapsed.len().min(max_len);
+    let safe_end = safe_truncate_index(&collapsed, max_len);
+    if safe_end < collapsed.len() {
+        Some(format!("{}...", &collapsed[..safe_end]))
+    } else {
+        Some(collapsed)
+    }
+}
+
 /// Error returned when the control session command channel is closed.
 fn session_unavailable<T>(_: T) -> (StatusCode, String) {
     (
@@ -3318,33 +3348,57 @@ async fn control_actor_loop(
 
             // Auto-generate title from conversation if not set
             if history.len() >= 2 {
-                let should_update = mission_store
-                    .get_mission(mid)
-                    .await
-                    .ok()
-                    .flatten()
-                    .and_then(|m| m.title)
+                let mission = mission_store.get_mission(mid).await.ok().flatten();
+                let title_missing = mission
+                    .as_ref()
+                    .and_then(|m| m.title.as_ref())
                     .map(|t| t.trim().is_empty())
                     .unwrap_or(true);
-                if should_update {
-                    // Prefer assistant's opening line (often a summary of intent)
-                    let title = history
-                        .iter()
-                        .rev()
-                        .find(|(role, _)| role == "assistant")
-                        .and_then(|(_, content)| extract_title_from_assistant(content))
-                        .unwrap_or_else(|| {
-                            // Fall back to user's first message
-                            let user_content = &history[0].1;
-                            if user_content.len() > 100 {
-                                let safe_end = safe_truncate_index(user_content, 100);
-                                format!("{}...", &user_content[..safe_end])
-                            } else {
-                                user_content.clone()
-                            }
-                        });
-                    if let Err(e) = mission_store.update_mission_title(mid, &title).await {
-                        tracing::warn!("Failed to update mission title: {}", e);
+                let short_description_missing = mission
+                    .as_ref()
+                    .and_then(|m| m.short_description.as_ref())
+                    .map(|d| d.trim().is_empty())
+                    .unwrap_or(true);
+
+                if title_missing || short_description_missing {
+                    let generated_title = if title_missing {
+                        Some(
+                            history
+                                .iter()
+                                .rev()
+                                .find(|(role, _)| role == "assistant")
+                                .and_then(|(_, content)| extract_title_from_assistant(content))
+                                .unwrap_or_else(|| {
+                                    let user_content = &history[0].1;
+                                    if user_content.len() > 100 {
+                                        let safe_end = safe_truncate_index(user_content, 100);
+                                        format!("{}...", &user_content[..safe_end])
+                                    } else {
+                                        user_content.clone()
+                                    }
+                                }),
+                        )
+                    } else {
+                        None
+                    };
+
+                    let generated_short_description = if short_description_missing {
+                        extract_short_description_from_history(history, 160)
+                    } else {
+                        None
+                    };
+
+                    if generated_title.is_some() || generated_short_description.is_some() {
+                        if let Err(e) = mission_store
+                            .update_mission_metadata(
+                                mid,
+                                generated_title.as_deref(),
+                                generated_short_description.as_deref(),
+                            )
+                            .await
+                        {
+                            tracing::warn!("Failed to update mission metadata: {}", e);
+                        }
                     }
                 }
             }
@@ -4805,26 +4859,56 @@ async fn control_actor_loop(
                                             .as_ref()
                                             .map(|s| s.trim().is_empty())
                                             .unwrap_or(true);
-                                        if title_empty && entries.len() >= 2 {
-                                            // Prefer assistant's opening line, fall back to user message
-                                            let title = entries
+                                        let short_description_empty = mission
+                                            .short_description
+                                            .as_ref()
+                                            .map(|s| s.trim().is_empty())
+                                            .unwrap_or(true);
+                                        if (title_empty || short_description_empty) && entries.len() >= 2 {
+                                            let generated_title = if title_empty {
+                                                Some(
+                                                    entries
+                                                        .iter()
+                                                        .rev()
+                                                        .find(|e| e.role == "assistant")
+                                                        .and_then(|e| extract_title_from_assistant(&e.content))
+                                                        .unwrap_or_else(|| {
+                                                            if user_msg.len() > 100 {
+                                                                let safe_end =
+                                                                    safe_truncate_index(&user_msg, 100);
+                                                                format!("{}...", &user_msg[..safe_end])
+                                                            } else {
+                                                                user_msg.clone()
+                                                            }
+                                                        }),
+                                                )
+                                            } else {
+                                                None
+                                            };
+                                            let pairs: Vec<(String, String)> = entries
                                                 .iter()
-                                                .rev()
-                                                .find(|e| e.role == "assistant")
-                                                .and_then(|e| extract_title_from_assistant(&e.content))
-                                                .unwrap_or_else(|| {
-                                                    if user_msg.len() > 100 {
-                                                        let safe_end =
-                                                            safe_truncate_index(&user_msg, 100);
-                                                        format!("{}...", &user_msg[..safe_end])
-                                                    } else {
-                                                        user_msg.clone()
-                                                    }
-                                                });
-                                            if let Err(e) =
-                                                mission_store.update_mission_title(mid, &title).await
-                                            {
-                                                tracing::warn!("Failed to update mission title: {}", e);
+                                                .map(|entry| (entry.role.clone(), entry.content.clone()))
+                                                .collect();
+                                            let generated_short_description = if short_description_empty {
+                                                extract_short_description_from_history(&pairs, 160)
+                                            } else {
+                                                None
+                                            };
+
+                                            if generated_title.is_some() || generated_short_description.is_some() {
+                                                if let Err(e) = mission_store
+                                                    .update_mission_metadata(
+                                                        mid,
+                                                        generated_title.as_deref(),
+                                                        generated_short_description.as_deref(),
+                                                    )
+                                                    .await
+                                                {
+                                                    tracing::warn!(
+                                                        "Failed to update mission metadata: {}",
+                                                        e
+                                                    );
+                                                }
                                             }
                                         }
                                     }

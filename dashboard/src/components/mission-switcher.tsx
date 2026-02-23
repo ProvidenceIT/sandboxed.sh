@@ -47,6 +47,9 @@ function getMissionDisplayName(
 }
 
 function getMissionDescription(mission: Mission): string {
+  if (mission.short_description?.trim()) {
+    return mission.short_description.trim();
+  }
   return getMissionTitle(mission, { maxLength: 60, fallback: '' });
 }
 

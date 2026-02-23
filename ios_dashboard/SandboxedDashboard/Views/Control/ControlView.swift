@@ -3241,7 +3241,8 @@ private struct MissionSwitcherSheet: View {
         }
         return nonRunning.filter { mission in
             mission.id.localizedCaseInsensitiveContains(searchText) ||
-            mission.displayTitle.localizedCaseInsensitiveContains(searchText)
+            mission.displayTitle.localizedCaseInsensitiveContains(searchText) ||
+            (mission.displayShortDescription?.localizedCaseInsensitiveContains(searchText) ?? false)
         }
     }
 

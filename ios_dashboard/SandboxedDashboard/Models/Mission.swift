@@ -73,6 +73,8 @@ struct Mission: Codable, Identifiable, Hashable {
     let id: String
     var status: MissionStatus
     var title: String?
+    var shortDescription: String?
+    let metadataUpdatedAt: String?
     let workspaceId: String?
     let workspaceName: String?
     let agent: String?
@@ -93,6 +95,8 @@ struct Mission: Codable, Identifiable, Hashable {
 
     enum CodingKeys: String, CodingKey {
         case id, status, title, history, resumable, agent, backend
+        case shortDescription = "short_description"
+        case metadataUpdatedAt = "metadata_updated_at"
         case workspaceId = "workspace_id"
         case workspaceName = "workspace_name"
         case createdAt = "created_at"
@@ -105,6 +109,8 @@ struct Mission: Codable, Identifiable, Hashable {
         id = try container.decode(String.self, forKey: .id)
         status = try container.decode(MissionStatus.self, forKey: .status)
         title = try container.decodeIfPresent(String.self, forKey: .title)
+        shortDescription = try container.decodeIfPresent(String.self, forKey: .shortDescription)
+        metadataUpdatedAt = try container.decodeIfPresent(String.self, forKey: .metadataUpdatedAt)
         workspaceId = try container.decodeIfPresent(String.self, forKey: .workspaceId)
         workspaceName = try container.decodeIfPresent(String.self, forKey: .workspaceName)
         agent = try container.decodeIfPresent(String.self, forKey: .agent)
@@ -121,6 +127,11 @@ struct Mission: Codable, Identifiable, Hashable {
             return title.count > 60 ? String(title.prefix(60)) + "..." : title
         }
         return "Untitled Mission"
+    }
+
+    var displayShortDescription: String? {
+        guard let shortDescription, !shortDescription.isEmpty else { return nil }
+        return shortDescription.count > 100 ? String(shortDescription.prefix(100)) + "..." : shortDescription
     }
     
     var updatedDate: Date? {
