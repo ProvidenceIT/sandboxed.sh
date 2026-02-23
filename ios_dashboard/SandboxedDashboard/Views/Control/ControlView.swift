@@ -3480,8 +3480,17 @@ private struct MissionSwitcherSheet: View {
         Set(runningMissions.map { $0.missionId })
     }
 
+    private func preferredMissionForDuplicateId(_ lhs: Mission, _ rhs: Mission) -> Mission {
+        let lhsUpdated = lhs.updatedDate ?? .distantPast
+        let rhsUpdated = rhs.updatedDate ?? .distantPast
+        return rhsUpdated >= lhsUpdated ? rhs : lhs
+    }
+
     private var missionById: [String: Mission] {
-        Dictionary(uniqueKeysWithValues: recentMissions.map { ($0.id, $0) })
+        Dictionary(
+            recentMissions.map { ($0.id, $0) },
+            uniquingKeysWith: preferredMissionForDuplicateId
+        )
     }
 
     private var filteredRunning: [RunningMissionInfo] {
@@ -3531,7 +3540,10 @@ private struct MissionSwitcherSheet: View {
             .map(\.0)
 
         if backendSearchQuery == normalizedSearchQuery {
-            let byId = Dictionary(uniqueKeysWithValues: nonRunning.map { ($0.id, $0) })
+            let byId = Dictionary(
+                nonRunning.map { ($0.id, $0) },
+                uniquingKeysWith: preferredMissionForDuplicateId
+            )
             var merged: [Mission] = []
             var seen = Set<String>()
 

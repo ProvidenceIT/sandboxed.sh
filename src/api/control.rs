@@ -1238,23 +1238,24 @@ async fn apply_generated_mission_metadata_updates(
     }
 }
 
-async fn refresh_mission_metadata_for_milestone(
+async fn refresh_mission_metadata_from_store(
     mission_store: &Arc<dyn MissionStore>,
     events_tx: &broadcast::Sender<AgentEvent>,
     mission_id: Uuid,
+    force_refresh: bool,
 ) {
     let mission = match mission_store.get_mission(mission_id).await {
         Ok(Some(mission)) => mission,
         Ok(None) => {
             tracing::warn!(
-                "Skipping milestone metadata refresh; mission {} not found",
+                "Skipping metadata refresh; mission {} not found",
                 mission_id
             );
             return;
         }
         Err(err) => {
             tracing::warn!(
-                "Failed to load mission {} for milestone metadata refresh: {}",
+                "Failed to load mission {} for metadata refresh: {}",
                 mission_id,
                 err
             );
@@ -1278,7 +1279,7 @@ async fn refresh_mission_metadata_for_milestone(
         &mission,
         &history_pairs,
         fallback_user_content,
-        true,
+        force_refresh,
     )
     .await;
     apply_generated_mission_metadata_updates(
@@ -1290,6 +1291,28 @@ async fn refresh_mission_metadata_for_milestone(
         mission.model_override.as_deref(),
     )
     .await;
+}
+
+fn schedule_mission_metadata_refresh(
+    mission_store: &Arc<dyn MissionStore>,
+    events_tx: &broadcast::Sender<AgentEvent>,
+    mission_id: Uuid,
+    force_refresh: bool,
+) {
+    let mission_store = Arc::clone(mission_store);
+    let events_tx = events_tx.clone();
+    let _background_refresh = tokio::spawn(async move {
+        refresh_mission_metadata_from_store(&mission_store, &events_tx, mission_id, force_refresh)
+            .await;
+    });
+}
+
+async fn refresh_mission_metadata_for_milestone(
+    mission_store: &Arc<dyn MissionStore>,
+    events_tx: &broadcast::Sender<AgentEvent>,
+    mission_id: Uuid,
+) {
+    refresh_mission_metadata_from_store(mission_store, events_tx, mission_id, true).await;
 }
 
 fn schedule_mission_metadata_refresh_for_milestone(
@@ -4797,32 +4820,7 @@ async fn control_actor_loop(
             if let Err(e) = mission_store.update_mission_history(mid, &entries).await {
                 tracing::warn!("Failed to persist mission history: {}", e);
             }
-
-            if let Ok(Some(mission)) = mission_store.get_mission(mid).await {
-                let (generated_title, generated_short_description) =
-                    generate_mission_metadata_updates(
-                        mission_store,
-                        mid,
-                        &mission,
-                        history,
-                        history
-                            .iter()
-                            .find(|(role, _)| role == "user")
-                            .map(|(_, content)| content.as_str()),
-                        false,
-                    )
-                    .await;
-
-                apply_generated_mission_metadata_updates(
-                    mission_store,
-                    events_tx,
-                    mid,
-                    generated_title,
-                    generated_short_description,
-                    mission.model_override.as_deref(),
-                )
-                .await;
-            }
+            schedule_mission_metadata_refresh(mission_store, events_tx, mid, false);
         }
     }
 
@@ -6265,7 +6263,7 @@ async fn control_actor_loop(
                     running_mission_id = None;
                     main_runner_activity = None;
                     match res {
-                        Ok((_mid, user_msg, agent_result)) => {
+                        Ok((_mid, _user_msg, agent_result)) => {
                             // Only append assistant to local history if this mission is still the current mission.
                             // Note: User message was already added before execution started.
                             // If the user created a new mission mid-execution, history was cleared for that new mission,
@@ -6294,31 +6292,14 @@ async fn control_actor_loop(
                                             mission_store.update_mission_history(mid, &entries).await
                                         {
                                             tracing::warn!("Failed to persist mission history: {}", e);
-                                        }
-
-                                        let pairs: Vec<(String, String)> = entries
-                                            .iter()
-                                            .map(|entry| (entry.role.clone(), entry.content.clone()))
-                                            .collect();
-                                        let (generated_title, generated_short_description) =
-                                            generate_mission_metadata_updates(
+                                        } else {
+                                            schedule_mission_metadata_refresh(
                                                 &mission_store,
+                                                &events_tx,
                                                 mid,
-                                                &mission,
-                                                &pairs,
-                                                Some(&user_msg),
                                                 true,
-                                            )
-                                            .await;
-                                        apply_generated_mission_metadata_updates(
-                                            &mission_store,
-                                            &events_tx,
-                                            mid,
-                                            generated_title,
-                                            generated_short_description,
-                                            mission.model_override.as_deref(),
-                                        )
-                                        .await;
+                                            );
+                                        }
                                     }
                                     Ok(None) => {
                                         tracing::warn!("Mission {} not found for history append", mid);
@@ -8850,6 +8831,68 @@ And the report:
 
         let (events_tx, mut events_rx) = broadcast::channel::<AgentEvent>(16);
         schedule_mission_metadata_refresh_for_milestone(&store, &events_tx, mission.id);
+
+        let saw_metadata_event = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                match events_rx.recv().await {
+                    Ok(AgentEvent::MissionMetadataUpdated { mission_id, .. })
+                        if mission_id == mission.id =>
+                    {
+                        break true;
+                    }
+                    Ok(_) => continue,
+                    Err(_) => break false,
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for metadata refresh event");
+        assert!(
+            saw_metadata_event,
+            "expected mission_metadata_updated event"
+        );
+
+        let refreshed = store
+            .get_mission(mission.id)
+            .await
+            .expect("get mission")
+            .expect("mission exists");
+        assert_eq!(
+            refreshed.title.as_deref(),
+            Some("Investigate websocket reconnect loop root cause")
+        );
+        assert_eq!(
+            refreshed.short_description.as_deref(),
+            Some("Investigate websocket reconnect loop")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_schedule_mission_metadata_refresh_updates_store_without_force_refresh() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = store
+            .create_mission(None, None, None, None, None, None, None)
+            .await
+            .expect("create mission");
+        store
+            .update_mission_history(
+                mission.id,
+                &[
+                    MissionHistoryEntry {
+                        role: "user".to_string(),
+                        content: "Investigate websocket reconnect loop".to_string(),
+                    },
+                    MissionHistoryEntry {
+                        role: "assistant".to_string(),
+                        content: "Investigate websocket reconnect loop root cause".to_string(),
+                    },
+                ],
+            )
+            .await
+            .expect("seed history");
+
+        let (events_tx, mut events_rx) = broadcast::channel::<AgentEvent>(16);
+        schedule_mission_metadata_refresh(&store, &events_tx, mission.id, false);
 
         let saw_metadata_event = tokio::time::timeout(std::time::Duration::from_secs(2), async {
             loop {
