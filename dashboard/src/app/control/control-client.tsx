@@ -5508,6 +5508,15 @@ export default function ControlClient() {
 
         // Always update mission status in state when it changes
         if (missionId) {
+          setRecentMissions((prev) => {
+            let changed = false;
+            const next = prev.map((mission) => {
+              if (mission.id !== missionId) return mission;
+              changed = true;
+              return { ...mission, status: newStatus as MissionStatus };
+            });
+            return changed ? next : prev;
+          });
           if (currentMissionRef.current?.id === missionId) {
             setCurrentMission((prev) =>
               prev ? { ...prev, status: newStatus as MissionStatus } : prev
@@ -5562,6 +5571,15 @@ export default function ControlClient() {
         const missionId = typeof data["mission_id"] === "string" ? data["mission_id"] : undefined;
         const title = typeof data["title"] === "string" ? data["title"] : undefined;
         if (missionId && title !== undefined) {
+          setRecentMissions((prev) => {
+            let changed = false;
+            const next = prev.map((mission) => {
+              if (mission.id !== missionId) return mission;
+              changed = true;
+              return { ...mission, title };
+            });
+            return changed ? next : prev;
+          });
           if (currentMissionRef.current?.id === missionId) {
             setCurrentMission((prev) => (prev ? { ...prev, title } : prev));
           }
@@ -5610,6 +5628,33 @@ export default function ControlClient() {
               : typeof data["metadata_version"] === "string"
                 ? data["metadata_version"]
                 : undefined;
+          setRecentMissions((prev) => {
+            let changed = false;
+            const next = prev.map((mission) => {
+              if (mission.id !== missionId) return mission;
+              changed = true;
+              return {
+                ...mission,
+                ...(title !== undefined ? { title } : {}),
+                ...(shortDescription !== undefined
+                  ? { short_description: shortDescription }
+                  : {}),
+                ...(metadataUpdatedAt !== undefined
+                  ? { metadata_updated_at: metadataUpdatedAt }
+                  : {}),
+                ...(metadataSource !== undefined
+                  ? { metadata_source: metadataSource }
+                  : {}),
+                ...(metadataModel !== undefined
+                  ? { metadata_model: metadataModel }
+                  : {}),
+                ...(metadataVersion !== undefined
+                  ? { metadata_version: metadataVersion }
+                  : {}),
+              };
+            });
+            return changed ? next : prev;
+          });
 
           if (currentMissionRef.current?.id === missionId) {
             setCurrentMission((prev) =>
