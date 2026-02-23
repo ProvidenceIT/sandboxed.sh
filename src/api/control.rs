@@ -2840,6 +2840,24 @@ pub struct MissionSearchCacheEntry {
     pub results: Vec<MissionSearchResult>,
 }
 
+const MISSION_SEARCH_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+
+fn mission_search_cache_hit_by_ttl(
+    entry: &MissionSearchCacheEntry,
+    recency_fingerprint: u64,
+) -> bool {
+    entry.cached_at.elapsed() <= MISSION_SEARCH_CACHE_TTL
+        && entry.recency_fingerprint == recency_fingerprint
+}
+
+fn mission_search_cache_hit_by_freshness(
+    entry: &MissionSearchCacheEntry,
+    recency_fingerprint: u64,
+    freshness_key: u64,
+) -> bool {
+    entry.recency_fingerprint == recency_fingerprint && entry.freshness_key == freshness_key
+}
+
 fn mission_search_query_hash(query: &str) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     normalize_metadata_text(query).hash(&mut hasher);
@@ -2898,12 +2916,9 @@ pub async fn search_missions(
         .await
         .map_err(internal_error)?;
     if let Some(cached_results) = {
-        const MISSION_SEARCH_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(5);
         let cache = control.mission_search_cache.read().await;
         cache.get(&query_hash).and_then(|entry| {
-            if entry.cached_at.elapsed() <= MISSION_SEARCH_CACHE_TTL
-                && entry.recency_fingerprint == recency_fingerprint
-            {
+            if mission_search_cache_hit_by_ttl(entry, recency_fingerprint) {
                 Some(entry.results.clone())
             } else {
                 None
@@ -2922,7 +2937,7 @@ pub async fn search_missions(
     if let Some(cached_results) = {
         let cache = control.mission_search_cache.read().await;
         cache.get(&query_hash).and_then(|entry| {
-            if entry.freshness_key == freshness_key {
+            if mission_search_cache_hit_by_freshness(entry, recency_fingerprint, freshness_key) {
                 Some(entry.results.clone())
             } else {
                 None
@@ -9593,6 +9608,19 @@ And the report:
             .await
             .expect("recency fingerprint should be computed");
         assert_ne!(before, after);
+    }
+
+    #[test]
+    fn test_mission_search_cache_hit_by_freshness_requires_recency_match() {
+        let entry = MissionSearchCacheEntry {
+            cached_at: std::time::Instant::now(),
+            freshness_key: 42,
+            recency_fingerprint: 100,
+            results: Vec::new(),
+        };
+
+        assert!(mission_search_cache_hit_by_freshness(&entry, 100, 42));
+        assert!(!mission_search_cache_hit_by_freshness(&entry, 101, 42));
     }
 
     #[test]
