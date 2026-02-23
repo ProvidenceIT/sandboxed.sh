@@ -10,6 +10,7 @@ import {
   getRunningMissions,
   loadMission,
   cancelMission,
+  resumeMission,
   type Mission,
   type RunningMissionInfo,
 } from '@/lib/api';
@@ -96,6 +97,16 @@ export function MissionSwitcherProvider({ children }: { children: React.ReactNod
     mutateMissions();
   }, [mutateMissions]);
 
+  const handleResumeMission = useCallback(async (missionId: string) => {
+    try {
+      await resumeMission(missionId);
+      toast.success('Mission resumed');
+      router.push(`/control?mission=${missionId}`);
+    } catch {
+      toast.error('Failed to resume mission');
+    }
+  }, [router]);
+
   const contextValue = useMemo(() => ({
     open: () => setIsOpen(true),
     close: () => setIsOpen(false),
@@ -116,6 +127,7 @@ export function MissionSwitcherProvider({ children }: { children: React.ReactNod
           viewingMissionId={null}
           onSelectMission={handleSelectMission}
           onCancelMission={handleCancelMission}
+          onResumeMission={handleResumeMission}
           onRefresh={handleRefresh}
         />
       )}

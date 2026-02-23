@@ -5,6 +5,7 @@ import {
   getMissionSearchScore,
   getMissionCardDescription,
   getMissionCardTitle,
+  getMissionQuickAction,
   getRunningMissionSearchText,
   getMissionSearchText,
   missionMatchesSearchQuery,
@@ -186,5 +187,22 @@ describe('mission switcher search helpers', () => {
     expect(runningMissionMatchesSearchQuery(runningInfo, 'running')).toBe(true);
     expect(runningMissionMatchesSearchQuery(runningInfo, 'mission-running-123')).toBe(true);
     expect(runningMissionMatchesSearchQuery(runningInfo, 'no-match-term')).toBe(false);
+  });
+
+  it('returns contextual quick actions for resumable terminal states', () => {
+    const interrupted = buildMission({ status: 'interrupted', resumable: true });
+    const blocked = buildMission({ status: 'blocked', resumable: true });
+    const failed = buildMission({ status: 'failed', resumable: true });
+
+    expect(getMissionQuickAction(interrupted, false)?.label).toBe('Resume');
+    expect(getMissionQuickAction(blocked, false)?.label).toBe('Continue');
+    expect(getMissionQuickAction(failed, false)?.label).toBe('Retry');
+  });
+
+  it('does not expose quick action for non-resumable or running missions', () => {
+    const mission = buildMission({ status: 'interrupted', resumable: false });
+
+    expect(getMissionQuickAction(mission, false)).toBeNull();
+    expect(getMissionQuickAction({ ...mission, resumable: true }, true)).toBeNull();
   });
 });

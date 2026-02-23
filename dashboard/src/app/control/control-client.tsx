@@ -4413,6 +4413,27 @@ export default function ControlClient() {
     }
   };
 
+  const handleResumeMissionById = async (missionId: string) => {
+    const activeMissionId = (viewingMission ?? currentMission)?.id;
+    if (activeMissionId === missionId) {
+      await handleResumeMission();
+      return;
+    }
+
+    try {
+      setMissionLoading(true);
+      await resumeMission(missionId);
+      await handleViewMission(missionId);
+      refreshRecentMissions();
+      toast.success("Mission resumed");
+    } catch (err) {
+      console.error("Failed to resume mission from switcher:", err);
+      toast.error("Failed to resume mission");
+    } finally {
+      setMissionLoading(false);
+    }
+  };
+
   // Debouncing for thinking updates to reduce re-renders during streaming
   const pendingThinkingRef = useRef<{
     content: string;
@@ -5909,6 +5930,7 @@ export default function ControlClient() {
         workspaceNameById={workspaceNameById}
         onSelectMission={handleViewMission}
         onCancelMission={handleCancelMission}
+        onResumeMission={handleResumeMissionById}
         onRefresh={refreshRecentMissions}
       />
 
