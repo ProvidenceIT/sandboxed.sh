@@ -176,14 +176,30 @@ fn extract_short_description_from_history(
         .or_else(|| history.iter().find(|(role, _)| role == "assistant"))
         .map(|(_, content)| content.as_str())?;
 
+    let lines: Vec<&str> = source.lines().collect();
     let mut inside_fenced_block = false;
-    let first_line = source.lines().map(str::trim).find(|line| {
+    let mut first_line: Option<&str> = None;
+    for idx in 0..lines.len() {
+        let line = lines[idx].trim();
         if line.starts_with("```") {
-            inside_fenced_block = !inside_fenced_block;
-            return false;
+            if inside_fenced_block {
+                inside_fenced_block = false;
+                continue;
+            }
+            let has_closing_fence = lines[(idx + 1)..]
+                .iter()
+                .any(|candidate| candidate.trim().starts_with("```"));
+            if has_closing_fence {
+                inside_fenced_block = true;
+            }
+            continue;
         }
-        !inside_fenced_block && !line.is_empty()
-    })?;
+        if !inside_fenced_block && !line.is_empty() {
+            first_line = Some(line);
+            break;
+        }
+    }
+    let first_line = first_line?;
 
     let collapsed = first_line.split_whitespace().collect::<Vec<_>>().join(" ");
     if collapsed.is_empty() {
@@ -401,6 +417,7 @@ async fn generate_mission_metadata_updates(
     mission: &Mission,
     history: &[(String, String)],
     fallback_user_content: Option<&str>,
+    force_refresh: bool,
 ) -> (Option<String>, Option<String>) {
     if history.is_empty() {
         return (None, None);
@@ -416,7 +433,7 @@ async fn generate_mission_metadata_updates(
         .as_ref()
         .map(|d| d.trim().is_empty())
         .unwrap_or(true);
-    let should_refresh = history.len().is_multiple_of(10);
+    let should_refresh = force_refresh || history.len().is_multiple_of(10);
 
     if !title_missing && !short_description_missing && !should_refresh {
         return (None, None);
@@ -3683,6 +3700,7 @@ async fn control_actor_loop(
                             .iter()
                             .find(|(role, _)| role == "user")
                             .map(|(_, content)| content.as_str()),
+                        false,
                     )
                     .await;
 
@@ -5212,6 +5230,7 @@ async fn control_actor_loop(
                                                 &mission,
                                                 &pairs,
                                                 Some(&user_msg),
+                                                true,
                                             )
                                             .await;
                                         if generated_title.is_some() || generated_short_description.is_some() {
@@ -7442,12 +7461,80 @@ And the report:
             .expect("create mission");
         let history = vec![("user".to_string(), "Hi".to_string())];
 
-        let (updated_title, updated_short_description) =
-            generate_mission_metadata_updates(&store, mission.id, &mission, &history, Some("Hi"))
-                .await;
+        let (updated_title, updated_short_description) = generate_mission_metadata_updates(
+            &store,
+            mission.id,
+            &mission,
+            &history,
+            Some("Hi"),
+            false,
+        )
+        .await;
 
         assert_eq!(updated_title.as_deref(), Some("Hi"));
         assert_eq!(updated_short_description.as_deref(), Some("Hi"));
+    }
+
+    #[tokio::test]
+    async fn test_generate_mission_metadata_updates_refreshes_on_milestone_event() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = store
+            .create_mission(Some("Legacy title"), None, None, None, None, None, None)
+            .await
+            .expect("create mission");
+        store
+            .update_mission_metadata(
+                mission.id,
+                Some("Legacy title"),
+                Some("Legacy short description"),
+            )
+            .await
+            .expect("seed metadata");
+        let mission = store
+            .get_mission(mission.id)
+            .await
+            .expect("get mission")
+            .expect("mission exists");
+        let history = vec![
+            (
+                "user".to_string(),
+                "Investigate production timeout in payment worker".to_string(),
+            ),
+            ("assistant".to_string(), "Thanks, checking now.".to_string()),
+            (
+                "assistant".to_string(),
+                "Investigate payment timeout root cause\nStarting with logs.".to_string(),
+            ),
+        ];
+
+        let without_milestone = generate_mission_metadata_updates(
+            &store,
+            mission.id,
+            &mission,
+            &history,
+            history.first().map(|(_, content)| content.as_str()),
+            false,
+        )
+        .await;
+        assert_eq!(without_milestone, (None, None));
+
+        let with_milestone = generate_mission_metadata_updates(
+            &store,
+            mission.id,
+            &mission,
+            &history,
+            history.first().map(|(_, content)| content.as_str()),
+            true,
+        )
+        .await;
+        assert_eq!(
+            with_milestone.0.as_deref(),
+            Some("Investigate payment timeout root cause")
+        );
+        assert_eq!(
+            with_milestone.1.as_deref(),
+            Some("Investigate production timeout in payment worker")
+        );
     }
 
     #[test]
@@ -7472,6 +7559,16 @@ And the report:
         let history = vec![("user".to_string(), "```bash\necho test\n```".to_string())];
         let extracted = extract_short_description_from_history(&history, 160);
         assert_eq!(extracted, None);
+    }
+
+    #[test]
+    fn test_extract_short_description_from_history_handles_unclosed_fence() {
+        let history = vec![(
+            "user".to_string(),
+            "```markdown\nInvestigate flaky CI timeout".to_string(),
+        )];
+        let extracted = extract_short_description_from_history(&history, 160);
+        assert_eq!(extracted.as_deref(), Some("Investigate flaky CI timeout"));
     }
 
     #[test]
