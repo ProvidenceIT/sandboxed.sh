@@ -283,7 +283,8 @@ fn extract_short_description_from_content(content: &str, max_len: usize) -> Opti
     }
     let first_line = first_line?;
 
-    let collapsed = first_line.split_whitespace().collect::<Vec<_>>().join(" ");
+    let cleaned = strip_markdown_prefixes(first_line);
+    let collapsed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
     if collapsed.is_empty() {
         return None;
     }
@@ -295,6 +296,59 @@ fn extract_short_description_from_content(content: &str, max_len: usize) -> Opti
     } else {
         Some(collapsed)
     }
+}
+
+fn strip_markdown_prefixes(line: &str) -> &str {
+    let mut cleaned = line.trim();
+    loop {
+        let next = if let Some(stripped) = cleaned.strip_prefix('#') {
+            Some(stripped.trim_start())
+        } else if let Some(stripped) = cleaned.strip_prefix('>') {
+            Some(stripped.trim_start())
+        } else if let Some(stripped) = cleaned.strip_prefix("- ") {
+            Some(stripped.trim_start())
+        } else if let Some(stripped) = cleaned.strip_prefix("* ") {
+            Some(stripped.trim_start())
+        } else if let Some(stripped) = cleaned.strip_prefix("+ ") {
+            Some(stripped.trim_start())
+        } else {
+            strip_ordered_list_prefix(cleaned)
+        };
+
+        match next {
+            Some(candidate) if candidate != cleaned => cleaned = candidate,
+            _ => break,
+        }
+    }
+    cleaned
+}
+
+fn strip_ordered_list_prefix(line: &str) -> Option<&str> {
+    let mut idx = 0;
+    for ch in line.chars() {
+        if ch.is_ascii_digit() {
+            idx += ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    if idx == 0 || idx >= line.len() {
+        return None;
+    }
+
+    let marker = line[idx..].chars().next()?;
+    if marker != '.' && marker != ')' {
+        return None;
+    }
+    let marker_end = idx + marker.len_utf8();
+    let suffix = line.get(marker_end..)?;
+    if suffix.is_empty() {
+        return None;
+    }
+    if !suffix.chars().next().is_some_and(char::is_whitespace) {
+        return None;
+    }
+    Some(suffix.trim_start())
 }
 
 fn markdown_fence_char(line: &str) -> Option<char> {
@@ -10869,6 +10923,26 @@ And the report:
         )];
         let extracted = extract_short_description_from_history(&history, 160);
         assert_eq!(extracted.as_deref(), Some("Investigate flaky CI timeout"));
+    }
+
+    #[test]
+    fn test_extract_short_description_from_history_strips_markdown_prefixes() {
+        let history = vec![(
+            "user".to_string(),
+            "## > - * 1. Investigate flaky CI timeout".to_string(),
+        )];
+        let extracted = extract_short_description_from_history(&history, 160);
+        assert_eq!(extracted.as_deref(), Some("Investigate flaky CI timeout"));
+    }
+
+    #[test]
+    fn test_extract_short_description_from_history_strips_ordered_list_markers() {
+        let history = vec![(
+            "user".to_string(),
+            "12) Resolve dashboard state drift".to_string(),
+        )];
+        let extracted = extract_short_description_from_history(&history, 160);
+        assert_eq!(extracted.as_deref(), Some("Resolve dashboard state drift"));
     }
 
     #[test]
