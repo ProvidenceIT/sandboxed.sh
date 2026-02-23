@@ -1080,6 +1080,7 @@ async fn generate_mission_metadata_updates(
         .map(|d| d.trim().is_empty())
         .unwrap_or(true);
     let should_refresh = force_refresh || history.len().is_multiple_of(10);
+    let has_assistant_reply = history.iter().any(|(role, _)| role == "assistant");
 
     if !title_missing && !short_description_missing && !should_refresh {
         return (None, None);
@@ -1092,7 +1093,7 @@ async fn generate_mission_metadata_updates(
             .find(|(role, _)| role == "assistant")
             .and_then(|(_, content)| extract_title_from_assistant(content))
             .or_else(|| {
-                if title_missing {
+                if title_missing && has_assistant_reply {
                     fallback_user_content.map(|user_content| {
                         if user_content.len() > 100 {
                             let safe_end = safe_truncate_index(user_content, 100);
@@ -8518,8 +8519,46 @@ And the report:
         )
         .await;
 
-        assert_eq!(updated_title.as_deref(), Some("Hi"));
+        assert_eq!(updated_title, None);
         assert_eq!(updated_short_description.as_deref(), Some("Hi"));
+    }
+
+    #[tokio::test]
+    async fn test_generate_mission_metadata_updates_generates_title_after_first_assistant_reply() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = store
+            .create_mission(None, None, None, None, None, None, None)
+            .await
+            .expect("create mission");
+        let history = vec![
+            (
+                "user".to_string(),
+                "Investigate oauth callback timeout in production".to_string(),
+            ),
+            (
+                "assistant".to_string(),
+                "Investigate oauth callback timeout root cause\nStarting with logs.".to_string(),
+            ),
+        ];
+
+        let (updated_title, updated_short_description) = generate_mission_metadata_updates(
+            &store,
+            mission.id,
+            &mission,
+            &history,
+            history.first().map(|(_, content)| content.as_str()),
+            false,
+        )
+        .await;
+
+        assert_eq!(
+            updated_title.as_deref(),
+            Some("Investigate oauth callback timeout root cause")
+        );
+        assert_eq!(
+            updated_short_description.as_deref(),
+            Some("Investigate oauth callback timeout in production")
+        );
     }
 
     #[tokio::test]
