@@ -1438,17 +1438,11 @@ pub enum AgentEvent {
     /// Mission metadata changed (title/short description refresh)
     MissionMetadataUpdated {
         mission_id: Uuid,
-        #[serde(skip_serializing_if = "Option::is_none")]
         title: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         short_description: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         metadata_updated_at: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         metadata_source: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         metadata_model: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
         metadata_version: Option<String>,
     },
     /// Agent phase update (for showing preparation steps)
@@ -8172,6 +8166,38 @@ And the report:
         assert!(
             saw_metadata_event,
             "expected mission_metadata_updated event"
+        );
+    }
+
+    #[test]
+    fn test_mission_metadata_updated_event_serializes_explicit_null_clears() {
+        let mission_id = Uuid::new_v4();
+        let event = AgentEvent::MissionMetadataUpdated {
+            mission_id,
+            title: None,
+            short_description: Some("Investigate timeout path".to_string()),
+            metadata_updated_at: None,
+            metadata_source: None,
+            metadata_model: None,
+            metadata_version: None,
+        };
+
+        let value = serde_json::to_value(event).expect("serialize mission metadata event");
+        assert_eq!(
+            value.get("type").and_then(|v| v.as_str()),
+            Some("mission_metadata_updated")
+        );
+        assert!(value.get("title").is_some(), "title key should be present");
+        assert!(value.get("title").is_some_and(serde_json::Value::is_null));
+        assert_eq!(
+            value.get("short_description").and_then(|v| v.as_str()),
+            Some("Investigate timeout path")
+        );
+        assert!(
+            value
+                .get("metadata_updated_at")
+                .is_some_and(serde_json::Value::is_null),
+            "metadata_updated_at key should be present as null when cleared"
         );
     }
 
