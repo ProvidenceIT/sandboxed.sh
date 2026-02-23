@@ -263,6 +263,66 @@ fn canonical_title_key(title: &str) -> String {
     normalize_metadata_text(strip_numeric_title_suffix(title))
 }
 
+fn title_similarity_token(token: &str) -> String {
+    if token.len() > 4 && token.ends_with("ies") {
+        return format!("{}y", &token[..token.len() - 3]);
+    }
+    if token.len() > 4 && token.ends_with('s') && !token.ends_with("ss") {
+        return token[..token.len() - 1].to_string();
+    }
+    token.to_string()
+}
+
+fn title_similarity_tokens(title: &str) -> Vec<String> {
+    normalize_metadata_text(strip_numeric_title_suffix(title))
+        .split_whitespace()
+        .filter(|token| !token.is_empty() && !is_search_stopword(token))
+        .map(title_similarity_token)
+        .filter(|token| !token.is_empty())
+        .collect()
+}
+
+fn token_similarity_strength(lhs: &str, rhs: &str) -> f64 {
+    search_token_match_strength(lhs, rhs).max(search_token_match_strength(rhs, lhs))
+}
+
+fn title_near_duplicate_score(lhs: &str, rhs: &str) -> f64 {
+    let lhs_tokens = title_similarity_tokens(lhs);
+    let rhs_tokens = title_similarity_tokens(rhs);
+    if lhs_tokens.is_empty() || rhs_tokens.is_empty() {
+        return 0.0;
+    }
+
+    let lhs_best_avg = lhs_tokens
+        .iter()
+        .map(|lhs_token| {
+            rhs_tokens
+                .iter()
+                .map(|rhs_token| token_similarity_strength(lhs_token, rhs_token))
+                .fold(0.0_f64, f64::max)
+        })
+        .sum::<f64>()
+        / lhs_tokens.len() as f64;
+
+    let rhs_best_avg = rhs_tokens
+        .iter()
+        .map(|rhs_token| {
+            lhs_tokens
+                .iter()
+                .map(|lhs_token| token_similarity_strength(rhs_token, lhs_token))
+                .fold(0.0_f64, f64::max)
+        })
+        .sum::<f64>()
+        / rhs_tokens.len() as f64;
+
+    (lhs_best_avg + rhs_best_avg) / 2.0
+}
+
+fn is_near_duplicate_title(candidate: &str, existing: &str) -> bool {
+    const NEAR_DUPLICATE_THRESHOLD: f64 = 0.9;
+    title_near_duplicate_score(candidate, existing) >= NEAR_DUPLICATE_THRESHOLD
+}
+
 fn has_significant_metadata_drift(existing: &str, candidate: &str) -> bool {
     let existing_normalized = normalize_metadata_text(existing);
     let candidate_normalized = normalize_metadata_text(candidate);
@@ -703,6 +763,7 @@ async fn disambiguate_generated_title(
     let mut canonical_titles = HashSet::new();
     let mut raw_titles = HashSet::new();
     let mut canonical_raw_titles = HashSet::new();
+    let mut dedupe_probe_titles = Vec::new();
 
     let mut offset = 0;
     while offset < TITLE_DEDUPE_MAX_SCAN {
@@ -744,6 +805,7 @@ async fn disambiguate_generated_title(
                 if !canonical.is_empty() {
                     canonical_titles.insert(canonical);
                 }
+                dedupe_probe_titles.push(existing_title.clone());
             }
         }
 
@@ -788,7 +850,10 @@ async fn disambiguate_generated_title(
     } else {
         exact_titles.contains(&candidate_exact) || canonical_titles.contains(&candidate_canonical)
     };
-    if !has_duplicate {
+    let has_near_duplicate = dedupe_probe_titles
+        .iter()
+        .any(|existing| is_near_duplicate_title(base_title, existing));
+    if !has_duplicate && !has_near_duplicate {
         return base_title.to_string();
     }
 
@@ -8034,6 +8099,22 @@ And the report:
         ));
     }
 
+    #[test]
+    fn test_is_near_duplicate_title_handles_plural_variant() {
+        assert!(is_near_duplicate_title(
+            "Fix flaky CI pipeline",
+            "Fix flaky CI pipelines"
+        ));
+    }
+
+    #[test]
+    fn test_is_near_duplicate_title_rejects_different_topic() {
+        assert!(!is_near_duplicate_title(
+            "Investigate API timeout on auth",
+            "Refactor dashboard sidebar layout"
+        ));
+    }
+
     #[tokio::test]
     async fn test_disambiguate_generated_title_appends_next_suffix() {
         let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
@@ -8129,6 +8210,31 @@ And the report:
         let disambiguated =
             disambiguate_generated_title(&store, probe.id, "ИСПРАВИТЬ СБОЙ ВХОДА").await;
         assert_eq!(disambiguated, "ИСПРАВИТЬ СБОЙ ВХОДА (2)");
+    }
+
+    #[tokio::test]
+    async fn test_disambiguate_generated_title_handles_near_duplicate_variants() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        store
+            .create_mission(
+                Some("Fix flaky CI pipeline"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("create mission");
+        let probe = store
+            .create_mission(None, None, None, None, None, None, None)
+            .await
+            .expect("create mission");
+
+        let disambiguated =
+            disambiguate_generated_title(&store, probe.id, "Fix flaky CI pipelines").await;
+        assert_eq!(disambiguated, "Fix flaky CI pipelines (2)");
     }
 
     #[tokio::test]
