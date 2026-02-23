@@ -9,6 +9,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::convert::Infallible;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use axum::{
@@ -1749,6 +1750,8 @@ pub struct ControlState {
     pub max_parallel: usize,
     /// Mission persistence (SQLite-backed)
     pub mission_store: Arc<dyn MissionStore>,
+    /// Cache for semantic mission search results keyed by normalized query hash
+    pub mission_search_cache: Arc<RwLock<HashMap<u64, MissionSearchCacheEntry>>>,
 }
 
 /// Control session manager for per-user sessions.
@@ -2098,6 +2101,44 @@ async fn populate_workspace_names(state: &Arc<AppState>, missions: &mut [Mission
     }
 }
 
+async fn list_missions_for_search(
+    state: &Arc<AppState>,
+    control: &ControlState,
+) -> Result<Vec<Mission>, (StatusCode, String)> {
+    const SEARCH_PAGE_SIZE: usize = 500;
+    const SEARCH_MAX_SCAN: usize = 10_000;
+
+    let mut all = Vec::new();
+    let mut offset = 0;
+
+    while offset < SEARCH_MAX_SCAN {
+        let mut page = control
+            .mission_store
+            .list_missions(SEARCH_PAGE_SIZE, offset)
+            .await
+            .map_err(internal_error)?;
+        if page.is_empty() {
+            break;
+        }
+        populate_workspace_names(state, &mut page).await;
+        let page_len = page.len();
+        all.extend(page);
+        if page_len < SEARCH_PAGE_SIZE {
+            break;
+        }
+        offset += SEARCH_PAGE_SIZE;
+    }
+
+    if offset >= SEARCH_MAX_SCAN {
+        tracing::warn!(
+            "Mission search scan hit cap ({} missions); some older missions may not be searched",
+            SEARCH_MAX_SCAN
+        );
+    }
+
+    Ok(all)
+}
+
 #[derive(Debug, Deserialize)]
 pub struct SearchMissionsQuery {
     pub q: String,
@@ -2108,6 +2149,30 @@ pub struct SearchMissionsQuery {
 pub struct MissionSearchResult {
     pub mission: Mission,
     pub relevance_score: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct MissionSearchCacheEntry {
+    pub freshness_key: u64,
+    pub results: Vec<MissionSearchResult>,
+}
+
+fn mission_search_query_hash(query: &str) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    normalize_metadata_text(query).hash(&mut hasher);
+    hasher.finish()
+}
+
+fn mission_search_freshness_key(missions: &[Mission]) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    missions.len().hash(&mut hasher);
+    for mission in missions {
+        mission.id.hash(&mut hasher);
+        mission.updated_at.hash(&mut hasher);
+        mission.metadata_updated_at.hash(&mut hasher);
+        mission.workspace_name.hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 /// Search missions with semantic-aware ranking.
@@ -2123,12 +2188,24 @@ pub async fn search_missions(
 
     let limit = params.limit.unwrap_or(20).clamp(1, 100);
     let control = control_for_user(&state, &user).await;
-    let mut missions = control
-        .mission_store
-        .list_missions(500, 0)
-        .await
-        .map_err(internal_error)?;
-    populate_workspace_names(&state, &mut missions).await;
+    let missions = list_missions_for_search(&state, &control).await?;
+    let query_hash = mission_search_query_hash(query);
+    let freshness_key = mission_search_freshness_key(&missions);
+
+    if let Some(cached_results) = {
+        let cache = control.mission_search_cache.read().await;
+        cache.get(&query_hash).and_then(|entry| {
+            if entry.freshness_key == freshness_key {
+                Some(entry.results.clone())
+            } else {
+                None
+            }
+        })
+    } {
+        let mut results = cached_results;
+        results.truncate(limit);
+        return Ok(Json(results));
+    }
 
     let mut scored: Vec<MissionSearchResult> = missions
         .into_iter()
@@ -2151,8 +2228,24 @@ pub async fn search_missions(
             .total_cmp(&a.relevance_score)
             .then_with(|| b.mission.updated_at.cmp(&a.mission.updated_at))
     });
-    scored.truncate(limit);
+    {
+        const MISSION_SEARCH_CACHE_MAX_ENTRIES: usize = 128;
+        let mut cache = control.mission_search_cache.write().await;
+        if cache.len() >= MISSION_SEARCH_CACHE_MAX_ENTRIES {
+            if let Some(key_to_drop) = cache.keys().next().copied() {
+                cache.remove(&key_to_drop);
+            }
+        }
+        cache.insert(
+            query_hash,
+            MissionSearchCacheEntry {
+                freshness_key,
+                results: scored.clone(),
+            },
+        );
+    }
 
+    scored.truncate(limit);
     Ok(Json(scored))
 }
 
@@ -2954,6 +3047,7 @@ fn spawn_control_session(
     let current_tree = Arc::new(RwLock::new(None));
     let progress = Arc::new(RwLock::new(ExecutionProgress::default()));
     let running_missions = Arc::new(RwLock::new(Vec::new()));
+    let mission_search_cache = Arc::new(RwLock::new(HashMap::new()));
     let max_parallel =
         crate::settings::max_parallel_missions_cached_or(config.max_parallel_missions);
 
@@ -2968,6 +3062,7 @@ fn spawn_control_session(
         running_missions: Arc::clone(&running_missions),
         max_parallel,
         mission_store: Arc::clone(&mission_store),
+        mission_search_cache,
     };
 
     // Spawn the main control actor
@@ -7717,6 +7812,9 @@ And the report:
                 mission.id,
                 Some("Legacy title"),
                 Some("Legacy short description"),
+                None,
+                None,
+                None,
             )
             .await
             .expect("seed metadata");
@@ -7980,6 +8078,52 @@ And the report:
             mission.workspace_name.as_deref(),
         );
         assert_eq!(score, 0.0);
+    }
+
+    #[test]
+    fn test_mission_search_query_hash_normalizes_equivalent_queries() {
+        let hash_a = mission_search_query_hash("Login Timeout");
+        let hash_b = mission_search_query_hash(" login   timeout ");
+        let hash_c = mission_search_query_hash("LOGIN-timeout");
+        assert_eq!(hash_a, hash_b);
+        assert_eq!(hash_b, hash_c);
+    }
+
+    #[test]
+    fn test_mission_search_freshness_key_changes_on_metadata_update() {
+        let now = mission_store::now_string();
+        let mut mission = Mission {
+            id: Uuid::new_v4(),
+            status: MissionStatus::Completed,
+            title: Some("Implement payment retry flow".to_string()),
+            short_description: Some("Handle webhook retries for failed invoices".to_string()),
+            metadata_updated_at: Some(now.clone()),
+            metadata_source: None,
+            metadata_model: None,
+            metadata_version: None,
+            workspace_id: crate::workspace::DEFAULT_WORKSPACE_ID,
+            workspace_name: Some("Sandboxed".to_string()),
+            agent: None,
+            model_override: None,
+            model_effort: None,
+            backend: "codex".to_string(),
+            config_profile: None,
+            history: Vec::new(),
+            created_at: now.clone(),
+            updated_at: now.clone(),
+            interrupted_at: None,
+            resumable: false,
+            desktop_sessions: Vec::new(),
+            session_id: None,
+            terminal_reason: None,
+        };
+        let before = mission_search_freshness_key(&[mission.clone()]);
+
+        mission.short_description = Some("Handle webhook retries and alerting".to_string());
+        mission.metadata_updated_at = Some("2099-01-01T00:00:00Z".to_string());
+        let after = mission_search_freshness_key(&[mission]);
+
+        assert_ne!(before, after);
     }
 
     #[test]
