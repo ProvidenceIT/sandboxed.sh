@@ -1205,12 +1205,13 @@ impl MissionStore for SqliteMissionStore {
         let conn = self.conn.clone();
         let now = now_string();
         let title = title.to_string();
+        let source = "user".to_string();
 
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
             conn.execute(
-                "UPDATE missions SET title = ?1, updated_at = ?2 WHERE id = ?3",
-                params![title, now, id.to_string()],
+                "UPDATE missions SET title = ?1, metadata_source = ?2, updated_at = ?3 WHERE id = ?4",
+                params![title, source, now, id.to_string()],
             )
             .map_err(|e| e.to_string())?;
             Ok(())
@@ -2734,6 +2735,43 @@ mod tests {
         assert_eq!(mission.short_description, None);
         assert_eq!(mission.metadata_source, None);
         assert_eq!(mission.metadata_version, None);
+    }
+
+    #[tokio::test]
+    async fn update_mission_title_marks_user_metadata_source() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = SqliteMissionStore::new(temp_dir.path().to_path_buf(), "test-user")
+            .await
+            .expect("sqlite store");
+        let mission = store
+            .create_mission(Some("Initial"), None, None, None, None, None, None)
+            .await
+            .expect("mission");
+
+        store
+            .update_mission_metadata(
+                mission.id,
+                None,
+                None,
+                Some(Some("backend_heuristic")),
+                None,
+                None,
+            )
+            .await
+            .expect("seed metadata source");
+
+        store
+            .update_mission_title(mission.id, "Manual title")
+            .await
+            .expect("rename mission");
+
+        let mission = store
+            .get_mission(mission.id)
+            .await
+            .expect("get mission")
+            .expect("mission exists");
+        assert_eq!(mission.title.as_deref(), Some("Manual title"));
+        assert_eq!(mission.metadata_source.as_deref(), Some("user"));
     }
 
     #[tokio::test]

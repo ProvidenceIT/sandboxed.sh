@@ -157,6 +157,7 @@ impl MissionStore for InMemoryMissionStore {
             .get_mut(&id)
             .ok_or_else(|| format!("Mission {} not found", id))?;
         mission.title = Some(title.to_string());
+        mission.metadata_source = Some("user".to_string());
         mission.updated_at = now_string();
         Ok(())
     }
@@ -413,5 +414,39 @@ mod tests {
         assert_eq!(mission.short_description, None);
         assert_eq!(mission.metadata_source, None);
         assert_eq!(mission.metadata_version, None);
+    }
+
+    #[tokio::test]
+    async fn update_mission_title_marks_user_metadata_source() {
+        let store = InMemoryMissionStore::new();
+        let mission = store
+            .create_mission(Some("Initial"), None, None, None, None, None, None)
+            .await
+            .expect("create mission");
+
+        store
+            .update_mission_metadata(
+                mission.id,
+                None,
+                None,
+                Some(Some("backend_heuristic")),
+                None,
+                None,
+            )
+            .await
+            .expect("seed metadata source");
+
+        store
+            .update_mission_title(mission.id, "Manual title")
+            .await
+            .expect("rename mission");
+
+        let mission = store
+            .get_mission(mission.id)
+            .await
+            .expect("get mission")
+            .expect("mission exists");
+        assert_eq!(mission.title.as_deref(), Some("Manual title"));
+        assert_eq!(mission.metadata_source.as_deref(), Some("user"));
     }
 }

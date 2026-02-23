@@ -285,6 +285,7 @@ fn normalize_metadata_text(text: &str) -> String {
 }
 
 const METADATA_SOURCE_BACKEND_HEURISTIC: &str = "backend_heuristic";
+const METADATA_SOURCE_USER: &str = "user";
 const METADATA_VERSION_V1: &str = "v1";
 static MISSION_TITLE_UPDATE_LOCK: std::sync::LazyLock<Mutex<()>> =
     std::sync::LazyLock::new(|| Mutex::new(()));
@@ -1201,6 +1202,8 @@ async fn generate_mission_metadata_updates(
         .as_ref()
         .map(|d| d.trim().is_empty())
         .unwrap_or(true);
+    let title_user_managed =
+        mission.metadata_source.as_deref() == Some(METADATA_SOURCE_USER) && !title_missing;
     let conversational_message_count = history
         .iter()
         .filter(|(role, _)| role == "user" || role == "assistant")
@@ -1221,7 +1224,7 @@ async fn generate_mission_metadata_updates(
         return (None, None);
     }
 
-    let title_candidate = if title_missing || should_refresh {
+    let title_candidate = if (title_missing || should_refresh) && !title_user_managed {
         history
             .iter()
             .rev()
@@ -8848,6 +8851,54 @@ And the report:
         assert_eq!(
             updated_short_description.as_deref(),
             Some("Investigate oauth callback timeout root cause")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_generate_mission_metadata_updates_does_not_overwrite_user_managed_title() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = store
+            .create_mission(Some("Initial title"), None, None, None, None, None, None)
+            .await
+            .expect("create mission");
+        store
+            .update_mission_metadata(
+                mission.id,
+                None,
+                None,
+                Some(Some(METADATA_SOURCE_USER)),
+                None,
+                None,
+            )
+            .await
+            .expect("mark title as user-managed");
+        let mission = store
+            .get_mission(mission.id)
+            .await
+            .expect("load mission")
+            .expect("mission exists");
+        let history = vec![
+            ("user".to_string(), "Track flaky auth tests".to_string()),
+            (
+                "assistant".to_string(),
+                "Auth test flakes are caused by parallel DB seed races.".to_string(),
+            ),
+        ];
+
+        let (updated_title, updated_short_description) = generate_mission_metadata_updates(
+            &store,
+            mission.id,
+            &mission,
+            &history,
+            history.first().map(|(_, c)| c.as_str()),
+            true,
+        )
+        .await;
+
+        assert_eq!(updated_title, None);
+        assert_eq!(
+            updated_short_description.as_deref(),
+            Some("Track flaky auth tests")
         );
     }
 
