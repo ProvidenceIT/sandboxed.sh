@@ -323,6 +323,115 @@ fn is_near_duplicate_title(candidate: &str, existing: &str) -> bool {
     title_near_duplicate_score(candidate, existing) >= NEAR_DUPLICATE_THRESHOLD
 }
 
+fn title_collides_with_existing(candidate: &str, existing: &str) -> bool {
+    let candidate_normalized = normalize_metadata_text(candidate);
+    let existing_normalized = normalize_metadata_text(existing);
+    if !candidate_normalized.is_empty() && candidate_normalized == existing_normalized {
+        return true;
+    }
+    is_near_duplicate_title(candidate, existing)
+}
+
+async fn load_recent_mission_titles(
+    mission_store: &Arc<dyn MissionStore>,
+    mission_id: Uuid,
+) -> Vec<String> {
+    const RECENT_TITLE_SCAN_LIMIT: usize = 300;
+    match mission_store
+        .list_missions(RECENT_TITLE_SCAN_LIMIT, 0)
+        .await
+    {
+        Ok(missions) => missions
+            .into_iter()
+            .filter(|mission| mission.id != mission_id)
+            .filter_map(|mission| mission.title)
+            .map(|title| title.trim().to_string())
+            .filter(|title| !title.is_empty())
+            .collect(),
+        Err(err) => {
+            tracing::warn!("Failed to load recent mission titles for metadata generation: {err}");
+            Vec::new()
+        }
+    }
+}
+
+fn derive_title_qualifier_from_text(base_title: &str, text: &str) -> Option<String> {
+    let base_tokens: HashSet<String> = normalize_metadata_text(base_title)
+        .split_whitespace()
+        .map(ToString::to_string)
+        .collect();
+    let qualifier_tokens: Vec<String> = normalize_metadata_text(text)
+        .split_whitespace()
+        .filter(|token| !base_tokens.contains(*token))
+        .filter(|token| !is_search_stopword(token))
+        .take(4)
+        .map(ToString::to_string)
+        .collect();
+
+    if qualifier_tokens.len() < 2 {
+        return None;
+    }
+    Some(qualifier_tokens.join(" "))
+}
+
+fn append_title_qualifier(base_title: &str, qualifier: &str) -> String {
+    let combined = format!("{} - {}", base_title.trim(), qualifier.trim());
+    let max_len = combined.len().min(100);
+    let safe_end = safe_truncate_index(&combined, max_len);
+    if safe_end < combined.len() {
+        format!("{}...", &combined[..safe_end])
+    } else {
+        combined
+    }
+}
+
+async fn diversify_generated_title_with_recent_context(
+    mission_store: &Arc<dyn MissionStore>,
+    mission_id: Uuid,
+    title_candidate: String,
+    history: &[(String, String)],
+    fallback_user_content: Option<&str>,
+) -> String {
+    let recent_titles = load_recent_mission_titles(mission_store, mission_id).await;
+    if recent_titles.is_empty()
+        || !recent_titles
+            .iter()
+            .any(|existing| title_collides_with_existing(&title_candidate, existing))
+    {
+        return title_candidate;
+    }
+
+    // Prefer user-origin context as negative prompt signal to diversify generic duplicates.
+    let mut qualifier_sources: Vec<&str> = Vec::new();
+    if let Some(user_content) = fallback_user_content {
+        qualifier_sources.push(user_content);
+    }
+    for (role, content) in history {
+        if role == "user" {
+            qualifier_sources.push(content);
+        }
+    }
+    for (role, content) in history {
+        if role == "assistant" {
+            qualifier_sources.push(content);
+        }
+    }
+
+    for source in qualifier_sources {
+        if let Some(qualifier) = derive_title_qualifier_from_text(&title_candidate, source) {
+            let diversified = append_title_qualifier(&title_candidate, &qualifier);
+            if !recent_titles
+                .iter()
+                .any(|existing| title_collides_with_existing(&diversified, existing))
+            {
+                return diversified;
+            }
+        }
+    }
+
+    title_candidate
+}
+
 fn has_significant_metadata_drift(existing: &str, candidate: &str) -> bool {
     let existing_normalized = normalize_metadata_text(existing);
     let candidate_normalized = normalize_metadata_text(candidate);
@@ -868,8 +977,8 @@ async fn disambiguate_generated_title(
 }
 
 async fn generate_mission_metadata_updates(
-    _mission_store: &Arc<dyn MissionStore>,
-    _mission_id: Uuid,
+    mission_store: &Arc<dyn MissionStore>,
+    mission_id: Uuid,
     mission: &Mission,
     history: &[(String, String)],
     fallback_user_content: Option<&str>,
@@ -917,6 +1026,19 @@ async fn generate_mission_metadata_updates(
             })
     } else {
         None
+    };
+    let title_candidate = match title_candidate {
+        Some(candidate) => Some(
+            diversify_generated_title_with_recent_context(
+                mission_store,
+                mission_id,
+                candidate,
+                history,
+                fallback_user_content,
+            )
+            .await,
+        ),
+        None => None,
     };
 
     let short_description_candidate = if short_description_missing || should_refresh {
@@ -8259,6 +8381,56 @@ And the report:
 
         assert_eq!(updated_title.as_deref(), Some("Hi"));
         assert_eq!(updated_short_description.as_deref(), Some("Hi"));
+    }
+
+    #[tokio::test]
+    async fn test_generate_mission_metadata_updates_uses_recent_titles_as_negative_context() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        store
+            .create_mission(
+                Some("Fix login redirect"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("create existing mission");
+        let mission = store
+            .create_mission(None, None, None, None, None, None, None)
+            .await
+            .expect("create probe mission");
+        let history = vec![
+            (
+                "user".to_string(),
+                "Fix login redirect on mobile safari callback flow".to_string(),
+            ),
+            (
+                "assistant".to_string(),
+                "Fix login redirect\nI'll investigate auth callback handling.".to_string(),
+            ),
+        ];
+
+        let (updated_title, updated_short_description) = generate_mission_metadata_updates(
+            &store,
+            mission.id,
+            &mission,
+            &history,
+            history.first().map(|(_, content)| content.as_str()),
+            false,
+        )
+        .await;
+
+        assert_eq!(
+            updated_title.as_deref(),
+            Some("Fix login redirect - mobile safari callback flow")
+        );
+        assert_eq!(
+            updated_short_description.as_deref(),
+            Some("Fix login redirect on mobile safari callback flow")
+        );
     }
 
     #[tokio::test]
