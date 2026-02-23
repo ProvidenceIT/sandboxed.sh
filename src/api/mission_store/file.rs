@@ -211,6 +211,8 @@ impl MissionStore for FileMissionStore {
             .ok_or_else(|| format!("Mission {} not found", id))?;
         mission.title = Some(title.to_string());
         mission.metadata_source = Some("user".to_string());
+        mission.metadata_model = None;
+        mission.metadata_version = None;
         mission.updated_at = now_string();
         drop(missions);
         self.persist().await
@@ -499,8 +501,8 @@ mod tests {
                 None,
                 None,
                 Some(Some("backend_heuristic")),
-                None,
-                None,
+                Some(Some("gpt-5")),
+                Some(Some("v1")),
             )
             .await
             .expect("seed metadata source");
@@ -517,5 +519,7 @@ mod tests {
             .expect("mission exists");
         assert_eq!(mission.title.as_deref(), Some("Manual title"));
         assert_eq!(mission.metadata_source.as_deref(), Some("user"));
+        assert_eq!(mission.metadata_model, None);
+        assert_eq!(mission.metadata_version, None);
     }
 }

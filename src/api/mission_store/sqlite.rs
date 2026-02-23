@@ -1210,7 +1210,13 @@ impl MissionStore for SqliteMissionStore {
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
             conn.execute(
-                "UPDATE missions SET title = ?1, metadata_source = ?2, updated_at = ?3 WHERE id = ?4",
+                "UPDATE missions
+                 SET title = ?1,
+                     metadata_source = ?2,
+                     metadata_model = NULL,
+                     metadata_version = NULL,
+                     updated_at = ?3
+                 WHERE id = ?4",
                 params![title, source, now, id.to_string()],
             )
             .map_err(|e| e.to_string())?;
@@ -2754,8 +2760,8 @@ mod tests {
                 None,
                 None,
                 Some(Some("backend_heuristic")),
-                None,
-                None,
+                Some(Some("gpt-5")),
+                Some(Some("v1")),
             )
             .await
             .expect("seed metadata source");
@@ -2772,6 +2778,8 @@ mod tests {
             .expect("mission exists");
         assert_eq!(mission.title.as_deref(), Some("Manual title"));
         assert_eq!(mission.metadata_source.as_deref(), Some("user"));
+        assert_eq!(mission.metadata_model, None);
+        assert_eq!(mission.metadata_version, None);
     }
 
     #[tokio::test]

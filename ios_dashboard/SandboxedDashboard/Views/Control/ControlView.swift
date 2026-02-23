@@ -1298,7 +1298,6 @@ struct ControlView: View {
     private func findMessageIdForEntryIndex(_ entryIndex: Int, snippet: String?) -> String? {
         guard entryIndex >= 0 else { return nil }
 
-        let toolHistoryRoles: Set<String> = ["tool", "tool_call", "tool_result"]
         let messageSearchText: (ChatMessage) -> String = { message in
             if message.isToolCall {
                 let toolName = message.toolCallName ?? ""
@@ -1308,14 +1307,26 @@ struct ControlView: View {
             }
             return message.content
         }
+        let isToolResultMessage: (ChatMessage) -> Bool = { message in
+            if let resultText = message.toolData?.resultString,
+               !resultText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            {
+                return true
+            }
+            return false
+        }
         let roleMatchesMessage: (String, ChatMessage) -> Bool = { role, message in
             switch role {
             case "user":
                 return message.isUser
             case "assistant":
                 return message.isAssistant
+            case "tool_result":
+                return isToolResultMessage(message)
+            case "tool", "tool_call":
+                return message.isToolCall
             default:
-                return toolHistoryRoles.contains(role) ? message.isToolCall : false
+                return false
             }
         }
 
