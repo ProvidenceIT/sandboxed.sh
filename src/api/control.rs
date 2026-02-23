@@ -1292,6 +1292,18 @@ async fn refresh_mission_metadata_for_milestone(
     .await;
 }
 
+fn schedule_mission_metadata_refresh_for_milestone(
+    mission_store: &Arc<dyn MissionStore>,
+    events_tx: &broadcast::Sender<AgentEvent>,
+    mission_id: Uuid,
+) {
+    let mission_store = Arc::clone(mission_store);
+    let events_tx = events_tx.clone();
+    let _background_refresh = tokio::spawn(async move {
+        refresh_mission_metadata_for_milestone(&mission_store, &events_tx, mission_id).await;
+    });
+}
+
 /// Error returned when the control session command channel is closed.
 fn session_unavailable<T>(_: T) -> (StatusCode, String) {
     (
@@ -6202,12 +6214,11 @@ async fn control_actor_loop(
                                 .await
                                 .is_ok()
                             {
-                                refresh_mission_metadata_for_milestone(
+                                schedule_mission_metadata_refresh_for_milestone(
                                     &mission_store,
                                     &events_tx,
                                     id,
-                                )
-                                .await;
+                                );
                                 // Generate and store mission summary
                                 if let Some(ref summary_text) = summary {
                                     // Extract key files from conversation (look for paths in assistant messages)
@@ -6881,12 +6892,11 @@ async fn control_actor_loop(
                                                     e
                                                 );
                                             } else {
-                                                refresh_mission_metadata_for_milestone(
+                                                schedule_mission_metadata_refresh_for_milestone(
                                                     &mission_store,
                                                     &events_tx,
                                                     *mission_id,
-                                                )
-                                                .await;
+                                                );
                                                 let _ = events_tx.send(AgentEvent::MissionStatusChanged {
                                                     mission_id: *mission_id,
                                                     status: new_status,
@@ -8800,6 +8810,79 @@ And the report:
         assert!(
             saw_metadata_event,
             "expected mission_metadata_updated event"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_schedule_mission_metadata_refresh_for_milestone_updates_store_and_emits_event() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = store
+            .create_mission(Some("Legacy title"), None, None, None, None, None, None)
+            .await
+            .expect("create mission");
+        store
+            .update_mission_metadata(
+                mission.id,
+                Some(Some("Legacy title")),
+                Some(Some("Legacy short description")),
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("seed metadata");
+        store
+            .update_mission_history(
+                mission.id,
+                &[
+                    MissionHistoryEntry {
+                        role: "user".to_string(),
+                        content: "Investigate websocket reconnect loop".to_string(),
+                    },
+                    MissionHistoryEntry {
+                        role: "assistant".to_string(),
+                        content: "Investigate websocket reconnect loop root cause".to_string(),
+                    },
+                ],
+            )
+            .await
+            .expect("seed history");
+
+        let (events_tx, mut events_rx) = broadcast::channel::<AgentEvent>(16);
+        schedule_mission_metadata_refresh_for_milestone(&store, &events_tx, mission.id);
+
+        let saw_metadata_event = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                match events_rx.recv().await {
+                    Ok(AgentEvent::MissionMetadataUpdated { mission_id, .. })
+                        if mission_id == mission.id =>
+                    {
+                        break true;
+                    }
+                    Ok(_) => continue,
+                    Err(_) => break false,
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for metadata refresh event");
+        assert!(
+            saw_metadata_event,
+            "expected mission_metadata_updated event"
+        );
+
+        let refreshed = store
+            .get_mission(mission.id)
+            .await
+            .expect("get mission")
+            .expect("mission exists");
+        assert_eq!(
+            refreshed.title.as_deref(),
+            Some("Investigate websocket reconnect loop root cause")
+        );
+        assert_eq!(
+            refreshed.short_description.as_deref(),
+            Some("Investigate websocket reconnect loop")
         );
     }
 
