@@ -3409,18 +3409,28 @@ private struct MissionSwitcherSheet: View {
     let onDismiss: () -> Void
 
     @State private var searchText = ""
+    @State private var backendSearchTask: Task<Void, Never>?
+    @State private var backendSearchQuery = ""
+    @State private var backendSearchResults: [MissionSearchResult] = []
+    @State private var isBackendSearchLoading = false
+
+    private let backendSearchDebounceNanos: UInt64 = 250_000_000
+
+    private var normalizedSearchQuery: String {
+        normalizeMetadataText(searchText)
+    }
 
     private var runningMissionIds: Set<String> {
         Set(runningMissions.map { $0.missionId })
     }
 
     private var filteredRunning: [RunningMissionInfo] {
-        if searchText.isEmpty {
+        if normalizedSearchQuery.isEmpty {
             return runningMissions
         }
         return runningMissions
             .compactMap { info -> (RunningMissionInfo, Double)? in
-                let score = runningMissionSearchScore(info, query: searchText)
+                let score = runningMissionSearchScore(info, query: normalizedSearchQuery)
                 return score > 0 ? (info, score) : nil
             }
             .sorted { lhs, rhs in
@@ -3434,12 +3444,20 @@ private struct MissionSwitcherSheet: View {
 
     private var filteredRecent: [Mission] {
         let nonRunning = recentMissions.filter { !runningMissionIds.contains($0.id) }
-        if searchText.isEmpty {
+        if normalizedSearchQuery.isEmpty {
             return nonRunning
         }
+
+        if backendSearchQuery == normalizedSearchQuery {
+            let byId = Dictionary(uniqueKeysWithValues: nonRunning.map { ($0.id, $0) })
+            return backendSearchResults
+                .compactMap { result in byId[result.mission.id] ?? result.mission }
+                .filter { !runningMissionIds.contains($0.id) }
+        }
+
         return nonRunning
             .compactMap { mission -> (Mission, Double)? in
-                let score = missionSearchRelevanceScore(mission, query: searchText)
+                let score = missionSearchRelevanceScore(mission, query: normalizedSearchQuery)
                 return score > 0 ? (mission, score) : nil
             }
             .sorted { lhs, rhs in
@@ -3535,7 +3553,19 @@ private struct MissionSwitcherSheet: View {
                 missionSection("Failed", missions: failedMissions)
                 missionSection("Interrupted", missions: interruptedMissions)
 
-                if filteredRunning.isEmpty && filteredRecent.isEmpty && !searchText.isEmpty {
+                if isBackendSearchLoading && !normalizedSearchQuery.isEmpty {
+                    Section {
+                        HStack(spacing: 8) {
+                            ProgressView()
+                                .scaleEffect(0.8)
+                            Text("Searching missions...")
+                                .font(.caption)
+                                .foregroundStyle(Theme.textMuted)
+                        }
+                    }
+                }
+
+                if filteredRunning.isEmpty && filteredRecent.isEmpty && !normalizedSearchQuery.isEmpty {
                     ContentUnavailableView(
                         "No Missions Found",
                         systemImage: "magnifyingglass",
@@ -3544,11 +3574,58 @@ private struct MissionSwitcherSheet: View {
                 }
             }
             .searchable(text: $searchText, prompt: "Search missions...")
+            .onChange(of: searchText) { _, newValue in
+                scheduleBackendSearch(for: newValue)
+            }
+            .onAppear {
+                scheduleBackendSearch(for: searchText)
+            }
+            .onDisappear {
+                backendSearchTask?.cancel()
+                backendSearchTask = nil
+            }
             .navigationTitle("Switch Mission")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Done") { onDismiss() }
+                }
+            }
+        }
+    }
+
+    private func scheduleBackendSearch(for rawQuery: String) {
+        backendSearchTask?.cancel()
+        backendSearchTask = nil
+
+        let normalizedQuery = normalizeMetadataText(rawQuery)
+        guard !normalizedQuery.isEmpty else {
+            backendSearchQuery = ""
+            backendSearchResults = []
+            isBackendSearchLoading = false
+            return
+        }
+
+        isBackendSearchLoading = true
+        backendSearchTask = Task {
+            try? await Task.sleep(nanoseconds: backendSearchDebounceNanos)
+            guard !Task.isCancelled else { return }
+
+            do {
+                let results = try await APIService.shared.searchMissions(query: normalizedQuery, limit: 50)
+                guard !Task.isCancelled else { return }
+
+                if normalizeMetadataText(searchText) == normalizedQuery {
+                    backendSearchQuery = normalizedQuery
+                    backendSearchResults = results
+                    isBackendSearchLoading = false
+                }
+            } catch {
+                guard !Task.isCancelled else { return }
+                if normalizeMetadataText(searchText) == normalizedQuery {
+                    backendSearchQuery = ""
+                    backendSearchResults = []
+                    isBackendSearchLoading = false
                 }
             }
         }
