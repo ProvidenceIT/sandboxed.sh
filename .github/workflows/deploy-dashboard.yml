@@ -1,0 +1,82 @@
+name: Deploy Dashboard
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'dashboard/**'
+      - 'docker-compose.dashboard.yml'
+
+concurrency:
+  group: deploy-dashboard
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Dashboard Tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dashboard
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Run unit tests
+        run: bun run test:unit
+
+      - name: Type check and build
+        run: bun run build
+
+  deploy:
+    name: Deploy to Production
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Copy files to server
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.DASHBOARD_DEPLOY_HOST }}
+          username: ${{ secrets.DASHBOARD_DEPLOY_USER }}
+          key: ${{ secrets.DASHBOARD_DEPLOY_KEY }}
+          source: "dashboard/,docker-compose.dashboard.yml"
+          target: /opt/sandboxed-dashboard
+          overwrite: true
+
+      - name: Build and restart container
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.DASHBOARD_DEPLOY_HOST }}
+          username: ${{ secrets.DASHBOARD_DEPLOY_USER }}
+          key: ${{ secrets.DASHBOARD_DEPLOY_KEY }}
+          script: |
+            cd /opt/sandboxed-dashboard
+            docker compose -f docker-compose.dashboard.yml up -d --build
+
+      - name: Health check
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.DASHBOARD_DEPLOY_HOST }}
+          username: ${{ secrets.DASHBOARD_DEPLOY_USER }}
+          key: ${{ secrets.DASHBOARD_DEPLOY_KEY }}
+          script: |
+            for i in 1 2 3 4 5 6; do
+              status=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:9100 || true)
+              if [ "$status" = "200" ]; then
+                echo "Health check passed (HTTP $status)"
+                exit 0
+              fi
+              echo "Attempt $i: HTTP $status — retrying in 10s..."
+              sleep 10
+            done
+            echo "Health check failed after 60s"
+            exit 1
