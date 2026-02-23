@@ -10,6 +10,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::convert::Infallible;
 use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use axum::{
@@ -276,6 +277,7 @@ static MISSION_TITLE_UPDATE_LOCK: std::sync::LazyLock<Mutex<()>> =
 struct MetadataRefreshTaskEntry {
     handle: tokio::task::JoinHandle<()>,
     force_refresh: bool,
+    task_id: u64,
 }
 
 struct MetadataRefreshTaskRegistration {
@@ -285,11 +287,13 @@ struct MetadataRefreshTaskRegistration {
 static MISSION_METADATA_REFRESH_TASKS: std::sync::LazyLock<
     std::sync::Mutex<HashMap<Uuid, MetadataRefreshTaskEntry>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+static MISSION_METADATA_REFRESH_TASK_ID: AtomicU64 = AtomicU64::new(1);
 
 fn register_metadata_refresh_task(
     tasks: &mut HashMap<Uuid, MetadataRefreshTaskEntry>,
     mission_id: Uuid,
     force_refresh: bool,
+    task_id: u64,
     handle: tokio::task::JoinHandle<()>,
 ) -> MetadataRefreshTaskRegistration {
     tasks.retain(|_, existing| !existing.handle.is_finished());
@@ -307,10 +311,25 @@ fn register_metadata_refresh_task(
         MetadataRefreshTaskEntry {
             handle,
             force_refresh,
+            task_id,
         },
     );
     MetadataRefreshTaskRegistration {
         superseded: replaced.map(|entry| entry.handle),
+    }
+}
+
+fn complete_metadata_refresh_task(
+    tasks: &mut HashMap<Uuid, MetadataRefreshTaskEntry>,
+    mission_id: Uuid,
+    task_id: u64,
+) {
+    if tasks
+        .get(&mission_id)
+        .map(|entry| entry.task_id == task_id)
+        .unwrap_or(false)
+    {
+        tasks.remove(&mission_id);
     }
 }
 
@@ -1393,17 +1412,28 @@ fn schedule_mission_metadata_refresh(
     mission_id: Uuid,
     force_refresh: bool,
 ) {
+    let task_id = MISSION_METADATA_REFRESH_TASK_ID.fetch_add(1, Ordering::Relaxed);
     let mission_store = Arc::clone(mission_store);
     let events_tx = events_tx.clone();
     let background_refresh = tokio::spawn(async move {
         refresh_mission_metadata_from_store(&mission_store, &events_tx, mission_id, force_refresh)
             .await;
+        let mut tasks = MISSION_METADATA_REFRESH_TASKS
+            .lock()
+            .expect("metadata refresh task registry lock poisoned");
+        complete_metadata_refresh_task(&mut tasks, mission_id, task_id);
     });
     let registration = {
         let mut tasks = MISSION_METADATA_REFRESH_TASKS
             .lock()
             .expect("metadata refresh task registry lock poisoned");
-        register_metadata_refresh_task(&mut tasks, mission_id, force_refresh, background_refresh)
+        register_metadata_refresh_task(
+            &mut tasks,
+            mission_id,
+            force_refresh,
+            task_id,
+            background_refresh,
+        )
     };
     if let Some(superseded) = registration.superseded {
         superseded.abort();
@@ -1423,16 +1453,21 @@ fn schedule_mission_metadata_refresh_for_milestone(
     events_tx: &broadcast::Sender<AgentEvent>,
     mission_id: Uuid,
 ) {
+    let task_id = MISSION_METADATA_REFRESH_TASK_ID.fetch_add(1, Ordering::Relaxed);
     let mission_store = Arc::clone(mission_store);
     let events_tx = events_tx.clone();
     let background_refresh = tokio::spawn(async move {
         refresh_mission_metadata_for_milestone(&mission_store, &events_tx, mission_id).await;
+        let mut tasks = MISSION_METADATA_REFRESH_TASKS
+            .lock()
+            .expect("metadata refresh task registry lock poisoned");
+        complete_metadata_refresh_task(&mut tasks, mission_id, task_id);
     });
     let registration = {
         let mut tasks = MISSION_METADATA_REFRESH_TASKS
             .lock()
             .expect("metadata refresh task registry lock poisoned");
-        register_metadata_refresh_task(&mut tasks, mission_id, true, background_refresh)
+        register_metadata_refresh_task(&mut tasks, mission_id, true, task_id, background_refresh)
     };
     if let Some(superseded) = registration.superseded {
         superseded.abort();
@@ -9552,7 +9587,7 @@ And the report:
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         });
         let first_task_id = first.id();
-        let registration = register_metadata_refresh_task(&mut tasks, mission_id, false, first);
+        let registration = register_metadata_refresh_task(&mut tasks, mission_id, false, 1, first);
         assert!(registration.superseded.is_none());
         assert_eq!(tasks.len(), 1);
         assert_eq!(
@@ -9564,7 +9599,7 @@ And the report:
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         });
         let second_task_id = second.id();
-        let registration = register_metadata_refresh_task(&mut tasks, mission_id, false, second);
+        let registration = register_metadata_refresh_task(&mut tasks, mission_id, false, 2, second);
         let replaced = registration
             .superseded
             .expect("expected previous task to be replaced");
@@ -9592,7 +9627,7 @@ And the report:
         });
         let forced_task_id = forced.id();
         let forced_registration =
-            register_metadata_refresh_task(&mut tasks, mission_id, true, forced);
+            register_metadata_refresh_task(&mut tasks, mission_id, true, 1, forced);
         assert!(forced_registration.superseded.is_none());
 
         let non_forced = tokio::spawn(async {
@@ -9600,7 +9635,7 @@ And the report:
         });
         let non_forced_task_id = non_forced.id();
         let non_forced_registration =
-            register_metadata_refresh_task(&mut tasks, mission_id, false, non_forced);
+            register_metadata_refresh_task(&mut tasks, mission_id, false, 2, non_forced);
         let rejected = non_forced_registration
             .superseded
             .expect("new non-forced task should be rejected");
@@ -9631,7 +9666,7 @@ And the report:
         });
         let non_forced_task_id = non_forced.id();
         let non_forced_registration =
-            register_metadata_refresh_task(&mut tasks, mission_id, false, non_forced);
+            register_metadata_refresh_task(&mut tasks, mission_id, false, 1, non_forced);
         assert!(non_forced_registration.superseded.is_none());
 
         let forced = tokio::spawn(async {
@@ -9639,7 +9674,7 @@ And the report:
         });
         let forced_task_id = forced.id();
         let forced_registration =
-            register_metadata_refresh_task(&mut tasks, mission_id, true, forced);
+            register_metadata_refresh_task(&mut tasks, mission_id, true, 2, forced);
         let replaced = forced_registration
             .superseded
             .expect("existing non-forced task should be replaced");
@@ -9658,6 +9693,23 @@ And the report:
         if let Some(active) = tasks.remove(&mission_id) {
             active.handle.abort();
         }
+    }
+
+    #[tokio::test]
+    async fn test_complete_metadata_refresh_task_only_removes_matching_generation() {
+        let mission_id = Uuid::new_v4();
+        let mut tasks: HashMap<Uuid, MetadataRefreshTaskEntry> = HashMap::new();
+
+        let task = tokio::spawn(async {});
+        let registration = register_metadata_refresh_task(&mut tasks, mission_id, false, 42, task);
+        assert!(registration.superseded.is_none());
+        assert_eq!(tasks.len(), 1);
+
+        complete_metadata_refresh_task(&mut tasks, mission_id, 41);
+        assert_eq!(tasks.len(), 1);
+
+        complete_metadata_refresh_task(&mut tasks, mission_id, 42);
+        assert!(tasks.is_empty());
     }
 
     #[test]

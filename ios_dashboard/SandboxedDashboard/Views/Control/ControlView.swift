@@ -3641,11 +3641,14 @@ private struct MissionSwitcherSheet: View {
                                 isRunning: true,
                                 runningState: info.state,
                                 isViewing: viewingMissionId == info.missionId,
-                                quickActions: mission != nil ? [.followUp] : [],
+                                quickActions: [.followUp],
                                 onSelect: { onSelectMission(info.missionId) },
                                 onQuickAction: { action in
-                                    guard let mission else { return }
-                                    handleQuickAction(action, for: mission)
+                                    handleRunningQuickAction(
+                                        action,
+                                        missionId: info.missionId,
+                                        mission: mission
+                                    )
                                 },
                                 onCancel: { onCancelMission(info.missionId) }
                             )
@@ -4047,6 +4050,30 @@ private struct MissionSwitcherSheet: View {
             onOpenFailureMission(mission.id)
         case .followUp:
             onFollowUpMission(mission)
+        }
+    }
+
+    private func handleRunningQuickAction(
+        _ action: MissionQuickAction,
+        missionId: String,
+        mission: Mission?
+    ) {
+        if let mission {
+            handleQuickAction(action, for: mission)
+            return
+        }
+        guard action == .followUp else { return }
+
+        Task {
+            do {
+                let hydratedMission = try await APIService.shared.getMission(id: missionId)
+                await MainActor.run {
+                    onFollowUpMission(hydratedMission)
+                }
+            } catch {
+                // If mission hydration fails, keep the sheet responsive and skip the action.
+                print("Failed to load mission for follow-up action: \(error)")
+            }
         }
     }
 }
