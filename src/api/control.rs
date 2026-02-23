@@ -2411,6 +2411,7 @@ pub struct MissionMomentSearchResult {
 pub struct MissionSearchCacheEntry {
     pub cached_at: std::time::Instant,
     pub freshness_key: u64,
+    pub head_fingerprint: u64,
     pub results: Vec<MissionSearchResult>,
 }
 
@@ -2434,6 +2435,24 @@ fn mission_search_freshness_key(missions: &[MissionSearchCandidate], page_size: 
     hasher.finish()
 }
 
+async fn mission_search_head_fingerprint(
+    mission_store: &Arc<dyn MissionStore>,
+) -> Result<u64, String> {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let head = mission_store.list_missions(1, 0).await?;
+    if let Some(mission) = head.first() {
+        mission.id.hash(&mut hasher);
+        mission.updated_at.hash(&mut hasher);
+        mission.metadata_updated_at.hash(&mut hasher);
+        mission.title.hash(&mut hasher);
+        mission.short_description.hash(&mut hasher);
+        mission.workspace_name.hash(&mut hasher);
+    } else {
+        0usize.hash(&mut hasher);
+    }
+    Ok(hasher.finish())
+}
+
 /// Search missions with semantic-aware ranking.
 pub async fn search_missions(
     State(state): State<Arc<AppState>>,
@@ -2448,11 +2467,16 @@ pub async fn search_missions(
     let limit = params.limit.unwrap_or(20).clamp(1, 100);
     let query_hash = mission_search_query_hash(query);
     let control = control_for_user(&state, &user).await;
+    let head_fingerprint = mission_search_head_fingerprint(&control.mission_store)
+        .await
+        .map_err(internal_error)?;
     if let Some(cached_results) = {
         const MISSION_SEARCH_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(5);
         let cache = control.mission_search_cache.read().await;
         cache.get(&query_hash).and_then(|entry| {
-            if entry.cached_at.elapsed() <= MISSION_SEARCH_CACHE_TTL {
+            if entry.cached_at.elapsed() <= MISSION_SEARCH_CACHE_TTL
+                && entry.head_fingerprint == head_fingerprint
+            {
                 Some(entry.results.clone())
             } else {
                 None
@@ -2515,6 +2539,7 @@ pub async fn search_missions(
             MissionSearchCacheEntry {
                 cached_at: std::time::Instant::now(),
                 freshness_key,
+                head_fingerprint,
                 results: scored.clone(),
             },
         );
@@ -8484,6 +8509,44 @@ And the report:
             100,
         );
 
+        assert_ne!(before, after);
+    }
+
+    #[tokio::test]
+    async fn test_mission_search_head_fingerprint_changes_on_metadata_update() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = store
+            .create_mission(
+                Some("Investigate cache drift"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("mission should be created");
+
+        let before = mission_search_head_fingerprint(&store)
+            .await
+            .expect("head fingerprint should be computed");
+
+        store
+            .update_mission_metadata(
+                mission.id,
+                Some(Some("Investigate cache drift")),
+                Some(Some("Updated metadata")),
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("metadata update should succeed");
+
+        let after = mission_search_head_fingerprint(&store)
+            .await
+            .expect("head fingerprint should be computed");
         assert_ne!(before, after);
     }
 
