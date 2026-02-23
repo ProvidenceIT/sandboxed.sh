@@ -3638,7 +3638,7 @@ private struct MissionSwitcherSheet: View {
                                 isRunning: true,
                                 runningState: info.state,
                                 isViewing: viewingMissionId == info.missionId,
-                                quickActions: mission.map { missionQuickActions(for: $0) } ?? [],
+                                quickActions: mission.map { missionQuickActions(for: $0, isRunning: true) } ?? [],
                                 onSelect: { onSelectMission(info.missionId) },
                                 onQuickAction: { action in
                                     guard let mission else { return }
@@ -4006,7 +4006,11 @@ private struct MissionSwitcherSheet: View {
         return max(score, metadataScore)
     }
 
-    private func missionQuickActions(for mission: Mission) -> [MissionQuickAction] {
+    private func missionQuickActions(for mission: Mission, isRunning: Bool = false) -> [MissionQuickAction] {
+        if isRunning {
+            return [.followUp]
+        }
+
         var actions: [MissionQuickAction] = []
         if mission.status == .failed {
             actions.append(.openFailure)
