@@ -176,10 +176,14 @@ fn extract_short_description_from_history(
         .or_else(|| history.iter().find(|(role, _)| role == "assistant"))
         .map(|(_, content)| content.as_str())?;
 
-    let first_line = source
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty() && !line.starts_with("```"))?;
+    let mut inside_fenced_block = false;
+    let first_line = source.lines().map(str::trim).find(|line| {
+        if line.starts_with("```") {
+            inside_fenced_block = !inside_fenced_block;
+            return false;
+        }
+        !inside_fenced_block && !line.is_empty()
+    })?;
 
     let collapsed = first_line.split_whitespace().collect::<Vec<_>>().join(" ");
     if collapsed.is_empty() {
@@ -7237,6 +7241,23 @@ And the report:
         let history = vec![("user".to_string(), "Hi".to_string())];
         let extracted = extract_short_description_from_history(&history, 160);
         assert_eq!(extracted.as_deref(), Some("Hi"));
+    }
+
+    #[test]
+    fn test_extract_short_description_from_history_skips_fenced_code_blocks() {
+        let history = vec![(
+            "user".to_string(),
+            "```rust\nfn main() {}\n```\nInvestigate rust build failure".to_string(),
+        )];
+        let extracted = extract_short_description_from_history(&history, 160);
+        assert_eq!(extracted.as_deref(), Some("Investigate rust build failure"));
+    }
+
+    #[test]
+    fn test_extract_short_description_from_history_returns_none_for_code_only_message() {
+        let history = vec![("user".to_string(), "```bash\necho test\n```".to_string())];
+        let extracted = extract_short_description_from_history(&history, 160);
+        assert_eq!(extracted, None);
     }
 
     #[test]
