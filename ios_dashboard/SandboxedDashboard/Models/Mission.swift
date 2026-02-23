@@ -75,6 +75,9 @@ struct Mission: Codable, Identifiable, Hashable {
     var title: String?
     var shortDescription: String?
     var metadataUpdatedAt: String?
+    var metadataSource: String?
+    var metadataModel: String?
+    var metadataVersion: String?
     let workspaceId: String?
     let workspaceName: String?
     let agent: String?
@@ -97,6 +100,9 @@ struct Mission: Codable, Identifiable, Hashable {
         case id, status, title, history, resumable, agent, backend
         case shortDescription = "short_description"
         case metadataUpdatedAt = "metadata_updated_at"
+        case metadataSource = "metadata_source"
+        case metadataModel = "metadata_model"
+        case metadataVersion = "metadata_version"
         case workspaceId = "workspace_id"
         case workspaceName = "workspace_name"
         case createdAt = "created_at"
@@ -111,6 +117,9 @@ struct Mission: Codable, Identifiable, Hashable {
         title = try container.decodeIfPresent(String.self, forKey: .title)
         shortDescription = try container.decodeIfPresent(String.self, forKey: .shortDescription)
         metadataUpdatedAt = try container.decodeIfPresent(String.self, forKey: .metadataUpdatedAt)
+        metadataSource = try container.decodeIfPresent(String.self, forKey: .metadataSource)
+        metadataModel = try container.decodeIfPresent(String.self, forKey: .metadataModel)
+        metadataVersion = try container.decodeIfPresent(String.self, forKey: .metadataVersion)
         workspaceId = try container.decodeIfPresent(String.self, forKey: .workspaceId)
         workspaceName = try container.decodeIfPresent(String.self, forKey: .workspaceName)
         agent = try container.decodeIfPresent(String.self, forKey: .agent)

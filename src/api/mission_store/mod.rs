@@ -31,6 +31,12 @@ pub struct Mission {
     pub short_description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata_updated_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata_model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata_version: Option<String>,
     /// Workspace ID where this mission runs (defaults to host workspace)
     #[serde(default = "default_workspace_id")]
     pub workspace_id: Uuid,
@@ -366,6 +372,9 @@ pub trait MissionStore: Send + Sync {
         id: Uuid,
         title: Option<&str>,
         short_description: Option<&str>,
+        metadata_source: Option<&str>,
+        metadata_model: Option<&str>,
+        metadata_version: Option<&str>,
     ) -> Result<(), String>;
 
     /// Update mission session ID (for backends like Amp that generate their own IDs).

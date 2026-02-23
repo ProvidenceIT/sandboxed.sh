@@ -64,6 +64,9 @@ impl MissionStore for InMemoryMissionStore {
             title: title.map(|s| s.to_string()),
             short_description: None,
             metadata_updated_at: None,
+            metadata_source: None,
+            metadata_model: None,
+            metadata_version: None,
             workspace_id: workspace_id.unwrap_or(crate::workspace::DEFAULT_WORKSPACE_ID),
             workspace_name: None,
             agent: agent.map(|s| s.to_string()),
@@ -163,8 +166,16 @@ impl MissionStore for InMemoryMissionStore {
         id: Uuid,
         title: Option<&str>,
         short_description: Option<&str>,
+        metadata_source: Option<&str>,
+        metadata_model: Option<&str>,
+        metadata_version: Option<&str>,
     ) -> Result<(), String> {
-        if title.is_none() && short_description.is_none() {
+        if title.is_none()
+            && short_description.is_none()
+            && metadata_source.is_none()
+            && metadata_model.is_none()
+            && metadata_version.is_none()
+        {
             return Ok(());
         }
 
@@ -178,6 +189,15 @@ impl MissionStore for InMemoryMissionStore {
         }
         if let Some(short_description) = short_description {
             mission.short_description = Some(short_description.to_string());
+        }
+        if let Some(metadata_source) = metadata_source {
+            mission.metadata_source = Some(metadata_source.to_string());
+        }
+        if let Some(metadata_model) = metadata_model {
+            mission.metadata_model = Some(metadata_model.to_string());
+        }
+        if let Some(metadata_version) = metadata_version {
+            mission.metadata_version = Some(metadata_version.to_string());
         }
         let now = now_string();
         mission.metadata_updated_at = Some(now.clone());
@@ -301,7 +321,14 @@ mod tests {
             .expect("create mission");
 
         store
-            .update_mission_metadata(mission.id, Some("Renamed"), Some("Short summary"))
+            .update_mission_metadata(
+                mission.id,
+                Some("Renamed"),
+                Some("Short summary"),
+                Some("backend_heuristic"),
+                None,
+                Some("v1"),
+            )
             .await
             .expect("set metadata");
 
@@ -317,7 +344,7 @@ mod tests {
         let updated_at = after_set.updated_at.clone();
 
         store
-            .update_mission_metadata(mission.id, None, None)
+            .update_mission_metadata(mission.id, None, None, None, None, None)
             .await
             .expect("noop metadata update");
 
@@ -332,6 +359,12 @@ mod tests {
             after_noop.short_description.as_deref(),
             Some("Short summary")
         );
+        assert_eq!(
+            after_noop.metadata_source.as_deref(),
+            Some("backend_heuristic")
+        );
+        assert_eq!(after_noop.metadata_model.as_deref(), None);
+        assert_eq!(after_noop.metadata_version.as_deref(), Some("v1"));
         assert_eq!(
             after_noop.metadata_updated_at.as_deref(),
             Some(metadata_updated_at.as_str())

@@ -365,6 +365,9 @@ export type ControlAgentEvent =
       title?: string | null;
       short_description?: string | null;
       metadata_updated_at?: string | null;
+      metadata_source?: string | null;
+      metadata_model?: string | null;
+      metadata_version?: string | null;
     }
   | { type: "error"; message: string; mission_id?: string };
 

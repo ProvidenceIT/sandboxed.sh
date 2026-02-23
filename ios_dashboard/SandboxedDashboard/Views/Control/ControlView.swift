@@ -1956,20 +1956,32 @@ struct ControlView: View {
                 let hasTitle = data.keys.contains("title")
                 let hasShortDescription = data.keys.contains("short_description")
                 let hasMetadataUpdatedAt = data.keys.contains("metadata_updated_at")
+                let hasMetadataSource = data.keys.contains("metadata_source")
+                let hasMetadataModel = data.keys.contains("metadata_model")
+                let hasMetadataVersion = data.keys.contains("metadata_version")
                 let title = data["title"] as? String
                 let shortDescription = data["short_description"] as? String
                 let metadataUpdatedAt = data["metadata_updated_at"] as? String
+                let metadataSource = data["metadata_source"] as? String
+                let metadataModel = data["metadata_model"] as? String
+                let metadataVersion = data["metadata_version"] as? String
 
                 if viewingMissionId == missionId {
                     if hasTitle { viewingMission?.title = title }
                     if hasShortDescription { viewingMission?.shortDescription = shortDescription }
                     if hasMetadataUpdatedAt { viewingMission?.metadataUpdatedAt = metadataUpdatedAt }
+                    if hasMetadataSource { viewingMission?.metadataSource = metadataSource }
+                    if hasMetadataModel { viewingMission?.metadataModel = metadataModel }
+                    if hasMetadataVersion { viewingMission?.metadataVersion = metadataVersion }
                 }
 
                 if currentMission?.id == missionId {
                     if hasTitle { currentMission?.title = title }
                     if hasShortDescription { currentMission?.shortDescription = shortDescription }
                     if hasMetadataUpdatedAt { currentMission?.metadataUpdatedAt = metadataUpdatedAt }
+                    if hasMetadataSource { currentMission?.metadataSource = metadataSource }
+                    if hasMetadataModel { currentMission?.metadataModel = metadataModel }
+                    if hasMetadataVersion { currentMission?.metadataVersion = metadataVersion }
                 }
 
                 if !isHistoricalReplay {
