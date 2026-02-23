@@ -144,11 +144,30 @@ fn activity_label_from_tool_call(tool_name: &str, args: &serde_json::Value) -> S
 /// Extract a concise title from the assistant's first response.
 /// Returns the first substantive line, cleaned of markdown formatting.
 fn extract_title_from_assistant(content: &str) -> Option<String> {
-    // Find the first non-trivial line that isn't a code fence
-    let first_line = content
-        .lines()
-        .map(|l| l.trim())
-        .find(|l| l.len() > 5 && !l.starts_with("```"))?;
+    let lines: Vec<&str> = content.lines().collect();
+    let mut inside_fenced_block = false;
+    let mut first_line: Option<&str> = None;
+    for idx in 0..lines.len() {
+        let line = lines[idx].trim();
+        if line.starts_with("```") {
+            if inside_fenced_block {
+                inside_fenced_block = false;
+                continue;
+            }
+            let has_closing_fence = lines[(idx + 1)..]
+                .iter()
+                .any(|candidate| candidate.trim().starts_with("```"));
+            if has_closing_fence {
+                inside_fenced_block = true;
+            }
+            continue;
+        }
+        if !inside_fenced_block && !line.is_empty() {
+            first_line = Some(line);
+            break;
+        }
+    }
+    let first_line = first_line?;
 
     // Strip markdown prefixes
     let cleaned = first_line.trim_start_matches(['#', '*', '-', ' ']).trim();
@@ -9223,6 +9242,20 @@ And the report:
         )];
         let extracted = extract_short_description_from_history(&history, 160);
         assert_eq!(extracted.as_deref(), Some("Investigate flaky CI timeout"));
+    }
+
+    #[test]
+    fn test_extract_title_from_assistant_skips_fenced_code_blocks() {
+        let title = extract_title_from_assistant(
+            "```rust\nfn main() {}\n```\nFix flaky CI timeout handling",
+        );
+        assert_eq!(title.as_deref(), Some("Fix flaky CI timeout handling"));
+    }
+
+    #[test]
+    fn test_extract_title_from_assistant_returns_none_for_code_only_message() {
+        let title = extract_title_from_assistant("```bash\necho test\n```");
+        assert_eq!(title, None);
     }
 
     #[test]
