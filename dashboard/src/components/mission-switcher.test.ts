@@ -265,11 +265,15 @@ describe('mission switcher search helpers', () => {
     ]);
   });
 
-  it('does not expose quick action for non-resumable or running missions', () => {
+  it('does not expose resume quick action for non-resumable interrupted missions', () => {
     const mission = buildMission({ status: 'interrupted', resumable: false });
 
     expect(getMissionQuickActions(mission, false).map((a) => a.label)).toEqual(['Follow-up']);
-    expect(getMissionQuickActions({ ...mission, resumable: true }, true)).toEqual([]);
+  });
+
+  it('exposes follow-up quick action for running missions', () => {
+    const mission = buildMission({ status: 'active', resumable: true });
+    expect(getMissionQuickActions(mission, true).map((a) => a.label)).toEqual(['Follow-up']);
   });
 
   it('still exposes failure jump action for non-resumable failed missions', () => {

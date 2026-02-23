@@ -113,7 +113,15 @@ export interface MissionQuickAction {
 }
 
 export function getMissionQuickActions(mission: Mission, isRunning: boolean): MissionQuickAction[] {
-  if (isRunning) return [];
+  if (isRunning) {
+    return [
+      {
+        action: 'follow_up',
+        label: 'Follow-up',
+        title: 'Start a follow-up mission from this context',
+      },
+    ];
+  }
 
   const actions: MissionQuickAction[] = [];
   if (mission.status === 'failed') {
