@@ -72,6 +72,10 @@ function getMissionBackendLabel(mission: Mission): string {
   return backend;
 }
 
+function getMissionStatusLabel(mission: Mission): string {
+  return STATUS_LABELS[mission.status] ?? mission.status ?? 'Unknown';
+}
+
 function getMissionSearchText(mission: Mission): string {
   const title = getMissionCardTitle(mission) ?? '';
   const shortDescription = mission.short_description?.trim() ?? '';
@@ -432,7 +436,7 @@ export function MissionSwitcher({
                           : isRunning
                           ? runningInfo?.state || 'running'
                           : mission
-                          ? `${STATUS_LABELS[mission.status]} · ${getMissionBackendLabel(mission)}`
+                          ? `${getMissionStatusLabel(mission)} · ${getMissionBackendLabel(mission)}`
                           : ''}
                       </span>
 
