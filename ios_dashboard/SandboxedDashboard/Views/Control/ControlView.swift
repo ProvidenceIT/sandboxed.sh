@@ -3638,7 +3638,7 @@ private struct MissionSwitcherSheet: View {
                                 isRunning: true,
                                 runningState: info.state,
                                 isViewing: viewingMissionId == info.missionId,
-                                quickActions: mission.map { missionQuickActions(for: $0, isRunning: true) } ?? [],
+                                quickActions: mission != nil ? [.followUp] : [],
                                 onSelect: { onSelectMission(info.missionId) },
                                 onQuickAction: { action in
                                     guard let mission else { return }

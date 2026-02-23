@@ -1118,12 +1118,15 @@ async fn generate_mission_metadata_updates(
         .unwrap_or(true);
     let should_refresh = force_refresh || history.len().is_multiple_of(10);
     let has_assistant_reply = history.iter().any(|(role, _)| role == "assistant");
-    let should_bootstrap_from_first_assistant = title_missing && has_assistant_reply;
+    let should_bootstrap_title_from_first_assistant = title_missing && has_assistant_reply;
+    let should_bootstrap_short_description_from_first_assistant =
+        has_assistant_reply && (short_description_missing || title_missing) && !should_refresh;
 
     if !title_missing
         && !short_description_missing
         && !should_refresh
-        && !should_bootstrap_from_first_assistant
+        && !should_bootstrap_title_from_first_assistant
+        && !should_bootstrap_short_description_from_first_assistant
     {
         return (None, None);
     }
@@ -1135,7 +1138,7 @@ async fn generate_mission_metadata_updates(
             .find(|(role, _)| role == "assistant")
             .and_then(|(_, content)| extract_title_from_assistant(content))
             .or_else(|| {
-                if title_missing && has_assistant_reply {
+                if should_bootstrap_title_from_first_assistant {
                     fallback_user_content.map(|user_content| {
                         if user_content.len() > 100 {
                             let safe_end = safe_truncate_index(user_content, 100);
@@ -1167,9 +1170,9 @@ async fn generate_mission_metadata_updates(
 
     let short_description_candidate = if short_description_missing
         || should_refresh
-        || should_bootstrap_from_first_assistant
+        || should_bootstrap_short_description_from_first_assistant
     {
-        if should_bootstrap_from_first_assistant && !short_description_missing && !should_refresh {
+        if should_bootstrap_short_description_from_first_assistant {
             extract_short_description_from_role(history, "assistant", 160)
                 .or_else(|| extract_short_description_from_history(history, 160))
         } else {
@@ -8622,7 +8625,48 @@ And the report:
         );
         assert_eq!(
             updated_short_description.as_deref(),
-            Some("Investigate oauth callback timeout in production")
+            Some("Investigate oauth callback timeout root cause")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_generate_mission_metadata_updates_prefers_assistant_short_description_when_title_exists(
+    ) {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = store
+            .create_mission(
+                Some("Existing mission title"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("create mission");
+        let history = vec![
+            ("user".to_string(), "Hi".to_string()),
+            (
+                "assistant".to_string(),
+                "Investigate oauth callback timeout root cause and retry behavior.".to_string(),
+            ),
+        ];
+
+        let (updated_title, updated_short_description) = generate_mission_metadata_updates(
+            &store,
+            mission.id,
+            &mission,
+            &history,
+            history.first().map(|(_, content)| content.as_str()),
+            false,
+        )
+        .await;
+
+        assert_eq!(updated_title, None);
+        assert_eq!(
+            updated_short_description.as_deref(),
+            Some("Investigate oauth callback timeout root cause and retry behavior.")
         );
     }
 

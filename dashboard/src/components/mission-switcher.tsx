@@ -577,6 +577,7 @@ export function MissionSwitcher({
   const dialogRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const focusTimeoutRef = useRef<number | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [loadingMissionId, setLoadingMissionId] = useState<string | null>(null);
@@ -737,10 +738,25 @@ export function MissionSwitcher({
       setSelectedIndex(0);
       setLoadingMissionId(null);
       // Focus input after animation
-      setTimeout(() => inputRef.current?.focus(), 50);
+      if (focusTimeoutRef.current !== null) {
+        window.clearTimeout(focusTimeoutRef.current);
+      }
+      focusTimeoutRef.current = window.setTimeout(() => {
+        inputRef.current?.focus();
+        focusTimeoutRef.current = null;
+      }, 50);
       // Refresh missions list
       onRefresh?.();
+    } else if (focusTimeoutRef.current !== null) {
+      window.clearTimeout(focusTimeoutRef.current);
+      focusTimeoutRef.current = null;
     }
+    return () => {
+      if (focusTimeoutRef.current !== null) {
+        window.clearTimeout(focusTimeoutRef.current);
+        focusTimeoutRef.current = null;
+      }
+    };
   }, [open, onRefresh]);
 
   // Reset selected index when filter changes

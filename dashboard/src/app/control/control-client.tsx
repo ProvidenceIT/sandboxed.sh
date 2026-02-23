@@ -4472,7 +4472,16 @@ export default function ControlClient() {
         if (targetId) {
           focusChatItem(targetId, best.entry_index);
         } else {
-          toast.error("Could not locate the target moment in loaded history");
+          // Ensure older history is visible before failing deep-link focus.
+          setVisibleItemsLimit((prev) => Math.max(prev, groupedItems.length));
+          requestAnimationFrame(() => {
+            const retryTargetId = findChatItemIdForEntryIndex(best.entry_index, best.snippet);
+            if (retryTargetId) {
+              focusChatItem(retryTargetId, best.entry_index);
+            } else {
+              toast.error("Could not locate the target moment in loaded history");
+            }
+          });
         }
         router.replace(`/control?mission=${missionFromQuery}`, { scroll: false });
       } catch (err) {
@@ -4490,7 +4499,14 @@ export default function ControlClient() {
     return () => {
       cancelled = true;
     };
-  }, [searchParams, viewingMission, router, focusChatItem, findChatItemIdForEntryIndex]);
+  }, [
+    searchParams,
+    viewingMission,
+    router,
+    focusChatItem,
+    findChatItemIdForEntryIndex,
+    groupedItems.length,
+  ]);
 
   // Sync viewingMissionId with currentMission only when there's no explicit viewing mission set
   useEffect(() => {
