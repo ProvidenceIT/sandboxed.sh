@@ -1595,6 +1595,7 @@ struct ControlView: View {
         let isGlobalEvent = type == "status"
             || type == "mission_status_changed"
             || type == "mission_title_changed"
+            || type == "mission_metadata_updated"
         if !isGlobalEvent {
             if let eventId = eventMissionId {
                 // Event has a mission_id
@@ -1945,6 +1946,29 @@ struct ControlView: View {
                 }
 
                 // Refresh running missions list so the bar picks up the new title
+                if !isHistoricalReplay {
+                    Task { await refreshRunningMissions() }
+                }
+            }
+
+        case "mission_metadata_updated":
+            if let missionId = data["mission_id"] as? String {
+                let title = data["title"] as? String
+                let shortDescription = data["short_description"] as? String
+                let metadataUpdatedAt = data["metadata_updated_at"] as? String
+
+                if viewingMissionId == missionId {
+                    if let title { viewingMission?.title = title }
+                    if let shortDescription { viewingMission?.shortDescription = shortDescription }
+                    if let metadataUpdatedAt { viewingMission?.metadataUpdatedAt = metadataUpdatedAt }
+                }
+
+                if currentMission?.id == missionId {
+                    if let title { currentMission?.title = title }
+                    if let shortDescription { currentMission?.shortDescription = shortDescription }
+                    if let metadataUpdatedAt { currentMission?.metadataUpdatedAt = metadataUpdatedAt }
+                }
+
                 if !isHistoricalReplay {
                     Task { await refreshRunningMissions() }
                 }

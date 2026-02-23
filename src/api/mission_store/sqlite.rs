@@ -1591,6 +1591,23 @@ impl MissionStore for SqliteMissionStore {
                 summary.clone().unwrap_or_default(),
                 serde_json::json!({ "status": status.to_string() }),
             ),
+            AgentEvent::MissionMetadataUpdated {
+                title,
+                short_description,
+                metadata_updated_at,
+                ..
+            } => (
+                "mission_metadata_updated",
+                None,
+                None,
+                None,
+                title.clone().unwrap_or_default(),
+                serde_json::json!({
+                    "title": title,
+                    "short_description": short_description,
+                    "metadata_updated_at": metadata_updated_at
+                }),
+            ),
             // Skip events that are less important for debugging
             AgentEvent::Status { .. }
             | AgentEvent::AgentPhase { .. }

@@ -215,6 +215,13 @@ fn normalize_metadata_text(text: &str) -> String {
         .join(" ")
 }
 
+fn normalize_raw_title_for_dedupe(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
 fn strip_numeric_title_suffix(title: &str) -> &str {
     let trimmed = title.trim();
     if !trimmed.ends_with(')') {
@@ -284,6 +291,8 @@ async fn disambiguate_generated_title(
 
     let mut exact_titles = HashSet::new();
     let mut canonical_titles = HashSet::new();
+    let mut raw_titles = HashSet::new();
+    let mut canonical_raw_titles = HashSet::new();
 
     let mut offset = 0;
     while offset < TITLE_DEDUPE_MAX_SCAN {
@@ -307,6 +316,16 @@ async fn disambiguate_generated_title(
                 continue;
             }
             if let Some(existing_title) = &mission.title {
+                let raw = normalize_raw_title_for_dedupe(existing_title);
+                if !raw.is_empty() {
+                    raw_titles.insert(raw);
+                }
+                let canonical_raw =
+                    normalize_raw_title_for_dedupe(strip_numeric_title_suffix(existing_title));
+                if !canonical_raw.is_empty() {
+                    canonical_raw_titles.insert(canonical_raw);
+                }
+
                 let normalized = normalize_metadata_text(existing_title);
                 if !normalized.is_empty() {
                     exact_titles.insert(normalized);
@@ -332,11 +351,29 @@ async fn disambiguate_generated_title(
     }
 
     let candidate_exact = normalize_metadata_text(base_title);
-    if candidate_exact.is_empty() {
-        return base_title.to_string();
-    }
+    let candidate_raw = normalize_raw_title_for_dedupe(base_title);
     let candidate_canonical = canonical_title_key(base_title);
-    let has_duplicate = if candidate_canonical.is_empty() {
+    let candidate_canonical_raw =
+        normalize_raw_title_for_dedupe(strip_numeric_title_suffix(base_title));
+
+    let is_taken = |candidate: &str| {
+        let normalized = normalize_metadata_text(candidate);
+        let raw = normalize_raw_title_for_dedupe(candidate);
+        let normalized_match = !normalized.is_empty() && exact_titles.contains(&normalized);
+        let raw_match = !raw.is_empty() && raw_titles.contains(&raw);
+        normalized_match || raw_match
+    };
+
+    let has_duplicate = if candidate_exact.is_empty() {
+        if candidate_raw.is_empty() {
+            false
+        } else if candidate_canonical_raw.is_empty() {
+            raw_titles.contains(&candidate_raw)
+        } else {
+            raw_titles.contains(&candidate_raw)
+                || canonical_raw_titles.contains(&candidate_canonical_raw)
+        }
+    } else if candidate_canonical.is_empty() {
         exact_titles.contains(&candidate_exact)
     } else {
         exact_titles.contains(&candidate_exact) || canonical_titles.contains(&candidate_canonical)
@@ -347,7 +384,7 @@ async fn disambiguate_generated_title(
 
     for idx in 2..100 {
         let candidate = format!("{} ({})", base_title, idx);
-        if !exact_titles.contains(&normalize_metadata_text(&candidate)) {
+        if !is_taken(&candidate) {
             return candidate;
         }
     }
@@ -1090,6 +1127,16 @@ pub enum AgentEvent {
     },
     /// Mission title changed (by user)
     MissionTitleChanged { mission_id: Uuid, title: String },
+    /// Mission metadata changed (title/short description refresh)
+    MissionMetadataUpdated {
+        mission_id: Uuid,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        short_description: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        metadata_updated_at: Option<String>,
+    },
     /// Agent phase update (for showing preparation steps)
     AgentPhase {
         /// Phase name: "executing", "delegating", etc.
@@ -1222,6 +1269,7 @@ impl AgentEvent {
             AgentEvent::SessionIdUpdate { .. } => "session_id_update",
             AgentEvent::MissionActivity { .. } => "mission_activity",
             AgentEvent::MissionTitleChanged { .. } => "mission_title_changed",
+            AgentEvent::MissionMetadataUpdated { .. } => "mission_metadata_updated",
         }
     }
 
@@ -1242,6 +1290,7 @@ impl AgentEvent {
             AgentEvent::SessionIdUpdate { mission_id, .. } => Some(*mission_id),
             AgentEvent::MissionActivity { mission_id, .. } => *mission_id,
             AgentEvent::MissionTitleChanged { mission_id, .. } => Some(*mission_id),
+            AgentEvent::MissionMetadataUpdated { mission_id, .. } => Some(*mission_id),
         }
     }
 }
@@ -3596,6 +3645,7 @@ async fn control_actor_loop(
     // Helper to persist history to a specific mission ID
     async fn persist_mission_history_to(
         mission_store: &Arc<dyn MissionStore>,
+        events_tx: &broadcast::Sender<AgentEvent>,
         mission_id: Option<Uuid>,
         history: &[(String, String)],
     ) {
@@ -3635,6 +3685,34 @@ async fn control_actor_loop(
                         .await
                     {
                         tracing::warn!("Failed to update mission metadata: {}", e);
+                    } else {
+                        match mission_store.get_mission(mid).await {
+                            Ok(Some(updated)) => {
+                                let _ = events_tx.send(AgentEvent::MissionMetadataUpdated {
+                                    mission_id: mid,
+                                    title: updated.title.clone(),
+                                    short_description: updated.short_description.clone(),
+                                    metadata_updated_at: updated.metadata_updated_at.clone(),
+                                });
+                                if generated_title.is_some() {
+                                    if let Some(title) = updated.title {
+                                        let _ = events_tx.send(AgentEvent::MissionTitleChanged {
+                                            mission_id: mid,
+                                            title,
+                                        });
+                                    }
+                                }
+                            }
+                            Ok(None) => {
+                                tracing::warn!("Mission {} disappeared after metadata update", mid);
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to reload mission metadata after update: {}",
+                                    e
+                                );
+                            }
+                        }
                     }
                 }
             }
@@ -3644,11 +3722,12 @@ async fn control_actor_loop(
     // Helper to persist history to current mission (wrapper for backwards compatibility)
     async fn persist_mission_history(
         mission_store: &Arc<dyn MissionStore>,
+        events_tx: &broadcast::Sender<AgentEvent>,
         current_mission: &Arc<RwLock<Option<Uuid>>>,
         history: &[(String, String)],
     ) {
         let mission_id = *current_mission.read().await;
-        persist_mission_history_to(mission_store, mission_id, history).await;
+        persist_mission_history_to(mission_store, events_tx, mission_id, history).await;
     }
 
     fn parse_tool_result_object(result: &serde_json::Value) -> Option<serde_json::Value> {
@@ -4116,7 +4195,13 @@ async fn control_actor_loop(
                                 if !main_is_running {
                                     if mission_id != Some(tid) {
                                         // Switch main session to target mission
-                                        persist_mission_history(&mission_store, &current_mission, &history).await;
+                                        persist_mission_history(
+                                            &mission_store,
+                                            &events_tx,
+                                            &current_mission,
+                                            &history,
+                                        )
+                                        .await;
                                         if let Ok(mission) = load_mission_record(&mission_store, tid).await {
                                             history.clear();
                                             for entry in &mission.history {
@@ -4231,7 +4316,12 @@ async fn control_actor_loop(
 
                                 // Immediately persist user message so it's visible when loading mission
                                 history.push(("user".to_string(), msg.clone()));
-                                persist_mission_history_to(&mission_store, msg_target_mid, &history)
+                                persist_mission_history_to(
+                                    &mission_store,
+                                    &events_tx,
+                                    msg_target_mid,
+                                    &history,
+                                )
                                     .await;
 
                                 let cfg = config.clone();
@@ -4372,6 +4462,7 @@ async fn control_actor_loop(
                         // First persist current mission history
                         persist_mission_history(
                             &mission_store,
+                            &events_tx,
                             &current_mission,
                             &history,
                         )
@@ -4418,6 +4509,7 @@ async fn control_actor_loop(
                         // First persist current mission history
                         persist_mission_history(
                             &mission_store,
+                            &events_tx,
                             &current_mission,
                             &history,
                         )
@@ -4693,6 +4785,7 @@ async fn control_actor_loop(
                                 // First persist current mission history (if any)
                                 persist_mission_history(
                                     &mission_store,
+                                    &events_tx,
                                     &current_mission,
                                     &history,
                                 )
@@ -4832,6 +4925,7 @@ async fn control_actor_loop(
                                 if current_mid == Some(mission_id) {
                                     persist_mission_history(
                                         &mission_store,
+                                        &events_tx,
                                         &current_mission,
                                         &history,
                                     )
@@ -5116,6 +5210,45 @@ async fn control_actor_loop(
                                                     "Failed to update mission metadata: {}",
                                                     e
                                                 );
+                                            } else {
+                                                match mission_store.get_mission(mid).await {
+                                                    Ok(Some(updated)) => {
+                                                        let _ = events_tx.send(
+                                                            AgentEvent::MissionMetadataUpdated {
+                                                                mission_id: mid,
+                                                                title: updated.title.clone(),
+                                                                short_description: updated
+                                                                    .short_description
+                                                                    .clone(),
+                                                                metadata_updated_at: updated
+                                                                    .metadata_updated_at
+                                                                .clone(),
+                                                            },
+                                                        );
+                                                        if generated_title.is_some() {
+                                                            if let Some(title) = updated.title {
+                                                                let _ = events_tx.send(
+                                                                    AgentEvent::MissionTitleChanged {
+                                                                        mission_id: mid,
+                                                                        title,
+                                                                    },
+                                                                );
+                                                            }
+                                                        }
+                                                    }
+                                                    Ok(None) => {
+                                                        tracing::warn!(
+                                                            "Mission {} disappeared after metadata update",
+                                                            mid
+                                                        );
+                                                    }
+                                                    Err(e) => {
+                                                        tracing::warn!(
+                                                            "Failed to reload mission metadata after update: {}",
+                                                            e
+                                                        );
+                                                    }
+                                                }
                                             }
                                         }
                                     }
@@ -5363,7 +5496,12 @@ async fn control_actor_loop(
 
                     // Immediately persist user message so it's visible when loading mission
                     history.push(("user".to_string(), msg.clone()));
-                    persist_mission_history_to(&mission_store, msg_target_mid, &history)
+                    persist_mission_history_to(
+                        &mission_store,
+                        &events_tx,
+                        msg_target_mid,
+                        &history,
+                    )
                         .await;
 
                     let cfg = config.clone();
@@ -7151,6 +7289,22 @@ And the report:
         let disambiguated =
             disambiguate_generated_title(&store, probe_id, "Need unique title").await;
         assert_eq!(disambiguated, "Need unique title (2)");
+    }
+
+    #[tokio::test]
+    async fn test_disambiguate_generated_title_handles_punctuation_only_titles() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let existing = store
+            .create_mission(Some("!!!"), None, None, None, None, None, None)
+            .await
+            .expect("create mission");
+        store
+            .create_mission(Some("!!! (2)"), None, None, None, None, None, None)
+            .await
+            .expect("create mission");
+
+        let disambiguated = disambiguate_generated_title(&store, existing.id, "!!!").await;
+        assert_eq!(disambiguated, "!!! (3)");
     }
 
     #[tokio::test]

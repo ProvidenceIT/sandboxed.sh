@@ -74,7 +74,7 @@ struct Mission: Codable, Identifiable, Hashable {
     var status: MissionStatus
     var title: String?
     var shortDescription: String?
-    let metadataUpdatedAt: String?
+    var metadataUpdatedAt: String?
     let workspaceId: String?
     let workspaceName: String?
     let agent: String?

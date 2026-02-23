@@ -52,15 +52,31 @@ function getMissionCardTitle(mission: Mission): string | null {
   return title;
 }
 
+function normalizeMetadataText(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function hasMeaningfulExtraTokens(baseText: string, candidateText: string): boolean {
+  const base = normalizeMetadataText(baseText);
+  const candidate = normalizeMetadataText(candidateText);
+  if (!candidate) return false;
+  if (!base) return true;
+
+  const baseTokens = new Set(base.split(' ').filter(Boolean));
+  const candidateTokens = candidate.split(' ').filter(Boolean);
+  return candidateTokens.some((token) => !baseTokens.has(token));
+}
+
 function getMissionCardDescription(mission: Mission, title?: string | null): string | null {
   const shortDescription = mission.short_description?.trim();
   if (!shortDescription) return null;
 
   const normalizedTitle = (title ?? '').trim();
-  if (
-    normalizedTitle &&
-    normalizedTitle.toLowerCase() === shortDescription.toLowerCase()
-  ) {
+  if (normalizedTitle && !hasMeaningfulExtraTokens(normalizedTitle, shortDescription)) {
     return null;
   }
   return shortDescription;
@@ -81,12 +97,21 @@ function getMissionSearchText(mission: Mission): string {
   const shortDescription = mission.short_description?.trim() ?? '';
   const backend = mission.backend?.trim() ?? '';
   const status = mission.status ?? '';
+  const textParts: string[] = [];
 
-  if (!shortDescription) return [title, backend, status].filter(Boolean).join(' ');
-  if (!title || title === shortDescription) {
-    return [shortDescription, backend, status].filter(Boolean).join(' ');
+  if (title) {
+    textParts.push(title);
   }
-  return [title, shortDescription, backend, status].filter(Boolean).join(' ');
+  if (shortDescription && (textParts.length === 0 || hasMeaningfulExtraTokens(title, shortDescription))) {
+    textParts.push(shortDescription);
+  }
+  if (backend) {
+    textParts.push(backend);
+  }
+  if (status) {
+    textParts.push(status);
+  }
+  return textParts.join(' ');
 }
 
 export function MissionSwitcher({
