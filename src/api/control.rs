@@ -273,17 +273,45 @@ const METADATA_SOURCE_BACKEND_HEURISTIC: &str = "backend_heuristic";
 const METADATA_VERSION_V1: &str = "v1";
 static MISSION_TITLE_UPDATE_LOCK: std::sync::LazyLock<Mutex<()>> =
     std::sync::LazyLock::new(|| Mutex::new(()));
+struct MetadataRefreshTaskEntry {
+    handle: tokio::task::JoinHandle<()>,
+    force_refresh: bool,
+}
+
+struct MetadataRefreshTaskRegistration {
+    superseded: Option<tokio::task::JoinHandle<()>>,
+}
+
 static MISSION_METADATA_REFRESH_TASKS: std::sync::LazyLock<
-    std::sync::Mutex<HashMap<Uuid, tokio::task::JoinHandle<()>>>,
+    std::sync::Mutex<HashMap<Uuid, MetadataRefreshTaskEntry>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 
 fn register_metadata_refresh_task(
-    tasks: &mut HashMap<Uuid, tokio::task::JoinHandle<()>>,
+    tasks: &mut HashMap<Uuid, MetadataRefreshTaskEntry>,
     mission_id: Uuid,
+    force_refresh: bool,
     handle: tokio::task::JoinHandle<()>,
-) -> Option<tokio::task::JoinHandle<()>> {
-    tasks.retain(|_, existing| !existing.is_finished());
-    tasks.insert(mission_id, handle)
+) -> MetadataRefreshTaskRegistration {
+    tasks.retain(|_, existing| !existing.handle.is_finished());
+
+    if let Some(existing) = tasks.get(&mission_id) {
+        if existing.force_refresh && !force_refresh {
+            return MetadataRefreshTaskRegistration {
+                superseded: Some(handle),
+            };
+        }
+    }
+
+    let replaced = tasks.insert(
+        mission_id,
+        MetadataRefreshTaskEntry {
+            handle,
+            force_refresh,
+        },
+    );
+    MetadataRefreshTaskRegistration {
+        superseded: replaced.map(|entry| entry.handle),
+    }
 }
 
 fn normalize_raw_title_for_dedupe(text: &str) -> String {
@@ -1371,14 +1399,14 @@ fn schedule_mission_metadata_refresh(
         refresh_mission_metadata_from_store(&mission_store, &events_tx, mission_id, force_refresh)
             .await;
     });
-    let replaced_task = {
+    let registration = {
         let mut tasks = MISSION_METADATA_REFRESH_TASKS
             .lock()
             .expect("metadata refresh task registry lock poisoned");
-        register_metadata_refresh_task(&mut tasks, mission_id, background_refresh)
+        register_metadata_refresh_task(&mut tasks, mission_id, force_refresh, background_refresh)
     };
-    if let Some(existing) = replaced_task {
-        existing.abort();
+    if let Some(superseded) = registration.superseded {
+        superseded.abort();
     }
 }
 
@@ -1400,14 +1428,14 @@ fn schedule_mission_metadata_refresh_for_milestone(
     let background_refresh = tokio::spawn(async move {
         refresh_mission_metadata_for_milestone(&mission_store, &events_tx, mission_id).await;
     });
-    let replaced_task = {
+    let registration = {
         let mut tasks = MISSION_METADATA_REFRESH_TASKS
             .lock()
             .expect("metadata refresh task registry lock poisoned");
-        register_metadata_refresh_task(&mut tasks, mission_id, background_refresh)
+        register_metadata_refresh_task(&mut tasks, mission_id, true, background_refresh)
     };
-    if let Some(existing) = replaced_task {
-        existing.abort();
+    if let Some(superseded) = registration.superseded {
+        superseded.abort();
     }
 }
 
@@ -9155,7 +9183,7 @@ And the report:
         );
         assert_eq!(
             refreshed.short_description.as_deref(),
-            Some("Investigate websocket reconnect loop")
+            Some("Investigate websocket reconnect loop root cause")
         );
     }
 
@@ -9255,17 +9283,17 @@ And the report:
     #[tokio::test]
     async fn test_register_metadata_refresh_task_replaces_existing_task_for_same_mission() {
         let mission_id = Uuid::new_v4();
-        let mut tasks: HashMap<Uuid, tokio::task::JoinHandle<()>> = HashMap::new();
+        let mut tasks: HashMap<Uuid, MetadataRefreshTaskEntry> = HashMap::new();
 
         let first = tokio::spawn(async {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         });
         let first_task_id = first.id();
-        let replaced = register_metadata_refresh_task(&mut tasks, mission_id, first);
-        assert!(replaced.is_none());
+        let registration = register_metadata_refresh_task(&mut tasks, mission_id, false, first);
+        assert!(registration.superseded.is_none());
         assert_eq!(tasks.len(), 1);
         assert_eq!(
-            tasks.get(&mission_id).map(|handle| handle.id()),
+            tasks.get(&mission_id).map(|entry| entry.handle.id()),
             Some(first_task_id)
         );
 
@@ -9273,19 +9301,99 @@ And the report:
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         });
         let second_task_id = second.id();
-        let replaced = register_metadata_refresh_task(&mut tasks, mission_id, second);
-        let replaced = replaced.expect("expected previous task to be replaced");
+        let registration = register_metadata_refresh_task(&mut tasks, mission_id, false, second);
+        let replaced = registration
+            .superseded
+            .expect("expected previous task to be replaced");
         assert_eq!(replaced.id(), first_task_id);
         replaced.abort();
 
         assert_eq!(tasks.len(), 1);
         assert_eq!(
-            tasks.get(&mission_id).map(|handle| handle.id()),
+            tasks.get(&mission_id).map(|entry| entry.handle.id()),
             Some(second_task_id)
         );
 
         if let Some(active) = tasks.remove(&mission_id) {
-            active.abort();
+            active.handle.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_register_metadata_refresh_task_keeps_in_flight_forced_task_over_non_forced() {
+        let mission_id = Uuid::new_v4();
+        let mut tasks: HashMap<Uuid, MetadataRefreshTaskEntry> = HashMap::new();
+
+        let forced = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        });
+        let forced_task_id = forced.id();
+        let forced_registration =
+            register_metadata_refresh_task(&mut tasks, mission_id, true, forced);
+        assert!(forced_registration.superseded.is_none());
+
+        let non_forced = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        });
+        let non_forced_task_id = non_forced.id();
+        let non_forced_registration =
+            register_metadata_refresh_task(&mut tasks, mission_id, false, non_forced);
+        let rejected = non_forced_registration
+            .superseded
+            .expect("new non-forced task should be rejected");
+        assert_eq!(rejected.id(), non_forced_task_id);
+        rejected.abort();
+
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(
+            tasks.get(&mission_id).map(|entry| entry.handle.id()),
+            Some(forced_task_id)
+        );
+        assert!(tasks
+            .get(&mission_id)
+            .is_some_and(|entry| entry.force_refresh));
+
+        if let Some(active) = tasks.remove(&mission_id) {
+            active.handle.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_register_metadata_refresh_task_forced_replaces_non_forced() {
+        let mission_id = Uuid::new_v4();
+        let mut tasks: HashMap<Uuid, MetadataRefreshTaskEntry> = HashMap::new();
+
+        let non_forced = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        });
+        let non_forced_task_id = non_forced.id();
+        let non_forced_registration =
+            register_metadata_refresh_task(&mut tasks, mission_id, false, non_forced);
+        assert!(non_forced_registration.superseded.is_none());
+
+        let forced = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        });
+        let forced_task_id = forced.id();
+        let forced_registration =
+            register_metadata_refresh_task(&mut tasks, mission_id, true, forced);
+        let replaced = forced_registration
+            .superseded
+            .expect("existing non-forced task should be replaced");
+        assert_eq!(replaced.id(), non_forced_task_id);
+        replaced.abort();
+
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(
+            tasks.get(&mission_id).map(|entry| entry.handle.id()),
+            Some(forced_task_id)
+        );
+        assert!(tasks
+            .get(&mission_id)
+            .is_some_and(|entry| entry.force_refresh));
+
+        if let Some(active) = tasks.remove(&mission_id) {
+            active.handle.abort();
         }
     }
 
