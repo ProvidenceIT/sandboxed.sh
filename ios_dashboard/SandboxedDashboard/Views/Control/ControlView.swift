@@ -3822,17 +3822,21 @@ private struct MissionSwitcherSheet: View {
                 let results = try await APIService.shared.searchMissions(query: normalizedQuery, limit: 50)
                 guard !Task.isCancelled else { return }
 
-                if normalizeMetadataText(searchText) == normalizedQuery {
-                    backendSearchQuery = normalizedQuery
-                    backendSearchResults = results
-                    isBackendSearchLoading = false
+                await MainActor.run {
+                    if normalizeMetadataText(searchText) == normalizedQuery {
+                        backendSearchQuery = normalizedQuery
+                        backendSearchResults = results
+                        isBackendSearchLoading = false
+                    }
                 }
             } catch {
                 guard !Task.isCancelled else { return }
-                if normalizeMetadataText(searchText) == normalizedQuery {
-                    backendSearchQuery = ""
-                    backendSearchResults = []
-                    isBackendSearchLoading = false
+                await MainActor.run {
+                    if normalizeMetadataText(searchText) == normalizedQuery {
+                        backendSearchQuery = ""
+                        backendSearchResults = []
+                        isBackendSearchLoading = false
+                    }
                 }
             }
         }

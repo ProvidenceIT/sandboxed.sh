@@ -2529,6 +2529,7 @@ export default function ControlClient() {
   );
   const [showMissionSwitcher, setShowMissionSwitcher] = useState(false);
   const [highlightedItemId, setHighlightedItemId] = useState<string | null>(null);
+  const deepLinkFocusKeyRef = useRef<string | null>(null);
   const [showAutomationsDialog, setShowAutomationsDialog] = useState(false);
 
   // Track which mission's events we're viewing (for parallel missions)
@@ -4528,15 +4529,23 @@ export default function ControlClient() {
   useEffect(() => {
     const focus = searchParams.get("focus");
     const missionFromQuery = searchParams.get("mission");
-    if ((focus !== "failure" && focus !== "moment") || !missionFromQuery) return;
+    const rawQuery = searchParams.get("query") ?? "";
+    if ((focus !== "failure" && focus !== "moment") || !missionFromQuery) {
+      deepLinkFocusKeyRef.current = null;
+      return;
+    }
     if (!viewingMission || viewingMission.id !== missionFromQuery) return;
+
+    const focusKey = `${focus}:${missionFromQuery}:${rawQuery}`;
+    if (deepLinkFocusKeyRef.current === focusKey) return;
+    deepLinkFocusKeyRef.current = focusKey;
 
     let cancelled = false;
     (async () => {
       const query =
         focus === "failure"
           ? "failing tool call error"
-          : normalizeMetadataText(searchParams.get("query") ?? "");
+          : normalizeMetadataText(rawQuery);
       if (!query) {
         toast.error("Missing moment query");
         router.replace(`/control?mission=${missionFromQuery}`, { scroll: false });
@@ -4593,7 +4602,7 @@ export default function ControlClient() {
     };
   }, [
     searchParams,
-    viewingMission,
+    viewingMission?.id,
     router,
     focusChatItem,
     findChatItemIdForEntryIndex,

@@ -1613,6 +1613,22 @@ fn record_metadata_refresh_baseline_from_mission(mission_id: Uuid, mission: &Mis
     record_metadata_refresh_baseline(mission_id, conversational_count);
 }
 
+async fn persist_mission_history_and_schedule_metadata_refresh(
+    mission_store: &Arc<dyn MissionStore>,
+    events_tx: &broadcast::Sender<AgentEvent>,
+    mission_id: Uuid,
+    entries: &[MissionHistoryEntry],
+) {
+    if let Err(e) = mission_store
+        .update_mission_history(mission_id, entries)
+        .await
+    {
+        tracing::warn!("Failed to persist mission history: {}", e);
+        return;
+    }
+    schedule_mission_metadata_refresh(mission_store, events_tx, mission_id, false);
+}
+
 async fn refresh_mission_metadata_from_store(
     mission_store: &Arc<dyn MissionStore>,
     events_tx: &broadcast::Sender<AgentEvent>,
@@ -5321,10 +5337,13 @@ async fn control_actor_loop(
                     content: content.clone(),
                 })
                 .collect();
-            if let Err(e) = mission_store.update_mission_history(mid, &entries).await {
-                tracing::warn!("Failed to persist mission history: {}", e);
-            }
-            schedule_mission_metadata_refresh(mission_store, events_tx, mid, false);
+            persist_mission_history_and_schedule_metadata_refresh(
+                mission_store,
+                events_tx,
+                mid,
+                &entries,
+            )
+            .await;
         }
     }
 
@@ -6614,16 +6633,13 @@ async fn control_actor_loop(
                                     content: content.clone(),
                                 })
                                 .collect();
-                            if let Err(e) = mission_store
-                                .update_mission_history(*mission_id, &entries)
-                                .await
-                            {
-                                tracing::warn!(
-                                    "Failed to persist parallel mission history {}: {}",
-                                    mission_id,
-                                    e
-                                );
-                            }
+                            persist_mission_history_and_schedule_metadata_refresh(
+                                &mission_store,
+                                &events_tx,
+                                *mission_id,
+                                &entries,
+                            )
+                            .await;
                             if mission_store
                                 .update_mission_status(*mission_id, MissionStatus::Interrupted)
                                 .await
@@ -7351,15 +7367,13 @@ async fn control_actor_loop(
                                     content: content.clone(),
                                 })
                                 .collect();
-                            if let Err(e) = mission_store
-                                .update_mission_history(*mission_id, &entries)
-                                .await
-                            {
-                                tracing::warn!(
-                                    "Failed to persist parallel mission history: {}",
-                                    e
-                                );
-                            }
+                            persist_mission_history_and_schedule_metadata_refresh(
+                                &mission_store,
+                                &events_tx,
+                                *mission_id,
+                                &entries,
+                            )
+                            .await;
 
                             // Check if we should enqueue agent_finished automations
                             let was_queue_empty = runner.queue.is_empty();
@@ -10179,6 +10193,65 @@ And the report:
         assert_eq!(
             refreshed.short_description.as_deref(),
             Some("Investigate websocket reconnect loop root cause")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_persist_mission_history_and_schedule_metadata_refresh_emits_metadata_update() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = store
+            .create_mission(None, None, None, None, None, None, None)
+            .await
+            .expect("create mission");
+        let entries = vec![
+            MissionHistoryEntry {
+                role: "user".to_string(),
+                content: "Debug websocket reconnect loop".to_string(),
+            },
+            MissionHistoryEntry {
+                role: "assistant".to_string(),
+                content: "Root cause is stale session token refresh ordering".to_string(),
+            },
+        ];
+
+        let (events_tx, mut events_rx) = broadcast::channel::<AgentEvent>(16);
+        persist_mission_history_and_schedule_metadata_refresh(
+            &store, &events_tx, mission.id, &entries,
+        )
+        .await;
+
+        let saw_metadata_event = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                match events_rx.recv().await {
+                    Ok(AgentEvent::MissionMetadataUpdated { mission_id, .. })
+                        if mission_id == mission.id =>
+                    {
+                        break true;
+                    }
+                    Ok(_) => continue,
+                    Err(_) => break false,
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for metadata refresh event");
+        assert!(
+            saw_metadata_event,
+            "expected mission_metadata_updated event"
+        );
+
+        let refreshed = store
+            .get_mission(mission.id)
+            .await
+            .expect("get mission")
+            .expect("mission exists");
+        assert_eq!(
+            refreshed.title.as_deref(),
+            Some("Root cause is stale session token refresh ordering")
+        );
+        assert_eq!(
+            refreshed.short_description.as_deref(),
+            Some("Root cause is stale session token refresh ordering")
         );
     }
 
