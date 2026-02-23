@@ -46,13 +46,13 @@ function getMissionDisplayName(
   return parts.join(' · ');
 }
 
-function getMissionCardTitle(mission: Mission): string | null {
+export function getMissionCardTitle(mission: Mission): string | null {
   const title = getMissionTitle(mission, { maxLength: 80, fallback: '' }).trim();
   if (!title) return null;
   return title;
 }
 
-function normalizeMetadataText(text: string): string {
+export function normalizeMetadataText(text: string): string {
   return text
     .toLowerCase()
     .replace(/[^a-z0-9\s]/g, ' ')
@@ -60,7 +60,7 @@ function normalizeMetadataText(text: string): string {
     .trim();
 }
 
-function hasMeaningfulExtraTokens(baseText: string, candidateText: string): boolean {
+export function hasMeaningfulExtraTokens(baseText: string, candidateText: string): boolean {
   const base = normalizeMetadataText(baseText);
   const candidate = normalizeMetadataText(candidateText);
   if (!candidate) return false;
@@ -71,7 +71,10 @@ function hasMeaningfulExtraTokens(baseText: string, candidateText: string): bool
   return candidateTokens.some((token) => !baseTokens.has(token));
 }
 
-function getMissionCardDescription(mission: Mission, title?: string | null): string | null {
+export function getMissionCardDescription(
+  mission: Mission,
+  title?: string | null
+): string | null {
   const shortDescription = mission.short_description?.trim();
   if (!shortDescription) return null;
 
@@ -92,7 +95,7 @@ function getMissionStatusLabel(mission: Mission): string {
   return STATUS_LABELS[mission.status] ?? mission.status ?? 'Unknown';
 }
 
-function getMissionSearchText(mission: Mission): string {
+export function getMissionSearchText(mission: Mission): string {
   const title = getMissionCardTitle(mission) ?? '';
   const shortDescription = mission.short_description?.trim() ?? '';
   const backend = mission.backend?.trim() ?? '';
@@ -112,6 +115,80 @@ function getMissionSearchText(mission: Mission): string {
     textParts.push(status);
   }
   return textParts.join(' ');
+}
+
+const SEARCH_SYNONYMS: Record<string, string[]> = {
+  auth: ['login', 'signin', 'oauth', 'credential', 'credentials'],
+  blocked: ['stalled', 'waiting'],
+  bug: ['issue', 'error', 'fix', 'problem'],
+  crash: ['panic', 'exception', 'failure'],
+  deploy: ['release', 'rollout', 'ship'],
+  error: ['bug', 'issue', 'failure'],
+  failed: ['error', 'failure'],
+  fix: ['bug', 'issue', 'error', 'repair'],
+  issue: ['bug', 'error', 'problem', 'fix'],
+  login: ['auth', 'signin', 'oauth', 'credentials'],
+  performance: ['perf', 'slow', 'latency', 'optimize'],
+  perf: ['performance', 'slow', 'latency', 'optimize'],
+  release: ['deploy', 'rollout', 'ship'],
+  signin: ['login', 'auth', 'oauth', 'credentials'],
+  slow: ['performance', 'latency', 'timeout', 'stall'],
+  stalled: ['blocked', 'waiting', 'timeout'],
+  timeout: ['slow', 'latency', 'stalled', 'hang'],
+};
+
+function expandQueryTokenGroup(token: string): string[] {
+  const normalized = normalizeMetadataText(token);
+  if (!normalized) return [];
+
+  const values = new Set<string>();
+  values.add(normalized);
+
+  const direct = SEARCH_SYNONYMS[normalized] ?? [];
+  for (const candidate of direct) {
+    const normalizedCandidate = normalizeMetadataText(candidate);
+    if (normalizedCandidate) {
+      values.add(normalizedCandidate);
+    }
+  }
+
+  return Array.from(values);
+}
+
+function groupMatchesTokenSet(group: string[], tokenSet: Set<string>): boolean {
+  for (const candidate of group) {
+    if (!candidate) continue;
+    for (const token of tokenSet) {
+      if (token === candidate || token.startsWith(candidate) || candidate.startsWith(token)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+export function missionMatchesSearchQuery(
+  mission: Mission,
+  searchQuery: string,
+  workspaceNameById?: Record<string, string>
+): boolean {
+  const normalizedQuery = normalizeMetadataText(searchQuery);
+  if (!normalizedQuery) return true;
+
+  const haystack = normalizeMetadataText(
+    `${getMissionDisplayName(mission, workspaceNameById)} ${getMissionSearchText(mission)}`
+  );
+  if (!haystack) return false;
+  if (haystack.includes(normalizedQuery)) return true;
+
+  const queryTokens = normalizedQuery.split(' ').filter(Boolean);
+  if (queryTokens.length === 0) return true;
+
+  const tokenSet = new Set(haystack.split(' ').filter(Boolean));
+  const queryGroups = queryTokens.map(expandQueryTokenGroup).filter((group) => group.length > 0);
+  if (queryGroups.length === 0) return false;
+
+  return queryGroups.every((group) => groupMatchesTokenSet(group, tokenSet));
 }
 
 export function MissionSwitcher({
@@ -200,12 +277,9 @@ export function MissionSwitcher({
   // Filter items by search query
   const filteredItems = useMemo(() => {
     if (!searchQuery.trim()) return allItems;
-    const query = searchQuery.toLowerCase();
     return allItems.filter((item) => {
       if (!item.mission) return false;
-      const name = getMissionDisplayName(item.mission, workspaceNameById).toLowerCase();
-      const desc = getMissionSearchText(item.mission).toLowerCase();
-      return name.includes(query) || desc.includes(query);
+      return missionMatchesSearchQuery(item.mission, searchQuery, workspaceNameById);
     });
   }, [allItems, searchQuery, workspaceNameById]);
 
