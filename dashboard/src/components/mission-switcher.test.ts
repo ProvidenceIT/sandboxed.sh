@@ -51,6 +51,17 @@ describe('mission switcher search helpers', () => {
     expect(searchText).toContain('blocked');
   });
 
+  it('uses the real default backend label when backend is missing', () => {
+    const mission = buildMission({
+      title: 'Investigate OAuth callback failures',
+      short_description: 'Auth token exchange fails after redirect',
+      backend: undefined,
+    });
+
+    const searchText = getMissionSearchText(mission);
+    expect(searchText).toContain('claudecode');
+  });
+
   it('supports query expansion for auth/login style intent matching', () => {
     const mission = buildMission({
       title: 'Investigate OAuth callback failures',
@@ -59,6 +70,25 @@ describe('mission switcher search helpers', () => {
 
     expect(missionMatchesSearchQuery(mission, 'login callback')).toBe(true);
     expect(missionMatchesSearchQuery(mission, 'signin token')).toBe(true);
+  });
+
+  it('avoids false positives for very short query prefixes', () => {
+    const mission = buildMission({
+      title: 'Authentication callback refactor',
+      short_description: 'Improve OAuth and credential handling',
+    });
+
+    expect(missionMatchesSearchQuery(mission, 'a')).toBe(false);
+    expect(missionSearchRelevanceScore(mission, 'a')).toBe(0);
+  });
+
+  it('still matches common inflections like timeout/timeouts', () => {
+    const mission = buildMission({
+      title: 'Handle timeout retries for session refresh',
+    });
+
+    expect(missionMatchesSearchQuery(mission, 'timeouts')).toBe(true);
+    expect(missionSearchRelevanceScore(mission, 'timeouts')).toBeGreaterThan(0);
   });
 
   it('ranks exact title phrase matches above weaker synonym matches', () => {

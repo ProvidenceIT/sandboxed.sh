@@ -87,7 +87,7 @@ export function getMissionCardDescription(
 
 function getMissionBackendLabel(mission: Mission): string {
   const backend = mission.backend?.trim();
-  if (!backend) return 'default';
+  if (!backend) return 'claudecode';
   return backend;
 }
 
@@ -98,7 +98,7 @@ function getMissionStatusLabel(mission: Mission): string {
 export function getMissionSearchText(mission: Mission): string {
   const title = getMissionCardTitle(mission) ?? '';
   const shortDescription = mission.short_description?.trim() ?? '';
-  const backend = mission.backend?.trim() ?? '';
+  const backend = getMissionBackendLabel(mission);
   const status = mission.status ?? '';
   const textParts: string[] = [];
 
@@ -157,7 +157,8 @@ function expandQueryTokenGroup(token: string): string[] {
 
 function tokenMatchStrength(token: string, candidate: string): number {
   if (token === candidate) return 1;
-  if (token.startsWith(candidate) || candidate.startsWith(token)) return 0.7;
+  if (candidate.length >= 3 && token.startsWith(candidate)) return 0.7;
+  if (token.length >= 5 && candidate.startsWith(token) && candidate.length - token.length <= 2) return 0.65;
   if (candidate.length >= 4 && token.includes(candidate)) return 0.45;
   return 0;
 }
@@ -182,6 +183,30 @@ function groupMatchStrengthForTokenSet(group: string[], tokenSet: Set<string>): 
 function tokenSetFromText(text: string): Set<string> {
   const normalized = normalizeMetadataText(text);
   return new Set(normalized.split(' ').filter(Boolean));
+}
+
+function hashSearchQuery(normalizedQuery: string): string {
+  let hash = 2166136261;
+  for (let i = 0; i < normalizedQuery.length; i += 1) {
+    hash ^= normalizedQuery.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
+}
+
+function getMissionSearchCacheKey(
+  mission: Mission,
+  normalizedQuery: string,
+  workspaceNameById?: Record<string, string>
+): string {
+  const workspaceLabel = getWorkspaceLabel(mission, workspaceNameById) ?? '';
+  return [
+    mission.id,
+    mission.updated_at ?? '',
+    mission.metadata_updated_at ?? '',
+    workspaceLabel,
+    hashSearchQuery(normalizedQuery),
+  ].join('|');
 }
 
 export function missionSearchRelevanceScore(
@@ -274,6 +299,7 @@ export function MissionSwitcher({
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [loadingMissionId, setLoadingMissionId] = useState<string | null>(null);
+  const searchScoreCacheRef = useRef<Map<string, number>>(new Map());
 
   // Handle mission selection with loading state
   const handleSelect = useCallback(async (missionId: string) => {
@@ -341,10 +367,24 @@ export function MissionSwitcher({
 
   // Filter items by search query
   const filteredItems = useMemo(() => {
-    if (!searchQuery.trim()) return allItems;
+    const normalizedQuery = normalizeMetadataText(searchQuery);
+    if (!normalizedQuery) return allItems;
+
+    const cache = searchScoreCacheRef.current;
     const scored = allItems.flatMap((item) => {
       if (!item.mission) return [];
-      const score = missionSearchRelevanceScore(item.mission, searchQuery, workspaceNameById);
+      const cacheKey = getMissionSearchCacheKey(item.mission, normalizedQuery, workspaceNameById);
+      let score = cache.get(cacheKey);
+      if (score === undefined) {
+        score = missionSearchRelevanceScore(item.mission, normalizedQuery, workspaceNameById);
+        cache.set(cacheKey, score);
+        if (cache.size > 1000) {
+          const oldestKey = cache.keys().next().value;
+          if (oldestKey) {
+            cache.delete(oldestKey);
+          }
+        }
+      }
       if (score <= 0) return [];
       return [{ item, score }];
     });
@@ -356,6 +396,10 @@ export function MissionSwitcher({
     });
     return scored.map(({ item }) => item);
   }, [allItems, searchQuery, workspaceNameById]);
+
+  useEffect(() => {
+    searchScoreCacheRef.current.clear();
+  }, [missions, workspaceNameById]);
 
   // Reset state on open/close
   useEffect(() => {
