@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use axum::{
     body::Bytes,
-    extract::{Extension, Path, State},
+    extract::{Extension, Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::sse::{Event, Sse},
     Json,
@@ -293,6 +293,177 @@ fn has_significant_metadata_drift(existing: &str, candidate: &str) -> bool {
     }
 
     true
+}
+
+fn mission_search_synonyms(token: &str) -> &'static [&'static str] {
+    match token {
+        "auth" => &["login", "signin", "oauth", "credential", "credentials"],
+        "blocked" => &["stalled", "waiting"],
+        "bug" => &["issue", "error", "fix", "problem"],
+        "crash" => &["panic", "exception", "failure"],
+        "deploy" => &["release", "rollout", "ship"],
+        "error" => &["bug", "issue", "failure"],
+        "failed" => &["error", "failure"],
+        "fix" => &["bug", "issue", "error", "repair"],
+        "issue" => &["bug", "error", "problem", "fix"],
+        "login" => &["auth", "signin", "oauth", "credentials"],
+        "performance" => &["perf", "slow", "latency", "optimize"],
+        "perf" => &["performance", "slow", "latency", "optimize"],
+        "release" => &["deploy", "rollout", "ship"],
+        "signin" => &["login", "auth", "oauth", "credentials"],
+        "slow" => &["performance", "latency", "timeout", "stall"],
+        "stalled" => &["blocked", "waiting", "timeout"],
+        "timeout" => &["slow", "latency", "stalled", "hang"],
+        _ => &[],
+    }
+}
+
+fn expand_search_query_group(token: &str) -> Vec<String> {
+    let normalized = normalize_metadata_text(token);
+    if normalized.is_empty() {
+        return Vec::new();
+    }
+
+    let mut values = HashSet::new();
+    values.insert(normalized.clone());
+    for candidate in mission_search_synonyms(&normalized) {
+        let normalized_candidate = normalize_metadata_text(candidate);
+        if !normalized_candidate.is_empty() {
+            values.insert(normalized_candidate);
+        }
+    }
+
+    values.into_iter().collect()
+}
+
+fn search_token_match_strength(token: &str, candidate: &str) -> f64 {
+    if token == candidate {
+        return 1.0;
+    }
+
+    let ascii_candidate = candidate
+        .chars()
+        .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit());
+    let candidate_len = candidate.chars().count();
+    let token_len = token.chars().count();
+
+    if token.starts_with(candidate) && (!ascii_candidate || candidate_len >= 3) {
+        return 0.7;
+    }
+    if ascii_candidate
+        && token_len >= 5
+        && candidate.starts_with(token)
+        && candidate_len.saturating_sub(token_len) <= 2
+    {
+        return 0.65;
+    }
+    if candidate_len >= 4 && token.contains(candidate) {
+        return 0.45;
+    }
+    0.0
+}
+
+fn search_token_set(text: &str) -> HashSet<String> {
+    normalize_metadata_text(text)
+        .split_whitespace()
+        .filter(|token| !token.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn group_match_strength_for_token_set(group: &[String], token_set: &HashSet<String>) -> f64 {
+    let mut best = 0.0;
+    for candidate in group {
+        if candidate.is_empty() {
+            continue;
+        }
+        for token in token_set {
+            let strength = search_token_match_strength(token, candidate);
+            if strength > best {
+                best = strength;
+            }
+            if best >= 1.0 {
+                return best;
+            }
+        }
+    }
+    best
+}
+
+fn mission_search_relevance_score(
+    mission: &Mission,
+    search_query: &str,
+    workspace_label: Option<&str>,
+) -> f64 {
+    let normalized_query = normalize_metadata_text(search_query);
+    if normalized_query.is_empty() {
+        return 0.0;
+    }
+
+    let title = mission.title.as_deref().unwrap_or("").trim();
+    let short_description = mission.short_description.as_deref().unwrap_or("").trim();
+    let backend = mission.backend.trim();
+    let status = mission.status.to_string();
+    let display_name = workspace_label.unwrap_or("");
+    let combined = format!(
+        "{} {} {} {} {}",
+        display_name, title, short_description, backend, status
+    );
+    let normalized_combined = normalize_metadata_text(&combined);
+    if normalized_combined.is_empty() {
+        return 0.0;
+    }
+
+    let query_tokens: Vec<&str> = normalized_query.split_whitespace().collect();
+    if query_tokens.is_empty() {
+        return 0.0;
+    }
+    let query_groups: Vec<Vec<String>> = query_tokens
+        .iter()
+        .map(|token| expand_search_query_group(token))
+        .filter(|group| !group.is_empty())
+        .collect();
+    if query_groups.is_empty() {
+        return 0.0;
+    }
+
+    let fields = [
+        (5.0, search_token_set(display_name)),
+        (8.0, search_token_set(title)),
+        (7.0, search_token_set(short_description)),
+        (3.0, search_token_set(backend)),
+        (2.0, search_token_set(&status)),
+        (1.0, search_token_set(&combined)),
+    ];
+
+    let mut score = 0.0;
+    for group in &query_groups {
+        let mut best_group_score: f64 = 0.0;
+        for (weight, token_set) in &fields {
+            let strength = group_match_strength_for_token_set(group, token_set);
+            if strength > 0.0 {
+                best_group_score = best_group_score.max(strength * weight);
+            }
+        }
+        if best_group_score <= 0.0 {
+            return 0.0;
+        }
+        score += best_group_score;
+    }
+
+    let phrase_boost_targets = [
+        (normalize_metadata_text(title), 14.0),
+        (normalize_metadata_text(short_description), 12.0),
+        (normalize_metadata_text(display_name), 8.0),
+        (normalize_metadata_text(&combined), 5.0),
+    ];
+    for (target, boost) in phrase_boost_targets {
+        if !target.is_empty() && target.contains(&normalized_query) {
+            score += boost;
+        }
+    }
+
+    score
 }
 
 async fn disambiguate_generated_title(
@@ -1915,15 +2086,74 @@ pub async fn list_missions(
         .list_missions(50, 0)
         .await
         .map_err(internal_error)?;
+    populate_workspace_names(&state, &mut missions).await;
+    Ok(Json(missions))
+}
 
-    // Populate workspace_name for each mission
-    for mission in &mut missions {
+async fn populate_workspace_names(state: &Arc<AppState>, missions: &mut [Mission]) {
+    for mission in missions {
         if let Some(workspace) = state.workspaces.get(mission.workspace_id).await {
             mission.workspace_name = Some(workspace.name);
         }
     }
+}
 
-    Ok(Json(missions))
+#[derive(Debug, Deserialize)]
+pub struct SearchMissionsQuery {
+    pub q: String,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MissionSearchResult {
+    pub mission: Mission,
+    pub relevance_score: f64,
+}
+
+/// Search missions with semantic-aware ranking.
+pub async fn search_missions(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+    Query(params): Query<SearchMissionsQuery>,
+) -> Result<Json<Vec<MissionSearchResult>>, (StatusCode, String)> {
+    let query = params.q.trim();
+    if query.is_empty() {
+        return Ok(Json(Vec::new()));
+    }
+
+    let limit = params.limit.unwrap_or(20).clamp(1, 100);
+    let control = control_for_user(&state, &user).await;
+    let mut missions = control
+        .mission_store
+        .list_missions(500, 0)
+        .await
+        .map_err(internal_error)?;
+    populate_workspace_names(&state, &mut missions).await;
+
+    let mut scored: Vec<MissionSearchResult> = missions
+        .into_iter()
+        .filter_map(|mission| {
+            let score =
+                mission_search_relevance_score(&mission, query, mission.workspace_name.as_deref());
+            if score > 0.0 {
+                Some(MissionSearchResult {
+                    mission,
+                    relevance_score: score,
+                })
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    scored.sort_by(|a, b| {
+        b.relevance_score
+            .total_cmp(&a.relevance_score)
+            .then_with(|| b.mission.updated_at.cmp(&a.mission.updated_at))
+    });
+    scored.truncate(limit);
+
+    Ok(Json(scored))
 }
 
 /// Get a specific mission.
@@ -7544,6 +7774,147 @@ And the report:
             normalize_model_override_for_backend(Some("codex"), "   "),
             None
         );
+    }
+
+    #[test]
+    fn test_mission_search_relevance_score_prefers_exact_phrase() {
+        let now = mission_store::now_string();
+        let strong = Mission {
+            id: Uuid::new_v4(),
+            status: MissionStatus::Active,
+            title: Some("Fix login timeout regression".to_string()),
+            short_description: Some(
+                "Investigate timeout happening after login redirect".to_string(),
+            ),
+            metadata_updated_at: None,
+            metadata_source: None,
+            metadata_model: None,
+            metadata_version: None,
+            workspace_id: crate::workspace::DEFAULT_WORKSPACE_ID,
+            workspace_name: Some("Sandboxed".to_string()),
+            agent: None,
+            model_override: None,
+            model_effort: None,
+            backend: "claudecode".to_string(),
+            config_profile: None,
+            history: Vec::new(),
+            created_at: now.clone(),
+            updated_at: now.clone(),
+            interrupted_at: None,
+            resumable: false,
+            desktop_sessions: Vec::new(),
+            session_id: None,
+            terminal_reason: None,
+        };
+        let weak = Mission {
+            id: Uuid::new_v4(),
+            status: MissionStatus::Active,
+            title: Some("Login failure investigation".to_string()),
+            short_description: Some("Issue affecting auth flow and API retries".to_string()),
+            metadata_updated_at: None,
+            metadata_source: None,
+            metadata_model: None,
+            metadata_version: None,
+            workspace_id: crate::workspace::DEFAULT_WORKSPACE_ID,
+            workspace_name: Some("Sandboxed".to_string()),
+            agent: None,
+            model_override: None,
+            model_effort: None,
+            backend: "claudecode".to_string(),
+            config_profile: None,
+            history: Vec::new(),
+            created_at: now.clone(),
+            updated_at: now,
+            interrupted_at: None,
+            resumable: false,
+            desktop_sessions: Vec::new(),
+            session_id: None,
+            terminal_reason: None,
+        };
+
+        let strong_score = mission_search_relevance_score(
+            &strong,
+            "login timeout",
+            strong.workspace_name.as_deref(),
+        );
+        let weak_score =
+            mission_search_relevance_score(&weak, "login timeout", weak.workspace_name.as_deref());
+
+        assert!(strong_score > weak_score);
+    }
+
+    #[test]
+    fn test_mission_search_relevance_score_supports_query_expansion() {
+        let now = mission_store::now_string();
+        let mission = Mission {
+            id: Uuid::new_v4(),
+            status: MissionStatus::Completed,
+            title: Some("Release prep for dashboard deploy".to_string()),
+            short_description: Some("Ship the rollout to production".to_string()),
+            metadata_updated_at: None,
+            metadata_source: None,
+            metadata_model: None,
+            metadata_version: None,
+            workspace_id: crate::workspace::DEFAULT_WORKSPACE_ID,
+            workspace_name: Some("Sandboxed".to_string()),
+            agent: None,
+            model_override: None,
+            model_effort: None,
+            backend: "codex".to_string(),
+            config_profile: None,
+            history: Vec::new(),
+            created_at: now.clone(),
+            updated_at: now,
+            interrupted_at: None,
+            resumable: false,
+            desktop_sessions: Vec::new(),
+            session_id: None,
+            terminal_reason: None,
+        };
+
+        let score = mission_search_relevance_score(
+            &mission,
+            "deploy rollout",
+            mission.workspace_name.as_deref(),
+        );
+        assert!(score > 0.0);
+    }
+
+    #[test]
+    fn test_mission_search_relevance_score_returns_zero_for_non_matching_query() {
+        let now = mission_store::now_string();
+        let mission = Mission {
+            id: Uuid::new_v4(),
+            status: MissionStatus::Completed,
+            title: Some("Implement payment retry flow".to_string()),
+            short_description: Some("Handle webhook retries for failed invoices".to_string()),
+            metadata_updated_at: None,
+            metadata_source: None,
+            metadata_model: None,
+            metadata_version: None,
+            workspace_id: crate::workspace::DEFAULT_WORKSPACE_ID,
+            workspace_name: Some("Sandboxed".to_string()),
+            agent: None,
+            model_override: None,
+            model_effort: None,
+            backend: "codex".to_string(),
+            config_profile: None,
+            history: Vec::new(),
+            created_at: now.clone(),
+            updated_at: now,
+            interrupted_at: None,
+            resumable: false,
+            desktop_sessions: Vec::new(),
+            session_id: None,
+            terminal_reason: None,
+        };
+
+        let score = mission_search_relevance_score(
+            &mission,
+            "kubernetes autoscaling",
+            mission.workspace_name.as_deref(),
+        );
+        assert_eq!(score, 0.0);
     }
 
     #[test]
