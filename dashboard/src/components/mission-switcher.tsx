@@ -1,7 +1,15 @@
 'use client';
 
 import { useEffect, useRef, useState, useMemo, useCallback } from 'react';
-import { Search, XCircle, Check, Loader2, RotateCcw, AlertTriangle } from 'lucide-react';
+import {
+  Search,
+  XCircle,
+  Check,
+  Loader2,
+  RotateCcw,
+  AlertTriangle,
+  MessageSquarePlus,
+} from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { searchMissions, type Mission, type RunningMissionInfo } from '@/lib/api';
 import { getMissionShortName } from '@/lib/mission-display';
@@ -19,6 +27,7 @@ interface MissionSwitcherProps {
   onCancelMission: (missionId: string) => void;
   onResumeMission?: (missionId: string) => Promise<void> | void;
   onOpenFailingToolCall?: (missionId: string) => Promise<void> | void;
+  onFollowUpMission?: (missionId: string) => Promise<void> | void;
   onRefresh?: () => void;
 }
 
@@ -98,7 +107,7 @@ function getMissionStatusLabel(mission: Mission): string {
 }
 
 export interface MissionQuickAction {
-  action: 'resume' | 'open_failure';
+  action: 'resume' | 'open_failure' | 'follow_up';
   label: string;
   title: string;
 }
@@ -115,30 +124,40 @@ export function getMissionQuickActions(mission: Mission, isRunning: boolean): Mi
     });
   }
 
-  if (!mission.resumable) return actions;
-  switch (mission.status) {
-    case 'blocked':
-      actions.push({
-        action: 'resume',
-        label: 'Continue',
-        title: 'Continue mission',
-      });
-      break;
-    case 'failed':
-      actions.push({
-        action: 'resume',
-        label: 'Retry',
-        title: 'Retry mission',
-      });
-      break;
-    case 'interrupted':
-      actions.push({
-        action: 'resume',
-        label: 'Resume',
-        title: 'Resume mission',
-      });
-      break;
+  if (mission.resumable) {
+    switch (mission.status) {
+      case 'blocked':
+        actions.push({
+          action: 'resume',
+          label: 'Continue',
+          title: 'Continue mission',
+        });
+        break;
+      case 'failed':
+        actions.push({
+          action: 'resume',
+          label: 'Retry',
+          title: 'Retry mission',
+        });
+        break;
+      case 'interrupted':
+        actions.push({
+          action: 'resume',
+          label: 'Resume',
+          title: 'Resume mission',
+        });
+        break;
+    }
   }
+
+  if (mission.status !== 'active') {
+    actions.push({
+      action: 'follow_up',
+      label: 'Follow-up',
+      title: 'Create a follow-up mission',
+    });
+  }
+
   return actions;
 }
 
@@ -402,6 +421,7 @@ export function MissionSwitcher({
   onCancelMission,
   onResumeMission,
   onOpenFailingToolCall,
+  onFollowUpMission,
   onRefresh,
 }: MissionSwitcherProps) {
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -839,7 +859,9 @@ export function MissionSwitcher({
                         .filter((action) =>
                           action.action === 'resume'
                             ? Boolean(onResumeMission)
-                            : Boolean(onOpenFailingToolCall)
+                            : action.action === 'open_failure'
+                              ? Boolean(onOpenFailingToolCall)
+                              : Boolean(onFollowUpMission)
                         )
                         .map((action) => (
                           <button
@@ -849,8 +871,10 @@ export function MissionSwitcher({
                               e.stopPropagation();
                               if (action.action === 'resume') {
                                 void onResumeMission?.(item.id);
-                              } else {
+                              } else if (action.action === 'open_failure') {
                                 void onOpenFailingToolCall?.(item.id);
+                              } else {
+                                void onFollowUpMission?.(item.id);
                               }
                               onClose();
                             }}
@@ -859,8 +883,10 @@ export function MissionSwitcher({
                           >
                             {action.action === 'resume' ? (
                               <RotateCcw className="h-3 w-3" />
-                            ) : (
+                            ) : action.action === 'open_failure' ? (
                               <AlertTriangle className="h-3 w-3" />
+                            ) : (
+                              <MessageSquarePlus className="h-3 w-3" />
                             )}
                             {action.label}
                           </button>
