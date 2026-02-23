@@ -215,6 +215,9 @@ fn normalize_metadata_text(text: &str) -> String {
         .join(" ")
 }
 
+const METADATA_SOURCE_BACKEND_HEURISTIC: &str = "backend_heuristic";
+const METADATA_VERSION_V1: &str = "v1";
+
 fn normalize_raw_title_for_dedupe(text: &str) -> String {
     text.split_whitespace()
         .collect::<Vec<_>>()
@@ -1136,6 +1139,12 @@ pub enum AgentEvent {
         short_description: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         metadata_updated_at: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        metadata_source: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        metadata_model: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        metadata_version: Option<String>,
     },
     /// Agent phase update (for showing preparation steps)
     AgentPhase {
@@ -3681,6 +3690,9 @@ async fn control_actor_loop(
                             mid,
                             generated_title.as_deref(),
                             generated_short_description.as_deref(),
+                            Some(METADATA_SOURCE_BACKEND_HEURISTIC),
+                            None,
+                            Some(METADATA_VERSION_V1),
                         )
                         .await
                     {
@@ -3693,6 +3705,9 @@ async fn control_actor_loop(
                                     title: updated.title.clone(),
                                     short_description: updated.short_description.clone(),
                                     metadata_updated_at: updated.metadata_updated_at.clone(),
+                                    metadata_source: updated.metadata_source.clone(),
+                                    metadata_model: updated.metadata_model.clone(),
+                                    metadata_version: updated.metadata_version.clone(),
                                 });
                                 if generated_title.is_some() {
                                     if let Some(title) = updated.title {
@@ -5203,6 +5218,9 @@ async fn control_actor_loop(
                                                     mid,
                                                     generated_title.as_deref(),
                                                     generated_short_description.as_deref(),
+                                                    Some(METADATA_SOURCE_BACKEND_HEURISTIC),
+                                                    None,
+                                                    Some(METADATA_VERSION_V1),
                                                 )
                                                 .await
                                             {
@@ -5222,7 +5240,16 @@ async fn control_actor_loop(
                                                                     .clone(),
                                                                 metadata_updated_at: updated
                                                                     .metadata_updated_at
-                                                                .clone(),
+                                                                    .clone(),
+                                                                metadata_source: updated
+                                                                    .metadata_source
+                                                                    .clone(),
+                                                                metadata_model: updated
+                                                                    .metadata_model
+                                                                    .clone(),
+                                                                metadata_version: updated
+                                                                    .metadata_version
+                                                                    .clone(),
                                                             },
                                                         );
                                                         if generated_title.is_some() {

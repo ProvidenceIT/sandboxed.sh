@@ -5293,6 +5293,24 @@ export default function ControlClient() {
               : typeof data["metadata_updated_at"] === "string"
                 ? data["metadata_updated_at"]
                 : undefined;
+          const metadataSource =
+            data["metadata_source"] === null
+              ? null
+              : typeof data["metadata_source"] === "string"
+                ? data["metadata_source"]
+                : undefined;
+          const metadataModel =
+            data["metadata_model"] === null
+              ? null
+              : typeof data["metadata_model"] === "string"
+                ? data["metadata_model"]
+                : undefined;
+          const metadataVersion =
+            data["metadata_version"] === null
+              ? null
+              : typeof data["metadata_version"] === "string"
+                ? data["metadata_version"]
+                : undefined;
 
           if (currentMissionRef.current?.id === missionId) {
             setCurrentMission((prev) =>
@@ -5305,6 +5323,15 @@ export default function ControlClient() {
                       : {}),
                     ...(metadataUpdatedAt !== undefined
                       ? { metadata_updated_at: metadataUpdatedAt }
+                      : {}),
+                    ...(metadataSource !== undefined
+                      ? { metadata_source: metadataSource }
+                      : {}),
+                    ...(metadataModel !== undefined
+                      ? { metadata_model: metadataModel }
+                      : {}),
+                    ...(metadataVersion !== undefined
+                      ? { metadata_version: metadataVersion }
                       : {}),
                   }
                 : prev
@@ -5321,6 +5348,15 @@ export default function ControlClient() {
                       : {}),
                     ...(metadataUpdatedAt !== undefined
                       ? { metadata_updated_at: metadataUpdatedAt }
+                      : {}),
+                    ...(metadataSource !== undefined
+                      ? { metadata_source: metadataSource }
+                      : {}),
+                    ...(metadataModel !== undefined
+                      ? { metadata_model: metadataModel }
+                      : {}),
+                    ...(metadataVersion !== undefined
+                      ? { metadata_version: metadataVersion }
                       : {}),
                   }
                 : prev
