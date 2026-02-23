@@ -400,6 +400,31 @@ fn clear_mission_metadata_refresh_state(mission_id: Uuid) {
     baselines.remove(&mission_id);
 }
 
+async fn clear_stale_mission_metadata_refresh_state(mission_store: &Arc<dyn MissionStore>) {
+    let tracked_ids: std::collections::HashSet<Uuid> = {
+        let tasks = MISSION_METADATA_REFRESH_TASKS
+            .lock()
+            .expect("metadata refresh task registry lock poisoned");
+        let baselines = MISSION_METADATA_REFRESH_BASELINES
+            .lock()
+            .expect("metadata refresh baseline lock poisoned");
+
+        tasks.keys().chain(baselines.keys()).copied().collect()
+    };
+
+    for mission_id in tracked_ids {
+        match mission_store.get_mission(mission_id).await {
+            Ok(Some(_)) => {}
+            Ok(None) => clear_mission_metadata_refresh_state(mission_id),
+            Err(err) => tracing::warn!(
+                "Failed to verify mission {} while clearing stale metadata refresh state: {}",
+                mission_id,
+                err
+            ),
+        }
+    }
+}
+
 fn normalize_raw_title_for_dedupe(text: &str) -> String {
     text.split_whitespace()
         .collect::<Vec<_>>()
@@ -4039,6 +4064,10 @@ pub async fn cleanup_empty_missions(
         .delete_empty_untitled_missions_excluding(&running_ids)
         .await
         .map_err(internal_error)?;
+
+    if count > 0 {
+        clear_stale_mission_metadata_refresh_state(&control.mission_store).await;
+    }
 
     Ok(Json(serde_json::json!({
         "ok": true,
@@ -10488,6 +10517,76 @@ And the report:
         }
 
         clear_mission_metadata_refresh_state(other_mission_id);
+    }
+
+    #[tokio::test]
+    async fn test_clear_stale_mission_metadata_refresh_state_prunes_deleted_missions() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+
+        let deleted_mission = store
+            .create_mission(None, None, None, None, None, None, None)
+            .await
+            .expect("create deleted mission");
+        let existing_mission = store
+            .create_mission(None, None, None, None, None, None, None)
+            .await
+            .expect("create existing mission");
+
+        let deleted_task = tokio::spawn(std::future::pending::<()>());
+        let existing_task = tokio::spawn(std::future::pending::<()>());
+
+        {
+            let mut tasks = MISSION_METADATA_REFRESH_TASKS
+                .lock()
+                .expect("metadata refresh task registry lock poisoned");
+            tasks.insert(
+                deleted_mission.id,
+                MetadataRefreshTaskEntry {
+                    task_id: 1,
+                    force_refresh: false,
+                    handle: deleted_task,
+                },
+            );
+            tasks.insert(
+                existing_mission.id,
+                MetadataRefreshTaskEntry {
+                    task_id: 2,
+                    force_refresh: false,
+                    handle: existing_task,
+                },
+            );
+
+            let mut baselines = MISSION_METADATA_REFRESH_BASELINES
+                .lock()
+                .expect("metadata refresh baseline lock poisoned");
+            baselines.insert(deleted_mission.id, 10);
+            baselines.insert(existing_mission.id, 20);
+        }
+
+        store
+            .delete_mission(deleted_mission.id)
+            .await
+            .expect("delete mission should succeed");
+
+        clear_stale_mission_metadata_refresh_state(&store).await;
+
+        {
+            let tasks = MISSION_METADATA_REFRESH_TASKS
+                .lock()
+                .expect("metadata refresh task registry lock poisoned");
+            assert!(!tasks.contains_key(&deleted_mission.id));
+            assert!(tasks.contains_key(&existing_mission.id));
+        }
+
+        {
+            let baselines = MISSION_METADATA_REFRESH_BASELINES
+                .lock()
+                .expect("metadata refresh baseline lock poisoned");
+            assert!(!baselines.contains_key(&deleted_mission.id));
+            assert_eq!(baselines.get(&existing_mission.id), Some(&20usize));
+        }
+
+        clear_mission_metadata_refresh_state(existing_mission.id);
     }
 
     #[test]
