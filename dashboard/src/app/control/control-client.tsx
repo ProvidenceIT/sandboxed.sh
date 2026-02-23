@@ -27,6 +27,7 @@ import {
   loadMission,
   getMission,
   getMissionEvents,
+  searchMissionMoments,
   createMission,
   listMissions,
   setMissionStatus,
@@ -174,6 +175,14 @@ function streamLog(level: StreamLogLevel, message: string, meta?: Record<string,
       console.error(...args);
       break;
   }
+}
+
+function normalizeSearchText(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 import {
   OptionList,
@@ -2508,6 +2517,7 @@ export default function ControlClient() {
     []
   );
   const [showMissionSwitcher, setShowMissionSwitcher] = useState(false);
+  const [highlightedItemId, setHighlightedItemId] = useState<string | null>(null);
   const [showAutomationsDialog, setShowAutomationsDialog] = useState(false);
 
   // Track which mission's events we're viewing (for parallel missions)
@@ -4358,6 +4368,87 @@ export default function ControlClient() {
     ]
   );
 
+  const findChatItemIdForEntryIndex = useCallback(
+    (entryIndex: number, snippet?: string): string | null => {
+      if (entryIndex < 0) return null;
+
+      let historyIndex = 0;
+      for (const item of itemsRef.current) {
+        if (item.kind !== "user" && item.kind !== "assistant") continue;
+        if (historyIndex === entryIndex) {
+          return item.id;
+        }
+        historyIndex += 1;
+      }
+
+      const normalizedSnippet = normalizeSearchText(snippet ?? "");
+      if (!normalizedSnippet) return null;
+      const best = itemsRef.current.find((item) => {
+        if (item.kind !== "user" && item.kind !== "assistant") return false;
+        return normalizeSearchText(item.content).includes(normalizedSnippet);
+      });
+      return best?.id ?? null;
+    },
+    []
+  );
+
+  const focusChatItem = useCallback((itemId: string) => {
+    setVisibleItemsLimit((prev) => Math.max(prev, groupedItems.length));
+    setHighlightedItemId(itemId);
+    requestAnimationFrame(() => {
+      const el = document.getElementById(`chat-item-${itemId}`);
+      if (!el) return;
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+    });
+  }, [groupedItems.length]);
+
+  useEffect(() => {
+    if (!highlightedItemId) return;
+    const timeout = window.setTimeout(() => setHighlightedItemId(null), 2400);
+    return () => window.clearTimeout(timeout);
+  }, [highlightedItemId]);
+
+  useEffect(() => {
+    const focus = searchParams.get("focus");
+    const missionFromQuery = searchParams.get("mission");
+    if (focus !== "failure" || !missionFromQuery) return;
+    if (!viewingMission || viewingMission.id !== missionFromQuery) return;
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const results = await searchMissionMoments("failing tool call error", {
+          missionId: missionFromQuery,
+          limit: 1,
+        });
+        if (cancelled) return;
+        const best = results[0];
+        if (!best) {
+          toast.error("No failing tool call moment found");
+          router.replace(`/control?mission=${missionFromQuery}`, { scroll: false });
+          return;
+        }
+
+        const targetId = findChatItemIdForEntryIndex(best.entry_index, best.snippet);
+        if (targetId) {
+          focusChatItem(targetId);
+        } else {
+          toast.error("Could not locate the failing moment in loaded history");
+        }
+        router.replace(`/control?mission=${missionFromQuery}`, { scroll: false });
+      } catch (err) {
+        if (cancelled) return;
+        console.error("Failed to search mission moments:", err);
+        toast.error("Failed to locate failing tool call");
+        router.replace(`/control?mission=${missionFromQuery}`, { scroll: false });
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [searchParams, viewingMission, router, focusChatItem, findChatItemIdForEntryIndex]);
+
   // Sync viewingMissionId with currentMission only when there's no explicit viewing mission set
   useEffect(() => {
     if (currentMission && !viewingMissionId) {
@@ -4511,6 +4602,13 @@ export default function ControlClient() {
       setMissionLoading(false);
     }
   };
+
+  const handleOpenFailingToolCallById = useCallback(
+    async (missionId: string) => {
+      router.replace(`/control?mission=${missionId}&focus=failure`, { scroll: false });
+    },
+    [router]
+  );
 
   // Debouncing for thinking updates to reduce re-renders during streaming
   const pendingThinkingRef = useRef<{
@@ -6009,6 +6107,7 @@ export default function ControlClient() {
         onSelectMission={handleViewMission}
         onCancelMission={handleCancelMission}
         onResumeMission={handleResumeMissionById}
+        onOpenFailingToolCall={handleOpenFailingToolCallById}
         onRefresh={refreshRecentMissions}
       />
 
@@ -6655,7 +6754,15 @@ export default function ControlClient() {
 
                 if (item.kind === "user") {
                   return (
-                    <div key={item.id} className="flex justify-end gap-3 group">
+                    <div
+                      key={item.id}
+                      id={`chat-item-${item.id}`}
+                      data-chat-item-id={item.id}
+                      className={cn(
+                        "flex justify-end gap-3 group rounded-xl transition-colors",
+                        highlightedItemId === item.id && "ring-1 ring-amber-400/70 bg-amber-500/10"
+                      )}
+                    >
                       <CopyButton
                         text={item.content}
                         className="self-start mt-2"
@@ -6702,7 +6809,12 @@ export default function ControlClient() {
                   return (
                     <div
                       key={item.id}
-                      className="flex justify-start gap-3 group"
+                      id={`chat-item-${item.id}`}
+                      data-chat-item-id={item.id}
+                      className={cn(
+                        "flex justify-start gap-3 group rounded-xl transition-colors",
+                        highlightedItemId === item.id && "ring-1 ring-amber-400/70 bg-amber-500/10"
+                      )}
                     >
                       <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-indigo-500/20">
                         <Bot className="h-4 w-4 text-indigo-400" />

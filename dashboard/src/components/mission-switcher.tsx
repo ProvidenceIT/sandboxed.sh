@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState, useMemo, useCallback } from 'react';
-import { Search, XCircle, Check, Loader2, RotateCcw } from 'lucide-react';
+import { Search, XCircle, Check, Loader2, RotateCcw, AlertTriangle } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { searchMissions, type Mission, type RunningMissionInfo } from '@/lib/api';
 import { getMissionShortName } from '@/lib/mission-display';
@@ -18,6 +18,7 @@ interface MissionSwitcherProps {
   onSelectMission: (missionId: string) => Promise<void> | void;
   onCancelMission: (missionId: string) => void;
   onResumeMission?: (missionId: string) => Promise<void> | void;
+  onOpenFailingToolCall?: (missionId: string) => Promise<void> | void;
   onRefresh?: () => void;
 }
 
@@ -97,35 +98,48 @@ function getMissionStatusLabel(mission: Mission): string {
 }
 
 export interface MissionQuickAction {
-  action: 'resume';
+  action: 'resume' | 'open_failure';
   label: string;
   title: string;
 }
 
-export function getMissionQuickAction(mission: Mission, isRunning: boolean): MissionQuickAction | null {
-  if (isRunning || !mission.resumable) return null;
+export function getMissionQuickActions(mission: Mission, isRunning: boolean): MissionQuickAction[] {
+  if (isRunning) return [];
+
+  const actions: MissionQuickAction[] = [];
+  if (mission.status === 'failed') {
+    actions.push({
+      action: 'open_failure',
+      label: 'Open Failure',
+      title: 'Jump to likely failing tool call',
+    });
+  }
+
+  if (!mission.resumable) return actions;
   switch (mission.status) {
     case 'blocked':
-      return {
+      actions.push({
         action: 'resume',
         label: 'Continue',
         title: 'Continue mission',
-      };
+      });
+      break;
     case 'failed':
-      return {
+      actions.push({
         action: 'resume',
         label: 'Retry',
         title: 'Retry mission',
-      };
+      });
+      break;
     case 'interrupted':
-      return {
+      actions.push({
         action: 'resume',
         label: 'Resume',
         title: 'Resume mission',
-      };
-    default:
-      return null;
+      });
+      break;
   }
+  return actions;
 }
 
 export function getMissionSearchText(mission: Mission): string {
@@ -387,6 +401,7 @@ export function MissionSwitcher({
   onSelectMission,
   onCancelMission,
   onResumeMission,
+  onOpenFailingToolCall,
   onRefresh,
 }: MissionSwitcherProps) {
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -401,6 +416,10 @@ export function MissionSwitcher({
   const [serverSearchLoading, setServerSearchLoading] = useState(false);
   const searchScoreCacheRef = useRef<Map<string, number>>(new Map());
   const latestSearchRequestIdRef = useRef(0);
+  const normalizedSearchQuery = useMemo(
+    () => normalizeMetadataText(searchQuery),
+    [searchQuery]
+  );
 
   // Handle mission selection with loading state
   const handleSelect = useCallback(async (missionId: string) => {
@@ -468,8 +487,7 @@ export function MissionSwitcher({
 
   useEffect(() => {
     if (!open) return;
-    const normalizedQuery = normalizeMetadataText(searchQuery);
-    if (!normalizedQuery) {
+    if (!normalizedSearchQuery) {
       setServerScoreByMissionId(null);
       setServerSearchLoading(false);
       return;
@@ -481,7 +499,7 @@ export function MissionSwitcher({
     const debounce = window.setTimeout(() => {
       if (cancelled || latestSearchRequestIdRef.current !== requestId) return;
       setServerSearchLoading(true);
-      void searchMissions(normalizedQuery, { limit: 100 })
+      void searchMissions(normalizedSearchQuery, { limit: 100 })
         .then((results) => {
           if (cancelled || latestSearchRequestIdRef.current !== requestId) return;
           setServerScoreByMissionId(mapServerMissionSearchScores(results));
@@ -501,24 +519,23 @@ export function MissionSwitcher({
       cancelled = true;
       window.clearTimeout(debounce);
     };
-  }, [open, searchQuery]);
+  }, [open, normalizedSearchQuery]);
 
   // Filter items by search query
   const filteredItems = useMemo(() => {
-    const normalizedQuery = normalizeMetadataText(searchQuery);
-    if (!normalizedQuery) return allItems;
+    if (!normalizedSearchQuery) return allItems;
 
     const cache = searchScoreCacheRef.current;
     const scored = allItems.flatMap((item) => {
       if (!item.mission) {
-        if (!item.runningInfo || !runningMissionMatchesSearchQuery(item.runningInfo, normalizedQuery)) {
+        if (!item.runningInfo || !runningMissionMatchesSearchQuery(item.runningInfo, normalizedSearchQuery)) {
           return [];
         }
         return [{ item, score: 0.1 }];
       }
       const score = getMissionSearchScore(
         item.mission,
-        normalizedQuery,
+        normalizedSearchQuery,
         cache,
         workspaceNameById,
         serverScoreByMissionId
@@ -533,7 +550,7 @@ export function MissionSwitcher({
       return bUpdatedAt.localeCompare(aUpdatedAt);
     });
     return scored.map(({ item }) => item);
-  }, [allItems, searchQuery, workspaceNameById, serverScoreByMissionId]);
+  }, [allItems, normalizedSearchQuery, workspaceNameById, serverScoreByMissionId]);
 
   useEffect(() => {
     searchScoreCacheRef.current.clear();
@@ -668,7 +685,7 @@ export function MissionSwitcher({
           ) : (
             <>
               {/* Current mission */}
-              {hasCurrent && !searchQuery && (
+              {hasCurrent && !normalizedSearchQuery && (
                 <div className="px-3 pt-1 pb-2">
                   <span className="text-[10px] font-medium uppercase tracking-wider text-white/30">
                     Current
@@ -678,13 +695,13 @@ export function MissionSwitcher({
               {filteredItems.map((item, index) => {
                 // Show section headers only when not searching
                 const showRunningHeader =
-                  !searchQuery &&
+                  !normalizedSearchQuery &&
                   item.type === 'running' &&
                   (index === 0 ||
                     (index === 1 && hasCurrent) ||
                     filteredItems[index - 1]?.type !== 'running');
                 const showRecentHeader =
-                  !searchQuery &&
+                  !normalizedSearchQuery &&
                   item.type === 'recent' &&
                   filteredItems[index - 1]?.type !== 'recent';
 
@@ -693,7 +710,7 @@ export function MissionSwitcher({
                 const isViewing = item.id === viewingMissionId;
                 const isRunning = item.type === 'running';
                 const runningInfo = item.runningInfo;
-                const missionQuickAction = mission ? getMissionQuickAction(mission, isRunning) : null;
+                const missionQuickActions = mission ? getMissionQuickActions(mission, isRunning) : [];
 
                 const stallInfo =
                   isRunning && runningInfo?.health?.status === 'stalled'
@@ -808,6 +825,7 @@ export function MissionSwitcher({
                       {isRunning && !isLoading && (
                         <button
                           onClick={(e) => {
+                            e.preventDefault();
                             e.stopPropagation();
                             onCancelMission(item.id);
                           }}
@@ -817,20 +835,36 @@ export function MissionSwitcher({
                           <XCircle className="h-4 w-4" />
                         </button>
                       )}
-                      {missionQuickAction && onResumeMission && !isLoading && (
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            void onResumeMission(item.id);
-                            onClose();
-                          }}
-                          className="px-1.5 py-0.5 rounded opacity-0 group-hover:opacity-100 hover:bg-white/[0.08] text-[10px] text-white/40 hover:text-emerald-300 transition-all shrink-0 inline-flex items-center gap-1"
-                          title={missionQuickAction.title}
-                        >
-                          <RotateCcw className="h-3 w-3" />
-                          {missionQuickAction.label}
-                        </button>
-                      )}
+                      {missionQuickActions
+                        .filter((action) =>
+                          action.action === 'resume'
+                            ? Boolean(onResumeMission)
+                            : Boolean(onOpenFailingToolCall)
+                        )
+                        .map((action) => (
+                          <button
+                            key={`${item.id}-${action.action}`}
+                            onClick={(e) => {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              if (action.action === 'resume') {
+                                void onResumeMission?.(item.id);
+                              } else {
+                                void onOpenFailingToolCall?.(item.id);
+                              }
+                              onClose();
+                            }}
+                            className="px-1.5 py-0.5 rounded opacity-0 group-hover:opacity-100 hover:bg-white/[0.08] text-[10px] text-white/40 hover:text-emerald-300 transition-all shrink-0 inline-flex items-center gap-1"
+                            title={action.title}
+                          >
+                            {action.action === 'resume' ? (
+                              <RotateCcw className="h-3 w-3" />
+                            ) : (
+                              <AlertTriangle className="h-3 w-3" />
+                            )}
+                            {action.label}
+                          </button>
+                        ))}
                     </a>
                   </div>
                 );

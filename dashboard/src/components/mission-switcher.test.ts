@@ -5,7 +5,7 @@ import {
   getMissionSearchScore,
   getMissionCardDescription,
   getMissionCardTitle,
-  getMissionQuickAction,
+  getMissionQuickActions,
   getRunningMissionSearchText,
   getMissionSearchText,
   missionMatchesSearchQuery,
@@ -194,15 +194,23 @@ describe('mission switcher search helpers', () => {
     const blocked = buildMission({ status: 'blocked', resumable: true });
     const failed = buildMission({ status: 'failed', resumable: true });
 
-    expect(getMissionQuickAction(interrupted, false)?.label).toBe('Resume');
-    expect(getMissionQuickAction(blocked, false)?.label).toBe('Continue');
-    expect(getMissionQuickAction(failed, false)?.label).toBe('Retry');
+    expect(getMissionQuickActions(interrupted, false).map((a) => a.label)).toEqual(['Resume']);
+    expect(getMissionQuickActions(blocked, false).map((a) => a.label)).toEqual(['Continue']);
+    expect(getMissionQuickActions(failed, false).map((a) => a.label)).toEqual([
+      'Open Failure',
+      'Retry',
+    ]);
   });
 
   it('does not expose quick action for non-resumable or running missions', () => {
     const mission = buildMission({ status: 'interrupted', resumable: false });
 
-    expect(getMissionQuickAction(mission, false)).toBeNull();
-    expect(getMissionQuickAction({ ...mission, resumable: true }, true)).toBeNull();
+    expect(getMissionQuickActions(mission, false)).toEqual([]);
+    expect(getMissionQuickActions({ ...mission, resumable: true }, true)).toEqual([]);
+  });
+
+  it('still exposes failure jump action for non-resumable failed missions', () => {
+    const mission = buildMission({ status: 'failed', resumable: false });
+    expect(getMissionQuickActions(mission, false).map((a) => a.label)).toEqual(['Open Failure']);
   });
 });

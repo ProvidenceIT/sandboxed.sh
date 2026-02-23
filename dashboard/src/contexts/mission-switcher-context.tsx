@@ -107,6 +107,10 @@ export function MissionSwitcherProvider({ children }: { children: React.ReactNod
     }
   }, [router]);
 
+  const handleOpenFailingToolCall = useCallback(async (missionId: string) => {
+    router.push(`/control?mission=${missionId}&focus=failure`);
+  }, [router]);
+
   const contextValue = useMemo(() => ({
     open: () => setIsOpen(true),
     close: () => setIsOpen(false),
@@ -128,6 +132,7 @@ export function MissionSwitcherProvider({ children }: { children: React.ReactNod
           onSelectMission={handleSelectMission}
           onCancelMission={handleCancelMission}
           onResumeMission={handleResumeMission}
+          onOpenFailingToolCall={handleOpenFailingToolCall}
           onRefresh={handleRefresh}
         />
       )}
