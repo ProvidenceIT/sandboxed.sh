@@ -64,11 +64,14 @@ export function getMissionCardTitle(mission: Mission): string | null {
 }
 
 export function normalizeMetadataText(text: string): string {
-  return text
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
+  const lower = text.toLowerCase();
+  let sanitized = lower;
+  try {
+    sanitized = lower.replace(new RegExp('[^\\p{L}\\p{N}\\s]', 'gu'), ' ');
+  } catch {
+    sanitized = lower.replace(/[!"#$%&'()*+,./:;<=>?@[\\\]^_`{|}~-]/g, ' ');
+  }
+  return sanitized.replace(/\s+/g, ' ').trim();
 }
 
 export function hasMeaningfulExtraTokens(baseText: string, candidateText: string): boolean {

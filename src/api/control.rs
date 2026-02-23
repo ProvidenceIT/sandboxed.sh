@@ -1464,6 +1464,11 @@ fn should_refresh_metadata_by_cadence(
         }
     });
 
+    if conversational_count < *baseline {
+        *baseline = conversational_count;
+        return false;
+    }
+
     conversational_count.saturating_sub(*baseline) >= 10
 }
 
@@ -10178,6 +10183,48 @@ And the report:
             refreshed.metadata_updated_at.as_deref(),
             Some(forced_timestamp.as_str())
         );
+    }
+
+    #[tokio::test]
+    async fn test_should_refresh_metadata_by_cadence_rebases_when_history_is_rewritten_shorter() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = store
+            .create_mission(Some("Existing mission"), None, None, None, None, None, None)
+            .await
+            .expect("create mission");
+        store
+            .update_mission_metadata(
+                mission.id,
+                Some(Some("Existing mission")),
+                Some(Some("Existing short description")),
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("seed metadata");
+        let mission = store
+            .get_mission(mission.id)
+            .await
+            .expect("get mission")
+            .expect("mission exists");
+
+        clear_mission_metadata_refresh_state(mission.id);
+
+        assert!(!should_refresh_metadata_by_cadence(
+            mission.id, &mission, 24, false
+        ));
+        assert!(!should_refresh_metadata_by_cadence(
+            mission.id, &mission, 4, false
+        ));
+        assert!(!should_refresh_metadata_by_cadence(
+            mission.id, &mission, 13, false
+        ));
+        assert!(should_refresh_metadata_by_cadence(
+            mission.id, &mission, 14, false
+        ));
+
+        clear_mission_metadata_refresh_state(mission.id);
     }
 
     #[tokio::test]
