@@ -1350,6 +1350,7 @@ async fn apply_generated_mission_metadata_updates(
     mission_id: Uuid,
     generated_title: Option<String>,
     generated_short_description: Option<String>,
+    metadata_source_update: Option<Option<&str>>,
     metadata_model: Option<&str>,
 ) {
     if generated_title.is_none() && generated_short_description.is_none() {
@@ -1372,7 +1373,7 @@ async fn apply_generated_mission_metadata_updates(
             mission_id,
             title_to_write.as_deref().map(Some),
             generated_short_description.as_deref().map(Some),
-            Some(Some(METADATA_SOURCE_BACKEND_HEURISTIC)),
+            metadata_source_update,
             metadata_model.map(Some),
             Some(Some(METADATA_VERSION_V1)),
         )
@@ -1453,12 +1454,25 @@ async fn refresh_mission_metadata_from_store(
         force_refresh,
     )
     .await;
+    let metadata_source_update = if generated_title.is_none()
+        && mission.metadata_source.as_deref() == Some(METADATA_SOURCE_USER)
+        && mission
+            .title
+            .as_deref()
+            .map(|title| !title.trim().is_empty())
+            .unwrap_or(false)
+    {
+        None
+    } else {
+        Some(Some(METADATA_SOURCE_BACKEND_HEURISTIC))
+    };
     apply_generated_mission_metadata_updates(
         mission_store,
         events_tx,
         mission_id,
         generated_title,
         generated_short_description,
+        metadata_source_update,
         mission.model_override.as_deref(),
     )
     .await;
@@ -8921,7 +8935,68 @@ And the report:
         assert_eq!(updated_title, None);
         assert_eq!(
             updated_short_description.as_deref(),
-            Some("Track flaky auth tests")
+            Some("Auth test flakes are caused by parallel DB seed races.")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_refresh_mission_metadata_preserves_user_source_when_only_short_description_changes(
+    ) {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = store
+            .create_mission(
+                Some("User chosen title"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("create mission");
+        store
+            .update_mission_title(mission.id, "User chosen title")
+            .await
+            .expect("mark title as user managed");
+        store
+            .update_mission_history(
+                mission.id,
+                &[
+                    MissionHistoryEntry {
+                        role: "user".to_string(),
+                        content: "Investigate oauth callback timeout".to_string(),
+                    },
+                    MissionHistoryEntry {
+                        role: "assistant".to_string(),
+                        content: "Root cause is stale oauth callback cache state across retries."
+                            .to_string(),
+                    },
+                ],
+            )
+            .await
+            .expect("seed history");
+
+        let (events_tx, _events_rx) = broadcast::channel::<AgentEvent>(16);
+        refresh_mission_metadata_for_milestone(&store, &events_tx, mission.id).await;
+
+        let refreshed = store
+            .get_mission(mission.id)
+            .await
+            .expect("get mission")
+            .expect("mission exists");
+        assert_eq!(refreshed.title.as_deref(), Some("User chosen title"));
+        assert_eq!(
+            refreshed.short_description.as_deref(),
+            Some("Root cause is stale oauth callback cache state across retries.")
+        );
+        assert_eq!(
+            refreshed.metadata_source.as_deref(),
+            Some(METADATA_SOURCE_USER)
+        );
+        assert_eq!(
+            refreshed.metadata_version.as_deref(),
+            Some(METADATA_VERSION_V1)
         );
     }
 
@@ -9341,7 +9416,7 @@ And the report:
         );
         assert_eq!(
             refreshed.short_description.as_deref(),
-            Some("Investigate oauth callback timeout")
+            Some("Investigate oauth callback timeout root cause")
         );
         assert_eq!(
             refreshed.metadata_source.as_deref(),
@@ -9445,7 +9520,7 @@ And the report:
         );
         assert_eq!(
             refreshed.short_description.as_deref(),
-            Some("Investigate websocket reconnect loop")
+            Some("Investigate websocket reconnect loop root cause")
         );
     }
 
@@ -9527,7 +9602,7 @@ And the report:
         );
         assert_eq!(
             refreshed.short_description.as_deref(),
-            Some("Investigate websocket reconnect loop")
+            Some("Investigate websocket reconnect loop root cause")
         );
     }
 
