@@ -218,6 +218,10 @@ impl MissionStore for FileMissionStore {
         title: Option<&str>,
         short_description: Option<&str>,
     ) -> Result<(), String> {
+        if title.is_none() && short_description.is_none() {
+            return Ok(());
+        }
+
         let mut missions = self.missions.write().await;
         let mission = missions
             .get_mut(&id)
@@ -341,5 +345,60 @@ impl MissionStore for FileMissionStore {
         _success: bool,
     ) -> Result<(), String> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn update_mission_metadata_is_noop_when_fields_missing() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = FileMissionStore::new(temp_dir.path().to_path_buf(), "test-user")
+            .await
+            .expect("file store");
+        let mission = store
+            .create_mission(Some("Initial"), None, None, None, None, None, None)
+            .await
+            .expect("create mission");
+
+        store
+            .update_mission_metadata(mission.id, Some("Renamed"), Some("Short summary"))
+            .await
+            .expect("set metadata");
+
+        let after_set = store
+            .get_mission(mission.id)
+            .await
+            .expect("get mission")
+            .expect("mission exists");
+        let metadata_updated_at = after_set
+            .metadata_updated_at
+            .clone()
+            .expect("metadata timestamp should be set");
+        let updated_at = after_set.updated_at.clone();
+
+        store
+            .update_mission_metadata(mission.id, None, None)
+            .await
+            .expect("noop metadata update");
+
+        let after_noop = store
+            .get_mission(mission.id)
+            .await
+            .expect("get mission")
+            .expect("mission exists");
+
+        assert_eq!(after_noop.title.as_deref(), Some("Renamed"));
+        assert_eq!(
+            after_noop.short_description.as_deref(),
+            Some("Short summary")
+        );
+        assert_eq!(
+            after_noop.metadata_updated_at.as_deref(),
+            Some(metadata_updated_at.as_str())
+        );
+        assert_eq!(after_noop.updated_at, updated_at);
     }
 }
