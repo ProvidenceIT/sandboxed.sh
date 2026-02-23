@@ -381,6 +381,14 @@ struct ControlView: View {
                     showMissionSwitcher = false
                     Task { await switchToMission(id: missionId) }
                 },
+                onResumeMission: { missionId in
+                    showMissionSwitcher = false
+                    Task { await resumeMission(id: missionId) }
+                },
+                onFollowUpMission: { mission in
+                    showMissionSwitcher = false
+                    Task { await createFollowUpMission(from: mission) }
+                },
                 onCancelMission: { missionId in
                     Task { await cancelMission(id: missionId) }
                 },
@@ -1208,18 +1216,54 @@ struct ControlView: View {
     
     private func resumeMission() async {
         guard let mission = viewingMission, mission.canResume else { return }
-        
+
+        await resumeMission(id: mission.id)
+    }
+
+    private func resumeMission(id: String) async {
         do {
-            let resumed = try await api.resumeMission(id: mission.id)
+            let resumed = try await api.resumeMission(id: id)
             currentMission = resumed
             applyViewingMission(resumed)
-            
+
             // Refresh running missions
             await refreshRunningMissions()
-            
+
             HapticService.success()
         } catch {
             print("Failed to resume mission: \(error)")
+            HapticService.error()
+        }
+    }
+
+    private func followUpPrompt(for mission: Mission) -> String {
+        let baseTitle = mission.displayTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        if baseTitle.isEmpty || baseTitle == "Untitled Mission" {
+            return "Follow up on this mission with the next concrete implementation steps."
+        }
+        return "Follow up on \"\(baseTitle)\" and implement the next concrete steps."
+    }
+
+    private func createFollowUpMission(from sourceMission: Mission) async {
+        do {
+            let mission = try await api.createMission(
+                workspaceId: sourceMission.workspaceId,
+                title: nil,
+                agent: sourceMission.agent,
+                modelOverride: nil,
+                backend: sourceMission.backend
+            )
+            currentMission = mission
+            applyViewingMission(mission, scrollToBottom: false)
+            inputText = followUpPrompt(for: sourceMission)
+            isInputFocused = true
+
+            // Refresh running missions to keep switcher state in sync.
+            await refreshRunningMissions()
+
+            HapticService.success()
+        } catch {
+            print("Failed to create follow-up mission: \(error)")
             HapticService.error()
         }
     }
@@ -3246,6 +3290,30 @@ private struct ToolGroupView: View {
 
 // MARK: - Mission Switcher Sheet
 
+private enum MissionQuickAction {
+    case resume
+    case `continue`
+    case retry
+    case followUp
+
+    var label: String {
+        switch self {
+        case .resume: return "Resume"
+        case .continue: return "Continue"
+        case .retry: return "Retry"
+        case .followUp: return "Follow-up"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .resume, .continue: return "play.circle.fill"
+        case .retry: return "arrow.clockwise.circle.fill"
+        case .followUp: return "plus.bubble.fill"
+        }
+    }
+}
+
 /// Sheet for switching between missions (like dashboard's Cmd+K)
 private struct MissionSwitcherSheet: View {
     let runningMissions: [RunningMissionInfo]
@@ -3253,6 +3321,8 @@ private struct MissionSwitcherSheet: View {
     let currentMissionId: String?
     let viewingMissionId: String?
     let onSelectMission: (String) -> Void
+    let onResumeMission: (String) -> Void
+    let onFollowUpMission: (Mission) -> Void
     let onCancelMission: (String) -> Void
     let onCreateNewMission: () -> Void
     let onDismiss: () -> Void
@@ -3331,7 +3401,11 @@ private struct MissionSwitcherSheet: View {
                         isRunning: false,
                         runningState: nil,
                         isViewing: viewingMissionId == mission.id,
+                        quickAction: missionQuickAction(for: mission),
                         onSelect: { onSelectMission(mission.id) },
+                        onQuickAction: {
+                            handleQuickAction(for: mission)
+                        },
                         onCancel: nil
                     )
                 }
@@ -3366,7 +3440,9 @@ private struct MissionSwitcherSheet: View {
                                 isRunning: true,
                                 runningState: info.state,
                                 isViewing: viewingMissionId == info.missionId,
+                                quickAction: nil,
                                 onSelect: { onSelectMission(info.missionId) },
+                                onQuickAction: nil,
                                 onCancel: { onCancelMission(info.missionId) }
                             )
                         }
@@ -3595,6 +3671,37 @@ private struct MissionSwitcherSheet: View {
         }
         return score
     }
+
+    private func missionQuickAction(for mission: Mission) -> MissionQuickAction? {
+        if mission.status == .completed {
+            return .followUp
+        }
+
+        if mission.resumable {
+            switch mission.status {
+            case .interrupted:
+                return .resume
+            case .blocked:
+                return .continue
+            case .failed, .notFeasible:
+                return .retry
+            default:
+                break
+            }
+        }
+
+        return nil
+    }
+
+    private func handleQuickAction(for mission: Mission) {
+        guard let action = missionQuickAction(for: mission) else { return }
+        switch action {
+        case .resume, .continue, .retry:
+            onResumeMission(mission.id)
+        case .followUp:
+            onFollowUpMission(mission)
+        }
+    }
 }
 
 // MARK: - Mission Row
@@ -3609,7 +3716,9 @@ private struct MissionRow: View {
     let isRunning: Bool
     let runningState: String?
     let isViewing: Bool
+    let quickAction: MissionQuickAction?
     let onSelect: () -> Void
+    let onQuickAction: (() -> Void)?
     let onCancel: (() -> Void)?
 
     private var shortId: String {
@@ -3723,6 +3832,22 @@ private struct MissionRow: View {
                         .padding(.vertical, 4)
                         .background(statusColor.opacity(0.1))
                         .clipShape(Capsule())
+                }
+
+                if let quickAction, let onQuickAction {
+                    Button {
+                        onQuickAction()
+                        HapticService.lightTap()
+                    } label: {
+                        Label(quickAction.label, systemImage: quickAction.icon)
+                            .font(.caption2.weight(.semibold))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Theme.accent.opacity(0.14))
+                            .foregroundStyle(Theme.accent)
+                            .clipShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
                 }
 
                 // Cancel button for running missions
