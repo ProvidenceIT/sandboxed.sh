@@ -160,7 +160,9 @@ impl MissionStore for InMemoryMissionStore {
         mission.metadata_source = Some("user".to_string());
         mission.metadata_model = None;
         mission.metadata_version = None;
-        mission.updated_at = now_string();
+        let now = now_string();
+        mission.metadata_updated_at = Some(now.clone());
+        mission.updated_at = now;
         Ok(())
     }
 
@@ -437,6 +439,14 @@ mod tests {
             )
             .await
             .expect("seed metadata source");
+        let seeded = store
+            .get_mission(mission.id)
+            .await
+            .expect("get seeded mission")
+            .expect("mission exists");
+        let seeded_metadata_updated_at = seeded
+            .metadata_updated_at
+            .expect("seed metadata timestamp should exist");
 
         store
             .update_mission_title(mission.id, "Manual title")
@@ -452,5 +462,12 @@ mod tests {
         assert_eq!(mission.metadata_source.as_deref(), Some("user"));
         assert_eq!(mission.metadata_model, None);
         assert_eq!(mission.metadata_version, None);
+        let metadata_updated_at = mission
+            .metadata_updated_at
+            .expect("manual title update should set metadata timestamp");
+        assert!(
+            metadata_updated_at >= seeded_metadata_updated_at,
+            "manual title update should advance metadata timestamp"
+        );
     }
 }
