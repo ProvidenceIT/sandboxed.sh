@@ -155,16 +155,96 @@ function expandQueryTokenGroup(token: string): string[] {
   return Array.from(values);
 }
 
-function groupMatchesTokenSet(group: string[], tokenSet: Set<string>): boolean {
+function tokenMatchStrength(token: string, candidate: string): number {
+  if (token === candidate) return 1;
+  if (token.startsWith(candidate) || candidate.startsWith(token)) return 0.7;
+  if (candidate.length >= 4 && token.includes(candidate)) return 0.45;
+  return 0;
+}
+
+function groupMatchStrengthForTokenSet(group: string[], tokenSet: Set<string>): number {
+  let best = 0;
   for (const candidate of group) {
     if (!candidate) continue;
     for (const token of tokenSet) {
-      if (token === candidate || token.startsWith(candidate) || candidate.startsWith(token)) {
-        return true;
+      const strength = tokenMatchStrength(token, candidate);
+      if (strength > best) {
+        best = strength;
+      }
+      if (best >= 1) {
+        return best;
       }
     }
   }
-  return false;
+  return best;
+}
+
+function tokenSetFromText(text: string): Set<string> {
+  const normalized = normalizeMetadataText(text);
+  return new Set(normalized.split(' ').filter(Boolean));
+}
+
+export function missionSearchRelevanceScore(
+  mission: Mission,
+  searchQuery: string,
+  workspaceNameById?: Record<string, string>
+): number {
+  const normalizedQuery = normalizeMetadataText(searchQuery);
+  if (!normalizedQuery) return 0;
+
+  const displayName = getMissionDisplayName(mission, workspaceNameById);
+  const title = getMissionCardTitle(mission) ?? '';
+  const shortDescription = mission.short_description?.trim() ?? '';
+  const backend = mission.backend?.trim() ?? '';
+  const status = mission.status ?? '';
+  const combined = `${displayName} ${getMissionSearchText(mission)}`;
+
+  const normalizedCombined = normalizeMetadataText(combined);
+  if (!normalizedCombined) return 0;
+
+  const queryTokens = normalizedQuery.split(' ').filter(Boolean);
+  if (queryTokens.length === 0) return 0;
+
+  const queryGroups = queryTokens.map(expandQueryTokenGroup).filter((group) => group.length > 0);
+  if (queryGroups.length === 0) return 0;
+
+  const fields = [
+    { weight: 5, tokens: tokenSetFromText(displayName) },
+    { weight: 8, tokens: tokenSetFromText(title) },
+    { weight: 7, tokens: tokenSetFromText(shortDescription) },
+    { weight: 3, tokens: tokenSetFromText(backend) },
+    { weight: 2, tokens: tokenSetFromText(status) },
+    { weight: 1, tokens: tokenSetFromText(combined) },
+  ];
+
+  let score = 0;
+  for (const group of queryGroups) {
+    let bestGroupScore = 0;
+    for (const field of fields) {
+      const strength = groupMatchStrengthForTokenSet(group, field.tokens);
+      if (strength > 0) {
+        bestGroupScore = Math.max(bestGroupScore, strength * field.weight);
+      }
+    }
+    if (bestGroupScore <= 0) {
+      return 0;
+    }
+    score += bestGroupScore;
+  }
+
+  const phraseBoostTargets = [
+    { text: normalizeMetadataText(title), boost: 14 },
+    { text: normalizeMetadataText(shortDescription), boost: 12 },
+    { text: normalizeMetadataText(displayName), boost: 8 },
+    { text: normalizeMetadataText(combined), boost: 5 },
+  ];
+  for (const target of phraseBoostTargets) {
+    if (target.text && target.text.includes(normalizedQuery)) {
+      score += target.boost;
+    }
+  }
+
+  return score;
 }
 
 export function missionMatchesSearchQuery(
@@ -172,23 +252,8 @@ export function missionMatchesSearchQuery(
   searchQuery: string,
   workspaceNameById?: Record<string, string>
 ): boolean {
-  const normalizedQuery = normalizeMetadataText(searchQuery);
-  if (!normalizedQuery) return true;
-
-  const haystack = normalizeMetadataText(
-    `${getMissionDisplayName(mission, workspaceNameById)} ${getMissionSearchText(mission)}`
-  );
-  if (!haystack) return false;
-  if (haystack.includes(normalizedQuery)) return true;
-
-  const queryTokens = normalizedQuery.split(' ').filter(Boolean);
-  if (queryTokens.length === 0) return true;
-
-  const tokenSet = new Set(haystack.split(' ').filter(Boolean));
-  const queryGroups = queryTokens.map(expandQueryTokenGroup).filter((group) => group.length > 0);
-  if (queryGroups.length === 0) return false;
-
-  return queryGroups.every((group) => groupMatchesTokenSet(group, tokenSet));
+  if (!normalizeMetadataText(searchQuery)) return true;
+  return missionSearchRelevanceScore(mission, searchQuery, workspaceNameById) > 0;
 }
 
 export function MissionSwitcher({
@@ -277,10 +342,19 @@ export function MissionSwitcher({
   // Filter items by search query
   const filteredItems = useMemo(() => {
     if (!searchQuery.trim()) return allItems;
-    return allItems.filter((item) => {
-      if (!item.mission) return false;
-      return missionMatchesSearchQuery(item.mission, searchQuery, workspaceNameById);
+    const scored = allItems.flatMap((item) => {
+      if (!item.mission) return [];
+      const score = missionSearchRelevanceScore(item.mission, searchQuery, workspaceNameById);
+      if (score <= 0) return [];
+      return [{ item, score }];
     });
+    scored.sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      const aUpdatedAt = a.item.mission?.updated_at ?? '';
+      const bUpdatedAt = b.item.mission?.updated_at ?? '';
+      return bUpdatedAt.localeCompare(aUpdatedAt);
+    });
+    return scored.map(({ item }) => item);
   }, [allItems, searchQuery, workspaceNameById]);
 
   // Reset state on open/close
