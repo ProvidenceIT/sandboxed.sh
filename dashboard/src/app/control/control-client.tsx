@@ -4383,22 +4383,30 @@ export default function ControlClient() {
         }
         return 0;
       };
+      const stringifyToolPayload = (payload: unknown): string => {
+        if (payload === undefined) return "";
+        if (typeof payload === "string") return payload;
+        try {
+          const serialized = JSON.stringify(payload);
+          return serialized ?? "";
+        } catch {
+          return String(payload);
+        }
+      };
       const historyItemSearchText = (item: GroupedItem): string => {
         if (item.kind === "user" || item.kind === "assistant") {
           return item.content;
         }
         if (item.kind === "tool") {
-          const argsText =
-            item.args === undefined ? "" : JSON.stringify(item.args);
-          const resultText =
-            item.result === undefined ? "" : JSON.stringify(item.result);
+          const argsText = stringifyToolPayload(item.args);
+          const resultText = stringifyToolPayload(item.result);
           return `${item.name} ${argsText} ${resultText}`.trim();
         }
         if (item.kind === "tool_group") {
           return item.tools
             .map((tool) => {
-              const argsText = tool.args === undefined ? "" : JSON.stringify(tool.args);
-              const resultText = tool.result === undefined ? "" : JSON.stringify(tool.result);
+              const argsText = stringifyToolPayload(tool.args);
+              const resultText = stringifyToolPayload(tool.result);
               return `${tool.name} ${argsText} ${resultText}`.trim();
             })
             .join(" ");

@@ -216,6 +216,26 @@ fn extract_short_description_from_role(
         .and_then(|(_, content)| extract_short_description_from_content(content, max_len))
 }
 
+fn extract_short_description_from_recent_role(
+    history: &[(String, String)],
+    role: &str,
+    max_len: usize,
+) -> Option<String> {
+    history
+        .iter()
+        .rev()
+        .filter(|(entry_role, _)| entry_role == role)
+        .find_map(|(_, content)| extract_short_description_from_content(content, max_len))
+}
+
+fn extract_short_description_from_recent_history(
+    history: &[(String, String)],
+    max_len: usize,
+) -> Option<String> {
+    extract_short_description_from_recent_role(history, "assistant", max_len)
+        .or_else(|| extract_short_description_from_recent_role(history, "user", max_len))
+}
+
 fn extract_short_description_from_content(content: &str, max_len: usize) -> Option<String> {
     let lines: Vec<&str> = content.lines().collect();
     let mut inside_fenced_block: Option<char> = None;
@@ -1267,6 +1287,9 @@ async fn generate_mission_metadata_updates(
     {
         if should_bootstrap_short_description_from_first_assistant {
             extract_short_description_from_role(history, "assistant", 160)
+                .or_else(|| extract_short_description_from_history(history, 160))
+        } else if should_refresh {
+            extract_short_description_from_recent_history(history, 160)
                 .or_else(|| extract_short_description_from_history(history, 160))
         } else {
             extract_short_description_from_history(history, 160)
@@ -9170,7 +9193,91 @@ And the report:
         );
         assert_eq!(
             with_milestone.1.as_deref(),
-            Some("Investigate production timeout in payment worker")
+            Some("Investigate payment timeout root cause")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_generate_mission_metadata_updates_refresh_uses_recent_conversational_short_description(
+    ) {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = store
+            .create_mission(Some("Legacy title"), None, None, None, None, None, None)
+            .await
+            .expect("create mission");
+        store
+            .update_mission_metadata(
+                mission.id,
+                Some(Some("Legacy title")),
+                Some(Some("Legacy short description")),
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("seed metadata");
+        let mission = store
+            .get_mission(mission.id)
+            .await
+            .expect("get mission")
+            .expect("mission exists");
+        let history = vec![
+            (
+                "user".to_string(),
+                "Start by auditing invoice retry failures in webhook processing.".to_string(),
+            ),
+            (
+                "assistant".to_string(),
+                "Acknowledged. I'll inspect the retry pipeline first.".to_string(),
+            ),
+            (
+                "user".to_string(),
+                "Check current retry backoff settings.".to_string(),
+            ),
+            (
+                "assistant".to_string(),
+                "Backoff settings retrieved from worker config.".to_string(),
+            ),
+            (
+                "user".to_string(),
+                "Look at dead-letter queue behavior next.".to_string(),
+            ),
+            (
+                "assistant".to_string(),
+                "Dead-letter queue is receiving retries after max attempts.".to_string(),
+            ),
+            (
+                "user".to_string(),
+                "Confirm alerting on repeated failures.".to_string(),
+            ),
+            (
+                "assistant".to_string(),
+                "Current alerts only trigger on total outage.".to_string(),
+            ),
+            (
+                "user".to_string(),
+                "Propose what we should change.".to_string(),
+            ),
+            (
+                "assistant".to_string(),
+                "Finalize webhook retry policy with staged backoff and failure alert routing."
+                    .to_string(),
+            ),
+        ];
+
+        let (_, updated_short_description) = generate_mission_metadata_updates(
+            &store,
+            mission.id,
+            &mission,
+            &history,
+            history.first().map(|(_, content)| content.as_str()),
+            false,
+        )
+        .await;
+
+        assert_eq!(
+            updated_short_description.as_deref(),
+            Some("Finalize webhook retry policy with staged backoff and failure alert routing.")
         );
     }
 
