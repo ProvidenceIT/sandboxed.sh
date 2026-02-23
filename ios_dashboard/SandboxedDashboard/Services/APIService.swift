@@ -190,6 +190,17 @@ final class APIService {
         return try await get(urlString)
     }
 
+    func searchMissions(query: String, limit: Int? = nil) async throws -> [MissionSearchResult] {
+        var queryItems: [URLQueryItem] = [URLQueryItem(name: "q", value: query)]
+        if let limit {
+            queryItems.append(URLQueryItem(name: "limit", value: String(limit)))
+        }
+
+        var components = URLComponents(string: "/api/control/missions/search")
+        components?.queryItems = queryItems
+        return try await get(components?.string ?? "/api/control/missions/search")
+    }
+
     func searchMissionMoments(
         query: String,
         limit: Int? = nil,
