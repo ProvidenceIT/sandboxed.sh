@@ -7,7 +7,7 @@
 //! - supports frontend/interactive tools by accepting tool results
 //! - supports persistent missions (goal-oriented sessions)
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::convert::Infallible;
 use std::sync::Arc;
 
@@ -193,6 +193,234 @@ fn extract_short_description_from_history(
     } else {
         Some(collapsed)
     }
+}
+
+fn normalize_metadata_text(text: &str) -> String {
+    text.to_ascii_lowercase()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch.is_ascii_whitespace() {
+                ch
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn strip_numeric_title_suffix(title: &str) -> &str {
+    let trimmed = title.trim();
+    if !trimmed.ends_with(')') {
+        return trimmed;
+    }
+    let Some(open_idx) = trimmed.rfind(" (") else {
+        return trimmed;
+    };
+    let suffix = &trimmed[(open_idx + 2)..(trimmed.len() - 1)];
+    if suffix.is_empty() || !suffix.chars().all(|c| c.is_ascii_digit()) {
+        return trimmed;
+    }
+    trimmed[..open_idx].trim_end()
+}
+
+fn canonical_title_key(title: &str) -> String {
+    normalize_metadata_text(strip_numeric_title_suffix(title))
+}
+
+fn has_significant_metadata_drift(existing: &str, candidate: &str) -> bool {
+    let existing_normalized = normalize_metadata_text(existing);
+    let candidate_normalized = normalize_metadata_text(candidate);
+
+    if existing_normalized.is_empty() {
+        return !candidate_normalized.is_empty();
+    }
+    if existing_normalized == candidate_normalized {
+        return false;
+    }
+    if existing_normalized.contains(&candidate_normalized)
+        || candidate_normalized.contains(&existing_normalized)
+    {
+        return false;
+    }
+
+    let existing_tokens: Vec<&str> = existing_normalized.split_whitespace().collect();
+    let candidate_tokens: Vec<&str> = candidate_normalized.split_whitespace().collect();
+    if existing_tokens.is_empty() || candidate_tokens.is_empty() {
+        return true;
+    }
+    let existing_set: HashSet<&str> = existing_tokens.iter().copied().collect();
+    let candidate_set: HashSet<&str> = candidate_tokens.iter().copied().collect();
+    let overlap = existing_set.intersection(&candidate_set).count();
+    let min_len = existing_set.len().min(candidate_set.len());
+    if min_len > 0 {
+        let overlap_ratio = overlap as f64 / min_len as f64;
+        if overlap_ratio >= 0.8 {
+            return false;
+        }
+    }
+
+    true
+}
+
+async fn disambiguate_generated_title(
+    mission_store: &Arc<dyn MissionStore>,
+    mission_id: Uuid,
+    title: &str,
+) -> String {
+    let base_title = title.trim();
+    if base_title.is_empty() {
+        return title.to_string();
+    }
+
+    let missions = match mission_store.list_missions(200, 0).await {
+        Ok(missions) => missions,
+        Err(err) => {
+            tracing::warn!("Failed to load mission titles for dedupe guard: {}", err);
+            return base_title.to_string();
+        }
+    };
+
+    let mut exact_titles = HashSet::new();
+    let mut canonical_titles = HashSet::new();
+    for mission in missions {
+        if mission.id == mission_id {
+            continue;
+        }
+        if let Some(existing_title) = mission.title {
+            let normalized = normalize_metadata_text(&existing_title);
+            if !normalized.is_empty() {
+                exact_titles.insert(normalized);
+            }
+            let canonical = canonical_title_key(&existing_title);
+            if !canonical.is_empty() {
+                canonical_titles.insert(canonical);
+            }
+        }
+    }
+
+    let candidate_exact = normalize_metadata_text(base_title);
+    let candidate_canonical = canonical_title_key(base_title);
+    if !exact_titles.contains(&candidate_exact) && !canonical_titles.contains(&candidate_canonical)
+    {
+        return base_title.to_string();
+    }
+
+    for idx in 2..100 {
+        let candidate = format!("{} ({})", base_title, idx);
+        if !exact_titles.contains(&normalize_metadata_text(&candidate)) {
+            return candidate;
+        }
+    }
+
+    format!("{} ({})", base_title, Uuid::new_v4().as_simple())
+}
+
+async fn generate_mission_metadata_updates(
+    mission_store: &Arc<dyn MissionStore>,
+    mission_id: Uuid,
+    mission: &Mission,
+    history: &[(String, String)],
+    fallback_user_content: Option<&str>,
+) -> (Option<String>, Option<String>) {
+    if history.len() < 2 {
+        return (None, None);
+    }
+
+    let title_missing = mission
+        .title
+        .as_ref()
+        .map(|t| t.trim().is_empty())
+        .unwrap_or(true);
+    let short_description_missing = mission
+        .short_description
+        .as_ref()
+        .map(|d| d.trim().is_empty())
+        .unwrap_or(true);
+    let should_refresh = history.len() % 10 == 0;
+
+    if !title_missing && !short_description_missing && !should_refresh {
+        return (None, None);
+    }
+
+    let title_candidate = if title_missing || should_refresh {
+        history
+            .iter()
+            .rev()
+            .find(|(role, _)| role == "assistant")
+            .and_then(|(_, content)| extract_title_from_assistant(content))
+            .or_else(|| {
+                if title_missing {
+                    fallback_user_content.map(|user_content| {
+                        if user_content.len() > 100 {
+                            let safe_end = safe_truncate_index(user_content, 100);
+                            format!("{}...", &user_content[..safe_end])
+                        } else {
+                            user_content.to_string()
+                        }
+                    })
+                } else {
+                    None
+                }
+            })
+    } else {
+        None
+    };
+
+    let short_description_candidate = if short_description_missing || should_refresh {
+        extract_short_description_from_history(history, 160)
+    } else {
+        None
+    };
+
+    let mut updated_title: Option<String> = None;
+    if let Some(candidate_title) = title_candidate {
+        let should_update = mission
+            .title
+            .as_deref()
+            .map(|existing| has_significant_metadata_drift(existing, &candidate_title))
+            .unwrap_or(true);
+        if should_update {
+            let disambiguated =
+                disambiguate_generated_title(mission_store, mission_id, &candidate_title).await;
+            let differs_from_existing = mission
+                .title
+                .as_deref()
+                .map(|existing| {
+                    normalize_metadata_text(existing) != normalize_metadata_text(&disambiguated)
+                })
+                .unwrap_or(true);
+            if differs_from_existing {
+                updated_title = Some(disambiguated);
+            }
+        }
+    }
+
+    let mut updated_short_description: Option<String> = None;
+    if let Some(candidate_short_description) = short_description_candidate {
+        let should_update = mission
+            .short_description
+            .as_deref()
+            .map(|existing| has_significant_metadata_drift(existing, &candidate_short_description))
+            .unwrap_or(true);
+        if should_update {
+            let differs_from_existing = mission
+                .short_description
+                .as_deref()
+                .map(|existing| {
+                    normalize_metadata_text(existing)
+                        != normalize_metadata_text(&candidate_short_description)
+                })
+                .unwrap_or(true);
+            if differs_from_existing {
+                updated_short_description = Some(candidate_short_description);
+            }
+        }
+    }
+
+    (updated_title, updated_short_description)
 }
 
 /// Error returned when the control session command channel is closed.
@@ -3346,59 +3574,30 @@ async fn control_actor_loop(
                 tracing::warn!("Failed to persist mission history: {}", e);
             }
 
-            // Auto-generate title from conversation if not set
-            if history.len() >= 2 {
-                let mission = mission_store.get_mission(mid).await.ok().flatten();
-                let title_missing = mission
-                    .as_ref()
-                    .and_then(|m| m.title.as_ref())
-                    .map(|t| t.trim().is_empty())
-                    .unwrap_or(true);
-                let short_description_missing = mission
-                    .as_ref()
-                    .and_then(|m| m.short_description.as_ref())
-                    .map(|d| d.trim().is_empty())
-                    .unwrap_or(true);
+            if let Ok(Some(mission)) = mission_store.get_mission(mid).await {
+                let (generated_title, generated_short_description) =
+                    generate_mission_metadata_updates(
+                        mission_store,
+                        mid,
+                        &mission,
+                        history,
+                        history
+                            .iter()
+                            .find(|(role, _)| role == "user")
+                            .map(|(_, content)| content.as_str()),
+                    )
+                    .await;
 
-                if title_missing || short_description_missing {
-                    let generated_title = if title_missing {
-                        Some(
-                            history
-                                .iter()
-                                .rev()
-                                .find(|(role, _)| role == "assistant")
-                                .and_then(|(_, content)| extract_title_from_assistant(content))
-                                .unwrap_or_else(|| {
-                                    let user_content = &history[0].1;
-                                    if user_content.len() > 100 {
-                                        let safe_end = safe_truncate_index(user_content, 100);
-                                        format!("{}...", &user_content[..safe_end])
-                                    } else {
-                                        user_content.clone()
-                                    }
-                                }),
+                if generated_title.is_some() || generated_short_description.is_some() {
+                    if let Err(e) = mission_store
+                        .update_mission_metadata(
+                            mid,
+                            generated_title.as_deref(),
+                            generated_short_description.as_deref(),
                         )
-                    } else {
-                        None
-                    };
-
-                    let generated_short_description = if short_description_missing {
-                        extract_short_description_from_history(history, 160)
-                    } else {
-                        None
-                    };
-
-                    if generated_title.is_some() || generated_short_description.is_some() {
-                        if let Err(e) = mission_store
-                            .update_mission_metadata(
-                                mid,
-                                generated_title.as_deref(),
-                                generated_short_description.as_deref(),
-                            )
-                            .await
-                        {
-                            tracing::warn!("Failed to update mission metadata: {}", e);
-                        }
+                        .await
+                    {
+                        tracing::warn!("Failed to update mission metadata: {}", e);
                     }
                 }
             }
@@ -4854,61 +5053,32 @@ async fn control_actor_loop(
                                             tracing::warn!("Failed to persist mission history: {}", e);
                                         }
 
-                                        let title_empty = mission
-                                            .title
-                                            .as_ref()
-                                            .map(|s| s.trim().is_empty())
-                                            .unwrap_or(true);
-                                        let short_description_empty = mission
-                                            .short_description
-                                            .as_ref()
-                                            .map(|s| s.trim().is_empty())
-                                            .unwrap_or(true);
-                                        if (title_empty || short_description_empty) && entries.len() >= 2 {
-                                            let generated_title = if title_empty {
-                                                Some(
-                                                    entries
-                                                        .iter()
-                                                        .rev()
-                                                        .find(|e| e.role == "assistant")
-                                                        .and_then(|e| extract_title_from_assistant(&e.content))
-                                                        .unwrap_or_else(|| {
-                                                            if user_msg.len() > 100 {
-                                                                let safe_end =
-                                                                    safe_truncate_index(&user_msg, 100);
-                                                                format!("{}...", &user_msg[..safe_end])
-                                                            } else {
-                                                                user_msg.clone()
-                                                            }
-                                                        }),
+                                        let pairs: Vec<(String, String)> = entries
+                                            .iter()
+                                            .map(|entry| (entry.role.clone(), entry.content.clone()))
+                                            .collect();
+                                        let (generated_title, generated_short_description) =
+                                            generate_mission_metadata_updates(
+                                                &mission_store,
+                                                mid,
+                                                &mission,
+                                                &pairs,
+                                                Some(&user_msg),
+                                            )
+                                            .await;
+                                        if generated_title.is_some() || generated_short_description.is_some() {
+                                            if let Err(e) = mission_store
+                                                .update_mission_metadata(
+                                                    mid,
+                                                    generated_title.as_deref(),
+                                                    generated_short_description.as_deref(),
                                                 )
-                                            } else {
-                                                None
-                                            };
-                                            let pairs: Vec<(String, String)> = entries
-                                                .iter()
-                                                .map(|entry| (entry.role.clone(), entry.content.clone()))
-                                                .collect();
-                                            let generated_short_description = if short_description_empty {
-                                                extract_short_description_from_history(&pairs, 160)
-                                            } else {
-                                                None
-                                            };
-
-                                            if generated_title.is_some() || generated_short_description.is_some() {
-                                                if let Err(e) = mission_store
-                                                    .update_mission_metadata(
-                                                        mid,
-                                                        generated_title.as_deref(),
-                                                        generated_short_description.as_deref(),
-                                                    )
-                                                    .await
-                                                {
-                                                    tracing::warn!(
-                                                        "Failed to update mission metadata: {}",
-                                                        e
-                                                    );
-                                                }
+                                                .await
+                                            {
+                                                tracing::warn!(
+                                                    "Failed to update mission metadata: {}",
+                                                    e
+                                                );
                                             }
                                         }
                                     }
@@ -6815,6 +6985,7 @@ pub async fn webhook_receiver(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn test_parse_image_tag() {
@@ -6862,6 +7033,47 @@ And the report:
         // Missing path attribute
         let tags = parse_rich_tags(r#"<image alt="no path" />"#);
         assert!(tags.is_empty());
+    }
+
+    #[test]
+    fn test_strip_numeric_title_suffix() {
+        assert_eq!(
+            strip_numeric_title_suffix("Fix flaky CI (2)"),
+            "Fix flaky CI"
+        );
+        assert_eq!(strip_numeric_title_suffix("Fix flaky CI"), "Fix flaky CI");
+        assert_eq!(
+            strip_numeric_title_suffix("Fix flaky CI (alpha)"),
+            "Fix flaky CI (alpha)"
+        );
+    }
+
+    #[test]
+    fn test_has_significant_metadata_drift_detects_minor_and_major_changes() {
+        assert!(!has_significant_metadata_drift(
+            "Fix the login redirect race",
+            "Fix login redirect race"
+        ));
+        assert!(has_significant_metadata_drift(
+            "Fix the login redirect race",
+            "Investigate websocket reconnect failures"
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_disambiguate_generated_title_appends_next_suffix() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let existing = store
+            .create_mission(Some("Fix flaky CI"), None, None, None, None, None, None)
+            .await
+            .expect("create mission");
+        store
+            .create_mission(Some("Fix flaky CI (2)"), None, None, None, None, None, None)
+            .await
+            .expect("create mission");
+
+        let disambiguated = disambiguate_generated_title(&store, existing.id, "Fix flaky CI").await;
+        assert_eq!(disambiguated, "Fix flaky CI (3)");
     }
 
     #[test]
