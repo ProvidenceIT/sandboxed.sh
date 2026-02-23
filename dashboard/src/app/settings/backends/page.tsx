@@ -9,6 +9,8 @@ import {
   updateBackendConfig,
   getProviderForBackend,
   getHealth,
+  getSettings,
+  updateSettings,
   BackendProviderResponse,
 } from '@/lib/api';
 import { Server, Save, Loader, Key, Check } from 'lucide-react';
@@ -19,7 +21,9 @@ import { ServerConnectionCard } from '@/components/server-connection-card';
 export default function BackendsPage() {
   const [activeBackendTab, setActiveBackendTab] = useState<'opencode' | 'claudecode' | 'amp'>('opencode');
   const [savingBackend, setSavingBackend] = useState(false);
+  const [savingMissionLimit, setSavingMissionLimit] = useState(false);
   const [testingConnection, setTestingConnection] = useState(false);
+  const [maxParallelMissionsValue, setMaxParallelMissionsValue] = useState('1');
 
   // Server connection state
   const [apiUrl, setApiUrl] = useState(() => getRuntimeApiBase());
@@ -29,6 +33,11 @@ export default function BackendsPage() {
   const { data: health, isLoading: healthLoading, mutate: mutateHealth } = useSWR(
     'health',
     getHealth,
+    { revalidateOnFocus: false }
+  );
+  const { data: serverSettings, mutate: mutateSettings } = useSWR(
+    'settings',
+    getSettings,
     { revalidateOnFocus: false }
   );
 
@@ -138,6 +147,36 @@ export default function BackendsPage() {
       api_key: typeof settings.api_key === 'string' ? settings.api_key : '',
     });
   }, [ampBackendConfig]);
+
+  useEffect(() => {
+    const limit = serverSettings?.max_parallel_missions;
+    if (typeof limit === 'number' && limit >= 1) {
+      setMaxParallelMissionsValue(String(limit));
+    }
+  }, [serverSettings]);
+
+  const handleSaveMissionLimit = async () => {
+    const parsed = Number.parseInt(maxParallelMissionsValue, 10);
+    if (!Number.isFinite(parsed) || parsed < 1) {
+      toast.error('Max parallel missions must be at least 1');
+      return;
+    }
+
+    setSavingMissionLimit(true);
+    try {
+      await updateSettings({ max_parallel_missions: parsed });
+      await mutateSettings();
+      toast.success('Mission concurrency limit updated');
+    } catch (err) {
+      toast.error(
+        `Failed to update mission concurrency limit: ${
+          err instanceof Error ? err.message : 'Unknown error'
+        }`
+      );
+    } finally {
+      setSavingMissionLimit(false);
+    }
+  };
 
   const handleSaveOpenCodeBackend = async () => {
     setSavingBackend(true);
@@ -284,6 +323,37 @@ export default function BackendsPage() {
                 {backend.name}
               </button>
             ))}
+          </div>
+
+          <div className="mb-4 rounded-lg border border-white/[0.06] bg-white/[0.02] p-3">
+            <label className="block text-xs text-white/60 mb-1.5">
+              Max Parallel Missions
+            </label>
+            <div className="flex items-center gap-2">
+              <input
+                type="number"
+                min={1}
+                step={1}
+                value={maxParallelMissionsValue}
+                onChange={(e) => setMaxParallelMissionsValue(e.target.value)}
+                className="w-32 rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500/50"
+              />
+              <button
+                onClick={handleSaveMissionLimit}
+                disabled={savingMissionLimit}
+                className="flex items-center gap-2 rounded-lg bg-indigo-500 px-3 py-1.5 text-xs text-white hover:bg-indigo-600 transition-colors disabled:opacity-50"
+              >
+                {savingMissionLimit ? (
+                  <Loader className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Save className="h-3.5 w-3.5" />
+                )}
+                Save Limit
+              </button>
+            </div>
+            <p className="mt-1.5 text-xs text-white/30">
+              Controls how many missions can run at the same time. Applies immediately.
+            </p>
           </div>
 
           {activeBackendTab === 'opencode' ? (

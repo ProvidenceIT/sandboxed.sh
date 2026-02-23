@@ -127,6 +127,7 @@ export default function DataSettingsPage() {
             library_remote: current?.library_remote ?? null,
             sandboxed_repo_path: current?.sandboxed_repo_path ?? null,
             rtk_enabled: enabled,
+            max_parallel_missions: current?.max_parallel_missions ?? 1,
           };
         },
         {
@@ -134,6 +135,7 @@ export default function DataSettingsPage() {
             library_remote: current?.library_remote ?? null,
             sandboxed_repo_path: current?.sandboxed_repo_path ?? null,
             rtk_enabled: enabled,
+            max_parallel_missions: current?.max_parallel_missions ?? 1,
           }),
           rollbackOnError: true,
           revalidate: true,

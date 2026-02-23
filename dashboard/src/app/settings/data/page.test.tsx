@@ -39,6 +39,7 @@ describe('DataSettingsPage RTK toggle', () => {
       library_remote: null,
       sandboxed_repo_path: null,
       rtk_enabled: false,
+      max_parallel_missions: 1,
     });
   });
 

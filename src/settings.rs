@@ -5,13 +5,16 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 /// Global cached RTK enabled state, updated when settings change.
 /// This allows synchronous checks from non-async contexts.
 static RTK_ENABLED_CACHED: AtomicBool = AtomicBool::new(false);
+/// Global cached max parallel missions value.
+/// A value of 0 means "unset" and callers should fall back to their default.
+static MAX_PARALLEL_MISSIONS_CACHED: AtomicUsize = AtomicUsize::new(0);
 
 /// Default repo path for sandboxed.sh source (used for self-updates).
 pub const DEFAULT_SANDBOXED_REPO_PATH: &str = "/opt/sandboxed-sh/vaduz-v1";
@@ -43,6 +46,10 @@ pub struct Settings {
     /// When None, falls back to the SANDBOXED_SH_RTK_ENABLED env var (default: false).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rtk_enabled: Option<bool>,
+    /// Maximum number of missions that can run in parallel.
+    /// When None, falls back to the MAX_PARALLEL_MISSIONS env var (default: 1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_parallel_missions: Option<usize>,
 }
 
 /// In-memory store for global settings with disk persistence.
@@ -100,6 +107,11 @@ impl SettingsStore {
                 )
                 .then_some(true)
             });
+        let max_parallel_missions = std::env::var("MAX_PARALLEL_MISSIONS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|v| *v >= 1);
+
         Settings {
             library_remote: std::env::var("LIBRARY_REMOTE").ok().or_else(|| {
                 Some("https://github.com/Th0rgal/sandboxed-library-template.git".to_string())
@@ -110,6 +122,7 @@ impl SettingsStore {
                 .or_else(|| Some(DEFAULT_SANDBOXED_REPO_PATH.to_string())),
             auth: None,
             rtk_enabled,
+            max_parallel_missions,
         }
     }
 
@@ -215,6 +228,35 @@ impl SettingsStore {
         }
     }
 
+    /// Get the max parallel missions setting.
+    /// Returns None if not explicitly set (caller should check env var as fallback).
+    pub async fn get_max_parallel_missions(&self) -> Option<usize> {
+        self.settings.read().await.max_parallel_missions
+    }
+
+    /// Update the max parallel missions setting.
+    ///
+    /// Returns `(changed, previous_value)`.
+    pub async fn set_max_parallel_missions(
+        &self,
+        max_parallel_missions: Option<usize>,
+    ) -> Result<(bool, Option<usize>), std::io::Error> {
+        let mut settings = self.settings.write().await;
+        let previous = settings.max_parallel_missions;
+
+        if previous != max_parallel_missions {
+            settings.max_parallel_missions = max_parallel_missions;
+            if let Some(limit) = max_parallel_missions {
+                set_max_parallel_missions_cached(limit);
+            }
+            drop(settings); // Release lock before saving
+            self.save_to_disk().await?;
+            Ok((true, previous))
+        } else {
+            Ok((false, previous))
+        }
+    }
+
     /// Update multiple settings at once.
     pub async fn update(&self, new_settings: Settings) -> Result<(), std::io::Error> {
         let mut settings = self.settings.write().await;
@@ -245,6 +287,9 @@ impl SettingsStore {
             if let Some(enabled) = settings.rtk_enabled {
                 set_rtk_enabled_cached(enabled);
             }
+            if let Some(limit) = settings.max_parallel_missions {
+                set_max_parallel_missions_cached(limit);
+            }
         }
     }
 }
@@ -262,4 +307,22 @@ pub fn rtk_enabled_cached() -> bool {
 /// Called during startup and when the setting is changed via the API.
 pub fn set_rtk_enabled_cached(enabled: bool) {
     RTK_ENABLED_CACHED.store(enabled, Ordering::Relaxed);
+}
+
+/// Get the effective max parallel missions limit from cache, with a fallback default.
+pub fn max_parallel_missions_cached_or(default: usize) -> usize {
+    let cached = MAX_PARALLEL_MISSIONS_CACHED.load(Ordering::Relaxed);
+    if cached >= 1 {
+        cached
+    } else if default >= 1 {
+        default
+    } else {
+        1
+    }
+}
+
+/// Update the cached max parallel missions value.
+/// Values less than 1 are normalized to 1.
+pub fn set_max_parallel_missions_cached(max_parallel_missions: usize) {
+    MAX_PARALLEL_MISSIONS_CACHED.store(max_parallel_missions.max(1), Ordering::Relaxed);
 }

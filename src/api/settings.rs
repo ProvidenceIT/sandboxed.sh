@@ -35,6 +35,7 @@ pub struct SettingsResponse {
     pub library_remote: Option<String>,
     pub sandboxed_repo_path: Option<String>,
     pub rtk_enabled: Option<bool>,
+    pub max_parallel_missions: Option<usize>,
 }
 
 impl From<Settings> for SettingsResponse {
@@ -43,6 +44,7 @@ impl From<Settings> for SettingsResponse {
             library_remote: settings.library_remote,
             sandboxed_repo_path: settings.sandboxed_repo_path,
             rtk_enabled: settings.rtk_enabled,
+            max_parallel_missions: settings.max_parallel_missions,
         }
     }
 }
@@ -56,6 +58,8 @@ pub struct UpdateSettingsRequest {
     pub sandboxed_repo_path: Option<Option<String>>,
     #[serde(default)]
     pub rtk_enabled: Option<bool>,
+    #[serde(default)]
+    pub max_parallel_missions: Option<usize>,
 }
 
 /// Request to update library remote specifically.
@@ -100,6 +104,16 @@ async fn update_settings(
         new_settings.rtk_enabled = Some(value);
         // Update the cached value for synchronous access
         crate::settings::set_rtk_enabled_cached(value);
+    }
+    if let Some(value) = req.max_parallel_missions {
+        if value < 1 {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "max_parallel_missions must be at least 1".to_string(),
+            ));
+        }
+        new_settings.max_parallel_missions = Some(value);
+        crate::settings::set_max_parallel_missions_cached(value);
     }
 
     state

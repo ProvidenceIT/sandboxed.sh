@@ -2126,9 +2126,10 @@ pub async fn get_parallel_config(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let control = control_for_user(&state, &user).await;
     let running = get_running_missions(&control).await?;
+    let max_parallel = crate::settings::max_parallel_missions_cached_or(control.max_parallel);
 
     Ok(Json(serde_json::json!({
-        "max_parallel_missions": control.max_parallel,
+        "max_parallel_missions": max_parallel,
         "running_count": running.len(),
     })))
 }
@@ -2353,7 +2354,8 @@ fn spawn_control_session(
     let current_tree = Arc::new(RwLock::new(None));
     let progress = Arc::new(RwLock::new(ExecutionProgress::default()));
     let running_missions = Arc::new(RwLock::new(Vec::new()));
-    let max_parallel = config.max_parallel_missions;
+    let max_parallel =
+        crate::settings::max_parallel_missions_cached_or(config.max_parallel_missions);
 
     let state = ControlState {
         cmd_tx,
@@ -3660,7 +3662,7 @@ async fn control_actor_loop(
                                 // Check capacity
                                 let parallel_running = parallel_runners.values().filter(|r| r.is_running()).count();
                                 let total_running = parallel_running + 1; // +1 for main
-                                let max_parallel = config.max_parallel_missions;
+                                let max_parallel = crate::settings::max_parallel_missions_cached_or(config.max_parallel_missions);
 
                                 if total_running >= max_parallel {
                                     tracing::warn!(
@@ -4210,7 +4212,7 @@ async fn control_actor_loop(
                         let parallel_running = parallel_runners.values().filter(|r| r.is_running()).count();
                         let main_running = if running.is_some() { 1 } else { 0 };
                         let total_running = parallel_running + main_running;
-                        let max_parallel = config.max_parallel_missions;
+                        let max_parallel = crate::settings::max_parallel_missions_cached_or(config.max_parallel_missions);
 
                         if total_running >= max_parallel {
                             let _ = respond.send(Err(format!(
