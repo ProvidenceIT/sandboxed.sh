@@ -4392,15 +4392,45 @@ export default function ControlClient() {
     []
   );
 
-  const focusChatItem = useCallback((itemId: string) => {
-    setVisibleItemsLimit((prev) => Math.max(prev, groupedItems.length));
-    setHighlightedItemId(itemId);
-    requestAnimationFrame(() => {
-      const el = document.getElementById(`chat-item-${itemId}`);
-      if (!el) return;
-      el.scrollIntoView({ behavior: "smooth", block: "center" });
-    });
-  }, [groupedItems.length]);
+  const focusChatItem = useCallback(
+    (itemId: string, entryIndex?: number) => {
+      let requiredVisible = groupedItems.length;
+      if (typeof entryIndex === "number" && entryIndex >= 0) {
+        let historyIndex = 0;
+        const groupedIndex = groupedItems.findIndex((item) => {
+          if (item.kind !== "user" && item.kind !== "assistant") {
+            return false;
+          }
+          if (historyIndex === entryIndex) {
+            return true;
+          }
+          historyIndex += 1;
+          return false;
+        });
+        if (groupedIndex >= 0) {
+          requiredVisible = Math.max(1, groupedItems.length - groupedIndex);
+        }
+      }
+
+      setVisibleItemsLimit((prev) => Math.max(prev, requiredVisible));
+      setHighlightedItemId(itemId);
+
+      let attempts = 0;
+      const tryFocus = () => {
+        const el = document.getElementById(`chat-item-${itemId}`);
+        if (el) {
+          el.scrollIntoView({ behavior: "smooth", block: "center" });
+          return;
+        }
+        attempts += 1;
+        if (attempts < 6) {
+          requestAnimationFrame(tryFocus);
+        }
+      };
+      requestAnimationFrame(tryFocus);
+    },
+    [groupedItems]
+  );
 
   useEffect(() => {
     if (!highlightedItemId) return;
@@ -4411,35 +4441,53 @@ export default function ControlClient() {
   useEffect(() => {
     const focus = searchParams.get("focus");
     const missionFromQuery = searchParams.get("mission");
-    if (focus !== "failure" || !missionFromQuery) return;
+    if ((focus !== "failure" && focus !== "moment") || !missionFromQuery) return;
     if (!viewingMission || viewingMission.id !== missionFromQuery) return;
 
     let cancelled = false;
     (async () => {
+      const query =
+        focus === "failure"
+          ? "failing tool call error"
+          : normalizeSearchText(searchParams.get("query") ?? "");
+      if (!query) {
+        toast.error("Missing moment query");
+        router.replace(`/control?mission=${missionFromQuery}`, { scroll: false });
+        return;
+      }
+
       try {
-        const results = await searchMissionMoments("failing tool call error", {
+        const results = await searchMissionMoments(query, {
           missionId: missionFromQuery,
           limit: 1,
         });
         if (cancelled) return;
         const best = results[0];
         if (!best) {
-          toast.error("No failing tool call moment found");
+          if (focus === "failure") {
+            toast.error("No failing tool call moment found");
+          } else {
+            toast.error("No matching moment found");
+          }
           router.replace(`/control?mission=${missionFromQuery}`, { scroll: false });
           return;
         }
 
         const targetId = findChatItemIdForEntryIndex(best.entry_index, best.snippet);
         if (targetId) {
-          focusChatItem(targetId);
+          focusChatItem(targetId, best.entry_index);
         } else {
-          toast.error("Could not locate the failing moment in loaded history");
+          toast.error("Could not locate the target moment in loaded history");
         }
         router.replace(`/control?mission=${missionFromQuery}`, { scroll: false });
       } catch (err) {
         if (cancelled) return;
         console.error("Failed to search mission moments:", err);
-        toast.error("Failed to locate failing tool call");
+        if (focus === "failure") {
+          toast.error("Failed to locate failing tool call");
+        } else {
+          toast.error("Failed to locate mission moment");
+        }
         router.replace(`/control?mission=${missionFromQuery}`, { scroll: false });
       }
     })();
