@@ -3311,6 +3311,7 @@ private struct MissionSwitcherSheet: View {
                 ForEach(missions) { mission in
                     MissionRow(
                         missionId: mission.id,
+                        displayName: missionDisplayName(for: mission),
                         title: mission.displayTitle,
                         shortDescription: missionCardDescription(for: mission),
                         backend: mission.backend,
@@ -3345,6 +3346,7 @@ private struct MissionSwitcherSheet: View {
                         ForEach(filteredRunning, id: \.missionId) { info in
                             MissionRow(
                                 missionId: info.missionId,
+                                displayName: nil,
                                 title: info.title,
                                 shortDescription: nil,
                                 backend: nil,
@@ -3394,6 +3396,22 @@ private struct MissionSwitcherSheet: View {
         return String(scalars)
             .split(whereSeparator: \.isWhitespace)
             .joined(separator: " ")
+    }
+
+    private func missionWorkspaceLabel(for mission: Mission) -> String? {
+        guard let workspaceName = mission.workspaceName?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !workspaceName.isEmpty else {
+            return nil
+        }
+        return workspaceName
+    }
+
+    private func missionDisplayName(for mission: Mission) -> String {
+        let shortId = String(mission.id.prefix(8)).uppercased()
+        if let workspaceLabel = missionWorkspaceLabel(for: mission) {
+            return "\(workspaceLabel) · \(shortId)"
+        }
+        return shortId
     }
 
     private func hasMeaningfulExtraTokens(baseText: String, candidateText: String) -> Bool {
@@ -3491,11 +3509,12 @@ private struct MissionSwitcherSheet: View {
         let normalizedQuery = normalizeMetadataText(query)
         if normalizedQuery.isEmpty { return 0 }
 
+        let displayName = missionDisplayName(for: mission)
         let title = mission.displayTitle
         let shortDescription = mission.shortDescription ?? ""
         let backend = mission.backend ?? ""
         let status = mission.status.displayLabel
-        let combined = "\(mission.id) \(title) \(shortDescription) \(backend) \(status)"
+        let combined = "\(displayName) \(mission.id) \(title) \(shortDescription) \(backend) \(status)"
         let normalizedCombined = normalizeMetadataText(combined)
         if normalizedCombined.isEmpty { return 0 }
 
@@ -3507,6 +3526,7 @@ private struct MissionSwitcherSheet: View {
         if groups.isEmpty { return 0 }
 
         let fields: [(weight: Double, tokens: Set<String>)] = [
+            (5, tokenSet(from: displayName)),
             (8, tokenSet(from: title)),
             (7, tokenSet(from: shortDescription)),
             (3, tokenSet(from: backend)),
@@ -3530,6 +3550,7 @@ private struct MissionSwitcherSheet: View {
         let phraseTargets: [(text: String, boost: Double)] = [
             (normalizeMetadataText(title), 14),
             (normalizeMetadataText(shortDescription), 12),
+            (normalizeMetadataText(displayName), 8),
             (normalizeMetadataText(combined), 5),
         ]
         for target in phraseTargets where !target.text.isEmpty {
@@ -3568,6 +3589,7 @@ private struct MissionSwitcherSheet: View {
 
 private struct MissionRow: View {
     let missionId: String
+    let displayName: String?
     let title: String?
     let shortDescription: String?
     let backend: String?
@@ -3580,6 +3602,14 @@ private struct MissionRow: View {
 
     private var shortId: String {
         String(missionId.prefix(8))
+    }
+
+    private var missionDisplayLabel: String {
+        let trimmed = displayName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let trimmed, !trimmed.isEmpty {
+            return trimmed
+        }
+        return shortId
     }
 
     private var statusColor: Color {
@@ -3629,7 +3659,7 @@ private struct MissionRow: View {
                 // Mission info
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 6) {
-                        Text(shortId)
+                        Text(missionDisplayLabel)
                             .font(.subheadline.monospaced().weight(.medium))
                             .foregroundStyle(Theme.textPrimary)
 
