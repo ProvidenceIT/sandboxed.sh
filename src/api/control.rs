@@ -1407,16 +1407,7 @@ async fn apply_generated_mission_metadata_updates(
 
     match mission_store.get_mission(mission_id).await {
         Ok(Some(updated)) => {
-            let _ = events_tx.send(AgentEvent::MissionMetadataUpdated {
-                mission_id,
-                title: updated.title.clone(),
-                short_description: updated.short_description.clone(),
-                metadata_updated_at: updated.metadata_updated_at.clone(),
-                updated_at: Some(updated.updated_at.clone()),
-                metadata_source: updated.metadata_source.clone(),
-                metadata_model: updated.metadata_model.clone(),
-                metadata_version: updated.metadata_version.clone(),
-            });
+            emit_mission_metadata_updated_event(events_tx, mission_id, &updated);
             if title_to_write.is_some() {
                 if let Some(title) = updated.title {
                     let _ = events_tx.send(AgentEvent::MissionTitleChanged { mission_id, title });
@@ -1431,6 +1422,23 @@ async fn apply_generated_mission_metadata_updates(
         }
     }
     true
+}
+
+fn emit_mission_metadata_updated_event(
+    events_tx: &broadcast::Sender<AgentEvent>,
+    mission_id: Uuid,
+    mission: &Mission,
+) {
+    let _ = events_tx.send(AgentEvent::MissionMetadataUpdated {
+        mission_id,
+        title: mission.title.clone(),
+        short_description: mission.short_description.clone(),
+        metadata_updated_at: mission.metadata_updated_at.clone(),
+        updated_at: Some(mission.updated_at.clone()),
+        metadata_source: mission.metadata_source.clone(),
+        metadata_model: mission.metadata_model.clone(),
+        metadata_version: mission.metadata_version.clone(),
+    });
 }
 
 fn conversational_message_count(history: &[(String, String)]) -> usize {
@@ -6061,6 +6069,24 @@ async fn control_actor_loop(
                                 mission_id: id,
                                 title: title.clone(),
                             });
+                            match mission_store.get_mission(id).await {
+                                Ok(Some(updated)) => {
+                                    emit_mission_metadata_updated_event(&events_tx, id, &updated);
+                                }
+                                Ok(None) => {
+                                    tracing::warn!(
+                                        "Mission {} disappeared after title update",
+                                        id
+                                    );
+                                }
+                                Err(err) => {
+                                    tracing::warn!(
+                                        "Failed to reload mission {} after title update: {}",
+                                        id,
+                                        err
+                                    );
+                                }
+                            }
                         }
                         let _ = respond.send(result);
                     }
