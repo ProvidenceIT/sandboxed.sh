@@ -1298,6 +1298,29 @@ struct ControlView: View {
     private func findMessageIdForEntryIndex(_ entryIndex: Int, snippet: String?) -> String? {
         guard entryIndex >= 0 else { return nil }
 
+        enum HistoryRoleCategory {
+            case user
+            case assistant
+            case toolCall
+            case toolResult
+            case other
+        }
+
+        let roleCategory: (String) -> HistoryRoleCategory = { role in
+            switch role {
+            case "user":
+                return .user
+            case "assistant":
+                return .assistant
+            case "tool", "tool_call":
+                return .toolCall
+            case "tool_result":
+                return .toolResult
+            default:
+                return .other
+            }
+        }
+
         let messageSearchText: (ChatMessage) -> String = { message in
             if message.isToolCall {
                 let toolName = message.toolCallName ?? ""
@@ -1316,42 +1339,63 @@ struct ControlView: View {
             return false
         }
         let roleMatchesMessage: (String, ChatMessage) -> Bool = { role, message in
-            switch role {
-            case "user":
+            switch roleCategory(role) {
+            case .user:
                 return message.isUser
-            case "assistant":
+            case .assistant:
                 return message.isAssistant
-            case "tool_result":
+            case .toolResult:
                 return isToolResultMessage(message)
-            case "tool", "tool_call":
+            case .toolCall:
                 return message.isToolCall
-            default:
+            case .other:
                 return false
             }
+        }
+        let roleMatchesHistoryCategory: (String, HistoryRoleCategory) -> Bool = { role, category in
+            roleCategory(role) == category
         }
 
         if let history = viewingMission?.history, entryIndex < history.count {
             let entry = history[entryIndex]
             let entryRole = entry.role.lowercased()
             let entryText = normalizeSearchText(entry.content)
+            let targetCategory = roleCategory(entryRole)
+            let roleOccurrence = history
+                .prefix(entryIndex + 1)
+                .filter { roleMatchesHistoryCategory($0.role.lowercased(), targetCategory) }
+                .count
             let matchingMessages = messages.filter { roleMatchesMessage(entryRole, $0) }
+            let targetMessageIndex = max(roleOccurrence - 1, 0)
+
             if let snippet, !snippet.isEmpty {
                 let normalizedSnippet = normalizeSearchText(snippet)
-                if !normalizedSnippet.isEmpty,
-                   let matched = matchingMessages.first(where: {
-                       normalizeSearchText(messageSearchText($0)).contains(normalizedSnippet)
-                   }) {
+                if !normalizedSnippet.isEmpty {
+                    let snippetMatches = matchingMessages.enumerated().filter { _, message in
+                        normalizeSearchText(messageSearchText(message)).contains(normalizedSnippet)
+                    }
+                    if let matched = snippetMatches.min(by: {
+                        abs($0.offset - targetMessageIndex) < abs($1.offset - targetMessageIndex)
+                    })?.element {
+                        return matched.id
+                    }
+                }
+            }
+            if !entryText.isEmpty {
+                let entryMatches = matchingMessages.enumerated().filter { _, message in
+                    normalizeSearchText(messageSearchText(message)).contains(entryText)
+                }
+                if let matched = entryMatches.min(by: {
+                    abs($0.offset - targetMessageIndex) < abs($1.offset - targetMessageIndex)
+                })?.element {
                     return matched.id
                 }
             }
-            if !entryText.isEmpty,
-               let matched = matchingMessages.first(where: {
-                   normalizeSearchText(messageSearchText($0)).contains(entryText)
-               }) {
-                return matched.id
+            if targetMessageIndex < matchingMessages.count {
+                return matchingMessages[targetMessageIndex].id
             }
-            if let first = matchingMessages.first {
-                return first.id
+            if let last = matchingMessages.last {
+                return last.id
             }
         }
 
