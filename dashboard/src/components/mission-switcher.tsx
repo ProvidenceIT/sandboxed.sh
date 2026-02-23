@@ -55,7 +55,7 @@ export function getMissionCardTitle(mission: Mission): string | null {
 export function normalizeMetadataText(text: string): string {
   return text
     .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -157,8 +157,16 @@ function expandQueryTokenGroup(token: string): string[] {
 
 function tokenMatchStrength(token: string, candidate: string): number {
   if (token === candidate) return 1;
-  if (candidate.length >= 3 && token.startsWith(candidate)) return 0.7;
-  if (token.length >= 5 && candidate.startsWith(token) && candidate.length - token.length <= 2) return 0.65;
+  const asciiCandidate = /^[a-z0-9]+$/.test(candidate);
+  if (token.startsWith(candidate) && (!asciiCandidate || candidate.length >= 3)) return 0.7;
+  if (
+    asciiCandidate &&
+    token.length >= 5 &&
+    candidate.startsWith(token) &&
+    candidate.length - token.length <= 2
+  ) {
+    return 0.65;
+  }
   if (candidate.length >= 4 && token.includes(candidate)) return 0.45;
   return 0;
 }

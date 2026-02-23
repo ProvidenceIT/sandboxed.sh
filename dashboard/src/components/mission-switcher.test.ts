@@ -35,6 +35,20 @@ describe('mission switcher search helpers', () => {
     expect(description).toBeNull();
   });
 
+  it('preserves Unicode text for metadata comparison and search', () => {
+    const mission = buildMission({
+      title: '修复登录错误',
+      short_description: '调查 OAuth 回调失败',
+    });
+
+    const title = getMissionCardTitle(mission);
+    const description = getMissionCardDescription(mission, title);
+
+    expect(description).toBe('调查 OAuth 回调失败');
+    expect(missionMatchesSearchQuery(mission, '回调')).toBe(true);
+    expect(missionSearchRelevanceScore(mission, '回调')).toBeGreaterThan(0);
+  });
+
   it('includes both title and short description in search text when each adds value', () => {
     const mission = buildMission({
       title: 'OAuth callback failures',
