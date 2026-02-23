@@ -52,7 +52,7 @@ export function MissionSwitcherProvider({ children }: { children: React.ReactNod
   );
 
   // SWR: fetch running missions
-  const { data: runningMissions = [] } = useSWR<RunningMissionInfo[]>(
+  const { data: runningMissions = [], mutate: mutateRunningMissions } = useSWR<RunningMissionInfo[]>(
     'global-running-missions',
     getRunningMissions,
     {
@@ -89,11 +89,11 @@ export function MissionSwitcherProvider({ children }: { children: React.ReactNod
     try {
       await cancelMission(missionId);
       toast.success('Mission cancelled');
-      mutateMissions();
+      await Promise.all([mutateMissions(), mutateRunningMissions()]);
     } catch {
       toast.error('Failed to cancel mission');
     }
-  }, [mutateMissions]);
+  }, [mutateMissions, mutateRunningMissions]);
 
   const handleRefresh = useCallback(() => {
     mutateMissions();
@@ -102,12 +102,13 @@ export function MissionSwitcherProvider({ children }: { children: React.ReactNod
   const handleResumeMission = useCallback(async (missionId: string) => {
     try {
       await resumeMission(missionId);
+      await Promise.all([mutateMissions(), mutateRunningMissions()]);
       toast.success('Mission resumed');
       router.push(`/control?mission=${missionId}`);
     } catch {
       toast.error('Failed to resume mission');
     }
-  }, [router]);
+  }, [mutateMissions, mutateRunningMissions, router]);
 
   const handleOpenFailingToolCall = useCallback(async (missionId: string) => {
     router.push(`/control?mission=${missionId}&focus=failure`);
@@ -128,12 +129,13 @@ export function MissionSwitcherProvider({ children }: { children: React.ReactNod
         modelEffort: sourceMission.model_effort,
         backend: sourceMission.backend,
       });
+      await Promise.all([mutateMissions(), mutateRunningMissions()]);
       toast.success('Follow-up mission created');
       router.push(`/control?mission=${followUpMission.id}`);
     } catch {
       toast.error('Failed to create follow-up mission');
     }
-  }, [missions, router]);
+  }, [missions, mutateMissions, mutateRunningMissions, router]);
 
   const contextValue = useMemo(() => ({
     open: () => setIsOpen(true),

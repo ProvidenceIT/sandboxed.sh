@@ -1245,25 +1245,33 @@ async fn generate_mission_metadata_updates(
     }
 
     let title_candidate = if (title_missing || should_refresh) && !title_user_managed {
-        history
-            .iter()
-            .rev()
-            .find(|(role, _)| role == "assistant")
-            .and_then(|(_, content)| extract_title_from_assistant(content))
-            .or_else(|| {
-                if should_bootstrap_title_from_first_assistant {
-                    fallback_user_content.map(|user_content| {
-                        if user_content.len() > 100 {
-                            let safe_end = safe_truncate_index(user_content, 100);
-                            format!("{}...", &user_content[..safe_end])
-                        } else {
-                            user_content.to_string()
-                        }
-                    })
-                } else {
-                    None
-                }
-            })
+        let assistant_title_candidate = if should_bootstrap_title_from_first_assistant {
+            history
+                .iter()
+                .filter(|(role, _)| role == "assistant")
+                .find_map(|(_, content)| extract_title_from_assistant(content))
+        } else {
+            history
+                .iter()
+                .rev()
+                .filter(|(role, _)| role == "assistant")
+                .find_map(|(_, content)| extract_title_from_assistant(content))
+        };
+
+        assistant_title_candidate.or_else(|| {
+            if should_bootstrap_title_from_first_assistant {
+                fallback_user_content.map(|user_content| {
+                    if user_content.len() > 100 {
+                        let safe_end = safe_truncate_index(user_content, 100);
+                        format!("{}...", &user_content[..safe_end])
+                    } else {
+                        user_content.to_string()
+                    }
+                })
+            } else {
+                None
+            }
+        })
     } else {
         None
     };
@@ -8888,6 +8896,49 @@ And the report:
         assert_eq!(
             updated_short_description.as_deref(),
             Some("Investigate oauth callback timeout root cause")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_generate_mission_metadata_updates_bootstrap_title_uses_first_assistant_response()
+    {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = store
+            .create_mission(None, None, None, None, None, None, None)
+            .await
+            .expect("create mission");
+        let history = vec![
+            (
+                "user".to_string(),
+                "Investigate oauth callback timeout in production".to_string(),
+            ),
+            (
+                "assistant".to_string(),
+                "Initial root cause hypothesis: oauth callback host mismatch.".to_string(),
+            ),
+            (
+                "assistant".to_string(),
+                "Follow-up: retry timing also contributes to failures.".to_string(),
+            ),
+        ];
+
+        let (updated_title, updated_short_description) = generate_mission_metadata_updates(
+            &store,
+            mission.id,
+            &mission,
+            &history,
+            history.first().map(|(_, content)| content.as_str()),
+            false,
+        )
+        .await;
+
+        assert_eq!(
+            updated_title.as_deref(),
+            Some("Initial root cause hypothesis: oauth callback host mismatch.")
+        );
+        assert_eq!(
+            updated_short_description.as_deref(),
+            Some("Initial root cause hypothesis: oauth callback host mismatch.")
         );
     }
 

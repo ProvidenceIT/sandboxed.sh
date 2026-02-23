@@ -3784,19 +3784,7 @@ private struct MissionSwitcherSheet: View {
     }
 
     private func normalizeMetadataText(_ text: String) -> String {
-        let lowered = text.lowercased()
-        let scalars = lowered.unicodeScalars.map { scalar -> Character in
-            if scalar.properties.isAlphabetic
-                || scalar.properties.numericType != nil
-                || CharacterSet.whitespacesAndNewlines.contains(scalar)
-            {
-                return Character(scalar)
-            }
-            return " "
-        }
-        return String(scalars)
-            .split(whereSeparator: \.isWhitespace)
-            .joined(separator: " ")
+        normalizeSearchText(text)
     }
 
     private let searchStopwords: Set<String> = [
