@@ -234,6 +234,8 @@ fn normalize_metadata_text(text: &str) -> String {
 
 const METADATA_SOURCE_BACKEND_HEURISTIC: &str = "backend_heuristic";
 const METADATA_VERSION_V1: &str = "v1";
+static MISSION_TITLE_UPDATE_LOCK: std::sync::LazyLock<Mutex<()>> =
+    std::sync::LazyLock::new(|| Mutex::new(()));
 
 fn normalize_raw_title_for_dedupe(text: &str) -> String {
     text.split_whitespace()
@@ -584,8 +586,8 @@ async fn disambiguate_generated_title(
 }
 
 async fn generate_mission_metadata_updates(
-    mission_store: &Arc<dyn MissionStore>,
-    mission_id: Uuid,
+    _mission_store: &Arc<dyn MissionStore>,
+    _mission_id: Uuid,
     mission: &Mission,
     history: &[(String, String)],
     fallback_user_content: Option<&str>,
@@ -649,17 +651,15 @@ async fn generate_mission_metadata_updates(
             .map(|existing| has_significant_metadata_drift(existing, &candidate_title))
             .unwrap_or(true);
         if should_update {
-            let disambiguated =
-                disambiguate_generated_title(mission_store, mission_id, &candidate_title).await;
             let differs_from_existing = mission
                 .title
                 .as_deref()
                 .map(|existing| {
-                    normalize_metadata_text(existing) != normalize_metadata_text(&disambiguated)
+                    normalize_metadata_text(existing) != normalize_metadata_text(&candidate_title)
                 })
                 .unwrap_or(true);
             if differs_from_existing {
-                updated_title = Some(disambiguated);
+                updated_title = Some(candidate_title);
             }
         }
     }
@@ -687,6 +687,69 @@ async fn generate_mission_metadata_updates(
     }
 
     (updated_title, updated_short_description)
+}
+
+async fn apply_generated_mission_metadata_updates(
+    mission_store: &Arc<dyn MissionStore>,
+    events_tx: &broadcast::Sender<AgentEvent>,
+    mission_id: Uuid,
+    generated_title: Option<String>,
+    generated_short_description: Option<String>,
+) {
+    if generated_title.is_none() && generated_short_description.is_none() {
+        return;
+    }
+
+    let _title_update_guard = if generated_title.is_some() {
+        Some(MISSION_TITLE_UPDATE_LOCK.lock().await)
+    } else {
+        None
+    };
+
+    let title_to_write = match generated_title {
+        Some(title) => Some(disambiguate_generated_title(mission_store, mission_id, &title).await),
+        None => None,
+    };
+
+    if let Err(err) = mission_store
+        .update_mission_metadata(
+            mission_id,
+            title_to_write.as_deref(),
+            generated_short_description.as_deref(),
+            Some(METADATA_SOURCE_BACKEND_HEURISTIC),
+            None,
+            Some(METADATA_VERSION_V1),
+        )
+        .await
+    {
+        tracing::warn!("Failed to update mission metadata: {}", err);
+        return;
+    }
+
+    match mission_store.get_mission(mission_id).await {
+        Ok(Some(updated)) => {
+            let _ = events_tx.send(AgentEvent::MissionMetadataUpdated {
+                mission_id,
+                title: updated.title.clone(),
+                short_description: updated.short_description.clone(),
+                metadata_updated_at: updated.metadata_updated_at.clone(),
+                metadata_source: updated.metadata_source.clone(),
+                metadata_model: updated.metadata_model.clone(),
+                metadata_version: updated.metadata_version.clone(),
+            });
+            if title_to_write.is_some() {
+                if let Some(title) = updated.title {
+                    let _ = events_tx.send(AgentEvent::MissionTitleChanged { mission_id, title });
+                }
+            }
+        }
+        Ok(None) => {
+            tracing::warn!("Mission {} disappeared after metadata update", mission_id);
+        }
+        Err(err) => {
+            tracing::warn!("Failed to reload mission metadata after update: {}", err);
+        }
+    }
 }
 
 /// Error returned when the control session command channel is closed.
@@ -2104,17 +2167,27 @@ async fn populate_workspace_names(state: &Arc<AppState>, missions: &mut [Mission
 async fn list_missions_for_search(
     state: &Arc<AppState>,
     control: &ControlState,
+    query: &str,
+    limit: usize,
 ) -> Result<Vec<Mission>, (StatusCode, String)> {
-    const SEARCH_PAGE_SIZE: usize = 500;
+    const SEARCH_PAGE_SIZE_MIN: usize = 50;
+    const SEARCH_PAGE_SIZE_MAX: usize = 200;
+    const SEARCH_TARGET_MATCH_MULTIPLIER: usize = 8;
     const SEARCH_MAX_SCAN: usize = 10_000;
+
+    let page_size = (limit.saturating_mul(5)).clamp(SEARCH_PAGE_SIZE_MIN, SEARCH_PAGE_SIZE_MAX);
+    let target_matches = limit
+        .saturating_mul(SEARCH_TARGET_MATCH_MULTIPLIER)
+        .max(limit);
 
     let mut all = Vec::new();
     let mut offset = 0;
+    let mut matched_total = 0usize;
 
     while offset < SEARCH_MAX_SCAN {
         let mut page = control
             .mission_store
-            .list_missions(SEARCH_PAGE_SIZE, offset)
+            .list_missions(page_size, offset)
             .await
             .map_err(internal_error)?;
         if page.is_empty() {
@@ -2122,11 +2195,23 @@ async fn list_missions_for_search(
         }
         populate_workspace_names(state, &mut page).await;
         let page_len = page.len();
+        let mut matched_in_page = 0usize;
+        for mission in &page {
+            if mission_search_relevance_score(mission, query, mission.workspace_name.as_deref())
+                > 0.0
+            {
+                matched_in_page += 1;
+            }
+        }
+        matched_total += matched_in_page;
         all.extend(page);
-        if page_len < SEARCH_PAGE_SIZE {
+        if page_len < page_size {
             break;
         }
-        offset += SEARCH_PAGE_SIZE;
+        offset += page_size;
+        if matched_total >= target_matches {
+            break;
+        }
     }
 
     if offset >= SEARCH_MAX_SCAN {
@@ -2163,9 +2248,10 @@ fn mission_search_query_hash(query: &str) -> u64 {
     hasher.finish()
 }
 
-fn mission_search_freshness_key(missions: &[Mission]) -> u64 {
+fn mission_search_freshness_key(missions: &[Mission], page_size: usize) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     missions.len().hash(&mut hasher);
+    page_size.hash(&mut hasher);
     for mission in missions {
         mission.id.hash(&mut hasher);
         mission.updated_at.hash(&mut hasher);
@@ -2188,9 +2274,10 @@ pub async fn search_missions(
 
     let limit = params.limit.unwrap_or(20).clamp(1, 100);
     let control = control_for_user(&state, &user).await;
-    let missions = list_missions_for_search(&state, &control).await?;
+    let page_size = (limit.saturating_mul(5)).clamp(50, 200);
+    let missions = list_missions_for_search(&state, &control, query, limit).await?;
     let query_hash = mission_search_query_hash(query);
-    let freshness_key = mission_search_freshness_key(&missions);
+    let freshness_key = mission_search_freshness_key(&missions, page_size);
 
     if let Some(cached_results) = {
         let cache = control.mission_search_cache.read().await;
@@ -4027,52 +4114,14 @@ async fn control_actor_loop(
                     )
                     .await;
 
-                if generated_title.is_some() || generated_short_description.is_some() {
-                    if let Err(e) = mission_store
-                        .update_mission_metadata(
-                            mid,
-                            generated_title.as_deref(),
-                            generated_short_description.as_deref(),
-                            Some(METADATA_SOURCE_BACKEND_HEURISTIC),
-                            None,
-                            Some(METADATA_VERSION_V1),
-                        )
-                        .await
-                    {
-                        tracing::warn!("Failed to update mission metadata: {}", e);
-                    } else {
-                        match mission_store.get_mission(mid).await {
-                            Ok(Some(updated)) => {
-                                let _ = events_tx.send(AgentEvent::MissionMetadataUpdated {
-                                    mission_id: mid,
-                                    title: updated.title.clone(),
-                                    short_description: updated.short_description.clone(),
-                                    metadata_updated_at: updated.metadata_updated_at.clone(),
-                                    metadata_source: updated.metadata_source.clone(),
-                                    metadata_model: updated.metadata_model.clone(),
-                                    metadata_version: updated.metadata_version.clone(),
-                                });
-                                if generated_title.is_some() {
-                                    if let Some(title) = updated.title {
-                                        let _ = events_tx.send(AgentEvent::MissionTitleChanged {
-                                            mission_id: mid,
-                                            title,
-                                        });
-                                    }
-                                }
-                            }
-                            Ok(None) => {
-                                tracing::warn!("Mission {} disappeared after metadata update", mid);
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    "Failed to reload mission metadata after update: {}",
-                                    e
-                                );
-                            }
-                        }
-                    }
-                }
+                apply_generated_mission_metadata_updates(
+                    mission_store,
+                    events_tx,
+                    mid,
+                    generated_title,
+                    generated_short_description,
+                )
+                .await;
             }
         }
     }
@@ -5556,72 +5605,14 @@ async fn control_actor_loop(
                                                 true,
                                             )
                                             .await;
-                                        if generated_title.is_some() || generated_short_description.is_some() {
-                                            if let Err(e) = mission_store
-                                                .update_mission_metadata(
-                                                    mid,
-                                                    generated_title.as_deref(),
-                                                    generated_short_description.as_deref(),
-                                                    Some(METADATA_SOURCE_BACKEND_HEURISTIC),
-                                                    None,
-                                                    Some(METADATA_VERSION_V1),
-                                                )
-                                                .await
-                                            {
-                                                tracing::warn!(
-                                                    "Failed to update mission metadata: {}",
-                                                    e
-                                                );
-                                            } else {
-                                                match mission_store.get_mission(mid).await {
-                                                    Ok(Some(updated)) => {
-                                                        let _ = events_tx.send(
-                                                            AgentEvent::MissionMetadataUpdated {
-                                                                mission_id: mid,
-                                                                title: updated.title.clone(),
-                                                                short_description: updated
-                                                                    .short_description
-                                                                    .clone(),
-                                                                metadata_updated_at: updated
-                                                                    .metadata_updated_at
-                                                                    .clone(),
-                                                                metadata_source: updated
-                                                                    .metadata_source
-                                                                    .clone(),
-                                                                metadata_model: updated
-                                                                    .metadata_model
-                                                                    .clone(),
-                                                                metadata_version: updated
-                                                                    .metadata_version
-                                                                    .clone(),
-                                                            },
-                                                        );
-                                                        if generated_title.is_some() {
-                                                            if let Some(title) = updated.title {
-                                                                let _ = events_tx.send(
-                                                                    AgentEvent::MissionTitleChanged {
-                                                                        mission_id: mid,
-                                                                        title,
-                                                                    },
-                                                                );
-                                                            }
-                                                        }
-                                                    }
-                                                    Ok(None) => {
-                                                        tracing::warn!(
-                                                            "Mission {} disappeared after metadata update",
-                                                            mid
-                                                        );
-                                                    }
-                                                    Err(e) => {
-                                                        tracing::warn!(
-                                                            "Failed to reload mission metadata after update: {}",
-                                                            e
-                                                        );
-                                                    }
-                                                }
-                                            }
-                                        }
+                                        apply_generated_mission_metadata_updates(
+                                            &mission_store,
+                                            &events_tx,
+                                            mid,
+                                            generated_title,
+                                            generated_short_description,
+                                        )
+                                        .await;
                                     }
                                     Ok(None) => {
                                         tracing::warn!("Mission {} not found for history append", mid);
@@ -8052,11 +8043,11 @@ And the report:
             session_id: None,
             terminal_reason: None,
         };
-        let before = mission_search_freshness_key(&[mission.clone()]);
+        let before = mission_search_freshness_key(&[mission.clone()], 100);
 
         mission.short_description = Some("Handle webhook retries and alerting".to_string());
         mission.metadata_updated_at = Some("2099-01-01T00:00:00Z".to_string());
-        let after = mission_search_freshness_key(&[mission]);
+        let after = mission_search_freshness_key(&[mission], 100);
 
         assert_ne!(before, after);
     }
