@@ -752,6 +752,59 @@ async fn apply_generated_mission_metadata_updates(
     }
 }
 
+async fn refresh_mission_metadata_for_milestone(
+    mission_store: &Arc<dyn MissionStore>,
+    events_tx: &broadcast::Sender<AgentEvent>,
+    mission_id: Uuid,
+) {
+    let mission = match mission_store.get_mission(mission_id).await {
+        Ok(Some(mission)) => mission,
+        Ok(None) => {
+            tracing::warn!(
+                "Skipping milestone metadata refresh; mission {} not found",
+                mission_id
+            );
+            return;
+        }
+        Err(err) => {
+            tracing::warn!(
+                "Failed to load mission {} for milestone metadata refresh: {}",
+                mission_id,
+                err
+            );
+            return;
+        }
+    };
+
+    let history_pairs: Vec<(String, String)> = mission
+        .history
+        .iter()
+        .map(|entry| (entry.role.clone(), entry.content.clone()))
+        .collect();
+    let fallback_user_content = history_pairs
+        .iter()
+        .find(|(role, _)| role == "user")
+        .map(|(_, content)| content.as_str());
+
+    let (generated_title, generated_short_description) = generate_mission_metadata_updates(
+        mission_store,
+        mission_id,
+        &mission,
+        &history_pairs,
+        fallback_user_content,
+        true,
+    )
+    .await;
+    apply_generated_mission_metadata_updates(
+        mission_store,
+        events_tx,
+        mission_id,
+        generated_title,
+        generated_short_description,
+    )
+    .await;
+}
+
 /// Error returned when the control session command channel is closed.
 fn session_unavailable<T>(_: T) -> (StatusCode, String) {
     (
@@ -5534,6 +5587,12 @@ async fn control_actor_loop(
                                 .await
                                 .is_ok()
                             {
+                                refresh_mission_metadata_for_milestone(
+                                    &mission_store,
+                                    &events_tx,
+                                    id,
+                                )
+                                .await;
                                 // Generate and store mission summary
                                 if let Some(ref summary_text) = summary {
                                     // Extract key files from conversation (look for paths in assistant messages)
@@ -6206,6 +6265,12 @@ async fn control_actor_loop(
                                                     e
                                                 );
                                             } else {
+                                                refresh_mission_metadata_for_milestone(
+                                                    &mission_store,
+                                                    &events_tx,
+                                                    *mission_id,
+                                                )
+                                                .await;
                                                 let _ = events_tx.send(AgentEvent::MissionStatusChanged {
                                                     mission_id: *mission_id,
                                                     status: new_status,
@@ -7871,6 +7936,83 @@ And the report:
         assert_eq!(
             with_milestone.1.as_deref(),
             Some("Investigate production timeout in payment worker")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_refresh_mission_metadata_for_milestone_updates_store_and_emits_event() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = store
+            .create_mission(Some("Legacy title"), None, None, None, None, None, None)
+            .await
+            .expect("create mission");
+        store
+            .update_mission_metadata(
+                mission.id,
+                Some(Some("Legacy title")),
+                Some(Some("Legacy short description")),
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("seed metadata");
+        store
+            .update_mission_history(
+                mission.id,
+                &[
+                    MissionHistoryEntry {
+                        role: "user".to_string(),
+                        content: "Investigate oauth callback timeout".to_string(),
+                    },
+                    MissionHistoryEntry {
+                        role: "assistant".to_string(),
+                        content:
+                            "Investigate oauth callback timeout root cause\nStarting with ingress logs."
+                                .to_string(),
+                    },
+                ],
+            )
+            .await
+            .expect("seed history");
+
+        let (events_tx, mut events_rx) = broadcast::channel::<AgentEvent>(16);
+        refresh_mission_metadata_for_milestone(&store, &events_tx, mission.id).await;
+
+        let refreshed = store
+            .get_mission(mission.id)
+            .await
+            .expect("get mission")
+            .expect("mission exists");
+        assert_eq!(
+            refreshed.title.as_deref(),
+            Some("Investigate oauth callback timeout root cause")
+        );
+        assert_eq!(
+            refreshed.short_description.as_deref(),
+            Some("Investigate oauth callback timeout")
+        );
+        assert_eq!(
+            refreshed.metadata_source.as_deref(),
+            Some(METADATA_SOURCE_BACKEND_HEURISTIC)
+        );
+        assert_eq!(
+            refreshed.metadata_version.as_deref(),
+            Some(METADATA_VERSION_V1)
+        );
+
+        let mut saw_metadata_event = false;
+        while let Ok(event) = events_rx.try_recv() {
+            if let AgentEvent::MissionMetadataUpdated { mission_id, .. } = event {
+                if mission_id == mission.id {
+                    saw_metadata_event = true;
+                    break;
+                }
+            }
+        }
+        assert!(
+            saw_metadata_event,
+            "expected mission_metadata_updated event"
         );
     }
 
