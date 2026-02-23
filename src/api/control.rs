@@ -336,23 +336,53 @@ async fn load_recent_mission_titles(
     mission_store: &Arc<dyn MissionStore>,
     mission_id: Uuid,
 ) -> Vec<String> {
-    const RECENT_TITLE_SCAN_LIMIT: usize = 300;
-    match mission_store
-        .list_missions(RECENT_TITLE_SCAN_LIMIT, 0)
-        .await
-    {
-        Ok(missions) => missions
-            .into_iter()
-            .filter(|mission| mission.id != mission_id)
-            .filter_map(|mission| mission.title)
-            .map(|title| title.trim().to_string())
-            .filter(|title| !title.is_empty())
-            .collect(),
-        Err(err) => {
-            tracing::warn!("Failed to load recent mission titles for metadata generation: {err}");
-            Vec::new()
+    const RECENT_TITLE_SCAN_PAGE_SIZE: usize = 200;
+    const RECENT_TITLE_SCAN_MAX: usize = 2_000;
+
+    let mut titles = Vec::new();
+    let mut offset = 0;
+
+    while offset < RECENT_TITLE_SCAN_MAX {
+        match mission_store
+            .list_missions(RECENT_TITLE_SCAN_PAGE_SIZE, offset)
+            .await
+        {
+            Ok(missions) => {
+                if missions.is_empty() {
+                    break;
+                }
+                let page_len = missions.len();
+                titles.extend(
+                    missions
+                        .into_iter()
+                        .filter(|mission| mission.id != mission_id)
+                        .filter_map(|mission| mission.title)
+                        .map(|title| title.trim().to_string())
+                        .filter(|title| !title.is_empty()),
+                );
+
+                if page_len < RECENT_TITLE_SCAN_PAGE_SIZE {
+                    break;
+                }
+                offset += RECENT_TITLE_SCAN_PAGE_SIZE;
+            }
+            Err(err) => {
+                tracing::warn!(
+                    "Failed to load recent mission titles for metadata generation: {err}"
+                );
+                break;
+            }
         }
     }
+
+    if offset >= RECENT_TITLE_SCAN_MAX {
+        tracing::warn!(
+            "Recent-title scan hit cap ({} missions); some older titles may be skipped",
+            RECENT_TITLE_SCAN_MAX
+        );
+    }
+
+    titles
 }
 
 fn derive_title_qualifier_from_text(base_title: &str, text: &str) -> Option<String> {
@@ -8497,6 +8527,70 @@ And the report:
         assert_eq!(
             updated_short_description.as_deref(),
             Some("Fix login redirect on mobile safari callback flow")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_generate_mission_metadata_updates_negative_context_scans_beyond_first_page() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        store
+            .create_mission(
+                Some("Fix login redirect"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("create existing mission");
+
+        for idx in 0..320 {
+            store
+                .create_mission(
+                    Some(&format!("Filler mission {}", idx)),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .expect("create filler mission");
+        }
+
+        let mission = store
+            .create_mission(None, None, None, None, None, None, None)
+            .await
+            .expect("create probe mission");
+        let history = vec![
+            (
+                "user".to_string(),
+                "Fix login redirect in admin callback flow for enterprise SSO".to_string(),
+            ),
+            (
+                "assistant".to_string(),
+                "Fix login redirect\nI'll investigate auth callback handling.".to_string(),
+            ),
+        ];
+
+        let (updated_title, _) = generate_mission_metadata_updates(
+            &store,
+            mission.id,
+            &mission,
+            &history,
+            history.first().map(|(_, content)| content.as_str()),
+            false,
+        )
+        .await;
+
+        let updated_title = updated_title.expect("title should be generated");
+        assert_ne!(updated_title, "Fix login redirect");
+        assert!(
+            updated_title.starts_with("Fix login redirect - admin callback flow"),
+            "unexpected diversified title: {updated_title}"
         );
     }
 
