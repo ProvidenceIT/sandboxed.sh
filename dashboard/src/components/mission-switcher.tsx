@@ -193,11 +193,8 @@ export function runningMissionMatchesSearchQuery(
   runningInfo: RunningMissionInfo,
   searchQuery: string
 ): boolean {
-  const normalizedQuery = normalizeMetadataText(searchQuery);
-  if (!normalizedQuery) return true;
-  const normalizedText = normalizeMetadataText(getRunningMissionSearchText(runningInfo));
-  if (!normalizedText) return false;
-  return normalizedText.includes(normalizedQuery);
+  if (!normalizeMetadataText(searchQuery)) return true;
+  return runningMissionSearchRelevanceScore(runningInfo, searchQuery) > 0;
 }
 
 const SEARCH_SYNONYMS: Record<string, string[]> = {
@@ -219,6 +216,76 @@ const SEARCH_SYNONYMS: Record<string, string[]> = {
   stalled: ['blocked', 'waiting', 'timeout'],
   timeout: ['slow', 'latency', 'stalled', 'hang'],
 };
+
+const SEARCH_STOPWORDS = new Set([
+  'a',
+  'an',
+  'and',
+  'at',
+  'did',
+  'do',
+  'does',
+  'for',
+  'from',
+  'how',
+  'i',
+  'in',
+  'is',
+  'it',
+  'me',
+  'my',
+  'of',
+  'on',
+  'or',
+  'our',
+  'please',
+  'show',
+  'that',
+  'the',
+  'this',
+  'to',
+  'us',
+  'was',
+  'we',
+  'what',
+  'when',
+  'where',
+  'which',
+  'who',
+  'why',
+  'with',
+  'you',
+  'your',
+]);
+
+interface SearchQueryTerms {
+  normalizedQuery: string;
+  normalizedCoreQuery: string;
+  queryGroups: string[][];
+}
+
+function buildSearchQueryTerms(searchQuery: string): SearchQueryTerms | null {
+  const normalizedQuery = normalizeMetadataText(searchQuery);
+  if (!normalizedQuery) return null;
+
+  const queryTokens = normalizedQuery.split(' ').filter(Boolean);
+  if (queryTokens.length === 0) return null;
+
+  const filteredTokens = queryTokens.filter((token) => !SEARCH_STOPWORDS.has(token));
+  const effectiveTokens = filteredTokens.length > 0 ? filteredTokens : queryTokens;
+  const normalizedCoreQuery = effectiveTokens.join(' ');
+
+  const queryGroups = effectiveTokens
+    .map(expandQueryTokenGroup)
+    .filter((group) => group.length > 0);
+  if (queryGroups.length === 0) return null;
+
+  return {
+    normalizedQuery,
+    normalizedCoreQuery,
+    queryGroups,
+  };
+}
 
 function expandQueryTokenGroup(token: string): string[] {
   const normalized = normalizeMetadataText(token);
@@ -342,8 +409,9 @@ export function missionSearchRelevanceScore(
   searchQuery: string,
   workspaceNameById?: Record<string, string>
 ): number {
-  const normalizedQuery = normalizeMetadataText(searchQuery);
-  if (!normalizedQuery) return 0;
+  const queryTerms = buildSearchQueryTerms(searchQuery);
+  if (!queryTerms) return 0;
+  const phraseQuery = queryTerms.normalizedCoreQuery || queryTerms.normalizedQuery;
 
   const displayName = getMissionDisplayName(mission, workspaceNameById);
   const title = getMissionCardTitle(mission) ?? '';
@@ -355,12 +423,6 @@ export function missionSearchRelevanceScore(
   const normalizedCombined = normalizeMetadataText(combined);
   if (!normalizedCombined) return 0;
 
-  const queryTokens = normalizedQuery.split(' ').filter(Boolean);
-  if (queryTokens.length === 0) return 0;
-
-  const queryGroups = queryTokens.map(expandQueryTokenGroup).filter((group) => group.length > 0);
-  if (queryGroups.length === 0) return 0;
-
   const fields = [
     { weight: 5, tokens: tokenSetFromText(displayName) },
     { weight: 8, tokens: tokenSetFromText(title) },
@@ -371,7 +433,7 @@ export function missionSearchRelevanceScore(
   ];
 
   let score = 0;
-  for (const group of queryGroups) {
+  for (const group of queryTerms.queryGroups) {
     let bestGroupScore = 0;
     for (const field of fields) {
       const strength = groupMatchStrengthForTokenSet(group, field.tokens);
@@ -392,9 +454,55 @@ export function missionSearchRelevanceScore(
     { text: normalizeMetadataText(combined), boost: 5 },
   ];
   for (const target of phraseBoostTargets) {
-    if (target.text && target.text.includes(normalizedQuery)) {
+    if (target.text && target.text.includes(phraseQuery)) {
       score += target.boost;
     }
+  }
+
+  return score;
+}
+
+function runningMissionSearchRelevanceScore(
+  runningInfo: RunningMissionInfo,
+  searchQuery: string
+): number {
+  const queryTerms = buildSearchQueryTerms(searchQuery);
+  if (!queryTerms) return 0;
+  const phraseQuery = queryTerms.normalizedCoreQuery || queryTerms.normalizedQuery;
+
+  const missionId = runningInfo.mission_id ?? '';
+  const state = runningInfo.state ?? '';
+  const shortName = getMissionShortName(missionId);
+  const combined = [missionId, shortName, state].filter(Boolean).join(' ');
+  const normalizedCombined = normalizeMetadataText(combined);
+  if (!normalizedCombined) return 0;
+
+  const fields = [
+    { weight: 6, tokens: tokenSetFromText(state) },
+    { weight: 5, tokens: tokenSetFromText(missionId) },
+    { weight: 4, tokens: tokenSetFromText(shortName) },
+    { weight: 2, tokens: tokenSetFromText(combined) },
+  ];
+
+  let score = 0;
+  for (const group of queryTerms.queryGroups) {
+    let bestGroupScore = 0;
+    for (const field of fields) {
+      const strength = groupMatchStrengthForTokenSet(group, field.tokens);
+      if (strength > 0) {
+        bestGroupScore = Math.max(bestGroupScore, strength * field.weight);
+      }
+    }
+    if (bestGroupScore <= 0) return 0;
+    score += bestGroupScore;
+  }
+
+  const normalizedState = normalizeMetadataText(state);
+  if (normalizedState && normalizedState.includes(phraseQuery)) {
+    score += 4;
+  }
+  if (normalizedCombined.includes(phraseQuery)) {
+    score += 6;
   }
 
   return score;
@@ -548,10 +656,14 @@ export function MissionSwitcher({
     const cache = searchScoreCacheRef.current;
     const scored = allItems.flatMap((item) => {
       if (!item.mission) {
-        if (!item.runningInfo || !runningMissionMatchesSearchQuery(item.runningInfo, normalizedSearchQuery)) {
+        if (!item.runningInfo) {
           return [];
         }
-        return [{ item, score: 0.1 }];
+        const runningScore = runningMissionSearchRelevanceScore(item.runningInfo, normalizedSearchQuery);
+        if (runningScore <= 0) {
+          return [];
+        }
+        return [{ item, score: runningScore }];
       }
       const score = getMissionSearchScore(
         item.mission,
