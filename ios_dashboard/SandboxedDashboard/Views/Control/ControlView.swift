@@ -3255,10 +3255,18 @@ private struct MissionSwitcherSheet: View {
         if searchText.isEmpty {
             return runningMissions
         }
-        return runningMissions.filter { info in
-            info.missionId.localizedCaseInsensitiveContains(searchText) ||
-            (info.title?.localizedCaseInsensitiveContains(searchText) ?? false)
-        }
+        return runningMissions
+            .compactMap { info -> (RunningMissionInfo, Double)? in
+                let score = runningMissionSearchScore(info, query: searchText)
+                return score > 0 ? (info, score) : nil
+            }
+            .sorted { lhs, rhs in
+                if lhs.1 == rhs.1 {
+                    return lhs.0.missionId < rhs.0.missionId
+                }
+                return lhs.1 > rhs.1
+            }
+            .map(\.0)
     }
 
     private var filteredRecent: [Mission] {
@@ -3266,11 +3274,18 @@ private struct MissionSwitcherSheet: View {
         if searchText.isEmpty {
             return nonRunning
         }
-        return nonRunning.filter { mission in
-            mission.id.localizedCaseInsensitiveContains(searchText) ||
-            mission.displayTitle.localizedCaseInsensitiveContains(searchText) ||
-            (mission.displayShortDescription?.localizedCaseInsensitiveContains(searchText) ?? false)
-        }
+        return nonRunning
+            .compactMap { mission -> (Mission, Double)? in
+                let score = missionSearchRelevanceScore(mission, query: searchText)
+                return score > 0 ? (mission, score) : nil
+            }
+            .sorted { lhs, rhs in
+                if lhs.1 == rhs.1 {
+                    return (lhs.0.updatedDate ?? .distantPast) > (rhs.0.updatedDate ?? .distantPast)
+                }
+                return lhs.1 > rhs.1
+            }
+            .map(\.0)
     }
 
     private var activeOrPendingMissions: [Mission] {
@@ -3297,6 +3312,8 @@ private struct MissionSwitcherSheet: View {
                     MissionRow(
                         missionId: mission.id,
                         title: mission.displayTitle,
+                        shortDescription: missionCardDescription(for: mission),
+                        backend: mission.backend,
                         status: mission.status,
                         isRunning: false,
                         runningState: nil,
@@ -3329,6 +3346,8 @@ private struct MissionSwitcherSheet: View {
                             MissionRow(
                                 missionId: info.missionId,
                                 title: info.title,
+                                shortDescription: nil,
+                                backend: nil,
                                 status: .active,
                                 isRunning: true,
                                 runningState: info.state,
@@ -3363,6 +3382,186 @@ private struct MissionSwitcherSheet: View {
             }
         }
     }
+
+    private func normalizeMetadataText(_ text: String) -> String {
+        let lowered = text.lowercased()
+        let scalars = lowered.unicodeScalars.map { scalar -> Character in
+            if CharacterSet.alphanumerics.contains(scalar) || CharacterSet.whitespacesAndNewlines.contains(scalar) {
+                return Character(scalar)
+            }
+            return " "
+        }
+        return String(scalars)
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
+    }
+
+    private func hasMeaningfulExtraTokens(baseText: String, candidateText: String) -> Bool {
+        let base = normalizeMetadataText(baseText)
+        let candidate = normalizeMetadataText(candidateText)
+        if candidate.isEmpty { return false }
+        if base.isEmpty { return true }
+
+        let baseTokens = Set(base.split(separator: " ").map(String.init))
+        let candidateTokens = candidate.split(separator: " ").map(String.init)
+        return candidateTokens.contains(where: { !baseTokens.contains($0) })
+    }
+
+    private func missionCardDescription(for mission: Mission) -> String? {
+        guard let shortDescription = mission.shortDescription?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !shortDescription.isEmpty else {
+            return nil
+        }
+        let title = mission.displayTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !title.isEmpty && !hasMeaningfulExtraTokens(baseText: title, candidateText: shortDescription) {
+            return nil
+        }
+        return shortDescription.count > 100 ? String(shortDescription.prefix(100)) + "..." : shortDescription
+    }
+
+    private func expandQueryGroup(token: String) -> [String] {
+        let synonyms: [String: [String]] = [
+            "auth": ["login", "signin", "oauth", "credential", "credentials"],
+            "blocked": ["stalled", "waiting"],
+            "bug": ["issue", "error", "fix", "problem"],
+            "crash": ["panic", "exception", "failure"],
+            "deploy": ["release", "rollout", "ship"],
+            "error": ["bug", "issue", "failure"],
+            "failed": ["error", "failure"],
+            "fix": ["bug", "issue", "error", "repair"],
+            "issue": ["bug", "error", "problem", "fix"],
+            "login": ["auth", "signin", "oauth", "credentials"],
+            "performance": ["perf", "slow", "latency", "optimize"],
+            "perf": ["performance", "slow", "latency", "optimize"],
+            "release": ["deploy", "rollout", "ship"],
+            "signin": ["login", "auth", "oauth", "credentials"],
+            "slow": ["performance", "latency", "timeout", "stall"],
+            "stalled": ["blocked", "waiting", "timeout"],
+            "timeout": ["slow", "latency", "stalled", "hang"],
+        ]
+
+        let normalized = normalizeMetadataText(token)
+        if normalized.isEmpty { return [] }
+
+        var group = Set<String>([normalized])
+        for synonym in synonyms[normalized] ?? [] {
+            let normalizedSynonym = normalizeMetadataText(synonym)
+            if !normalizedSynonym.isEmpty {
+                group.insert(normalizedSynonym)
+            }
+        }
+        return Array(group)
+    }
+
+    private func tokenMatchStrength(token: String, candidate: String) -> Double {
+        if token == candidate { return 1.0 }
+
+        let asciiCandidate = candidate.range(of: "^[a-z0-9]+$", options: .regularExpression) != nil
+        if token.hasPrefix(candidate) && (!asciiCandidate || candidate.count >= 3) {
+            return 0.7
+        }
+        if asciiCandidate && token.count >= 5 && candidate.hasPrefix(token) && candidate.count - token.count <= 2 {
+            return 0.65
+        }
+        if candidate.count >= 4 && token.contains(candidate) {
+            return 0.45
+        }
+        return 0
+    }
+
+    private func tokenSet(from text: String) -> Set<String> {
+        let normalized = normalizeMetadataText(text)
+        if normalized.isEmpty { return [] }
+        return Set(normalized.split(separator: " ").map(String.init))
+    }
+
+    private func groupMatchStrength(_ group: [String], in tokenSet: Set<String>) -> Double {
+        var best = 0.0
+        for candidate in group where !candidate.isEmpty {
+            for token in tokenSet {
+                let strength = tokenMatchStrength(token: token, candidate: candidate)
+                best = max(best, strength)
+                if best >= 1 { return best }
+            }
+        }
+        return best
+    }
+
+    private func missionSearchRelevanceScore(_ mission: Mission, query: String) -> Double {
+        let normalizedQuery = normalizeMetadataText(query)
+        if normalizedQuery.isEmpty { return 0 }
+
+        let title = mission.displayTitle
+        let shortDescription = mission.shortDescription ?? ""
+        let backend = mission.backend ?? ""
+        let status = mission.status.displayLabel
+        let combined = "\(mission.id) \(title) \(shortDescription) \(backend) \(status)"
+        let normalizedCombined = normalizeMetadataText(combined)
+        if normalizedCombined.isEmpty { return 0 }
+
+        let groups = normalizedQuery
+            .split(separator: " ")
+            .map(String.init)
+            .map(expandQueryGroup)
+            .filter { !$0.isEmpty }
+        if groups.isEmpty { return 0 }
+
+        let fields: [(weight: Double, tokens: Set<String>)] = [
+            (8, tokenSet(from: title)),
+            (7, tokenSet(from: shortDescription)),
+            (3, tokenSet(from: backend)),
+            (2, tokenSet(from: status)),
+            (1, tokenSet(from: combined)),
+        ]
+
+        var score = 0.0
+        for group in groups {
+            var bestGroupScore = 0.0
+            for field in fields {
+                let strength = groupMatchStrength(group, in: field.tokens)
+                if strength > 0 {
+                    bestGroupScore = max(bestGroupScore, strength * field.weight)
+                }
+            }
+            if bestGroupScore <= 0 { return 0 }
+            score += bestGroupScore
+        }
+
+        let phraseTargets: [(text: String, boost: Double)] = [
+            (normalizeMetadataText(title), 14),
+            (normalizeMetadataText(shortDescription), 12),
+            (normalizeMetadataText(combined), 5),
+        ]
+        for target in phraseTargets where !target.text.isEmpty {
+            if target.text.contains(normalizedQuery) {
+                score += target.boost
+            }
+        }
+
+        return score
+    }
+
+    private func runningMissionSearchScore(_ mission: RunningMissionInfo, query: String) -> Double {
+        let normalizedQuery = normalizeMetadataText(query)
+        if normalizedQuery.isEmpty { return 0 }
+
+        let title = mission.title ?? ""
+        let combined = "\(mission.missionId) \(title) \(mission.state)"
+        let queryTokens = Set(normalizedQuery.split(separator: " ").map(String.init))
+        let candidateTokens = tokenSet(from: combined)
+        if queryTokens.isEmpty || candidateTokens.isEmpty { return 0 }
+
+        var score = 0.0
+        for queryToken in queryTokens {
+            let strength = queryToken == normalizedQuery ? 1.0 : groupMatchStrength(expandQueryGroup(token: queryToken), in: candidateTokens)
+            if strength <= 0 { return 0 }
+            score += strength * 4.0
+        }
+        if normalizeMetadataText(combined).contains(normalizedQuery) {
+            score += 6
+        }
+        return score
+    }
 }
 
 // MARK: - Mission Row
@@ -3370,6 +3569,8 @@ private struct MissionSwitcherSheet: View {
 private struct MissionRow: View {
     let missionId: String
     let title: String?
+    let shortDescription: String?
+    let backend: String?
     let status: MissionStatus
     let isRunning: Bool
     let runningState: String?
@@ -3443,6 +3644,20 @@ private struct MissionRow: View {
                         Text(title)
                             .font(.caption)
                             .foregroundStyle(Theme.textSecondary)
+                            .lineLimit(1)
+                    }
+
+                    if let shortDescription = shortDescription, !shortDescription.isEmpty {
+                        Text(shortDescription)
+                            .font(.caption2)
+                            .foregroundStyle(Theme.textMuted)
+                            .lineLimit(1)
+                    }
+
+                    if let backend = backend?.trimmingCharacters(in: .whitespacesAndNewlines), !backend.isEmpty {
+                        Text(backend)
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(Theme.textMuted)
                             .lineLimit(1)
                     }
                 }
