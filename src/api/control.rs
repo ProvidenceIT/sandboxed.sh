@@ -255,6 +255,12 @@ fn extract_short_description_from_first_successful_assistant(
         })
 }
 
+fn assistant_reply_is_successful(content: &str) -> bool {
+    extract_short_description_from_content(content, 160)
+        .map(|candidate| !is_unsuccessful_assistant_summary(&candidate))
+        .unwrap_or(false)
+}
+
 fn extract_short_description_from_content(content: &str, max_len: usize) -> Option<String> {
     let lines: Vec<&str> = content.lines().collect();
     let mut inside_fenced_block: Option<char> = None;
@@ -1343,9 +1349,14 @@ async fn generate_mission_metadata_updates(
     let title_user_managed =
         mission.metadata_source.as_deref() == Some(METADATA_SOURCE_USER) && !title_missing;
     let has_assistant_reply = history.iter().any(|(role, _)| role == "assistant");
-    let should_bootstrap_title_from_first_assistant = title_missing && has_assistant_reply;
-    let should_bootstrap_short_description_from_first_assistant =
-        has_assistant_reply && (short_description_missing || title_missing) && !should_refresh;
+    let has_successful_assistant_reply = history
+        .iter()
+        .any(|(role, content)| role == "assistant" && assistant_reply_is_successful(content));
+    let should_bootstrap_title_from_first_assistant =
+        title_missing && has_successful_assistant_reply;
+    let should_bootstrap_short_description_from_first_assistant = has_successful_assistant_reply
+        && (short_description_missing || title_missing)
+        && !should_refresh;
 
     if !title_missing
         && !short_description_missing
@@ -1411,6 +1422,8 @@ async fn generate_mission_metadata_updates(
         } else if should_refresh {
             extract_short_description_from_recent_history(history, 160)
                 .or_else(|| extract_short_description_from_history(history, 160))
+        } else if has_assistant_reply {
+            None
         } else {
             extract_short_description_from_history(history, 160)
         }
@@ -9199,6 +9212,39 @@ And the report:
             updated_short_description.as_deref(),
             Some("Identified root cause: callback URL host mismatch in production.")
         );
+    }
+
+    #[tokio::test]
+    async fn test_generate_mission_metadata_updates_waits_for_successful_assistant_before_bootstrap(
+    ) {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = store
+            .create_mission(None, None, None, None, None, None, None)
+            .await
+            .expect("create mission");
+        let history = vec![
+            (
+                "user".to_string(),
+                "Fix oauth callback failures on mobile safari".to_string(),
+            ),
+            (
+                "assistant".to_string(),
+                "Error: unable to complete analysis because logs are missing.".to_string(),
+            ),
+        ];
+
+        let (updated_title, updated_short_description) = generate_mission_metadata_updates(
+            &store,
+            mission.id,
+            &mission,
+            &history,
+            history.first().map(|(_, content)| content.as_str()),
+            false,
+        )
+        .await;
+
+        assert_eq!(updated_title, None);
+        assert_eq!(updated_short_description, None);
     }
 
     #[tokio::test]
