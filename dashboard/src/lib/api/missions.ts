@@ -31,6 +31,8 @@ export interface Mission {
   id: string;
   status: MissionStatus;
   title: string | null;
+  short_description?: string | null;
+  metadata_updated_at?: string | null;
   workspace_id?: string;
   workspace_name?: string;
   agent?: string;

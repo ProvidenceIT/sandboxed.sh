@@ -111,6 +111,8 @@ impl MissionStore for FileMissionStore {
             id: Uuid::new_v4(),
             status: MissionStatus::Pending,
             title: title.map(|s| s.to_string()),
+            short_description: None,
+            metadata_updated_at: None,
             workspace_id: workspace_id.unwrap_or(crate::workspace::DEFAULT_WORKSPACE_ID),
             workspace_name: None,
             agent: agent.map(|s| s.to_string()),
@@ -206,6 +208,31 @@ impl MissionStore for FileMissionStore {
             .ok_or_else(|| format!("Mission {} not found", id))?;
         mission.title = Some(title.to_string());
         mission.updated_at = now_string();
+        drop(missions);
+        self.persist().await
+    }
+
+    async fn update_mission_metadata(
+        &self,
+        id: Uuid,
+        title: Option<&str>,
+        short_description: Option<&str>,
+    ) -> Result<(), String> {
+        let mut missions = self.missions.write().await;
+        let mission = missions
+            .get_mut(&id)
+            .ok_or_else(|| format!("Mission {} not found", id))?;
+
+        if let Some(title) = title {
+            mission.title = Some(title.to_string());
+        }
+        if let Some(short_description) = short_description {
+            mission.short_description = Some(short_description.to_string());
+        }
+
+        let now = now_string();
+        mission.metadata_updated_at = Some(now.clone());
+        mission.updated_at = now;
         drop(missions);
         self.persist().await
     }
