@@ -1299,7 +1299,7 @@ struct ControlView: View {
         guard entryIndex >= 0 else { return nil }
 
         var historyIndex = 0
-        for message in messages where message.isUser || message.isAssistant {
+        for message in messages where message.isUser || message.isAssistant || message.isToolCall {
             if historyIndex == entryIndex {
                 return message.id
             }
@@ -1311,7 +1311,7 @@ struct ControlView: View {
         guard !normalizedSnippet.isEmpty else { return nil }
 
         let best = messages.first { message in
-            guard message.isUser || message.isAssistant else { return false }
+            guard message.isUser || message.isAssistant || message.isToolCall else { return false }
             return normalizeSearchText(message.content).contains(normalizedSnippet)
         }
         return best?.id

@@ -4365,21 +4365,75 @@ export default function ControlClient() {
     (entryIndex: number, snippet?: string): string | null => {
       if (entryIndex < 0) return null;
 
-      let historyIndex = 0;
-      for (const item of groupedItems) {
-        if (item.kind !== "user" && item.kind !== "assistant") continue;
-        if (historyIndex === entryIndex) {
-          return item.id;
+      const historyEntrySpan = (item: GroupedItem): number => {
+        if (item.kind === "user" || item.kind === "assistant" || item.kind === "tool") {
+          return 1;
         }
-        historyIndex += 1;
+        if (item.kind === "tool_group") {
+          return item.tools.length;
+        }
+        return 0;
+      };
+      const historyItemSearchText = (item: GroupedItem): string => {
+        if (item.kind === "user" || item.kind === "assistant") {
+          return item.content;
+        }
+        if (item.kind === "tool") {
+          const argsText =
+            item.args === undefined ? "" : JSON.stringify(item.args);
+          const resultText =
+            item.result === undefined ? "" : JSON.stringify(item.result);
+          return `${item.name} ${argsText} ${resultText}`.trim();
+        }
+        if (item.kind === "tool_group") {
+          return item.tools
+            .map((tool) => {
+              const argsText = tool.args === undefined ? "" : JSON.stringify(tool.args);
+              const resultText = tool.result === undefined ? "" : JSON.stringify(tool.result);
+              return `${tool.name} ${argsText} ${resultText}`.trim();
+            })
+            .join(" ");
+        }
+        return "";
+      };
+      const nextFocusableChatItemId = (startIdx: number): string | null => {
+        for (let idx = startIdx; idx < groupedItems.length; idx += 1) {
+          const candidate = groupedItems[idx];
+          if (candidate.kind === "user" || candidate.kind === "assistant") {
+            return candidate.id;
+          }
+        }
+        return null;
+      };
+
+      let historyIndex = 0;
+      let previousFocusableId: string | null = null;
+      for (let groupedIdx = 0; groupedIdx < groupedItems.length; groupedIdx += 1) {
+        const item = groupedItems[groupedIdx];
+        const span = historyEntrySpan(item);
+        if (span <= 0) continue;
+        if (entryIndex >= historyIndex && entryIndex < historyIndex + span) {
+          if (item.kind === "user" || item.kind === "assistant") {
+            return item.id;
+          }
+          return nextFocusableChatItemId(groupedIdx + 1) ?? previousFocusableId;
+        }
+        if (item.kind === "user" || item.kind === "assistant") {
+          previousFocusableId = item.id;
+        }
+        historyIndex += span;
       }
 
       const normalizedSnippet = normalizeMetadataText(snippet ?? "");
       if (!normalizedSnippet) return null;
       for (const item of groupedItems) {
-        if (item.kind !== "user" && item.kind !== "assistant") continue;
-        if (normalizeMetadataText(item.content).includes(normalizedSnippet)) {
-          return item.id;
+        if (historyEntrySpan(item) <= 0) continue;
+        if (
+          normalizeMetadataText(historyItemSearchText(item)).includes(normalizedSnippet)
+        ) {
+          if (item.kind === "user" || item.kind === "assistant") {
+            return item.id;
+          }
         }
       }
       return null;
@@ -4393,13 +4447,20 @@ export default function ControlClient() {
       if (typeof entryIndex === "number" && entryIndex >= 0) {
         let historyIndex = 0;
         const groupedIndex = groupedItems.findIndex((item) => {
-          if (item.kind !== "user" && item.kind !== "assistant") {
+          const span =
+            item.kind === "tool_group"
+              ? item.tools.length
+              : item.kind === "user" || item.kind === "assistant" || item.kind === "tool"
+                ? 1
+                : 0;
+          if (span <= 0) {
             return false;
           }
-          if (historyIndex === entryIndex) {
+          const matches = entryIndex >= historyIndex && entryIndex < historyIndex + span;
+          historyIndex += span;
+          if (matches) {
             return true;
           }
-          historyIndex += 1;
           return false;
         });
         if (groupedIndex >= 0) {
