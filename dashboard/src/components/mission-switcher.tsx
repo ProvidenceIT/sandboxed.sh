@@ -52,12 +52,17 @@ function getMissionCardTitle(mission: Mission): string | null {
   return title;
 }
 
-function getMissionCardDescription(mission: Mission): string | null {
+function getMissionCardDescription(mission: Mission, title?: string | null): string | null {
   const shortDescription = mission.short_description?.trim();
   if (!shortDescription) return null;
 
-  const title = getMissionCardTitle(mission) ?? '';
-  if (title.toLowerCase() === shortDescription.toLowerCase()) return null;
+  const normalizedTitle = (title ?? '').trim();
+  if (
+    normalizedTitle &&
+    normalizedTitle.toLowerCase() === shortDescription.toLowerCase()
+  ) {
+    return null;
+  }
   return shortDescription;
 }
 
@@ -77,7 +82,7 @@ function getMissionSearchText(mission: Mission): string {
   if (!title || title === shortDescription) {
     return [shortDescription, backend, status].filter(Boolean).join(' ');
   }
-  return `${title} ${shortDescription} ${backend} ${status}`;
+  return [title, shortDescription, backend, status].filter(Boolean).join(' ');
 }
 
 export function MissionSwitcher({
@@ -335,7 +340,9 @@ export function MissionSwitcher({
                 const isSeverlyStalled = stallInfo?.severity === 'severe';
                 const isLoading = loadingMissionId === item.id;
                 const cardTitle = mission ? getMissionCardTitle(mission) : null;
-                const cardDescription = mission ? getMissionCardDescription(mission) : null;
+                const cardDescription = mission
+                  ? getMissionCardDescription(mission, cardTitle)
+                  : null;
 
                 return (
                   <div key={item.id}>
