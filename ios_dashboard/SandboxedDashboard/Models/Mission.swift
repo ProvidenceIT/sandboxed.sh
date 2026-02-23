@@ -85,7 +85,7 @@ struct Mission: Codable, Identifiable, Hashable {
     let backend: String?
     let history: [MissionHistoryEntry]
     let createdAt: String
-    let updatedAt: String
+    var updatedAt: String
     let interruptedAt: String?
     let resumable: Bool
 

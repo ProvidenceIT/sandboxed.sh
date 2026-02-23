@@ -2119,10 +2119,12 @@ function ImagePreview({
 // Memoized to prevent re-renders when parent state changes
 const ToolCallItem = memo(function ToolCallItem({
   item,
+  highlighted = false,
   workspaceId,
   missionId,
 }: {
   item: Extract<ChatItem, { kind: "tool" }>;
+  highlighted?: boolean;
   workspaceId?: string;
   missionId?: string;
 }) {
@@ -2203,7 +2205,14 @@ const ToolCallItem = memo(function ToolCallItem({
   );
 
   return (
-    <div className="my-2">
+    <div
+      id={`chat-item-${item.id}`}
+      data-chat-item-id={item.id}
+      className={cn(
+        "my-2 rounded-xl transition-colors",
+        highlighted && "ring-1 ring-amber-400/70 bg-amber-500/10"
+      )}
+    >
       {/* Compact header */}
       <button
         onClick={() => setExpanded(!expanded)}
@@ -4396,30 +4405,18 @@ export default function ControlClient() {
         }
         return "";
       };
-      const nextFocusableChatItemId = (startIdx: number): string | null => {
-        for (let idx = startIdx; idx < groupedItems.length; idx += 1) {
-          const candidate = groupedItems[idx];
-          if (candidate.kind === "user" || candidate.kind === "assistant") {
-            return candidate.id;
-          }
-        }
-        return null;
-      };
 
       let historyIndex = 0;
-      let previousFocusableId: string | null = null;
-      for (let groupedIdx = 0; groupedIdx < groupedItems.length; groupedIdx += 1) {
-        const item = groupedItems[groupedIdx];
+      for (const item of groupedItems) {
         const span = historyEntrySpan(item);
         if (span <= 0) continue;
         if (entryIndex >= historyIndex && entryIndex < historyIndex + span) {
-          if (item.kind === "user" || item.kind === "assistant") {
+          if (item.kind === "tool_group") {
+            return item.groupId;
+          }
+          if (item.kind === "user" || item.kind === "assistant" || item.kind === "tool") {
             return item.id;
           }
-          return nextFocusableChatItemId(groupedIdx + 1) ?? previousFocusableId;
-        }
-        if (item.kind === "user" || item.kind === "assistant") {
-          previousFocusableId = item.id;
         }
         historyIndex += span;
       }
@@ -4431,7 +4428,10 @@ export default function ControlClient() {
         if (
           normalizeMetadataText(historyItemSearchText(item)).includes(normalizedSnippet)
         ) {
-          if (item.kind === "user" || item.kind === "assistant") {
+          if (item.kind === "tool_group") {
+            return item.groupId;
+          }
+          if (item.kind === "user" || item.kind === "assistant" || item.kind === "tool") {
             return item.id;
           }
         }
@@ -5687,6 +5687,8 @@ export default function ControlClient() {
               : typeof data["metadata_updated_at"] === "string"
                 ? data["metadata_updated_at"]
                 : undefined;
+          const updatedAt =
+            typeof data["updated_at"] === "string" ? data["updated_at"] : undefined;
           const metadataSource =
             data["metadata_source"] === null
               ? null
@@ -5719,6 +5721,7 @@ export default function ControlClient() {
                 ...(metadataUpdatedAt !== undefined
                   ? { metadata_updated_at: metadataUpdatedAt }
                   : {}),
+                ...(updatedAt !== undefined ? { updated_at: updatedAt } : {}),
                 ...(metadataSource !== undefined
                   ? { metadata_source: metadataSource }
                   : {}),
@@ -5730,7 +5733,9 @@ export default function ControlClient() {
                   : {}),
               };
             });
-            return changed ? next : prev;
+            if (!changed) return prev;
+            if (updatedAt === undefined) return next;
+            return [...next].sort((a, b) => b.updated_at.localeCompare(a.updated_at));
           });
 
           if (currentMissionRef.current?.id === missionId) {
@@ -5745,6 +5750,7 @@ export default function ControlClient() {
                     ...(metadataUpdatedAt !== undefined
                       ? { metadata_updated_at: metadataUpdatedAt }
                       : {}),
+                    ...(updatedAt !== undefined ? { updated_at: updatedAt } : {}),
                     ...(metadataSource !== undefined
                       ? { metadata_source: metadataSource }
                       : {}),
@@ -5770,6 +5776,7 @@ export default function ControlClient() {
                     ...(metadataUpdatedAt !== undefined
                       ? { metadata_updated_at: metadataUpdatedAt }
                       : {}),
+                    ...(updatedAt !== undefined ? { updated_at: updatedAt } : {}),
                     ...(metadataSource !== undefined
                       ? { metadata_source: metadataSource }
                       : {}),
@@ -6951,29 +6958,38 @@ export default function ControlClient() {
                 if (item.kind === "tool_group") {
                   const isExpanded = expandedToolGroups.has(item.groupId);
                   return (
-                    <CollapsedToolGroup
+                    <div
                       key={item.groupId}
-                      tools={item.tools}
-                      isExpanded={isExpanded}
-                      onToggleExpand={() => {
-                        // Use startTransition so expanding many tools
-                        // doesn't block the browser from painting the
-                        // button's click feedback first (issue #156).
-                        startTransition(() => {
-                          setExpandedToolGroups((prev) => {
-                            const next = new Set(prev);
-                            if (next.has(item.groupId)) {
-                              next.delete(item.groupId);
-                            } else {
-                              next.add(item.groupId);
-                            }
-                            return next;
+                      id={`chat-item-${item.groupId}`}
+                      data-chat-item-id={item.groupId}
+                      className={cn(
+                        "rounded-xl transition-colors",
+                        highlightedItemId === item.groupId && "ring-1 ring-amber-400/70 bg-amber-500/10"
+                      )}
+                    >
+                      <CollapsedToolGroup
+                        tools={item.tools}
+                        isExpanded={isExpanded}
+                        onToggleExpand={() => {
+                          // Use startTransition so expanding many tools
+                          // doesn't block the browser from painting the
+                          // button's click feedback first (issue #156).
+                          startTransition(() => {
+                            setExpandedToolGroups((prev) => {
+                              const next = new Set(prev);
+                              if (next.has(item.groupId)) {
+                                next.delete(item.groupId);
+                              } else {
+                                next.add(item.groupId);
+                              }
+                              return next;
+                            });
                           });
-                        });
-                      }}
-                      workspaceId={missionForDownloads?.workspace_id}
-                      missionId={missionForDownloads?.id}
-                    />
+                        }}
+                        workspaceId={missionForDownloads?.workspace_id}
+                        missionId={missionForDownloads?.id}
+                      />
+                    </div>
                   );
                 }
 
@@ -7327,6 +7343,7 @@ export default function ControlClient() {
                       <ToolCallItem
                         key={item.id}
                         item={item}
+                        highlighted={highlightedItemId === item.id}
                         workspaceId={missionForDownloads?.workspace_id}
                         missionId={missionForDownloads?.id}
                       />
@@ -7343,6 +7360,7 @@ export default function ControlClient() {
                     <ToolCallItem
                       key={item.id}
                       item={item}
+                      highlighted={highlightedItemId === item.id}
                       workspaceId={missionForDownloads?.workspace_id}
                       missionId={missionForDownloads?.id}
                     />

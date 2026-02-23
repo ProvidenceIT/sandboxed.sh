@@ -1298,12 +1298,50 @@ struct ControlView: View {
     private func findMessageIdForEntryIndex(_ entryIndex: Int, snippet: String?) -> String? {
         guard entryIndex >= 0 else { return nil }
 
-        var historyIndex = 0
-        for message in messages where message.isUser || message.isAssistant || message.isToolCall {
-            if historyIndex == entryIndex {
-                return message.id
+        let toolHistoryRoles: Set<String> = ["tool", "tool_call", "tool_result"]
+        let messageSearchText: (ChatMessage) -> String = { message in
+            if message.isToolCall {
+                let toolName = message.toolCallName ?? ""
+                let argsText = message.toolData?.args ?? ""
+                let resultText = message.toolData?.resultString ?? ""
+                return "\(toolName) \(message.content) \(argsText) \(resultText)"
             }
-            historyIndex += 1
+            return message.content
+        }
+        let roleMatchesMessage: (String, ChatMessage) -> Bool = { role, message in
+            switch role {
+            case "user":
+                return message.isUser
+            case "assistant":
+                return message.isAssistant
+            default:
+                return toolHistoryRoles.contains(role) ? message.isToolCall : false
+            }
+        }
+
+        if let history = viewingMission?.history, entryIndex < history.count {
+            let entry = history[entryIndex]
+            let entryRole = entry.role.lowercased()
+            let entryText = normalizeSearchText(entry.content)
+            let matchingMessages = messages.filter { roleMatchesMessage(entryRole, $0) }
+            if let snippet, !snippet.isEmpty {
+                let normalizedSnippet = normalizeSearchText(snippet)
+                if !normalizedSnippet.isEmpty,
+                   let matched = matchingMessages.first(where: {
+                       normalizeSearchText(messageSearchText($0)).contains(normalizedSnippet)
+                   }) {
+                    return matched.id
+                }
+            }
+            if !entryText.isEmpty,
+               let matched = matchingMessages.first(where: {
+                   normalizeSearchText(messageSearchText($0)).contains(entryText)
+               }) {
+                return matched.id
+            }
+            if let first = matchingMessages.first {
+                return first.id
+            }
         }
 
         guard let snippet, !snippet.isEmpty else { return nil }
@@ -1312,7 +1350,7 @@ struct ControlView: View {
 
         let best = messages.first { message in
             guard message.isUser || message.isAssistant || message.isToolCall else { return false }
-            return normalizeSearchText(message.content).contains(normalizedSnippet)
+            return normalizeSearchText(messageSearchText(message)).contains(normalizedSnippet)
         }
         return best?.id
     }
@@ -1629,6 +1667,7 @@ struct ControlView: View {
             return
         }
         mutate(&recentMissions[index])
+        recentMissions.sort { $0.updatedAt > $1.updatedAt }
     }
 
     private func startPollingRunningMissions() {
@@ -2127,12 +2166,14 @@ struct ControlView: View {
                 let hasTitle = data.keys.contains("title")
                 let hasShortDescription = data.keys.contains("short_description")
                 let hasMetadataUpdatedAt = data.keys.contains("metadata_updated_at")
+                let hasUpdatedAt = data.keys.contains("updated_at")
                 let hasMetadataSource = data.keys.contains("metadata_source")
                 let hasMetadataModel = data.keys.contains("metadata_model")
                 let hasMetadataVersion = data.keys.contains("metadata_version")
                 let title = data["title"] as? String
                 let shortDescription = data["short_description"] as? String
                 let metadataUpdatedAt = data["metadata_updated_at"] as? String
+                let updatedAt = data["updated_at"] as? String
                 let metadataSource = data["metadata_source"] as? String
                 let metadataModel = data["metadata_model"] as? String
                 let metadataVersion = data["metadata_version"] as? String
@@ -2141,6 +2182,7 @@ struct ControlView: View {
                     if hasTitle { viewingMission?.title = title }
                     if hasShortDescription { viewingMission?.shortDescription = shortDescription }
                     if hasMetadataUpdatedAt { viewingMission?.metadataUpdatedAt = metadataUpdatedAt }
+                    if hasUpdatedAt, let updatedAt { viewingMission?.updatedAt = updatedAt }
                     if hasMetadataSource { viewingMission?.metadataSource = metadataSource }
                     if hasMetadataModel { viewingMission?.metadataModel = metadataModel }
                     if hasMetadataVersion { viewingMission?.metadataVersion = metadataVersion }
@@ -2150,6 +2192,7 @@ struct ControlView: View {
                     if hasTitle { currentMission?.title = title }
                     if hasShortDescription { currentMission?.shortDescription = shortDescription }
                     if hasMetadataUpdatedAt { currentMission?.metadataUpdatedAt = metadataUpdatedAt }
+                    if hasUpdatedAt, let updatedAt { currentMission?.updatedAt = updatedAt }
                     if hasMetadataSource { currentMission?.metadataSource = metadataSource }
                     if hasMetadataModel { currentMission?.metadataModel = metadataModel }
                     if hasMetadataVersion { currentMission?.metadataVersion = metadataVersion }
@@ -2159,6 +2202,7 @@ struct ControlView: View {
                     if hasTitle { mission.title = title }
                     if hasShortDescription { mission.shortDescription = shortDescription }
                     if hasMetadataUpdatedAt { mission.metadataUpdatedAt = metadataUpdatedAt }
+                    if hasUpdatedAt, let updatedAt { mission.updatedAt = updatedAt }
                     if hasMetadataSource { mission.metadataSource = metadataSource }
                     if hasMetadataModel { mission.metadataModel = metadataModel }
                     if hasMetadataVersion { mission.metadataVersion = metadataVersion }

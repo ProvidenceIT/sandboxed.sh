@@ -1684,6 +1684,7 @@ impl MissionStore for SqliteMissionStore {
                 title,
                 short_description,
                 metadata_updated_at,
+                updated_at,
                 metadata_source,
                 metadata_model,
                 metadata_version,
@@ -1698,6 +1699,7 @@ impl MissionStore for SqliteMissionStore {
                     "title": title,
                     "short_description": short_description,
                     "metadata_updated_at": metadata_updated_at,
+                    "updated_at": updated_at,
                     "metadata_source": metadata_source,
                     "metadata_model": metadata_model,
                     "metadata_version": metadata_version

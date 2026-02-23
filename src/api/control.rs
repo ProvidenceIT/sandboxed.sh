@@ -1363,6 +1363,7 @@ async fn apply_generated_mission_metadata_updates(
                 title: updated.title.clone(),
                 short_description: updated.short_description.clone(),
                 metadata_updated_at: updated.metadata_updated_at.clone(),
+                updated_at: Some(updated.updated_at.clone()),
                 metadata_source: updated.metadata_source.clone(),
                 metadata_model: updated.metadata_model.clone(),
                 metadata_version: updated.metadata_version.clone(),
@@ -2174,6 +2175,7 @@ pub enum AgentEvent {
         title: Option<String>,
         short_description: Option<String>,
         metadata_updated_at: Option<String>,
+        updated_at: Option<String>,
         metadata_source: Option<String>,
         metadata_model: Option<String>,
         metadata_version: Option<String>,
@@ -9198,11 +9200,13 @@ And the report:
             if let AgentEvent::MissionMetadataUpdated {
                 mission_id,
                 metadata_model,
+                updated_at,
                 ..
             } = event
             {
                 if mission_id == mission.id {
                     assert_eq!(metadata_model.as_deref(), Some(model_override));
+                    assert_eq!(updated_at.as_deref(), Some(refreshed.updated_at.as_str()));
                     saw_metadata_event = true;
                     break;
                 }
@@ -9926,6 +9930,7 @@ And the report:
             title: None,
             short_description: Some("Investigate timeout path".to_string()),
             metadata_updated_at: None,
+            updated_at: None,
             metadata_source: None,
             metadata_model: None,
             metadata_version: None,
@@ -9947,6 +9952,12 @@ And the report:
                 .get("metadata_updated_at")
                 .is_some_and(serde_json::Value::is_null),
             "metadata_updated_at key should be present as null when cleared"
+        );
+        assert!(
+            value
+                .get("updated_at")
+                .is_some_and(serde_json::Value::is_null),
+            "updated_at key should be present as null when not provided"
         );
     }
 
