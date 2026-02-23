@@ -101,6 +101,15 @@ export interface MissionSearchResult {
   relevance_score: number;
 }
 
+export interface MissionMomentSearchResult {
+  mission: Mission;
+  entry_index: number;
+  role: string;
+  snippet: string;
+  rationale: string;
+  relevance_score: number;
+}
+
 // ---------------------------------------------------------------------------
 // API Functions
 // ---------------------------------------------------------------------------
@@ -119,6 +128,20 @@ export async function searchMissions(
   return apiGet(
     `/api/control/missions/search?${params.toString()}`,
     "Failed to search missions"
+  );
+}
+
+export async function searchMissionMoments(
+  query: string,
+  options?: { limit?: number; missionId?: string }
+): Promise<MissionMomentSearchResult[]> {
+  const params = new URLSearchParams();
+  params.set("q", query);
+  if (options?.limit) params.set("limit", String(options.limit));
+  if (options?.missionId) params.set("mission_id", options.missionId);
+  return apiGet(
+    `/api/control/missions/search/moments?${params.toString()}`,
+    "Failed to search mission moments"
   );
 }
 
