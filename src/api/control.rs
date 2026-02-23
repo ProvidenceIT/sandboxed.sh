@@ -2719,7 +2719,7 @@ pub struct MissionMomentSearchResult {
 pub struct MissionSearchCacheEntry {
     pub cached_at: std::time::Instant,
     pub freshness_key: u64,
-    pub head_fingerprint: u64,
+    pub recency_fingerprint: u64,
     pub results: Vec<MissionSearchResult>,
 }
 
@@ -2743,20 +2743,19 @@ fn mission_search_freshness_key(missions: &[MissionSearchCandidate], page_size: 
     hasher.finish()
 }
 
-async fn mission_search_head_fingerprint(
+async fn mission_search_recency_fingerprint(
     mission_store: &Arc<dyn MissionStore>,
 ) -> Result<u64, String> {
+    const MISSION_SEARCH_RECENCY_FINGERPRINT_LIMIT: usize = 64;
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    let head = mission_store.list_missions(1, 0).await?;
-    if let Some(mission) = head.first() {
+    let recent = mission_store
+        .list_missions(MISSION_SEARCH_RECENCY_FINGERPRINT_LIMIT, 0)
+        .await?;
+    recent.len().hash(&mut hasher);
+    for mission in recent {
         mission.id.hash(&mut hasher);
         mission.updated_at.hash(&mut hasher);
         mission.metadata_updated_at.hash(&mut hasher);
-        mission.title.hash(&mut hasher);
-        mission.short_description.hash(&mut hasher);
-        mission.workspace_name.hash(&mut hasher);
-    } else {
-        0usize.hash(&mut hasher);
     }
     Ok(hasher.finish())
 }
@@ -2775,7 +2774,7 @@ pub async fn search_missions(
     let limit = params.limit.unwrap_or(20).clamp(1, 100);
     let query_hash = mission_search_query_hash(query);
     let control = control_for_user(&state, &user).await;
-    let head_fingerprint = mission_search_head_fingerprint(&control.mission_store)
+    let recency_fingerprint = mission_search_recency_fingerprint(&control.mission_store)
         .await
         .map_err(internal_error)?;
     if let Some(cached_results) = {
@@ -2783,7 +2782,7 @@ pub async fn search_missions(
         let cache = control.mission_search_cache.read().await;
         cache.get(&query_hash).and_then(|entry| {
             if entry.cached_at.elapsed() <= MISSION_SEARCH_CACHE_TTL
-                && entry.head_fingerprint == head_fingerprint
+                && entry.recency_fingerprint == recency_fingerprint
             {
                 Some(entry.results.clone())
             } else {
@@ -2847,7 +2846,7 @@ pub async fn search_missions(
             MissionSearchCacheEntry {
                 cached_at: std::time::Instant::now(),
                 freshness_key,
-                head_fingerprint,
+                recency_fingerprint,
                 results: scored.clone(),
             },
         );
@@ -9089,7 +9088,7 @@ And the report:
     }
 
     #[tokio::test]
-    async fn test_mission_search_head_fingerprint_changes_on_metadata_update() {
+    async fn test_mission_search_recency_fingerprint_changes_on_metadata_update() {
         let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
         let mission = store
             .create_mission(
@@ -9104,9 +9103,9 @@ And the report:
             .await
             .expect("mission should be created");
 
-        let before = mission_search_head_fingerprint(&store)
+        let before = mission_search_recency_fingerprint(&store)
             .await
-            .expect("head fingerprint should be computed");
+            .expect("recency fingerprint should be computed");
 
         store
             .update_mission_metadata(
@@ -9120,9 +9119,44 @@ And the report:
             .await
             .expect("metadata update should succeed");
 
-        let after = mission_search_head_fingerprint(&store)
+        let after = mission_search_recency_fingerprint(&store)
             .await
-            .expect("head fingerprint should be computed");
+            .expect("recency fingerprint should be computed");
+        assert_ne!(before, after);
+    }
+
+    #[tokio::test]
+    async fn test_mission_search_recency_fingerprint_changes_for_non_head_mission_update() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let older_mission = store
+            .create_mission(Some("Older mission"), None, None, None, None, None, None)
+            .await
+            .expect("older mission should be created");
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let _newer_mission = store
+            .create_mission(Some("Newer mission"), None, None, None, None, None, None)
+            .await
+            .expect("newer mission should be created");
+
+        let before = mission_search_recency_fingerprint(&store)
+            .await
+            .expect("recency fingerprint should be computed");
+
+        store
+            .update_mission_metadata(
+                older_mission.id,
+                Some(Some("Older mission")),
+                Some(Some("Metadata changed on older mission")),
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("metadata update should succeed");
+
+        let after = mission_search_recency_fingerprint(&store)
+            .await
+            .expect("recency fingerprint should be computed");
         assert_ne!(before, after);
     }
 
