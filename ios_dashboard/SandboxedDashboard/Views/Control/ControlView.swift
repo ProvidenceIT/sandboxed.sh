@@ -1953,20 +1953,23 @@ struct ControlView: View {
 
         case "mission_metadata_updated":
             if let missionId = data["mission_id"] as? String {
+                let hasTitle = data.keys.contains("title")
+                let hasShortDescription = data.keys.contains("short_description")
+                let hasMetadataUpdatedAt = data.keys.contains("metadata_updated_at")
                 let title = data["title"] as? String
                 let shortDescription = data["short_description"] as? String
                 let metadataUpdatedAt = data["metadata_updated_at"] as? String
 
                 if viewingMissionId == missionId {
-                    if let title { viewingMission?.title = title }
-                    if let shortDescription { viewingMission?.shortDescription = shortDescription }
-                    if let metadataUpdatedAt { viewingMission?.metadataUpdatedAt = metadataUpdatedAt }
+                    if hasTitle { viewingMission?.title = title }
+                    if hasShortDescription { viewingMission?.shortDescription = shortDescription }
+                    if hasMetadataUpdatedAt { viewingMission?.metadataUpdatedAt = metadataUpdatedAt }
                 }
 
                 if currentMission?.id == missionId {
-                    if let title { currentMission?.title = title }
-                    if let shortDescription { currentMission?.shortDescription = shortDescription }
-                    if let metadataUpdatedAt { currentMission?.metadataUpdatedAt = metadataUpdatedAt }
+                    if hasTitle { currentMission?.title = title }
+                    if hasShortDescription { currentMission?.shortDescription = shortDescription }
+                    if hasMetadataUpdatedAt { currentMission?.metadataUpdatedAt = metadataUpdatedAt }
                 }
 
                 if !isHistoricalReplay {
