@@ -90,6 +90,16 @@ describe('mission switcher search helpers', () => {
     expect(missionMatchesSearchQuery(mission, 'signin token')).toBe(true);
   });
 
+  it('supports abbreviation phrase expansion for mission relevance fallback', () => {
+    const mission = buildMission({
+      title: 'Fix session id timeout handling',
+      short_description: 'Normalize cookie session id parsing in auth callback',
+    });
+
+    expect(missionMatchesSearchQuery(mission, 'sid timeout')).toBe(true);
+    expect(missionSearchRelevanceScore(mission, 'sid timeout')).toBeGreaterThan(0);
+  });
+
   it('ignores natural-language stopwords for mission relevance scoring', () => {
     const mission = buildMission({
       title: 'Fix login timeout during session refresh',
@@ -218,6 +228,21 @@ describe('mission switcher search helpers', () => {
 
     expect(runningMissionMatchesSearchQuery(runningInfo, 'stalled mission')).toBe(true);
     expect(runningMissionMatchesSearchQuery(runningInfo, 'where is my blocked mission')).toBe(true);
+  });
+
+  it('supports abbreviation phrase expansion for running mission fallback relevance', () => {
+    const runningInfo = {
+      mission_id: 'mission-login-pipeline-123',
+      state: 'running',
+      queue_len: 0,
+      history_len: 12,
+      seconds_since_activity: 3,
+      health: { status: 'healthy' as const },
+      expected_deliverables: 0,
+    };
+
+    expect(runningMissionMatchesSearchQuery(runningInfo, 'sso')).toBe(true);
+    expect(runningMissionMatchesSearchQuery(runningInfo, 'ci')).toBe(true);
   });
 
   it('returns contextual quick actions for resumable terminal states', () => {

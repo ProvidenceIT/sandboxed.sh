@@ -198,10 +198,14 @@ export function runningMissionMatchesSearchQuery(
 }
 
 const SEARCH_SYNONYMS: Record<string, string[]> = {
+  api: ['endpoint', 'http', 'rest', 'rpc'],
   auth: ['login', 'signin', 'oauth', 'credential', 'credentials'],
   blocked: ['stalled', 'waiting'],
   bug: ['issue', 'error', 'fix', 'problem'],
+  cd: ['deploy', 'release', 'rollout', 'ship'],
+  ci: ['pipeline', 'build', 'integration', 'tests'],
   crash: ['panic', 'exception', 'failure'],
+  db: ['database', 'sql', 'sqlite', 'postgres'],
   deploy: ['release', 'rollout', 'ship'],
   error: ['bug', 'issue', 'failure'],
   failed: ['error', 'failure'],
@@ -211,10 +215,21 @@ const SEARCH_SYNONYMS: Record<string, string[]> = {
   performance: ['perf', 'slow', 'latency', 'optimize'],
   perf: ['performance', 'slow', 'latency', 'optimize'],
   release: ['deploy', 'rollout', 'ship'],
+  sid: ['session', 'id', 'sessionid', 'cookie', 'token'],
   signin: ['login', 'auth', 'oauth', 'credentials'],
   slow: ['performance', 'latency', 'timeout', 'stall'],
+  sso: ['signin', 'login', 'auth', 'oauth'],
   stalled: ['blocked', 'waiting', 'timeout'],
   timeout: ['slow', 'latency', 'stalled', 'hang'],
+  ui: ['ux', 'interface', 'frontend'],
+  ux: ['ui', 'interface', 'frontend'],
+};
+
+const SEARCH_PHRASE_EXPANSIONS: Record<string, string[]> = {
+  cd: ['continuous deployment'],
+  ci: ['continuous integration'],
+  sid: ['session id'],
+  sso: ['single sign on'],
 };
 
 const SEARCH_STOPWORDS = new Set([
@@ -262,6 +277,7 @@ interface SearchQueryTerms {
   normalizedQuery: string;
   normalizedCoreQuery: string;
   queryGroups: string[][];
+  phraseQueries: string[];
 }
 
 function buildSearchQueryTerms(searchQuery: string): SearchQueryTerms | null {
@@ -280,10 +296,22 @@ function buildSearchQueryTerms(searchQuery: string): SearchQueryTerms | null {
     .filter((group) => group.length > 0);
   if (queryGroups.length === 0) return null;
 
+  const phraseQueries = Array.from(
+    new Set([
+      normalizedCoreQuery,
+      ...effectiveTokens.flatMap((token) =>
+        (SEARCH_PHRASE_EXPANSIONS[token] ?? [])
+          .map((phrase) => normalizeMetadataText(phrase))
+          .filter(Boolean)
+      ),
+    ].filter(Boolean))
+  );
+
   return {
     normalizedQuery,
     normalizedCoreQuery,
     queryGroups,
+    phraseQueries,
   };
 }
 
@@ -411,7 +439,10 @@ export function missionSearchRelevanceScore(
 ): number {
   const queryTerms = buildSearchQueryTerms(searchQuery);
   if (!queryTerms) return 0;
-  const phraseQuery = queryTerms.normalizedCoreQuery || queryTerms.normalizedQuery;
+  const phraseQueries =
+    queryTerms.phraseQueries.length > 0
+      ? queryTerms.phraseQueries
+      : [queryTerms.normalizedCoreQuery || queryTerms.normalizedQuery];
 
   const displayName = getMissionDisplayName(mission, workspaceNameById);
   const title = getMissionCardTitle(mission) ?? '';
@@ -454,7 +485,7 @@ export function missionSearchRelevanceScore(
     { text: normalizeMetadataText(combined), boost: 5 },
   ];
   for (const target of phraseBoostTargets) {
-    if (target.text && target.text.includes(phraseQuery)) {
+    if (target.text && phraseQueries.some((phraseQuery) => target.text.includes(phraseQuery))) {
       score += target.boost;
     }
   }
@@ -468,7 +499,10 @@ function runningMissionSearchRelevanceScore(
 ): number {
   const queryTerms = buildSearchQueryTerms(searchQuery);
   if (!queryTerms) return 0;
-  const phraseQuery = queryTerms.normalizedCoreQuery || queryTerms.normalizedQuery;
+  const phraseQueries =
+    queryTerms.phraseQueries.length > 0
+      ? queryTerms.phraseQueries
+      : [queryTerms.normalizedCoreQuery || queryTerms.normalizedQuery];
 
   const missionId = runningInfo.mission_id ?? '';
   const state = runningInfo.state ?? '';
@@ -498,10 +532,10 @@ function runningMissionSearchRelevanceScore(
   }
 
   const normalizedState = normalizeMetadataText(state);
-  if (normalizedState && normalizedState.includes(phraseQuery)) {
+  if (normalizedState && phraseQueries.some((phraseQuery) => normalizedState.includes(phraseQuery))) {
     score += 4;
   }
-  if (normalizedCombined.includes(phraseQuery)) {
+  if (phraseQueries.some((phraseQuery) => normalizedCombined.includes(phraseQuery))) {
     score += 6;
   }
 
