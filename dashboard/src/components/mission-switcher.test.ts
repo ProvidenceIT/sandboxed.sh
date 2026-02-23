@@ -90,6 +90,22 @@ describe('mission switcher search helpers', () => {
     expect(missionMatchesSearchQuery(mission, 'signin token')).toBe(true);
   });
 
+  it('ignores natural-language stopwords for mission relevance scoring', () => {
+    const mission = buildMission({
+      title: 'Fix login timeout during session refresh',
+      short_description: 'Retry credential refresh when auth callback stalls',
+    });
+
+    const keywordScore = missionSearchRelevanceScore(mission, 'fix login timeout');
+    const naturalLanguageScore = missionSearchRelevanceScore(
+      mission,
+      'where did we fix the login timeout'
+    );
+
+    expect(keywordScore).toBeGreaterThan(0);
+    expect(naturalLanguageScore).toBe(keywordScore);
+  });
+
   it('avoids false positives for very short query prefixes', () => {
     const mission = buildMission({
       title: 'Authentication callback refactor',
@@ -187,6 +203,21 @@ describe('mission switcher search helpers', () => {
     expect(runningMissionMatchesSearchQuery(runningInfo, 'running')).toBe(true);
     expect(runningMissionMatchesSearchQuery(runningInfo, 'mission-running-123')).toBe(true);
     expect(runningMissionMatchesSearchQuery(runningInfo, 'no-match-term')).toBe(false);
+  });
+
+  it('supports synonym and stopword matching for running missions', () => {
+    const runningInfo = {
+      mission_id: 'mission-running-123',
+      state: 'blocked',
+      queue_len: 0,
+      history_len: 12,
+      seconds_since_activity: 3,
+      health: { status: 'healthy' as const },
+      expected_deliverables: 0,
+    };
+
+    expect(runningMissionMatchesSearchQuery(runningInfo, 'stalled mission')).toBe(true);
+    expect(runningMissionMatchesSearchQuery(runningInfo, 'where is my blocked mission')).toBe(true);
   });
 
   it('returns contextual quick actions for resumable terminal states', () => {
