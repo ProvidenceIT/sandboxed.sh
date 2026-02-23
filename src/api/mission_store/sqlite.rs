@@ -1222,11 +1222,11 @@ impl MissionStore for SqliteMissionStore {
     async fn update_mission_metadata(
         &self,
         id: Uuid,
-        title: Option<&str>,
-        short_description: Option<&str>,
-        metadata_source: Option<&str>,
-        metadata_model: Option<&str>,
-        metadata_version: Option<&str>,
+        title: Option<Option<&str>>,
+        short_description: Option<Option<&str>>,
+        metadata_source: Option<Option<&str>>,
+        metadata_model: Option<Option<&str>>,
+        metadata_version: Option<Option<&str>>,
     ) -> Result<(), String> {
         if title.is_none()
             && short_description.is_none()
@@ -1239,29 +1239,39 @@ impl MissionStore for SqliteMissionStore {
 
         let conn = self.conn.clone();
         let now = now_string();
-        let title = title.map(|s| s.to_string());
-        let short_description = short_description.map(|s| s.to_string());
-        let metadata_source = metadata_source.map(|s| s.to_string());
-        let metadata_model = metadata_model.map(|s| s.to_string());
-        let metadata_version = metadata_version.map(|s| s.to_string());
+        let title_set = title.is_some();
+        let short_description_set = short_description.is_some();
+        let metadata_source_set = metadata_source.is_some();
+        let metadata_model_set = metadata_model.is_some();
+        let metadata_version_set = metadata_version.is_some();
+        let title = title.flatten().map(|s| s.to_string());
+        let short_description = short_description.flatten().map(|s| s.to_string());
+        let metadata_source = metadata_source.flatten().map(|s| s.to_string());
+        let metadata_model = metadata_model.flatten().map(|s| s.to_string());
+        let metadata_version = metadata_version.flatten().map(|s| s.to_string());
 
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
             conn.execute(
                 "UPDATE missions
-                 SET title = COALESCE(?1, title),
-                     short_description = COALESCE(?2, short_description),
-                     metadata_source = COALESCE(?3, metadata_source),
-                     metadata_model = COALESCE(?4, metadata_model),
-                     metadata_version = COALESCE(?5, metadata_version),
-                     metadata_updated_at = ?6,
-                     updated_at = ?6
-                 WHERE id = ?7",
+                 SET title = CASE WHEN ?1 THEN ?2 ELSE title END,
+                     short_description = CASE WHEN ?3 THEN ?4 ELSE short_description END,
+                     metadata_source = CASE WHEN ?5 THEN ?6 ELSE metadata_source END,
+                     metadata_model = CASE WHEN ?7 THEN ?8 ELSE metadata_model END,
+                     metadata_version = CASE WHEN ?9 THEN ?10 ELSE metadata_version END,
+                     metadata_updated_at = ?11,
+                     updated_at = ?11
+                 WHERE id = ?12",
                 params![
+                    title_set,
                     title,
+                    short_description_set,
                     short_description,
+                    metadata_source_set,
                     metadata_source,
+                    metadata_model_set,
                     metadata_model,
+                    metadata_version_set,
                     metadata_version,
                     now,
                     id.to_string()
@@ -2602,11 +2612,11 @@ mod tests {
         store
             .update_mission_metadata(
                 mission.id,
-                Some("Renamed"),
-                Some("Short summary"),
-                Some("backend_heuristic"),
+                Some(Some("Renamed")),
+                Some(Some("Short summary")),
+                Some(Some("backend_heuristic")),
                 None,
-                Some("v1"),
+                Some(Some("v1")),
             )
             .await
             .expect("set metadata");
@@ -2649,6 +2659,52 @@ mod tests {
             Some(metadata_updated_at.as_str())
         );
         assert_eq!(after_noop.updated_at, updated_at);
+    }
+
+    #[tokio::test]
+    async fn update_mission_metadata_can_clear_fields() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = SqliteMissionStore::new(temp_dir.path().to_path_buf(), "test-user")
+            .await
+            .expect("sqlite store");
+        let mission = store
+            .create_mission(Some("Initial"), None, None, None, None, None, None)
+            .await
+            .expect("mission");
+
+        store
+            .update_mission_metadata(
+                mission.id,
+                Some(Some("Renamed")),
+                Some(Some("Short summary")),
+                Some(Some("backend_heuristic")),
+                None,
+                Some(Some("v1")),
+            )
+            .await
+            .expect("set metadata");
+
+        store
+            .update_mission_metadata(
+                mission.id,
+                Some(None),
+                Some(None),
+                Some(None),
+                None,
+                Some(None),
+            )
+            .await
+            .expect("clear metadata fields");
+
+        let mission = store
+            .get_mission(mission.id)
+            .await
+            .expect("get mission")
+            .expect("mission exists");
+        assert_eq!(mission.title, None);
+        assert_eq!(mission.short_description, None);
+        assert_eq!(mission.metadata_source, None);
+        assert_eq!(mission.metadata_version, None);
     }
 
     #[tokio::test]

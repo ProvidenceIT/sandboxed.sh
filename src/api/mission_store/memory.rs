@@ -164,11 +164,11 @@ impl MissionStore for InMemoryMissionStore {
     async fn update_mission_metadata(
         &self,
         id: Uuid,
-        title: Option<&str>,
-        short_description: Option<&str>,
-        metadata_source: Option<&str>,
-        metadata_model: Option<&str>,
-        metadata_version: Option<&str>,
+        title: Option<Option<&str>>,
+        short_description: Option<Option<&str>>,
+        metadata_source: Option<Option<&str>>,
+        metadata_model: Option<Option<&str>>,
+        metadata_version: Option<Option<&str>>,
     ) -> Result<(), String> {
         if title.is_none()
             && short_description.is_none()
@@ -185,19 +185,19 @@ impl MissionStore for InMemoryMissionStore {
             .ok_or_else(|| format!("Mission {} not found", id))?;
 
         if let Some(title) = title {
-            mission.title = Some(title.to_string());
+            mission.title = title.map(ToString::to_string);
         }
         if let Some(short_description) = short_description {
-            mission.short_description = Some(short_description.to_string());
+            mission.short_description = short_description.map(ToString::to_string);
         }
         if let Some(metadata_source) = metadata_source {
-            mission.metadata_source = Some(metadata_source.to_string());
+            mission.metadata_source = metadata_source.map(ToString::to_string);
         }
         if let Some(metadata_model) = metadata_model {
-            mission.metadata_model = Some(metadata_model.to_string());
+            mission.metadata_model = metadata_model.map(ToString::to_string);
         }
         if let Some(metadata_version) = metadata_version {
-            mission.metadata_version = Some(metadata_version.to_string());
+            mission.metadata_version = metadata_version.map(ToString::to_string);
         }
         let now = now_string();
         mission.metadata_updated_at = Some(now.clone());
@@ -323,11 +323,11 @@ mod tests {
         store
             .update_mission_metadata(
                 mission.id,
-                Some("Renamed"),
-                Some("Short summary"),
-                Some("backend_heuristic"),
+                Some(Some("Renamed")),
+                Some(Some("Short summary")),
+                Some(Some("backend_heuristic")),
                 None,
-                Some("v1"),
+                Some(Some("v1")),
             )
             .await
             .expect("set metadata");
@@ -370,5 +370,48 @@ mod tests {
             Some(metadata_updated_at.as_str())
         );
         assert_eq!(after_noop.updated_at, updated_at);
+    }
+
+    #[tokio::test]
+    async fn update_mission_metadata_can_clear_fields() {
+        let store = InMemoryMissionStore::new();
+        let mission = store
+            .create_mission(Some("Initial"), None, None, None, None, None, None)
+            .await
+            .expect("create mission");
+
+        store
+            .update_mission_metadata(
+                mission.id,
+                Some(Some("Renamed")),
+                Some(Some("Short summary")),
+                Some(Some("backend_heuristic")),
+                None,
+                Some(Some("v1")),
+            )
+            .await
+            .expect("set metadata");
+
+        store
+            .update_mission_metadata(
+                mission.id,
+                Some(None),
+                Some(None),
+                Some(None),
+                None,
+                Some(None),
+            )
+            .await
+            .expect("clear metadata fields");
+
+        let mission = store
+            .get_mission(mission.id)
+            .await
+            .expect("get mission")
+            .expect("mission exists");
+        assert_eq!(mission.title, None);
+        assert_eq!(mission.short_description, None);
+        assert_eq!(mission.metadata_source, None);
+        assert_eq!(mission.metadata_version, None);
     }
 }

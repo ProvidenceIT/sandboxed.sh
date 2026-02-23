@@ -714,11 +714,11 @@ async fn apply_generated_mission_metadata_updates(
     if let Err(err) = mission_store
         .update_mission_metadata(
             mission_id,
-            title_to_write.as_deref(),
-            generated_short_description.as_deref(),
-            Some(METADATA_SOURCE_BACKEND_HEURISTIC),
+            title_to_write.as_deref().map(Some),
+            generated_short_description.as_deref().map(Some),
+            Some(Some(METADATA_SOURCE_BACKEND_HEURISTIC)),
             None,
-            Some(METADATA_VERSION_V1),
+            Some(Some(METADATA_VERSION_V1)),
         )
         .await
     {
@@ -7754,8 +7754,8 @@ And the report:
         store
             .update_mission_metadata(
                 mission.id,
-                Some("Legacy title"),
-                Some("Legacy short description"),
+                Some(Some("Legacy title")),
+                Some(Some("Legacy short description")),
                 None,
                 None,
                 None,
