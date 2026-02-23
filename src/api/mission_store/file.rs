@@ -117,12 +117,13 @@ impl MissionStore for FileMissionStore {
                 Some(METADATA_SOURCE_USER.to_string())
             }
         });
+        let metadata_updated_at = metadata_source.as_ref().map(|_| now.clone());
         let mission = Mission {
             id: Uuid::new_v4(),
             status: MissionStatus::Pending,
             title: title.map(|s| s.to_string()),
             short_description: None,
-            metadata_updated_at: None,
+            metadata_updated_at,
             metadata_source,
             metadata_model: None,
             metadata_version: None,
@@ -570,17 +571,23 @@ mod tests {
             .await
             .expect("create titled mission");
         assert_eq!(titled.metadata_source.as_deref(), Some("user"));
+        assert!(
+            titled.metadata_updated_at.is_some(),
+            "titled mission should set metadata_updated_at"
+        );
 
         let untitled = store
             .create_mission(None, None, None, None, None, None, None)
             .await
             .expect("create untitled mission");
         assert_eq!(untitled.metadata_source, None);
+        assert_eq!(untitled.metadata_updated_at, None);
 
         let blank_titled = store
             .create_mission(Some("  "), None, None, None, None, None, None)
             .await
             .expect("create blank titled mission");
         assert_eq!(blank_titled.metadata_source, None);
+        assert_eq!(blank_titled.metadata_updated_at, None);
     }
 }
