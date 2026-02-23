@@ -200,10 +200,10 @@ fn extract_short_description_from_history(
 }
 
 fn normalize_metadata_text(text: &str) -> String {
-    text.to_ascii_lowercase()
+    text.to_lowercase()
         .chars()
         .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch.is_ascii_whitespace() {
+            if ch.is_alphanumeric() || ch.is_whitespace() {
                 ch
             } else {
                 ' '
@@ -219,7 +219,7 @@ fn normalize_raw_title_for_dedupe(text: &str) -> String {
     text.split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
-        .to_ascii_lowercase()
+        .to_lowercase()
 }
 
 fn strip_numeric_title_suffix(title: &str) -> &str {
@@ -7300,6 +7300,14 @@ And the report:
         ));
     }
 
+    #[test]
+    fn test_has_significant_metadata_drift_handles_unicode_equivalents() {
+        assert!(!has_significant_metadata_drift(
+            "Исправить сбой входа!",
+            "исправить   сбой входа"
+        ));
+    }
+
     #[tokio::test]
     async fn test_disambiguate_generated_title_appends_next_suffix() {
         let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
@@ -7370,6 +7378,31 @@ And the report:
 
         let disambiguated = disambiguate_generated_title(&store, existing.id, "!!!").await;
         assert_eq!(disambiguated, "!!! (3)");
+    }
+
+    #[tokio::test]
+    async fn test_disambiguate_generated_title_handles_unicode_casefolding() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        store
+            .create_mission(
+                Some("Исправить сбой входа"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("create mission");
+        let probe = store
+            .create_mission(None, None, None, None, None, None, None)
+            .await
+            .expect("create mission");
+
+        let disambiguated =
+            disambiguate_generated_title(&store, probe.id, "ИСПРАВИТЬ СБОЙ ВХОДА").await;
+        assert_eq!(disambiguated, "ИСПРАВИТЬ СБОЙ ВХОДА (2)");
     }
 
     #[tokio::test]
