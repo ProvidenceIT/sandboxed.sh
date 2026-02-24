@@ -9566,7 +9566,7 @@ And the report:
         );
         assert_eq!(
             updated_short_description.as_deref(),
-            Some("Fix login redirect on mobile safari callback flow")
+            Some("Fix login redirect")
         );
     }
 
@@ -9646,7 +9646,7 @@ And the report:
                 mission.id,
                 Some(Some("Legacy title")),
                 Some(Some("Legacy short description")),
-                None,
+                Some(Some(METADATA_SOURCE_BACKEND_HEURISTIC)),
                 None,
                 None,
             )
@@ -9712,7 +9712,7 @@ And the report:
                 mission.id,
                 Some(Some("Legacy title")),
                 Some(Some("Legacy short description")),
-                None,
+                Some(Some(METADATA_SOURCE_BACKEND_HEURISTIC)),
                 None,
                 None,
             )
@@ -9804,7 +9804,7 @@ And the report:
                 mission.id,
                 Some(Some("Legacy title")),
                 Some(Some("Legacy short description")),
-                None,
+                Some(Some(METADATA_SOURCE_BACKEND_HEURISTIC)),
                 None,
                 None,
             )
@@ -9890,7 +9890,7 @@ And the report:
                 mission.id,
                 Some(Some("Legacy title")),
                 Some(Some("Legacy short description")),
-                None,
+                Some(Some(METADATA_SOURCE_BACKEND_HEURISTIC)),
                 None,
                 None,
             )
@@ -9963,7 +9963,7 @@ And the report:
                 mission.id,
                 Some(Some("Legacy title")),
                 Some(Some("Legacy short description")),
-                None,
+                Some(Some(METADATA_SOURCE_BACKEND_HEURISTIC)),
                 None,
                 None,
             )
