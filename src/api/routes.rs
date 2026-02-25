@@ -138,6 +138,9 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     // Initialize workspace store (loads from disk and recovers orphaned containers)
     let workspaces = Arc::new(workspace::WorkspaceStore::new(config.working_dir.clone()).await);
 
+    // Enable per-container metrics collection in the monitoring background task
+    monitoring::init_monitoring_workspaces(Arc::clone(&workspaces)).await;
+
     // Initialize OpenCode connection store
     let opencode_connections = Arc::new(
         crate::opencode_config::OpenCodeStore::new(
