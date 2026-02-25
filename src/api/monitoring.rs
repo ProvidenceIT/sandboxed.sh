@@ -310,9 +310,7 @@ impl MonitoringState {
             }
 
             let ws_id = ws.id.to_string();
-            let container_name =
-                format!("mission-{}", ws_id.split('-').next().unwrap_or("unknown"));
-            let scope_name = format!("machine-{}.scope", container_name);
+            let scope_name = format!("machine-{}.scope", ws.name);
 
             let output = match tokio::process::Command::new("systemctl")
                 .args(["show", &scope_name])
@@ -566,19 +564,16 @@ async fn handle_monitoring_stream(socket: WebSocket) {
                         break;
                     }
 
-                    // Send container metrics if any
-                    if !broadcast.containers.is_empty() {
-                        let msg = ContainerMetricsMessage {
-                            msg_type: "container_metrics",
-                            containers: broadcast.containers,
-                        };
-                        if let Ok(json) = serde_json::to_string(&msg) {
-                            if ws_sender.send(Message::Text(json)).await.is_err() {
-                                tracing::debug!(
-                                    "Client disconnected during container metrics send"
-                                );
-                                break;
-                            }
+                    // Always send container metrics (even if empty) so the
+                    // frontend can clean up when all containers stop.
+                    let msg = ContainerMetricsMessage {
+                        msg_type: "container_metrics",
+                        containers: broadcast.containers,
+                    };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        if ws_sender.send(Message::Text(json)).await.is_err() {
+                            tracing::debug!("Client disconnected during container metrics send");
+                            break;
                         }
                     }
                 }
