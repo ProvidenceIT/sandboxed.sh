@@ -155,7 +155,7 @@ function ServerInfoCard() {
 
 export default function MonitoringPage() {
   return (
-    <div className="flex-1 flex gap-4 p-6 min-h-0">
+    <div className="flex gap-4 p-6 h-screen">
       {/* Server Info - Left column */}
       <div className="w-[200px] shrink-0">
         <ServerInfoCard />
