@@ -26,6 +26,7 @@ struct ControlView: View {
     @State private var copiedMessageId: String?
     @State private var shouldScrollImmediately = false
     @State private var isLoadingHistory = false  // Track when loading historical messages to prevent animated scroll
+    @State private var pendingFocusedMessageId: String?
 
     // Connection state for SSE stream - starts as disconnected until first event received
     @State private var connectionState: ConnectionState = .disconnected
@@ -381,6 +382,18 @@ struct ControlView: View {
                     showMissionSwitcher = false
                     Task { await switchToMission(id: missionId) }
                 },
+                onResumeMission: { missionId in
+                    showMissionSwitcher = false
+                    Task { await resumeMission(id: missionId) }
+                },
+                onFollowUpMission: { mission in
+                    showMissionSwitcher = false
+                    Task { await createFollowUpMission(from: mission) }
+                },
+                onOpenFailureMission: { missionId in
+                    showMissionSwitcher = false
+                    Task { await openFailingToolCall(for: missionId) }
+                },
                 onCancelMission: { missionId in
                     Task { await cancelMission(id: missionId) }
                 },
@@ -538,6 +551,9 @@ struct ControlView: View {
                     isInputFocused = false
                 }
                 .onChange(of: messages.count) { _, _ in
+                    if let pendingFocusedMessageId {
+                        scheduleMessageFocusRetry(proxy: proxy, targetId: pendingFocusedMessageId)
+                    }
                     // Only auto-scroll on message count change if we're at bottom AND not loading historical messages
                     // This prevents the jarring animated scroll when loading cached/historical conversations
                     if isAtBottom && !isLoadingHistory {
@@ -550,6 +566,10 @@ struct ControlView: View {
                         shouldScrollToBottom = false
                         shouldScrollImmediately = false
                     }
+                }
+                .onChange(of: pendingFocusedMessageId) { _, targetId in
+                    guard let targetId else { return }
+                    scheduleMessageFocusRetry(proxy: proxy, targetId: targetId)
                 }
                 .overlay(alignment: .bottom) {
                     // Scroll to bottom button
@@ -1189,7 +1209,6 @@ struct ControlView: View {
         }
     }
 
-    
     private func setMissionStatus(_ status: MissionStatus) async {
         guard let mission = viewingMission else { return }
         
@@ -1208,18 +1227,245 @@ struct ControlView: View {
     
     private func resumeMission() async {
         guard let mission = viewingMission, mission.canResume else { return }
-        
+
+        await resumeMission(id: mission.id)
+    }
+
+    private func resumeMission(id: String) async {
         do {
-            let resumed = try await api.resumeMission(id: mission.id)
+            let resumed = try await api.resumeMission(id: id)
             currentMission = resumed
             applyViewingMission(resumed)
-            
+
             // Refresh running missions
             await refreshRunningMissions()
-            
+
             HapticService.success()
         } catch {
             print("Failed to resume mission: \(error)")
+            HapticService.error()
+        }
+    }
+
+    private func followUpPrompt(for mission: Mission) -> String {
+        let baseTitle = mission.displayTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        if baseTitle.isEmpty || baseTitle == "Untitled Mission" {
+            return "Follow up on this mission with the next concrete implementation steps."
+        }
+        return "Follow up on \"\(baseTitle)\" and implement the next concrete steps."
+    }
+
+    private func createFollowUpMission(from sourceMission: Mission) async {
+        do {
+            let mission = try await api.createMission(
+                workspaceId: sourceMission.workspaceId,
+                title: nil,
+                agent: sourceMission.agent,
+                modelOverride: sourceMission.modelOverride,
+                backend: sourceMission.backend
+            )
+            currentMission = mission
+            applyViewingMission(mission, scrollToBottom: false)
+            inputText = followUpPrompt(for: sourceMission)
+            isInputFocused = true
+
+            // Refresh running missions to keep switcher state in sync.
+            await refreshRunningMissions()
+
+            HapticService.success()
+        } catch {
+            print("Failed to create follow-up mission: \(error)")
+            HapticService.error()
+        }
+    }
+
+    private func normalizeSearchText(_ text: String) -> String {
+        let lowered = text.lowercased()
+        let scalars = lowered.unicodeScalars.map { scalar -> Character in
+            if scalar.properties.isAlphabetic
+                || scalar.properties.numericType != nil
+                || CharacterSet.whitespacesAndNewlines.contains(scalar)
+            {
+                return Character(scalar)
+            }
+            return " "
+        }
+        return String(scalars)
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
+    }
+
+    private func findMessageIdForEntryIndex(_ entryIndex: Int, snippet: String?) -> String? {
+        guard entryIndex >= 0 else { return nil }
+
+        enum HistoryRoleCategory {
+            case user
+            case assistant
+            case toolCall
+            case toolResult
+            case other
+        }
+
+        let roleCategory: (String) -> HistoryRoleCategory = { role in
+            switch role {
+            case "user":
+                return .user
+            case "assistant":
+                return .assistant
+            case "tool", "tool_call":
+                return .toolCall
+            case "tool_result":
+                return .toolResult
+            default:
+                return .other
+            }
+        }
+
+        let messageSearchText: (ChatMessage) -> String = { message in
+            if message.isToolCall {
+                let toolName = message.toolCallName ?? ""
+                let argsText = message.toolData?.args ?? ""
+                let resultText = message.toolData?.resultString ?? ""
+                return "\(toolName) \(message.content) \(argsText) \(resultText)"
+            }
+            return message.content
+        }
+        let isToolResultMessage: (ChatMessage) -> Bool = { message in
+            if let resultText = message.toolData?.resultString,
+               !resultText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            {
+                return true
+            }
+            return false
+        }
+        let roleMatchesMessage: (String, ChatMessage) -> Bool = { role, message in
+            switch roleCategory(role) {
+            case .user:
+                return message.isUser
+            case .assistant:
+                return message.isAssistant
+            case .toolResult:
+                return isToolResultMessage(message)
+            case .toolCall:
+                return message.isToolCall
+            case .other:
+                return false
+            }
+        }
+        let roleMatchesHistoryCategory: (String, HistoryRoleCategory) -> Bool = { role, category in
+            roleCategory(role) == category
+        }
+
+        if let history = viewingMission?.history, entryIndex < history.count {
+            let entry = history[entryIndex]
+            let entryRole = entry.role.lowercased()
+            let entryText = normalizeSearchText(entry.content)
+            let targetCategory = roleCategory(entryRole)
+            let roleOccurrence = history
+                .prefix(entryIndex + 1)
+                .filter { roleMatchesHistoryCategory($0.role.lowercased(), targetCategory) }
+                .count
+            let matchingMessages = messages.filter { roleMatchesMessage(entryRole, $0) }
+            let targetMessageIndex = max(roleOccurrence - 1, 0)
+
+            if let snippet, !snippet.isEmpty {
+                let normalizedSnippet = normalizeSearchText(snippet)
+                if !normalizedSnippet.isEmpty {
+                    let snippetMatches = matchingMessages.enumerated().filter { _, message in
+                        normalizeSearchText(messageSearchText(message)).contains(normalizedSnippet)
+                    }
+                    if let matched = snippetMatches.min(by: {
+                        abs($0.offset - targetMessageIndex) < abs($1.offset - targetMessageIndex)
+                    })?.element {
+                        return matched.id
+                    }
+                }
+            }
+            if !entryText.isEmpty {
+                let entryMatches = matchingMessages.enumerated().filter { _, message in
+                    normalizeSearchText(messageSearchText(message)).contains(entryText)
+                }
+                if let matched = entryMatches.min(by: {
+                    abs($0.offset - targetMessageIndex) < abs($1.offset - targetMessageIndex)
+                })?.element {
+                    return matched.id
+                }
+            }
+            if targetMessageIndex < matchingMessages.count {
+                return matchingMessages[targetMessageIndex].id
+            }
+            if let last = matchingMessages.last {
+                return last.id
+            }
+        }
+
+        guard let snippet, !snippet.isEmpty else { return nil }
+        let normalizedSnippet = normalizeSearchText(snippet)
+        guard !normalizedSnippet.isEmpty else { return nil }
+
+        let best = messages.first { message in
+            guard message.isUser || message.isAssistant || message.isToolCall else { return false }
+            return normalizeSearchText(messageSearchText(message)).contains(normalizedSnippet)
+        }
+        return best?.id
+    }
+
+    private func scheduleMessageFocusRetry(
+        proxy: ScrollViewProxy,
+        targetId: String,
+        attempt: Int = 0
+    ) {
+        guard pendingFocusedMessageId == targetId else { return }
+
+        let canFocusNow = messages.contains { $0.id == targetId }
+        if canFocusNow {
+            withAnimation(.easeInOut(duration: 0.25)) {
+                proxy.scrollTo(targetId, anchor: .center)
+            }
+            // Keep trying a couple more frames so late-mounted rows still get focused.
+            if attempt >= 2 {
+                pendingFocusedMessageId = nil
+                return
+            }
+        }
+
+        let maxAttempts = 10
+        guard attempt < maxAttempts else {
+            pendingFocusedMessageId = nil
+            return
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+            self.scheduleMessageFocusRetry(proxy: proxy, targetId: targetId, attempt: attempt + 1)
+        }
+    }
+
+    private func openFailingToolCall(for missionId: String) async {
+        if viewingMissionId != missionId {
+            await switchToMission(id: missionId)
+        }
+
+        do {
+            let results = try await api.searchMissionMoments(
+                query: "failing tool call error",
+                limit: 1,
+                missionId: missionId
+            )
+            guard let best = results.first else {
+                print("No failure moment found for mission \(missionId)")
+                HapticService.error()
+                return
+            }
+
+            if let targetId = findMessageIdForEntryIndex(best.entryIndex, snippet: best.snippet) {
+                pendingFocusedMessageId = targetId
+                HapticService.selectionChanged()
+            } else {
+                print("Failed to locate failure moment in loaded history for mission \(missionId)")
+                HapticService.error()
+            }
+        } catch {
+            print("Failed to open failing tool call: \(error)")
             HapticService.error()
         }
     }
@@ -1468,6 +1714,17 @@ struct ControlView: View {
         }
     }
 
+    private func updateRecentMission(
+        id missionId: String,
+        _ mutate: (inout Mission) -> Void
+    ) {
+        guard let index = recentMissions.firstIndex(where: { $0.id == missionId }) else {
+            return
+        }
+        mutate(&recentMissions[index])
+        recentMissions.sort { $0.updatedAt > $1.updatedAt }
+    }
+
     private func startPollingRunningMissions() {
         pollingTask = Task {
             while !Task.isCancelled {
@@ -1595,6 +1852,7 @@ struct ControlView: View {
         let isGlobalEvent = type == "status"
             || type == "mission_status_changed"
             || type == "mission_title_changed"
+            || type == "mission_metadata_updated"
         if !isGlobalEvent {
             if let eventId = eventMissionId {
                 // Event has a mission_id
@@ -1924,6 +2182,10 @@ struct ControlView: View {
                     currentMission?.status = newStatus
                 }
 
+                updateRecentMission(id: missionId) { mission in
+                    mission.status = newStatus
+                }
+
                 // Refresh running missions list (live only)
                 if !isHistoricalReplay {
                     Task { await refreshRunningMissions() }
@@ -1944,7 +2206,63 @@ struct ControlView: View {
                     currentMission?.title = title
                 }
 
+                updateRecentMission(id: missionId) { mission in
+                    mission.title = title
+                }
+
                 // Refresh running missions list so the bar picks up the new title
+                if !isHistoricalReplay {
+                    Task { await refreshRunningMissions() }
+                }
+            }
+
+        case "mission_metadata_updated":
+            if let missionId = data["mission_id"] as? String {
+                let hasTitle = data.keys.contains("title")
+                let hasShortDescription = data.keys.contains("short_description")
+                let hasMetadataUpdatedAt = data.keys.contains("metadata_updated_at")
+                let hasUpdatedAt = data.keys.contains("updated_at")
+                let hasMetadataSource = data.keys.contains("metadata_source")
+                let hasMetadataModel = data.keys.contains("metadata_model")
+                let hasMetadataVersion = data.keys.contains("metadata_version")
+                let title = data["title"] as? String
+                let shortDescription = data["short_description"] as? String
+                let metadataUpdatedAt = data["metadata_updated_at"] as? String
+                let updatedAt = data["updated_at"] as? String
+                let metadataSource = data["metadata_source"] as? String
+                let metadataModel = data["metadata_model"] as? String
+                let metadataVersion = data["metadata_version"] as? String
+
+                if viewingMissionId == missionId {
+                    if hasTitle { viewingMission?.title = title }
+                    if hasShortDescription { viewingMission?.shortDescription = shortDescription }
+                    if hasMetadataUpdatedAt { viewingMission?.metadataUpdatedAt = metadataUpdatedAt }
+                    if hasUpdatedAt, let updatedAt { viewingMission?.updatedAt = updatedAt }
+                    if hasMetadataSource { viewingMission?.metadataSource = metadataSource }
+                    if hasMetadataModel { viewingMission?.metadataModel = metadataModel }
+                    if hasMetadataVersion { viewingMission?.metadataVersion = metadataVersion }
+                }
+
+                if currentMission?.id == missionId {
+                    if hasTitle { currentMission?.title = title }
+                    if hasShortDescription { currentMission?.shortDescription = shortDescription }
+                    if hasMetadataUpdatedAt { currentMission?.metadataUpdatedAt = metadataUpdatedAt }
+                    if hasUpdatedAt, let updatedAt { currentMission?.updatedAt = updatedAt }
+                    if hasMetadataSource { currentMission?.metadataSource = metadataSource }
+                    if hasMetadataModel { currentMission?.metadataModel = metadataModel }
+                    if hasMetadataVersion { currentMission?.metadataVersion = metadataVersion }
+                }
+
+                updateRecentMission(id: missionId) { mission in
+                    if hasTitle { mission.title = title }
+                    if hasShortDescription { mission.shortDescription = shortDescription }
+                    if hasMetadataUpdatedAt { mission.metadataUpdatedAt = metadataUpdatedAt }
+                    if hasUpdatedAt, let updatedAt { mission.updatedAt = updatedAt }
+                    if hasMetadataSource { mission.metadataSource = metadataSource }
+                    if hasMetadataModel { mission.metadataModel = metadataModel }
+                    if hasMetadataVersion { mission.metadataVersion = metadataVersion }
+                }
+
                 if !isHistoricalReplay {
                     Task { await refreshRunningMissions() }
                 }
@@ -3207,6 +3525,33 @@ private struct ToolGroupView: View {
 
 // MARK: - Mission Switcher Sheet
 
+private enum MissionQuickAction: Hashable {
+    case resume
+    case `continue`
+    case retry
+    case openFailure
+    case followUp
+
+    var label: String {
+        switch self {
+        case .resume: return "Resume"
+        case .continue: return "Continue"
+        case .retry: return "Retry"
+        case .openFailure: return "Open Failure"
+        case .followUp: return "Follow-up"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .resume, .continue: return "play.circle.fill"
+        case .retry: return "arrow.clockwise.circle.fill"
+        case .openFailure: return "wrench.and.screwdriver.fill"
+        case .followUp: return "plus.bubble.fill"
+        }
+    }
+}
+
 /// Sheet for switching between missions (like dashboard's Cmd+K)
 private struct MissionSwitcherSheet: View {
     let runningMissions: [RunningMissionInfo]
@@ -3214,35 +3559,114 @@ private struct MissionSwitcherSheet: View {
     let currentMissionId: String?
     let viewingMissionId: String?
     let onSelectMission: (String) -> Void
+    let onResumeMission: (String) -> Void
+    let onFollowUpMission: (Mission) -> Void
+    let onOpenFailureMission: (String) -> Void
     let onCancelMission: (String) -> Void
     let onCreateNewMission: () -> Void
     let onDismiss: () -> Void
 
     @State private var searchText = ""
+    @State private var backendSearchTask: Task<Void, Never>?
+    @State private var backendSearchQuery = ""
+    @State private var backendSearchResults: [MissionSearchResult] = []
+    @State private var isBackendSearchLoading = false
+
+    private let backendSearchDebounceNanos: UInt64 = 250_000_000
+
+    private var normalizedSearchQuery: String {
+        normalizeMetadataText(searchText)
+    }
 
     private var runningMissionIds: Set<String> {
         Set(runningMissions.map { $0.missionId })
     }
 
+    private func preferredMissionForDuplicateId(_ lhs: Mission, _ rhs: Mission) -> Mission {
+        let lhsUpdated = lhs.updatedDate ?? .distantPast
+        let rhsUpdated = rhs.updatedDate ?? .distantPast
+        return rhsUpdated >= lhsUpdated ? rhs : lhs
+    }
+
+    private var missionById: [String: Mission] {
+        Dictionary(
+            recentMissions.map { ($0.id, $0) },
+            uniquingKeysWith: preferredMissionForDuplicateId
+        )
+    }
+
     private var filteredRunning: [RunningMissionInfo] {
-        if searchText.isEmpty {
+        if normalizedSearchQuery.isEmpty {
             return runningMissions
         }
-        return runningMissions.filter { info in
-            info.missionId.localizedCaseInsensitiveContains(searchText) ||
-            (info.title?.localizedCaseInsensitiveContains(searchText) ?? false)
-        }
+        return runningMissions
+            .compactMap { info -> (RunningMissionInfo, Double)? in
+                let score = runningMissionSearchScore(
+                    info,
+                    query: normalizedSearchQuery,
+                    linkedMission: missionById[info.missionId]
+                )
+                return score > 0 ? (info, score) : nil
+            }
+            .sorted { lhs, rhs in
+                if lhs.1 == rhs.1 {
+                    let lhsUpdated = missionById[lhs.0.missionId]?.updatedDate ?? .distantPast
+                    let rhsUpdated = missionById[rhs.0.missionId]?.updatedDate ?? .distantPast
+                    if lhsUpdated != rhsUpdated {
+                        return lhsUpdated > rhsUpdated
+                    }
+                    return lhs.0.missionId < rhs.0.missionId
+                }
+                return lhs.1 > rhs.1
+            }
+            .map(\.0)
     }
 
     private var filteredRecent: [Mission] {
         let nonRunning = recentMissions.filter { !runningMissionIds.contains($0.id) }
-        if searchText.isEmpty {
+        if normalizedSearchQuery.isEmpty {
             return nonRunning
         }
-        return nonRunning.filter { mission in
-            mission.id.localizedCaseInsensitiveContains(searchText) ||
-            mission.displayTitle.localizedCaseInsensitiveContains(searchText)
+
+        let localMatches: [Mission] = nonRunning
+            .compactMap { mission -> (Mission, Double)? in
+                let score = missionSearchRelevanceScore(mission, query: normalizedSearchQuery)
+                return score > 0 ? (mission, score) : nil
+            }
+            .sorted { lhs, rhs in
+                if lhs.1 == rhs.1 {
+                    return (lhs.0.updatedDate ?? .distantPast) > (rhs.0.updatedDate ?? .distantPast)
+                }
+                return lhs.1 > rhs.1
+            }
+            .map(\.0)
+
+        if backendSearchQuery == normalizedSearchQuery {
+            let byId = Dictionary(
+                nonRunning.map { ($0.id, $0) },
+                uniquingKeysWith: preferredMissionForDuplicateId
+            )
+            var merged: [Mission] = []
+            var seen = Set<String>()
+
+            for result in backendSearchResults {
+                let mission = byId[result.mission.id] ?? result.mission
+                guard !runningMissionIds.contains(mission.id) else { continue }
+                if seen.insert(mission.id).inserted {
+                    merged.append(mission)
+                }
+            }
+
+            for mission in localMatches {
+                if seen.insert(mission.id).inserted {
+                    merged.append(mission)
+                }
+            }
+
+            return merged
         }
+
+        return localMatches
     }
 
     private var activeOrPendingMissions: [Mission] {
@@ -3268,12 +3692,19 @@ private struct MissionSwitcherSheet: View {
                 ForEach(missions) { mission in
                     MissionRow(
                         missionId: mission.id,
+                        displayName: missionDisplayName(for: mission),
                         title: mission.displayTitle,
+                        shortDescription: missionCardDescription(for: mission),
+                        backend: mission.backend,
                         status: mission.status,
                         isRunning: false,
                         runningState: nil,
                         isViewing: viewingMissionId == mission.id,
+                        quickActions: missionQuickActions(for: mission),
                         onSelect: { onSelectMission(mission.id) },
+                        onQuickAction: { action in
+                            handleQuickAction(action, for: mission)
+                        },
                         onCancel: nil
                     )
                 }
@@ -3298,14 +3729,26 @@ private struct MissionSwitcherSheet: View {
                 if !filteredRunning.isEmpty {
                     Section("Running") {
                         ForEach(filteredRunning, id: \.missionId) { info in
+                            let mission = missionById[info.missionId]
                             MissionRow(
                                 missionId: info.missionId,
-                                title: info.title,
+                                displayName: mission.map { missionDisplayName(for: $0) },
+                                title: mission?.displayTitle ?? info.title,
+                                shortDescription: mission.flatMap { missionCardDescription(for: $0) },
+                                backend: mission?.backend,
                                 status: .active,
                                 isRunning: true,
                                 runningState: info.state,
                                 isViewing: viewingMissionId == info.missionId,
+                                quickActions: [.followUp],
                                 onSelect: { onSelectMission(info.missionId) },
+                                onQuickAction: { action in
+                                    handleRunningQuickAction(
+                                        action,
+                                        missionId: info.missionId,
+                                        mission: mission
+                                    )
+                                },
                                 onCancel: { onCancelMission(info.missionId) }
                             )
                         }
@@ -3317,7 +3760,19 @@ private struct MissionSwitcherSheet: View {
                 missionSection("Failed", missions: failedMissions)
                 missionSection("Interrupted", missions: interruptedMissions)
 
-                if filteredRunning.isEmpty && filteredRecent.isEmpty && !searchText.isEmpty {
+                if isBackendSearchLoading && !normalizedSearchQuery.isEmpty {
+                    Section {
+                        HStack(spacing: 8) {
+                            ProgressView()
+                                .scaleEffect(0.8)
+                            Text("Searching missions...")
+                                .font(.caption)
+                                .foregroundStyle(Theme.textMuted)
+                        }
+                    }
+                }
+
+                if filteredRunning.isEmpty && filteredRecent.isEmpty && !normalizedSearchQuery.isEmpty {
                     ContentUnavailableView(
                         "No Missions Found",
                         systemImage: "magnifyingglass",
@@ -3326,6 +3781,16 @@ private struct MissionSwitcherSheet: View {
                 }
             }
             .searchable(text: $searchText, prompt: "Search missions...")
+            .onChange(of: searchText) { _, newValue in
+                scheduleBackendSearch(for: newValue)
+            }
+            .onAppear {
+                scheduleBackendSearch(for: searchText)
+            }
+            .onDisappear {
+                backendSearchTask?.cancel()
+                backendSearchTask = nil
+            }
             .navigationTitle("Switch Mission")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -3335,22 +3800,402 @@ private struct MissionSwitcherSheet: View {
             }
         }
     }
+
+    private func scheduleBackendSearch(for rawQuery: String) {
+        backendSearchTask?.cancel()
+        backendSearchTask = nil
+
+        let normalizedQuery = normalizeMetadataText(rawQuery)
+        guard !normalizedQuery.isEmpty else {
+            backendSearchQuery = ""
+            backendSearchResults = []
+            isBackendSearchLoading = false
+            return
+        }
+
+        isBackendSearchLoading = true
+        backendSearchTask = Task {
+            try? await Task.sleep(nanoseconds: backendSearchDebounceNanos)
+            guard !Task.isCancelled else { return }
+
+            do {
+                let results = try await APIService.shared.searchMissions(query: normalizedQuery, limit: 50)
+                guard !Task.isCancelled else { return }
+
+                await MainActor.run {
+                    if normalizeMetadataText(searchText) == normalizedQuery {
+                        backendSearchQuery = normalizedQuery
+                        backendSearchResults = results
+                        isBackendSearchLoading = false
+                    }
+                }
+            } catch {
+                guard !Task.isCancelled else { return }
+                await MainActor.run {
+                    if normalizeMetadataText(searchText) == normalizedQuery {
+                        backendSearchQuery = ""
+                        backendSearchResults = []
+                        isBackendSearchLoading = false
+                    }
+                }
+            }
+        }
+    }
+
+    private func normalizeMetadataText(_ text: String) -> String {
+        normalizeSearchText(text)
+    }
+
+    private let searchStopwords: Set<String> = [
+        "a", "an", "and", "at", "did", "do", "does", "for", "from", "how",
+        "i", "in", "is", "it", "me", "my", "of", "on", "or", "our", "please",
+        "show", "that", "the", "this", "to", "us", "was", "we", "what", "when",
+        "where", "which", "who", "why", "with", "you", "your",
+    ]
+
+    private struct SearchQueryTerms {
+        let normalizedQuery: String
+        let normalizedCoreQuery: String
+        let queryGroups: [[String]]
+        let phraseQueries: [String]
+    }
+
+    private func buildSearchQueryTerms(_ query: String) -> SearchQueryTerms? {
+        let normalizedQuery = normalizeMetadataText(query)
+        if normalizedQuery.isEmpty { return nil }
+
+        let queryTokens = normalizedQuery.split(separator: " ").map(String.init)
+        if queryTokens.isEmpty { return nil }
+
+        let filteredTokens = queryTokens.filter { !searchStopwords.contains($0) }
+        let effectiveTokens = filteredTokens.isEmpty ? queryTokens : filteredTokens
+        let normalizedCoreQuery = effectiveTokens.joined(separator: " ")
+
+        let queryGroups = effectiveTokens
+            .map(expandQueryGroup)
+            .filter { !$0.isEmpty }
+        if queryGroups.isEmpty { return nil }
+
+        var phraseQueries = Set<String>()
+        phraseQueries.insert(normalizedCoreQuery)
+        for token in effectiveTokens {
+            for phrase in phraseExpansions(for: token) {
+                let normalizedPhrase = normalizeMetadataText(phrase)
+                if !normalizedPhrase.isEmpty {
+                    phraseQueries.insert(normalizedPhrase)
+                }
+            }
+        }
+
+        return SearchQueryTerms(
+            normalizedQuery: normalizedQuery,
+            normalizedCoreQuery: normalizedCoreQuery,
+            queryGroups: queryGroups,
+            phraseQueries: Array(phraseQueries)
+        )
+    }
+
+    private func missionWorkspaceLabel(for mission: Mission) -> String? {
+        guard let workspaceName = mission.workspaceName?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !workspaceName.isEmpty else {
+            return nil
+        }
+        return workspaceName
+    }
+
+    private func missionDisplayName(for mission: Mission) -> String {
+        let shortId = String(mission.id.prefix(8)).uppercased()
+        if let workspaceLabel = missionWorkspaceLabel(for: mission) {
+            return "\(workspaceLabel) · \(shortId)"
+        }
+        return shortId
+    }
+
+    private func hasMeaningfulExtraTokens(baseText: String, candidateText: String) -> Bool {
+        let base = normalizeMetadataText(baseText)
+        let candidate = normalizeMetadataText(candidateText)
+        if candidate.isEmpty { return false }
+        if base.isEmpty { return true }
+
+        let baseTokens = Set(base.split(separator: " ").map(String.init))
+        let candidateTokens = candidate.split(separator: " ").map(String.init)
+        return candidateTokens.contains(where: { !baseTokens.contains($0) })
+    }
+
+    private func missionCardDescription(for mission: Mission) -> String? {
+        guard let shortDescription = mission.shortDescription?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !shortDescription.isEmpty else {
+            return nil
+        }
+        let title = mission.displayTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !title.isEmpty && !hasMeaningfulExtraTokens(baseText: title, candidateText: shortDescription) {
+            return nil
+        }
+        return shortDescription.count > 100 ? String(shortDescription.prefix(100)) + "..." : shortDescription
+    }
+
+    private func expandQueryGroup(token: String) -> [String] {
+        let synonyms: [String: [String]] = [
+            "api": ["endpoint", "http", "rest", "rpc"],
+            "auth": ["login", "signin", "oauth", "credential", "credentials"],
+            "blocked": ["stalled", "waiting"],
+            "bug": ["issue", "error", "fix", "problem"],
+            "cd": ["deploy", "release", "rollout", "ship"],
+            "ci": ["pipeline", "build", "integration", "tests"],
+            "crash": ["panic", "exception", "failure"],
+            "db": ["database", "sql", "sqlite", "postgres"],
+            "deploy": ["release", "rollout", "ship"],
+            "error": ["bug", "issue", "failure"],
+            "failed": ["error", "failure"],
+            "fix": ["bug", "issue", "error", "repair"],
+            "issue": ["bug", "error", "problem", "fix"],
+            "login": ["auth", "signin", "oauth", "credentials"],
+            "performance": ["perf", "slow", "latency", "optimize"],
+            "perf": ["performance", "slow", "latency", "optimize"],
+            "release": ["deploy", "rollout", "ship"],
+            "sid": ["session", "id", "sessionid", "cookie", "token"],
+            "signin": ["login", "auth", "oauth", "credentials"],
+            "slow": ["performance", "latency", "timeout", "stall"],
+            "sso": ["signin", "login", "auth", "oauth"],
+            "stalled": ["blocked", "waiting", "timeout"],
+            "timeout": ["slow", "latency", "stalled", "hang"],
+            "ui": ["ux", "interface", "frontend"],
+            "ux": ["ui", "interface", "frontend"],
+        ]
+
+        let normalized = normalizeMetadataText(token)
+        if normalized.isEmpty { return [] }
+
+        var group = Set<String>([normalized])
+        for synonym in synonyms[normalized] ?? [] {
+            let normalizedSynonym = normalizeMetadataText(synonym)
+            if !normalizedSynonym.isEmpty {
+                group.insert(normalizedSynonym)
+            }
+        }
+        return Array(group)
+    }
+
+    private func phraseExpansions(for token: String) -> [String] {
+        let normalized = normalizeMetadataText(token)
+        let expansions: [String: [String]] = [
+            "cd": ["continuous deployment"],
+            "ci": ["continuous integration"],
+            "sid": ["session id"],
+            "sso": ["single sign on"],
+        ]
+        return expansions[normalized] ?? []
+    }
+
+    private func tokenMatchStrength(token: String, candidate: String) -> Double {
+        if token == candidate { return 1.0 }
+
+        let asciiCandidate = candidate.range(of: "^[a-z0-9]+$", options: .regularExpression) != nil
+        if token.hasPrefix(candidate) && (!asciiCandidate || candidate.count >= 3) {
+            return 0.7
+        }
+        if asciiCandidate && token.count >= 5 && candidate.hasPrefix(token) && candidate.count - token.count <= 2 {
+            return 0.65
+        }
+        if candidate.count >= 4 && token.contains(candidate) {
+            return 0.45
+        }
+        return 0
+    }
+
+    private func tokenSet(from text: String) -> Set<String> {
+        let normalized = normalizeMetadataText(text)
+        if normalized.isEmpty { return [] }
+        return Set(normalized.split(separator: " ").map(String.init))
+    }
+
+    private func groupMatchStrength(_ group: [String], in tokenSet: Set<String>) -> Double {
+        var best = 0.0
+        for candidate in group where !candidate.isEmpty {
+            for token in tokenSet {
+                let strength = tokenMatchStrength(token: token, candidate: candidate)
+                best = max(best, strength)
+                if best >= 1 { return best }
+            }
+        }
+        return best
+    }
+
+    private func missionSearchRelevanceScore(_ mission: Mission, query: String) -> Double {
+        guard let queryTerms = buildSearchQueryTerms(query) else { return 0 }
+        let phraseQueries = queryTerms.phraseQueries.isEmpty
+            ? [queryTerms.normalizedCoreQuery.isEmpty ? queryTerms.normalizedQuery : queryTerms.normalizedCoreQuery]
+            : queryTerms.phraseQueries
+
+        let displayName = missionDisplayName(for: mission)
+        let title = mission.displayTitle
+        let shortDescription = mission.shortDescription ?? ""
+        let backend = mission.backend ?? ""
+        let status = mission.status.displayLabel
+        let combined = "\(displayName) \(mission.id) \(title) \(shortDescription) \(backend) \(status)"
+        let normalizedCombined = normalizeMetadataText(combined)
+        if normalizedCombined.isEmpty { return 0 }
+
+        let fields: [(weight: Double, tokens: Set<String>)] = [
+            (5, tokenSet(from: displayName)),
+            (8, tokenSet(from: title)),
+            (7, tokenSet(from: shortDescription)),
+            (3, tokenSet(from: backend)),
+            (2, tokenSet(from: status)),
+            (1, tokenSet(from: combined)),
+        ]
+
+        var score = 0.0
+        for group in queryTerms.queryGroups {
+            var bestGroupScore = 0.0
+            for field in fields {
+                let strength = groupMatchStrength(group, in: field.tokens)
+                if strength > 0 {
+                    bestGroupScore = max(bestGroupScore, strength * field.weight)
+                }
+            }
+            if bestGroupScore <= 0 { return 0 }
+            score += bestGroupScore
+        }
+
+        let phraseTargets: [(text: String, boost: Double)] = [
+            (normalizeMetadataText(title), 14),
+            (normalizeMetadataText(shortDescription), 12),
+            (normalizeMetadataText(displayName), 8),
+            (normalizeMetadataText(combined), 5),
+        ]
+        for target in phraseTargets where !target.text.isEmpty {
+            if phraseQueries.contains(where: { phraseQuery in
+                !phraseQuery.isEmpty && target.text.contains(phraseQuery)
+            }) {
+                score += target.boost
+            }
+        }
+
+        return score
+    }
+
+    private func runningMissionSearchScore(
+        _ mission: RunningMissionInfo,
+        query: String,
+        linkedMission: Mission?
+    ) -> Double {
+        guard let queryTerms = buildSearchQueryTerms(query) else { return 0 }
+        let phraseQueries = queryTerms.phraseQueries.isEmpty
+            ? [queryTerms.normalizedCoreQuery.isEmpty ? queryTerms.normalizedQuery : queryTerms.normalizedCoreQuery]
+            : queryTerms.phraseQueries
+
+        let title = mission.title ?? ""
+        let combined = "\(mission.missionId) \(title) \(mission.state)"
+        let candidateTokens = tokenSet(from: combined)
+        if candidateTokens.isEmpty { return 0 }
+
+        var score = 0.0
+        for group in queryTerms.queryGroups {
+            let strength = groupMatchStrength(group, in: candidateTokens)
+            if strength <= 0 { return 0 }
+            score += strength * 4.0
+        }
+        if phraseQueries.contains(where: { phraseQuery in
+            !phraseQuery.isEmpty && normalizeMetadataText(combined).contains(phraseQuery)
+        }) {
+            score += 6
+        }
+
+        let metadataScore = linkedMission.map { missionSearchRelevanceScore($0, query: query) } ?? 0
+        return max(score, metadataScore)
+    }
+
+    private func missionQuickActions(for mission: Mission, isRunning: Bool = false) -> [MissionQuickAction] {
+        if isRunning {
+            return [.followUp]
+        }
+
+        var actions: [MissionQuickAction] = []
+        if mission.status == .failed {
+            actions.append(.openFailure)
+        }
+        if mission.resumable {
+            switch mission.status {
+            case .interrupted:
+                actions.append(.resume)
+            case .blocked:
+                actions.append(.continue)
+            case .failed, .notFeasible:
+                actions.append(.retry)
+            default:
+                break
+            }
+        }
+        if mission.status != .active {
+            actions.append(.followUp)
+        }
+        return actions
+    }
+
+    private func handleQuickAction(_ action: MissionQuickAction, for mission: Mission) {
+        switch action {
+        case .resume, .continue, .retry:
+            onResumeMission(mission.id)
+        case .openFailure:
+            onOpenFailureMission(mission.id)
+        case .followUp:
+            onFollowUpMission(mission)
+        }
+    }
+
+    private func handleRunningQuickAction(
+        _ action: MissionQuickAction,
+        missionId: String,
+        mission: Mission?
+    ) {
+        if let mission {
+            handleQuickAction(action, for: mission)
+            return
+        }
+        guard action == .followUp else { return }
+
+        Task {
+            do {
+                let hydratedMission = try await APIService.shared.getMission(id: missionId)
+                await MainActor.run {
+                    onFollowUpMission(hydratedMission)
+                }
+            } catch {
+                // If mission hydration fails, keep the sheet responsive and skip the action.
+                print("Failed to load mission for follow-up action: \(error)")
+            }
+        }
+    }
 }
 
 // MARK: - Mission Row
 
 private struct MissionRow: View {
     let missionId: String
+    let displayName: String?
     let title: String?
+    let shortDescription: String?
+    let backend: String?
     let status: MissionStatus
     let isRunning: Bool
     let runningState: String?
     let isViewing: Bool
+    let quickActions: [MissionQuickAction]
     let onSelect: () -> Void
+    let onQuickAction: ((MissionQuickAction) -> Void)?
     let onCancel: (() -> Void)?
 
     private var shortId: String {
         String(missionId.prefix(8))
+    }
+
+    private var missionDisplayLabel: String {
+        let trimmed = displayName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let trimmed, !trimmed.isEmpty {
+            return trimmed
+        }
+        return shortId
     }
 
     private var statusColor: Color {
@@ -3400,7 +4245,7 @@ private struct MissionRow: View {
                 // Mission info
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 6) {
-                        Text(shortId)
+                        Text(missionDisplayLabel)
                             .font(.subheadline.monospaced().weight(.medium))
                             .foregroundStyle(Theme.textPrimary)
 
@@ -3415,6 +4260,20 @@ private struct MissionRow: View {
                         Text(title)
                             .font(.caption)
                             .foregroundStyle(Theme.textSecondary)
+                            .lineLimit(1)
+                    }
+
+                    if let shortDescription = shortDescription, !shortDescription.isEmpty {
+                        Text(shortDescription)
+                            .font(.caption2)
+                            .foregroundStyle(Theme.textMuted)
+                            .lineLimit(1)
+                    }
+
+                    if let backend = backend?.trimmingCharacters(in: .whitespacesAndNewlines), !backend.isEmpty {
+                        Text(backend)
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(Theme.textMuted)
                             .lineLimit(1)
                     }
                 }
@@ -3438,6 +4297,24 @@ private struct MissionRow: View {
                         .padding(.vertical, 4)
                         .background(statusColor.opacity(0.1))
                         .clipShape(Capsule())
+                }
+
+                if !quickActions.isEmpty, let onQuickAction {
+                    ForEach(quickActions, id: \.self) { action in
+                        Button {
+                            onQuickAction(action)
+                            HapticService.lightTap()
+                        } label: {
+                            Label(action.label, systemImage: action.icon)
+                                .font(.caption2.weight(.semibold))
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(Theme.accent.opacity(0.14))
+                                .foregroundStyle(Theme.accent)
+                                .clipShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+                    }
                 }
 
                 // Cancel button for running missions

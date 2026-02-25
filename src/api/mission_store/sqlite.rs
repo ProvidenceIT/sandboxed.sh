@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 type LegacyAutomationRow = (String, String, String, i64, i64, String, Option<String>);
 const COST_CURRENCY_USD: &str = "USD";
+const METADATA_SOURCE_USER: &str = "user";
 
 #[derive(serde::Serialize)]
 struct AssistantCostMetadata {
@@ -94,6 +95,11 @@ CREATE TABLE IF NOT EXISTS missions (
     id TEXT PRIMARY KEY NOT NULL,
     status TEXT NOT NULL DEFAULT 'active',
     title TEXT,
+    short_description TEXT,
+    metadata_updated_at TEXT,
+    metadata_source TEXT,
+    metadata_model TEXT,
+    metadata_version TEXT,
     workspace_id TEXT NOT NULL,
     workspace_name TEXT,
     agent TEXT,
@@ -161,7 +167,7 @@ CREATE TABLE IF NOT EXISTS automations (
     trigger_data TEXT NOT NULL,
     variables TEXT NOT NULL DEFAULT '{}',
     active INTEGER NOT NULL DEFAULT 1,
-    stop_policy TEXT NOT NULL DEFAULT 'never',
+    stop_policy TEXT NOT NULL DEFAULT 'consecutive_failures:2',
     fresh_session TEXT NOT NULL DEFAULT 'keep',
     created_at TEXT NOT NULL,
     last_triggered_at TEXT,
@@ -529,6 +535,77 @@ impl SqliteMissionStore {
                 .map_err(|e| format!("Failed to add model_effort column: {}", e))?;
         }
 
+        // Check if 'short_description' column exists in missions table
+        let has_short_description_column: bool = conn
+            .prepare("SELECT 1 FROM pragma_table_info('missions') WHERE name = 'short_description'")
+            .map_err(|e| format!("Failed to check for short_description column: {}", e))?
+            .exists([])
+            .map_err(|e| format!("Failed to query table info: {}", e))?;
+
+        if !has_short_description_column {
+            tracing::info!(
+                "Running migration: adding 'short_description' column to missions table"
+            );
+            conn.execute("ALTER TABLE missions ADD COLUMN short_description TEXT", [])
+                .map_err(|e| format!("Failed to add short_description column: {}", e))?;
+        }
+
+        // Check if 'metadata_updated_at' column exists in missions table
+        let has_metadata_updated_at_column: bool = conn
+            .prepare(
+                "SELECT 1 FROM pragma_table_info('missions') WHERE name = 'metadata_updated_at'",
+            )
+            .map_err(|e| format!("Failed to check for metadata_updated_at column: {}", e))?
+            .exists([])
+            .map_err(|e| format!("Failed to query table info: {}", e))?;
+
+        if !has_metadata_updated_at_column {
+            tracing::info!(
+                "Running migration: adding 'metadata_updated_at' column to missions table"
+            );
+            conn.execute(
+                "ALTER TABLE missions ADD COLUMN metadata_updated_at TEXT",
+                [],
+            )
+            .map_err(|e| format!("Failed to add metadata_updated_at column: {}", e))?;
+        }
+
+        let has_metadata_source_column: bool = conn
+            .prepare("SELECT 1 FROM pragma_table_info('missions') WHERE name = 'metadata_source'")
+            .map_err(|e| format!("Failed to check for metadata_source column: {}", e))?
+            .exists([])
+            .map_err(|e| format!("Failed to query table info: {}", e))?;
+
+        if !has_metadata_source_column {
+            tracing::info!("Running migration: adding 'metadata_source' column to missions table");
+            conn.execute("ALTER TABLE missions ADD COLUMN metadata_source TEXT", [])
+                .map_err(|e| format!("Failed to add metadata_source column: {}", e))?;
+        }
+
+        let has_metadata_model_column: bool = conn
+            .prepare("SELECT 1 FROM pragma_table_info('missions') WHERE name = 'metadata_model'")
+            .map_err(|e| format!("Failed to check for metadata_model column: {}", e))?
+            .exists([])
+            .map_err(|e| format!("Failed to query table info: {}", e))?;
+
+        if !has_metadata_model_column {
+            tracing::info!("Running migration: adding 'metadata_model' column to missions table");
+            conn.execute("ALTER TABLE missions ADD COLUMN metadata_model TEXT", [])
+                .map_err(|e| format!("Failed to add metadata_model column: {}", e))?;
+        }
+
+        let has_metadata_version_column: bool = conn
+            .prepare("SELECT 1 FROM pragma_table_info('missions') WHERE name = 'metadata_version'")
+            .map_err(|e| format!("Failed to check for metadata_version column: {}", e))?
+            .exists([])
+            .map_err(|e| format!("Failed to query table info: {}", e))?;
+
+        if !has_metadata_version_column {
+            tracing::info!("Running migration: adding 'metadata_version' column to missions table");
+            conn.execute("ALTER TABLE missions ADD COLUMN metadata_version TEXT", [])
+                .map_err(|e| format!("Failed to add metadata_version column: {}", e))?;
+        }
+
         // Migrate automations table to new schema
         Self::migrate_automations_table(conn)?;
         Self::ensure_automation_indexes(conn)?;
@@ -584,7 +661,7 @@ impl SqliteMissionStore {
                     trigger_data TEXT NOT NULL,
                     variables TEXT NOT NULL DEFAULT '{}',
                     active INTEGER NOT NULL DEFAULT 1,
-                    stop_policy TEXT NOT NULL DEFAULT 'never',
+                    stop_policy TEXT NOT NULL DEFAULT 'consecutive_failures:2',
                     created_at TEXT NOT NULL,
                     last_triggered_at TEXT,
                     retry_max_retries INTEGER NOT NULL DEFAULT 3,
@@ -647,7 +724,7 @@ impl SqliteMissionStore {
                                              trigger_type, trigger_data, variables, active, stop_policy,
                                              fresh_session, created_at, last_triggered_at, retry_max_retries,
                                              retry_delay_seconds, retry_backoff_multiplier)
-                     VALUES (?, ?, 'library', ?, 'interval', ?, '{}', ?, 'never', 'keep', ?, ?, 3, 60, 2.0)",
+                     VALUES (?, ?, 'library', ?, 'interval', ?, '{}', ?, 'consecutive_failures:2', 'keep', ?, ?, 3, 60, 2.0)",
                     params![id, mission_id, command_source_data, trigger_data, active, created_at, last_triggered_at],
                 )
                 .map_err(|e| format!("Failed to migrate automation: {}", e))?;
@@ -718,7 +795,7 @@ impl SqliteMissionStore {
         if !has_stop_policy {
             tracing::info!("Running migration: adding 'stop_policy' column to automations table");
             conn.execute(
-                "ALTER TABLE automations ADD COLUMN stop_policy TEXT NOT NULL DEFAULT 'never'",
+                "ALTER TABLE automations ADD COLUMN stop_policy TEXT NOT NULL DEFAULT 'consecutive_failures:2'",
                 [],
             )
             .map_err(|e| format!("Failed to add stop_policy column: {}", e))?;
@@ -782,7 +859,7 @@ impl MissionStore for SqliteMissionStore {
             let conn = conn.blocking_lock();
             let mut stmt = conn
                 .prepare(
-                    "SELECT id, status, title, workspace_id, workspace_name, agent, model_override,
+                    "SELECT id, status, title, short_description, metadata_updated_at, metadata_source, metadata_model, metadata_version, workspace_id, workspace_name, agent, model_override,
                             model_effort,
                             created_at, updated_at, interrupted_at, resumable, desktop_sessions,
                             COALESCE(backend, 'opencode') as backend, session_id, terminal_reason,
@@ -797,30 +874,35 @@ impl MissionStore for SqliteMissionStore {
                 .query_map(params![limit as i64, offset as i64], |row| {
                     let id_str: String = row.get(0)?;
                     let status_str: String = row.get(1)?;
-                    let workspace_id_str: String = row.get(3)?;
-                    let desktop_sessions_json: Option<String> = row.get(12)?;
-                    let backend: String = row.get(13)?;
-                    let session_id: Option<String> = row.get(14)?;
-                    let terminal_reason: Option<String> = row.get(15)?;
-                    let config_profile: Option<String> = row.get(16)?;
+                    let workspace_id_str: String = row.get(8)?;
+                    let desktop_sessions_json: Option<String> = row.get(17)?;
+                    let backend: String = row.get(18)?;
+                    let session_id: Option<String> = row.get(19)?;
+                    let terminal_reason: Option<String> = row.get(20)?;
+                    let config_profile: Option<String> = row.get(21)?;
 
                     Ok(Mission {
                         id: parse_uuid_or_nil(&id_str),
                         status: parse_status(&status_str),
                         title: row.get(2)?,
+                        short_description: row.get(3)?,
+                        metadata_updated_at: row.get(4)?,
+                        metadata_source: row.get(5)?,
+                        metadata_model: row.get(6)?,
+                        metadata_version: row.get(7)?,
                         workspace_id: Uuid::parse_str(&workspace_id_str)
                             .unwrap_or(crate::workspace::DEFAULT_WORKSPACE_ID),
-                        workspace_name: row.get(4)?,
-                        agent: row.get(5)?,
-                        model_override: row.get(6)?,
-                        model_effort: row.get(7)?,
+                        workspace_name: row.get(9)?,
+                        agent: row.get(10)?,
+                        model_override: row.get(11)?,
+                        model_effort: row.get(12)?,
                         backend,
                         config_profile,
                         history: vec![], // Loaded separately if needed
-                        created_at: row.get(8)?,
-                        updated_at: row.get(9)?,
-                        interrupted_at: row.get(10)?,
-                        resumable: row.get::<_, i32>(11)? != 0,
+                        created_at: row.get(13)?,
+                        updated_at: row.get(14)?,
+                        interrupted_at: row.get(15)?,
+                        resumable: row.get::<_, i32>(16)? != 0,
                         desktop_sessions: desktop_sessions_json
                             .and_then(|s| serde_json::from_str(&s).ok())
                             .unwrap_or_default(),
@@ -848,7 +930,7 @@ impl MissionStore for SqliteMissionStore {
             // Get mission
             let mut stmt = conn
                 .prepare(
-                    "SELECT id, status, title, workspace_id, workspace_name, agent, model_override,
+                    "SELECT id, status, title, short_description, metadata_updated_at, metadata_source, metadata_model, metadata_version, workspace_id, workspace_name, agent, model_override,
                             model_effort,
                             created_at, updated_at, interrupted_at, resumable, desktop_sessions,
                             COALESCE(backend, 'opencode') as backend, session_id, terminal_reason,
@@ -861,30 +943,35 @@ impl MissionStore for SqliteMissionStore {
                 .query_row(params![&id_str], |row| {
                     let id_str: String = row.get(0)?;
                     let status_str: String = row.get(1)?;
-                    let workspace_id_str: String = row.get(3)?;
-                    let desktop_sessions_json: Option<String> = row.get(12)?;
-                    let backend: String = row.get(13)?;
-                    let session_id: Option<String> = row.get(14)?;
-                    let terminal_reason: Option<String> = row.get(15)?;
-                    let config_profile: Option<String> = row.get(16)?;
+                    let workspace_id_str: String = row.get(8)?;
+                    let desktop_sessions_json: Option<String> = row.get(17)?;
+                    let backend: String = row.get(18)?;
+                    let session_id: Option<String> = row.get(19)?;
+                    let terminal_reason: Option<String> = row.get(20)?;
+                    let config_profile: Option<String> = row.get(21)?;
 
                     Ok(Mission {
                         id: parse_uuid_or_nil(&id_str),
                         status: parse_status(&status_str),
                         title: row.get(2)?,
+                        short_description: row.get(3)?,
+                        metadata_updated_at: row.get(4)?,
+                        metadata_source: row.get(5)?,
+                        metadata_model: row.get(6)?,
+                        metadata_version: row.get(7)?,
                         workspace_id: Uuid::parse_str(&workspace_id_str)
                             .unwrap_or(crate::workspace::DEFAULT_WORKSPACE_ID),
-                        workspace_name: row.get(4)?,
-                        agent: row.get(5)?,
-                        model_override: row.get(6)?,
-                        model_effort: row.get(7)?,
+                        workspace_name: row.get(9)?,
+                        agent: row.get(10)?,
+                        model_override: row.get(11)?,
+                        model_effort: row.get(12)?,
                         backend,
                         config_profile,
                         history: vec![],
-                        created_at: row.get(8)?,
-                        updated_at: row.get(9)?,
-                        interrupted_at: row.get(10)?,
-                        resumable: row.get::<_, i32>(11)? != 0,
+                        created_at: row.get(13)?,
+                        updated_at: row.get(14)?,
+                        interrupted_at: row.get(15)?,
+                        resumable: row.get::<_, i32>(16)? != 0,
                         desktop_sessions: desktop_sessions_json
                             .and_then(|s| serde_json::from_str(&s).ok())
                             .unwrap_or_default(),
@@ -955,6 +1042,15 @@ impl MissionStore for SqliteMissionStore {
         let id = Uuid::new_v4();
         let workspace_id = workspace_id.unwrap_or(crate::workspace::DEFAULT_WORKSPACE_ID);
         let backend = backend.unwrap_or("claudecode").to_string();
+        let metadata_source = title.and_then(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(METADATA_SOURCE_USER.to_string())
+            }
+        });
+        let metadata_updated_at = metadata_source.as_ref().map(|_| now.clone());
         // Generate session_id for conversation persistence (used by Claude Code --session-id)
         let session_id = Uuid::new_v4().to_string();
 
@@ -962,6 +1058,11 @@ impl MissionStore for SqliteMissionStore {
             id,
             status: MissionStatus::Pending,
             title: title.map(|s| s.to_string()),
+            short_description: None,
+            metadata_updated_at,
+            metadata_source,
+            metadata_model: None,
+            metadata_version: None,
             workspace_id,
             workspace_name: None,
             agent: agent.map(|s| s.to_string()),
@@ -983,12 +1084,17 @@ impl MissionStore for SqliteMissionStore {
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
             conn.execute(
-                "INSERT INTO missions (id, status, title, workspace_id, agent, model_override, model_effort, backend, config_profile, created_at, updated_at, resumable, session_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                "INSERT INTO missions (id, status, title, short_description, metadata_updated_at, metadata_source, metadata_model, metadata_version, workspace_id, agent, model_override, model_effort, backend, config_profile, created_at, updated_at, resumable, session_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
                 params![
                     m.id.to_string(),
                     status_to_string(m.status),
                     m.title,
+                    m.short_description,
+                    m.metadata_updated_at,
+                    m.metadata_source,
+                    m.metadata_model,
+                    m.metadata_version,
                     m.workspace_id.to_string(),
                     m.agent,
                     m.model_override,
@@ -1109,12 +1215,85 @@ impl MissionStore for SqliteMissionStore {
         let conn = self.conn.clone();
         let now = now_string();
         let title = title.to_string();
+        let source = "user".to_string();
 
         tokio::task::spawn_blocking(move || {
             let conn = conn.blocking_lock();
             conn.execute(
-                "UPDATE missions SET title = ?1, updated_at = ?2 WHERE id = ?3",
-                params![title, now, id.to_string()],
+                "UPDATE missions
+                 SET title = ?1,
+                     metadata_source = ?2,
+                     metadata_model = NULL,
+                     metadata_version = NULL,
+                     metadata_updated_at = ?3,
+                     updated_at = ?4
+                 WHERE id = ?5",
+                params![title, source, now.clone(), now, id.to_string()],
+            )
+            .map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+
+    async fn update_mission_metadata(
+        &self,
+        id: Uuid,
+        title: Option<Option<&str>>,
+        short_description: Option<Option<&str>>,
+        metadata_source: Option<Option<&str>>,
+        metadata_model: Option<Option<&str>>,
+        metadata_version: Option<Option<&str>>,
+    ) -> Result<(), String> {
+        if title.is_none()
+            && short_description.is_none()
+            && metadata_source.is_none()
+            && metadata_model.is_none()
+            && metadata_version.is_none()
+        {
+            return Ok(());
+        }
+
+        let conn = self.conn.clone();
+        let now = now_string();
+        let title_set = title.is_some();
+        let short_description_set = short_description.is_some();
+        let metadata_source_set = metadata_source.is_some();
+        let metadata_model_set = metadata_model.is_some();
+        let metadata_version_set = metadata_version.is_some();
+        let title = title.flatten().map(|s| s.to_string());
+        let short_description = short_description.flatten().map(|s| s.to_string());
+        let metadata_source = metadata_source.flatten().map(|s| s.to_string());
+        let metadata_model = metadata_model.flatten().map(|s| s.to_string());
+        let metadata_version = metadata_version.flatten().map(|s| s.to_string());
+
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.blocking_lock();
+            conn.execute(
+                "UPDATE missions
+                 SET title = CASE WHEN ?1 THEN ?2 ELSE title END,
+                     short_description = CASE WHEN ?3 THEN ?4 ELSE short_description END,
+                     metadata_source = CASE WHEN ?5 THEN ?6 ELSE metadata_source END,
+                     metadata_model = CASE WHEN ?7 THEN ?8 ELSE metadata_model END,
+                     metadata_version = CASE WHEN ?9 THEN ?10 ELSE metadata_version END,
+                     metadata_updated_at = ?11,
+                     updated_at = ?11
+                 WHERE id = ?12",
+                params![
+                    title_set,
+                    title,
+                    short_description_set,
+                    short_description,
+                    metadata_source_set,
+                    metadata_source,
+                    metadata_model_set,
+                    metadata_model,
+                    metadata_version_set,
+                    metadata_version,
+                    now,
+                    id.to_string()
+                ],
             )
             .map_err(|e| e.to_string())?;
             Ok(())
@@ -1276,6 +1455,11 @@ impl MissionStore for SqliteMissionStore {
                         id: parse_uuid_or_nil(&id_str),
                         status: parse_status(&status_str),
                         title: row.get(2)?,
+                        short_description: None,
+                        metadata_updated_at: None,
+                        metadata_source: None,
+                        metadata_model: None,
+                        metadata_version: None,
                         workspace_id: Uuid::parse_str(&workspace_id_str)
                             .unwrap_or(crate::workspace::DEFAULT_WORKSPACE_ID),
                         workspace_name: row.get(4)?,
@@ -1333,6 +1517,11 @@ impl MissionStore for SqliteMissionStore {
                         id: parse_uuid_or_nil(&id_str),
                         status: parse_status(&status_str),
                         title: row.get(2)?,
+                        short_description: None,
+                        metadata_updated_at: None,
+                        metadata_source: None,
+                        metadata_model: None,
+                        metadata_version: None,
                         workspace_id: Uuid::parse_str(&workspace_id_str)
                             .unwrap_or(crate::workspace::DEFAULT_WORKSPACE_ID),
                         workspace_name: row.get(4)?,
@@ -1508,6 +1697,31 @@ impl MissionStore for SqliteMissionStore {
                 None,
                 summary.clone().unwrap_or_default(),
                 serde_json::json!({ "status": status.to_string() }),
+            ),
+            AgentEvent::MissionMetadataUpdated {
+                title,
+                short_description,
+                metadata_updated_at,
+                updated_at,
+                metadata_source,
+                metadata_model,
+                metadata_version,
+                ..
+            } => (
+                "mission_metadata_updated",
+                None,
+                None,
+                None,
+                title.clone().unwrap_or_default(),
+                serde_json::json!({
+                    "title": title,
+                    "short_description": short_description,
+                    "metadata_updated_at": metadata_updated_at,
+                    "updated_at": updated_at,
+                    "metadata_source": metadata_source,
+                    "metadata_model": metadata_model,
+                    "metadata_version": metadata_version
+                }),
             ),
             // Skip events that are less important for debugging
             AgentEvent::Status { .. }
@@ -2429,6 +2643,209 @@ mod tests {
                 },
             })
         );
+    }
+
+    #[tokio::test]
+    async fn update_mission_metadata_is_noop_when_fields_missing() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = SqliteMissionStore::new(temp_dir.path().to_path_buf(), "test-user")
+            .await
+            .expect("sqlite store");
+        let mission = store
+            .create_mission(Some("Initial"), None, None, None, None, None, None)
+            .await
+            .expect("mission");
+
+        store
+            .update_mission_metadata(
+                mission.id,
+                Some(Some("Renamed")),
+                Some(Some("Short summary")),
+                Some(Some("backend_heuristic")),
+                None,
+                Some(Some("v1")),
+            )
+            .await
+            .expect("set metadata");
+
+        let after_set = store
+            .get_mission(mission.id)
+            .await
+            .expect("get mission")
+            .expect("mission exists");
+        let metadata_updated_at = after_set
+            .metadata_updated_at
+            .clone()
+            .expect("metadata timestamp should be set");
+        let updated_at = after_set.updated_at.clone();
+
+        store
+            .update_mission_metadata(mission.id, None, None, None, None, None)
+            .await
+            .expect("noop metadata update");
+
+        let after_noop = store
+            .get_mission(mission.id)
+            .await
+            .expect("get mission")
+            .expect("mission exists");
+
+        assert_eq!(after_noop.title.as_deref(), Some("Renamed"));
+        assert_eq!(
+            after_noop.short_description.as_deref(),
+            Some("Short summary")
+        );
+        assert_eq!(
+            after_noop.metadata_source.as_deref(),
+            Some("backend_heuristic")
+        );
+        assert_eq!(after_noop.metadata_model.as_deref(), None);
+        assert_eq!(after_noop.metadata_version.as_deref(), Some("v1"));
+        assert_eq!(
+            after_noop.metadata_updated_at.as_deref(),
+            Some(metadata_updated_at.as_str())
+        );
+        assert_eq!(after_noop.updated_at, updated_at);
+    }
+
+    #[tokio::test]
+    async fn update_mission_metadata_can_clear_fields() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = SqliteMissionStore::new(temp_dir.path().to_path_buf(), "test-user")
+            .await
+            .expect("sqlite store");
+        let mission = store
+            .create_mission(Some("Initial"), None, None, None, None, None, None)
+            .await
+            .expect("mission");
+
+        store
+            .update_mission_metadata(
+                mission.id,
+                Some(Some("Renamed")),
+                Some(Some("Short summary")),
+                Some(Some("backend_heuristic")),
+                None,
+                Some(Some("v1")),
+            )
+            .await
+            .expect("set metadata");
+
+        store
+            .update_mission_metadata(
+                mission.id,
+                Some(None),
+                Some(None),
+                Some(None),
+                None,
+                Some(None),
+            )
+            .await
+            .expect("clear metadata fields");
+
+        let mission = store
+            .get_mission(mission.id)
+            .await
+            .expect("get mission")
+            .expect("mission exists");
+        assert_eq!(mission.title, None);
+        assert_eq!(mission.short_description, None);
+        assert_eq!(mission.metadata_source, None);
+        assert_eq!(mission.metadata_version, None);
+    }
+
+    #[tokio::test]
+    async fn update_mission_title_marks_user_metadata_source() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = SqliteMissionStore::new(temp_dir.path().to_path_buf(), "test-user")
+            .await
+            .expect("sqlite store");
+        let mission = store
+            .create_mission(Some("Initial"), None, None, None, None, None, None)
+            .await
+            .expect("mission");
+
+        store
+            .update_mission_metadata(
+                mission.id,
+                None,
+                None,
+                Some(Some("backend_heuristic")),
+                Some(Some("gpt-5")),
+                Some(Some("v1")),
+            )
+            .await
+            .expect("seed metadata source");
+        let seeded = store
+            .get_mission(mission.id)
+            .await
+            .expect("get seeded mission")
+            .expect("mission exists");
+        let seeded_metadata_updated_at = seeded
+            .metadata_updated_at
+            .expect("seed metadata timestamp should exist");
+
+        store
+            .update_mission_title(mission.id, "Manual title")
+            .await
+            .expect("rename mission");
+
+        let mission = store
+            .get_mission(mission.id)
+            .await
+            .expect("get mission")
+            .expect("mission exists");
+        assert_eq!(mission.title.as_deref(), Some("Manual title"));
+        assert_eq!(mission.metadata_source.as_deref(), Some("user"));
+        assert_eq!(mission.metadata_model, None);
+        assert_eq!(mission.metadata_version, None);
+        let metadata_updated_at = mission
+            .metadata_updated_at
+            .expect("manual title update should set metadata timestamp");
+        assert!(
+            metadata_updated_at >= seeded_metadata_updated_at,
+            "manual title update should advance metadata timestamp"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_mission_marks_user_metadata_source_when_title_is_provided() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = SqliteMissionStore::new(temp_dir.path().to_path_buf(), "test-user")
+            .await
+            .expect("sqlite store");
+
+        let titled = store
+            .create_mission(
+                Some("User titled mission"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("create titled mission");
+        assert_eq!(titled.metadata_source.as_deref(), Some("user"));
+        assert!(
+            titled.metadata_updated_at.is_some(),
+            "titled mission should set metadata_updated_at"
+        );
+
+        let untitled = store
+            .create_mission(None, None, None, None, None, None, None)
+            .await
+            .expect("create untitled mission");
+        assert_eq!(untitled.metadata_source, None);
+        assert_eq!(untitled.metadata_updated_at, None);
+
+        let blank_titled = store
+            .create_mission(Some("  "), None, None, None, None, None, None)
+            .await
+            .expect("create blank titled mission");
+        assert_eq!(blank_titled.metadata_source, None);
+        assert_eq!(blank_titled.metadata_updated_at, None);
     }
 
     #[tokio::test]

@@ -1,11 +1,19 @@
 'use client';
 
 import { useEffect, useRef, useState, useMemo, useCallback } from 'react';
-import { Search, XCircle, Check, Loader2 } from 'lucide-react';
+import {
+  Search,
+  XCircle,
+  Check,
+  Loader2,
+  RotateCcw,
+  AlertTriangle,
+  MessageSquarePlus,
+} from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { type Mission, type MissionStatus, type RunningMissionInfo } from '@/lib/api';
+import { searchMissions, type Mission, type RunningMissionInfo } from '@/lib/api';
 import { getMissionShortName } from '@/lib/mission-display';
-import { STATUS_DOT_COLORS, STATUS_LABELS, getMissionDotColor, getMissionTitle } from '@/lib/mission-status';
+import { STATUS_LABELS, getMissionDotColor, getMissionTitle } from '@/lib/mission-status';
 
 interface MissionSwitcherProps {
   open: boolean;
@@ -17,6 +25,9 @@ interface MissionSwitcherProps {
   workspaceNameById?: Record<string, string>;
   onSelectMission: (missionId: string) => Promise<void> | void;
   onCancelMission: (missionId: string) => void;
+  onResumeMission?: (missionId: string) => Promise<void> | void;
+  onOpenFailingToolCall?: (missionId: string) => Promise<void> | void;
+  onFollowUpMission?: (missionId: string) => Promise<void> | void;
   onRefresh?: () => void;
 }
 
@@ -46,8 +57,513 @@ function getMissionDisplayName(
   return parts.join(' · ');
 }
 
-function getMissionDescription(mission: Mission): string {
-  return getMissionTitle(mission, { maxLength: 60, fallback: '' });
+export function getMissionCardTitle(mission: Mission): string | null {
+  const title = getMissionTitle(mission, { maxLength: 80, fallback: '' }).trim();
+  if (!title) return null;
+  return title;
+}
+
+export function normalizeMetadataText(text: string): string {
+  const lower = text.toLowerCase();
+  let sanitized = lower;
+  try {
+    sanitized = lower.replace(new RegExp('[^\\p{L}\\p{N}\\s]', 'gu'), ' ');
+  } catch {
+    sanitized = lower.replace(/[!"#$%&'()*+,./:;<=>?@[\\\]^_`{|}~-]/g, ' ');
+  }
+  return sanitized.replace(/\s+/g, ' ').trim();
+}
+
+export function hasMeaningfulExtraTokens(baseText: string, candidateText: string): boolean {
+  const base = normalizeMetadataText(baseText);
+  const candidate = normalizeMetadataText(candidateText);
+  if (!candidate) return false;
+  if (!base) return true;
+
+  const baseTokens = new Set(base.split(' ').filter(Boolean));
+  const candidateTokens = candidate.split(' ').filter(Boolean);
+  return candidateTokens.some((token) => !baseTokens.has(token));
+}
+
+export function getMissionCardDescription(
+  mission: Mission,
+  title?: string | null
+): string | null {
+  const shortDescription = mission.short_description?.trim();
+  if (!shortDescription) return null;
+
+  const normalizedTitle = (title ?? '').trim();
+  if (normalizedTitle && !hasMeaningfulExtraTokens(normalizedTitle, shortDescription)) {
+    return null;
+  }
+  return shortDescription;
+}
+
+function getMissionBackendLabel(mission: Mission): string {
+  const backend = mission.backend?.trim();
+  if (!backend) return 'claudecode';
+  return backend;
+}
+
+function getMissionStatusLabel(mission: Mission): string {
+  return STATUS_LABELS[mission.status] ?? mission.status ?? 'Unknown';
+}
+
+export interface MissionQuickAction {
+  action: 'resume' | 'open_failure' | 'follow_up';
+  label: string;
+  title: string;
+}
+
+export function getRunningMissionQuickActions(): MissionQuickAction[] {
+  return [
+    {
+      action: 'follow_up',
+      label: 'Follow-up',
+      title: 'Start a follow-up mission from this context',
+    },
+  ];
+}
+
+export function getMissionQuickActions(mission: Mission, isRunning: boolean): MissionQuickAction[] {
+  if (isRunning) {
+    return getRunningMissionQuickActions();
+  }
+
+  const actions: MissionQuickAction[] = [];
+  if (mission.status === 'failed') {
+    actions.push({
+      action: 'open_failure',
+      label: 'Open Failure',
+      title: 'Jump to likely failing tool call',
+    });
+  }
+
+  if (mission.resumable) {
+    switch (mission.status) {
+      case 'blocked':
+        actions.push({
+          action: 'resume',
+          label: 'Continue',
+          title: 'Continue mission',
+        });
+        break;
+      case 'failed':
+        actions.push({
+          action: 'resume',
+          label: 'Retry',
+          title: 'Retry mission',
+        });
+        break;
+      case 'interrupted':
+        actions.push({
+          action: 'resume',
+          label: 'Resume',
+          title: 'Resume mission',
+        });
+        break;
+    }
+  }
+
+  if (mission.status !== 'active') {
+    actions.push({
+      action: 'follow_up',
+      label: 'Follow-up',
+      title: 'Create a follow-up mission',
+    });
+  }
+
+  return actions;
+}
+
+export function getMissionSearchText(mission: Mission): string {
+  const title = getMissionCardTitle(mission) ?? '';
+  const shortDescription = mission.short_description?.trim() ?? '';
+  const backend = getMissionBackendLabel(mission);
+  const status = mission.status ?? '';
+  const textParts: string[] = [];
+
+  if (title) {
+    textParts.push(title);
+  }
+  if (shortDescription && (textParts.length === 0 || hasMeaningfulExtraTokens(title, shortDescription))) {
+    textParts.push(shortDescription);
+  }
+  if (backend) {
+    textParts.push(backend);
+  }
+  if (status) {
+    textParts.push(status);
+  }
+  return textParts.join(' ');
+}
+
+export function getRunningMissionSearchText(runningInfo: RunningMissionInfo): string {
+  return [runningInfo.mission_id, getMissionShortName(runningInfo.mission_id), runningInfo.state]
+    .filter(Boolean)
+    .join(' ');
+}
+
+export function runningMissionMatchesSearchQuery(
+  runningInfo: RunningMissionInfo,
+  searchQuery: string
+): boolean {
+  if (!normalizeMetadataText(searchQuery)) return true;
+  return runningMissionSearchRelevanceScore(runningInfo, searchQuery) > 0;
+}
+
+const SEARCH_SYNONYMS: Record<string, string[]> = {
+  api: ['endpoint', 'http', 'rest', 'rpc'],
+  auth: ['login', 'signin', 'oauth', 'credential', 'credentials'],
+  blocked: ['stalled', 'waiting'],
+  bug: ['issue', 'error', 'fix', 'problem'],
+  cd: ['deploy', 'release', 'rollout', 'ship'],
+  ci: ['pipeline', 'build', 'integration', 'tests'],
+  crash: ['panic', 'exception', 'failure'],
+  db: ['database', 'sql', 'sqlite', 'postgres'],
+  deploy: ['release', 'rollout', 'ship'],
+  error: ['bug', 'issue', 'failure'],
+  failed: ['error', 'failure'],
+  fix: ['bug', 'issue', 'error', 'repair'],
+  issue: ['bug', 'error', 'problem', 'fix'],
+  login: ['auth', 'signin', 'oauth', 'credentials'],
+  performance: ['perf', 'slow', 'latency', 'optimize'],
+  perf: ['performance', 'slow', 'latency', 'optimize'],
+  release: ['deploy', 'rollout', 'ship'],
+  sid: ['session', 'id', 'sessionid', 'cookie', 'token'],
+  signin: ['login', 'auth', 'oauth', 'credentials'],
+  slow: ['performance', 'latency', 'timeout', 'stall'],
+  sso: ['signin', 'login', 'auth', 'oauth'],
+  stalled: ['blocked', 'waiting', 'timeout'],
+  timeout: ['slow', 'latency', 'stalled', 'hang'],
+  ui: ['ux', 'interface', 'frontend'],
+  ux: ['ui', 'interface', 'frontend'],
+};
+
+const SEARCH_PHRASE_EXPANSIONS: Record<string, string[]> = {
+  cd: ['continuous deployment'],
+  ci: ['continuous integration'],
+  sid: ['session id'],
+  sso: ['single sign on'],
+};
+
+const SEARCH_STOPWORDS = new Set([
+  'a',
+  'an',
+  'and',
+  'at',
+  'did',
+  'do',
+  'does',
+  'for',
+  'from',
+  'how',
+  'i',
+  'in',
+  'is',
+  'it',
+  'me',
+  'my',
+  'of',
+  'on',
+  'or',
+  'our',
+  'please',
+  'show',
+  'that',
+  'the',
+  'this',
+  'to',
+  'us',
+  'was',
+  'we',
+  'what',
+  'when',
+  'where',
+  'which',
+  'who',
+  'why',
+  'with',
+  'you',
+  'your',
+]);
+
+interface SearchQueryTerms {
+  normalizedQuery: string;
+  normalizedCoreQuery: string;
+  queryGroups: string[][];
+  phraseQueries: string[];
+}
+
+function buildSearchQueryTerms(searchQuery: string): SearchQueryTerms | null {
+  const normalizedQuery = normalizeMetadataText(searchQuery);
+  if (!normalizedQuery) return null;
+
+  const queryTokens = normalizedQuery.split(' ').filter(Boolean);
+  if (queryTokens.length === 0) return null;
+
+  const filteredTokens = queryTokens.filter((token) => !SEARCH_STOPWORDS.has(token));
+  const effectiveTokens = filteredTokens.length > 0 ? filteredTokens : queryTokens;
+  const normalizedCoreQuery = effectiveTokens.join(' ');
+
+  const queryGroups = effectiveTokens
+    .map(expandQueryTokenGroup)
+    .filter((group) => group.length > 0);
+  if (queryGroups.length === 0) return null;
+
+  const phraseQueries = Array.from(
+    new Set([
+      normalizedCoreQuery,
+      ...effectiveTokens.flatMap((token) =>
+        (SEARCH_PHRASE_EXPANSIONS[token] ?? [])
+          .map((phrase) => normalizeMetadataText(phrase))
+          .filter(Boolean)
+      ),
+    ].filter(Boolean))
+  );
+
+  return {
+    normalizedQuery,
+    normalizedCoreQuery,
+    queryGroups,
+    phraseQueries,
+  };
+}
+
+function expandQueryTokenGroup(token: string): string[] {
+  const normalized = normalizeMetadataText(token);
+  if (!normalized) return [];
+
+  const values = new Set<string>();
+  values.add(normalized);
+
+  const direct = SEARCH_SYNONYMS[normalized] ?? [];
+  for (const candidate of direct) {
+    const normalizedCandidate = normalizeMetadataText(candidate);
+    if (normalizedCandidate) {
+      values.add(normalizedCandidate);
+    }
+  }
+
+  return Array.from(values);
+}
+
+function tokenMatchStrength(token: string, candidate: string): number {
+  if (token === candidate) return 1;
+  const asciiCandidate = /^[a-z0-9]+$/.test(candidate);
+  if (token.startsWith(candidate) && (!asciiCandidate || candidate.length >= 3)) return 0.7;
+  if (
+    asciiCandidate &&
+    token.length >= 5 &&
+    candidate.startsWith(token) &&
+    candidate.length - token.length <= 2
+  ) {
+    return 0.65;
+  }
+  if (candidate.length >= 4 && token.includes(candidate)) return 0.45;
+  return 0;
+}
+
+function groupMatchStrengthForTokenSet(group: string[], tokenSet: Set<string>): number {
+  let best = 0;
+  for (const candidate of group) {
+    if (!candidate) continue;
+    for (const token of tokenSet) {
+      const strength = tokenMatchStrength(token, candidate);
+      if (strength > best) {
+        best = strength;
+      }
+      if (best >= 1) {
+        return best;
+      }
+    }
+  }
+  return best;
+}
+
+function tokenSetFromText(text: string): Set<string> {
+  const normalized = normalizeMetadataText(text);
+  return new Set(normalized.split(' ').filter(Boolean));
+}
+
+function hashSearchQuery(normalizedQuery: string): string {
+  let hash = 2166136261;
+  for (let i = 0; i < normalizedQuery.length; i += 1) {
+    hash ^= normalizedQuery.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
+}
+
+function getMissionSearchCacheKey(
+  mission: Mission,
+  normalizedQuery: string,
+  workspaceNameById?: Record<string, string>
+): string {
+  const workspaceLabel = getWorkspaceLabel(mission, workspaceNameById) ?? '';
+  return [
+    mission.id,
+    mission.updated_at ?? '',
+    mission.metadata_updated_at ?? '',
+    workspaceLabel,
+    hashSearchQuery(normalizedQuery),
+  ].join('|');
+}
+
+function mapServerMissionSearchScores(results: Array<{ mission: Mission; relevance_score: number }>): Map<string, number> {
+  const scoreByMissionId = new Map<string, number>();
+  for (const result of results) {
+    const missionId = result.mission?.id;
+    if (!missionId) continue;
+    scoreByMissionId.set(missionId, result.relevance_score ?? 0);
+  }
+  return scoreByMissionId;
+}
+
+export function getMissionSearchScore(
+  mission: Mission,
+  normalizedQuery: string,
+  cache: Map<string, number>,
+  workspaceNameById?: Record<string, string>,
+  serverScoreByMissionId?: Map<string, number> | null
+): number {
+  const serverScore = serverScoreByMissionId?.get(mission.id);
+  if (typeof serverScore === 'number') {
+    return serverScore;
+  }
+
+  const cacheKey = getMissionSearchCacheKey(mission, normalizedQuery, workspaceNameById);
+  let localScore = cache.get(cacheKey);
+  if (localScore === undefined) {
+    localScore = missionSearchRelevanceScore(mission, normalizedQuery, workspaceNameById);
+    cache.set(cacheKey, localScore);
+    if (cache.size > 1000) {
+      const oldestKey = cache.keys().next().value;
+      if (oldestKey) {
+        cache.delete(oldestKey);
+      }
+    }
+  }
+  return localScore;
+}
+
+export function missionSearchRelevanceScore(
+  mission: Mission,
+  searchQuery: string,
+  workspaceNameById?: Record<string, string>
+): number {
+  const queryTerms = buildSearchQueryTerms(searchQuery);
+  if (!queryTerms) return 0;
+  const phraseQueries =
+    queryTerms.phraseQueries.length > 0
+      ? queryTerms.phraseQueries
+      : [queryTerms.normalizedCoreQuery || queryTerms.normalizedQuery];
+
+  const displayName = getMissionDisplayName(mission, workspaceNameById);
+  const title = getMissionCardTitle(mission) ?? '';
+  const shortDescription = mission.short_description?.trim() ?? '';
+  const backend = mission.backend?.trim() ?? '';
+  const status = mission.status ?? '';
+  const combined = `${displayName} ${getMissionSearchText(mission)}`;
+
+  const normalizedCombined = normalizeMetadataText(combined);
+  if (!normalizedCombined) return 0;
+
+  const fields = [
+    { weight: 5, tokens: tokenSetFromText(displayName) },
+    { weight: 8, tokens: tokenSetFromText(title) },
+    { weight: 7, tokens: tokenSetFromText(shortDescription) },
+    { weight: 3, tokens: tokenSetFromText(backend) },
+    { weight: 2, tokens: tokenSetFromText(status) },
+    { weight: 1, tokens: tokenSetFromText(combined) },
+  ];
+
+  let score = 0;
+  for (const group of queryTerms.queryGroups) {
+    let bestGroupScore = 0;
+    for (const field of fields) {
+      const strength = groupMatchStrengthForTokenSet(group, field.tokens);
+      if (strength > 0) {
+        bestGroupScore = Math.max(bestGroupScore, strength * field.weight);
+      }
+    }
+    if (bestGroupScore <= 0) {
+      return 0;
+    }
+    score += bestGroupScore;
+  }
+
+  const phraseBoostTargets = [
+    { text: normalizeMetadataText(title), boost: 14 },
+    { text: normalizeMetadataText(shortDescription), boost: 12 },
+    { text: normalizeMetadataText(displayName), boost: 8 },
+    { text: normalizeMetadataText(combined), boost: 5 },
+  ];
+  for (const target of phraseBoostTargets) {
+    if (target.text && phraseQueries.some((phraseQuery) => target.text.includes(phraseQuery))) {
+      score += target.boost;
+    }
+  }
+
+  return score;
+}
+
+function runningMissionSearchRelevanceScore(
+  runningInfo: RunningMissionInfo,
+  searchQuery: string
+): number {
+  const queryTerms = buildSearchQueryTerms(searchQuery);
+  if (!queryTerms) return 0;
+  const phraseQueries =
+    queryTerms.phraseQueries.length > 0
+      ? queryTerms.phraseQueries
+      : [queryTerms.normalizedCoreQuery || queryTerms.normalizedQuery];
+
+  const missionId = runningInfo.mission_id ?? '';
+  const state = runningInfo.state ?? '';
+  const shortName = getMissionShortName(missionId);
+  const combined = [missionId, shortName, state].filter(Boolean).join(' ');
+  const normalizedCombined = normalizeMetadataText(combined);
+  if (!normalizedCombined) return 0;
+
+  const fields = [
+    { weight: 6, tokens: tokenSetFromText(state) },
+    { weight: 5, tokens: tokenSetFromText(missionId) },
+    { weight: 4, tokens: tokenSetFromText(shortName) },
+    { weight: 2, tokens: tokenSetFromText(combined) },
+  ];
+
+  let score = 0;
+  for (const group of queryTerms.queryGroups) {
+    let bestGroupScore = 0;
+    for (const field of fields) {
+      const strength = groupMatchStrengthForTokenSet(group, field.tokens);
+      if (strength > 0) {
+        bestGroupScore = Math.max(bestGroupScore, strength * field.weight);
+      }
+    }
+    if (bestGroupScore <= 0) return 0;
+    score += bestGroupScore;
+  }
+
+  const normalizedState = normalizeMetadataText(state);
+  if (normalizedState && phraseQueries.some((phraseQuery) => normalizedState.includes(phraseQuery))) {
+    score += 4;
+  }
+  if (phraseQueries.some((phraseQuery) => normalizedCombined.includes(phraseQuery))) {
+    score += 6;
+  }
+
+  return score;
+}
+
+export function missionMatchesSearchQuery(
+  mission: Mission,
+  searchQuery: string,
+  workspaceNameById?: Record<string, string>
+): boolean {
+  if (!normalizeMetadataText(searchQuery)) return true;
+  return missionSearchRelevanceScore(mission, searchQuery, workspaceNameById) > 0;
 }
 
 export function MissionSwitcher({
@@ -60,14 +576,28 @@ export function MissionSwitcher({
   workspaceNameById,
   onSelectMission,
   onCancelMission,
+  onResumeMission,
+  onOpenFailingToolCall,
+  onFollowUpMission,
   onRefresh,
 }: MissionSwitcherProps) {
   const dialogRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const focusTimeoutRef = useRef<number | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [loadingMissionId, setLoadingMissionId] = useState<string | null>(null);
+  const [serverScoreByMissionId, setServerScoreByMissionId] = useState<Map<string, number> | null>(
+    null
+  );
+  const [serverSearchLoading, setServerSearchLoading] = useState(false);
+  const searchScoreCacheRef = useRef<Map<string, number>>(new Map());
+  const latestSearchRequestIdRef = useRef(0);
+  const normalizedSearchQuery = useMemo(
+    () => normalizeMetadataText(searchQuery),
+    [searchQuery]
+  );
 
   // Handle mission selection with loading state
   const handleSelect = useCallback(async (missionId: string) => {
@@ -133,17 +663,79 @@ export function MissionSwitcher({
     return items;
   }, [missions, currentMissionId, runningMissions, runningMissionIds, recentMissions]);
 
+  useEffect(() => {
+    if (!open) return;
+    if (!normalizedSearchQuery) {
+      setServerScoreByMissionId(null);
+      setServerSearchLoading(false);
+      return;
+    }
+
+    const requestId = latestSearchRequestIdRef.current + 1;
+    latestSearchRequestIdRef.current = requestId;
+    let cancelled = false;
+    const debounce = window.setTimeout(() => {
+      if (cancelled || latestSearchRequestIdRef.current !== requestId) return;
+      setServerSearchLoading(true);
+      void searchMissions(normalizedSearchQuery, { limit: 100 })
+        .then((results) => {
+          if (cancelled || latestSearchRequestIdRef.current !== requestId) return;
+          setServerScoreByMissionId(mapServerMissionSearchScores(results));
+        })
+        .catch((error) => {
+          if (cancelled || latestSearchRequestIdRef.current !== requestId) return;
+          console.warn('Mission search endpoint unavailable, falling back to local scoring:', error);
+          setServerScoreByMissionId(null);
+        })
+        .finally(() => {
+          if (cancelled || latestSearchRequestIdRef.current !== requestId) return;
+          setServerSearchLoading(false);
+        });
+    }, 120);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(debounce);
+    };
+  }, [open, normalizedSearchQuery]);
+
   // Filter items by search query
   const filteredItems = useMemo(() => {
-    if (!searchQuery.trim()) return allItems;
-    const query = searchQuery.toLowerCase();
-    return allItems.filter((item) => {
-      if (!item.mission) return false;
-      const name = getMissionDisplayName(item.mission, workspaceNameById).toLowerCase();
-      const desc = getMissionDescription(item.mission).toLowerCase();
-      return name.includes(query) || desc.includes(query);
+    if (!normalizedSearchQuery) return allItems;
+
+    const cache = searchScoreCacheRef.current;
+    const scored = allItems.flatMap((item) => {
+      if (!item.mission) {
+        if (!item.runningInfo) {
+          return [];
+        }
+        // Always include running missions without a full Mission record so they
+        // remain visible during search even when we lack metadata to score.
+        const runningScore = runningMissionSearchRelevanceScore(item.runningInfo, normalizedSearchQuery);
+        return [{ item, score: Math.max(runningScore, 0.01) }];
+      }
+      const score = getMissionSearchScore(
+        item.mission,
+        normalizedSearchQuery,
+        cache,
+        workspaceNameById,
+        serverScoreByMissionId
+      );
+      if (score <= 0) return [];
+      return [{ item, score }];
     });
-  }, [allItems, searchQuery, workspaceNameById]);
+    scored.sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      const aUpdatedAt = a.item.mission?.updated_at ?? '';
+      const bUpdatedAt = b.item.mission?.updated_at ?? '';
+      return bUpdatedAt.localeCompare(aUpdatedAt);
+    });
+    return scored.map(({ item }) => item);
+  }, [allItems, normalizedSearchQuery, workspaceNameById, serverScoreByMissionId]);
+
+  useEffect(() => {
+    searchScoreCacheRef.current.clear();
+  }, [missions, workspaceNameById]);
 
   // Reset state on open/close
   useEffect(() => {
@@ -152,16 +744,39 @@ export function MissionSwitcher({
       setSelectedIndex(0);
       setLoadingMissionId(null);
       // Focus input after animation
-      setTimeout(() => inputRef.current?.focus(), 50);
+      if (focusTimeoutRef.current !== null) {
+        window.clearTimeout(focusTimeoutRef.current);
+      }
+      focusTimeoutRef.current = window.setTimeout(() => {
+        inputRef.current?.focus();
+        focusTimeoutRef.current = null;
+      }, 50);
       // Refresh missions list
       onRefresh?.();
+    } else if (focusTimeoutRef.current !== null) {
+      window.clearTimeout(focusTimeoutRef.current);
+      focusTimeoutRef.current = null;
     }
+    return () => {
+      if (focusTimeoutRef.current !== null) {
+        window.clearTimeout(focusTimeoutRef.current);
+        focusTimeoutRef.current = null;
+      }
+    };
   }, [open, onRefresh]);
 
   // Reset selected index when filter changes
   useEffect(() => {
     setSelectedIndex(0);
   }, [searchQuery]);
+
+  // Keep selected index in bounds when async rescoring changes list size.
+  useEffect(() => {
+    setSelectedIndex((prev) => {
+      if (filteredItems.length <= 0) return 0;
+      return Math.min(prev, filteredItems.length - 1);
+    });
+  }, [filteredItems.length]);
 
   // Handle keyboard navigation
   useEffect(() => {
@@ -230,8 +845,6 @@ export function MissionSwitcher({
 
   if (!open) return null;
 
-  const hasRunning = runningMissions.length > 0;
-  const hasRecent = recentMissions.length > 0;
   const hasCurrent =
     currentMissionId && !runningMissionIds.has(currentMissionId);
 
@@ -256,6 +869,9 @@ export function MissionSwitcher({
             placeholder="Search missions..."
             className="flex-1 bg-transparent text-sm text-white placeholder:text-white/40 focus:outline-none"
           />
+          {serverSearchLoading && searchQuery.trim() ? (
+            <Loader2 className="h-3.5 w-3.5 text-white/40 animate-spin shrink-0" />
+          ) : null}
           <div className="flex items-center gap-1 text-[10px] text-white/30">
             <kbd className="px-1.5 py-0.5 rounded bg-white/[0.06] font-mono">
               esc
@@ -273,7 +889,7 @@ export function MissionSwitcher({
           ) : (
             <>
               {/* Current mission */}
-              {hasCurrent && !searchQuery && (
+              {hasCurrent && !normalizedSearchQuery && (
                 <div className="px-3 pt-1 pb-2">
                   <span className="text-[10px] font-medium uppercase tracking-wider text-white/30">
                     Current
@@ -283,13 +899,13 @@ export function MissionSwitcher({
               {filteredItems.map((item, index) => {
                 // Show section headers only when not searching
                 const showRunningHeader =
-                  !searchQuery &&
+                  !normalizedSearchQuery &&
                   item.type === 'running' &&
                   (index === 0 ||
                     (index === 1 && hasCurrent) ||
                     filteredItems[index - 1]?.type !== 'running');
                 const showRecentHeader =
-                  !searchQuery &&
+                  !normalizedSearchQuery &&
                   item.type === 'recent' &&
                   filteredItems[index - 1]?.type !== 'recent';
 
@@ -298,6 +914,11 @@ export function MissionSwitcher({
                 const isViewing = item.id === viewingMissionId;
                 const isRunning = item.type === 'running';
                 const runningInfo = item.runningInfo;
+                const missionQuickActions = mission
+                  ? getMissionQuickActions(mission, isRunning)
+                  : isRunning
+                    ? getRunningMissionQuickActions()
+                    : [];
 
                 const stallInfo =
                   isRunning && runningInfo?.health?.status === 'stalled'
@@ -306,6 +927,10 @@ export function MissionSwitcher({
                 const isStalled = Boolean(stallInfo);
                 const isSeverlyStalled = stallInfo?.severity === 'severe';
                 const isLoading = loadingMissionId === item.id;
+                const cardTitle = mission ? getMissionCardTitle(mission) : null;
+                const cardDescription = mission
+                  ? getMissionCardDescription(mission, cardTitle)
+                  : null;
 
                 return (
                   <div key={item.id}>
@@ -329,10 +954,6 @@ export function MissionSwitcher({
                       onClick={(e) => {
                         e.preventDefault();
                         handleSelect(item.id);
-                      }}
-                      onContextMenu={(e) => {
-                        // Allow default right-click behavior for "Open in new tab"
-                        // Don't prevent default - let browser handle right-click menu
                       }}
                       className={cn(
                         'group flex items-center gap-3 px-3 py-2 mx-2 rounded-lg cursor-pointer transition-colors no-underline',
@@ -376,10 +997,19 @@ export function MissionSwitcher({
                             </span>
                           )}
                         </div>
-                        {mission && getMissionDescription(mission) && (
-                          <p className="text-xs text-white/40 truncate mt-0.5">
-                            {getMissionDescription(mission)}
-                          </p>
+                        {mission && (
+                          <>
+                            {cardTitle && (
+                              <p className="text-xs text-white/55 truncate mt-0.5">
+                                {cardTitle}
+                              </p>
+                            )}
+                            {cardDescription && (
+                              <p className="text-[11px] text-white/40 truncate">
+                                {cardDescription}
+                              </p>
+                            )}
+                          </>
                         )}
                       </div>
 
@@ -390,7 +1020,7 @@ export function MissionSwitcher({
                           : isRunning
                           ? runningInfo?.state || 'running'
                           : mission
-                          ? STATUS_LABELS[mission.status]
+                          ? `${getMissionStatusLabel(mission)} · ${getMissionBackendLabel(mission)}`
                           : ''}
                       </span>
 
@@ -403,6 +1033,7 @@ export function MissionSwitcher({
                       {isRunning && !isLoading && (
                         <button
                           onClick={(e) => {
+                            e.preventDefault();
                             e.stopPropagation();
                             onCancelMission(item.id);
                           }}
@@ -412,6 +1043,42 @@ export function MissionSwitcher({
                           <XCircle className="h-4 w-4" />
                         </button>
                       )}
+                      {missionQuickActions
+                        .filter((action) =>
+                          action.action === 'resume'
+                            ? Boolean(onResumeMission)
+                            : action.action === 'open_failure'
+                              ? Boolean(onOpenFailingToolCall)
+                              : Boolean(onFollowUpMission)
+                        )
+                        .map((action) => (
+                          <button
+                            key={`${item.id}-${action.action}`}
+                            onClick={(e) => {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              if (action.action === 'resume') {
+                                void onResumeMission?.(item.id);
+                              } else if (action.action === 'open_failure') {
+                                void onOpenFailingToolCall?.(item.id);
+                              } else {
+                                void onFollowUpMission?.(item.id);
+                              }
+                              onClose();
+                            }}
+                            className="px-1.5 py-0.5 rounded opacity-0 group-hover:opacity-100 hover:bg-white/[0.08] text-[10px] text-white/40 hover:text-emerald-300 transition-all shrink-0 inline-flex items-center gap-1"
+                            title={action.title}
+                          >
+                            {action.action === 'resume' ? (
+                              <RotateCcw className="h-3 w-3" />
+                            ) : action.action === 'open_failure' ? (
+                              <AlertTriangle className="h-3 w-3" />
+                            ) : (
+                              <MessageSquarePlus className="h-3 w-3" />
+                            )}
+                            {action.label}
+                          </button>
+                        ))}
                     </a>
                   </div>
                 );

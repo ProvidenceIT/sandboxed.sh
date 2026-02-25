@@ -10,6 +10,9 @@ import {
   getRunningMissions,
   loadMission,
   cancelMission,
+  resumeMission,
+  createMission,
+  getMission,
   type Mission,
   type RunningMissionInfo,
 } from '@/lib/api';
@@ -49,7 +52,7 @@ export function MissionSwitcherProvider({ children }: { children: React.ReactNod
   );
 
   // SWR: fetch running missions
-  const { data: runningMissions = [] } = useSWR<RunningMissionInfo[]>(
+  const { data: runningMissions = [], mutate: mutateRunningMissions } = useSWR<RunningMissionInfo[]>(
     'global-running-missions',
     getRunningMissions,
     {
@@ -86,15 +89,53 @@ export function MissionSwitcherProvider({ children }: { children: React.ReactNod
     try {
       await cancelMission(missionId);
       toast.success('Mission cancelled');
-      mutateMissions();
+      await Promise.all([mutateMissions(), mutateRunningMissions()]);
     } catch {
       toast.error('Failed to cancel mission');
     }
-  }, [mutateMissions]);
+  }, [mutateMissions, mutateRunningMissions]);
 
   const handleRefresh = useCallback(() => {
     mutateMissions();
   }, [mutateMissions]);
+
+  const handleResumeMission = useCallback(async (missionId: string) => {
+    try {
+      await resumeMission(missionId);
+      await Promise.all([mutateMissions(), mutateRunningMissions()]);
+      toast.success('Mission resumed');
+      router.push(`/control?mission=${missionId}`);
+    } catch {
+      toast.error('Failed to resume mission');
+    }
+  }, [mutateMissions, mutateRunningMissions, router]);
+
+  const handleOpenFailingToolCall = useCallback(async (missionId: string) => {
+    router.push(`/control?mission=${missionId}&focus=failure`);
+  }, [router]);
+
+  const handleFollowUpMission = useCallback(async (missionId: string) => {
+    try {
+      const sourceMission = missions.find((mission) => mission.id === missionId) ?? (await getMission(missionId));
+      if (!sourceMission) {
+        toast.error('Source mission not found');
+        return;
+      }
+
+      const followUpMission = await createMission({
+        workspaceId: sourceMission.workspace_id,
+        agent: sourceMission.agent,
+        modelOverride: sourceMission.model_override,
+        modelEffort: sourceMission.model_effort,
+        backend: sourceMission.backend,
+      });
+      await Promise.all([mutateMissions(), mutateRunningMissions()]);
+      toast.success('Follow-up mission created');
+      router.push(`/control?mission=${followUpMission.id}`);
+    } catch {
+      toast.error('Failed to create follow-up mission');
+    }
+  }, [missions, mutateMissions, mutateRunningMissions, router]);
 
   const contextValue = useMemo(() => ({
     open: () => setIsOpen(true),
@@ -116,6 +157,9 @@ export function MissionSwitcherProvider({ children }: { children: React.ReactNod
           viewingMissionId={null}
           onSelectMission={handleSelectMission}
           onCancelMission={handleCancelMission}
+          onResumeMission={handleResumeMission}
+          onOpenFailingToolCall={handleOpenFailingToolCall}
+          onFollowUpMission={handleFollowUpMission}
           onRefresh={handleRefresh}
         />
       )}

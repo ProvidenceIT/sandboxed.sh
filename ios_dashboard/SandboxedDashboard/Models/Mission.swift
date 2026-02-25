@@ -73,13 +73,19 @@ struct Mission: Codable, Identifiable, Hashable {
     let id: String
     var status: MissionStatus
     var title: String?
+    var shortDescription: String?
+    var metadataUpdatedAt: String?
+    var metadataSource: String?
+    var metadataModel: String?
+    var metadataVersion: String?
     let workspaceId: String?
     let workspaceName: String?
     let agent: String?
+    let modelOverride: String?
     let backend: String?
     let history: [MissionHistoryEntry]
     let createdAt: String
-    let updatedAt: String
+    var updatedAt: String
     let interruptedAt: String?
     let resumable: Bool
 
@@ -93,8 +99,14 @@ struct Mission: Codable, Identifiable, Hashable {
 
     enum CodingKeys: String, CodingKey {
         case id, status, title, history, resumable, agent, backend
+        case shortDescription = "short_description"
+        case metadataUpdatedAt = "metadata_updated_at"
+        case metadataSource = "metadata_source"
+        case metadataModel = "metadata_model"
+        case metadataVersion = "metadata_version"
         case workspaceId = "workspace_id"
         case workspaceName = "workspace_name"
+        case modelOverride = "model_override"
         case createdAt = "created_at"
         case updatedAt = "updated_at"
         case interruptedAt = "interrupted_at"
@@ -105,9 +117,15 @@ struct Mission: Codable, Identifiable, Hashable {
         id = try container.decode(String.self, forKey: .id)
         status = try container.decode(MissionStatus.self, forKey: .status)
         title = try container.decodeIfPresent(String.self, forKey: .title)
+        shortDescription = try container.decodeIfPresent(String.self, forKey: .shortDescription)
+        metadataUpdatedAt = try container.decodeIfPresent(String.self, forKey: .metadataUpdatedAt)
+        metadataSource = try container.decodeIfPresent(String.self, forKey: .metadataSource)
+        metadataModel = try container.decodeIfPresent(String.self, forKey: .metadataModel)
+        metadataVersion = try container.decodeIfPresent(String.self, forKey: .metadataVersion)
         workspaceId = try container.decodeIfPresent(String.self, forKey: .workspaceId)
         workspaceName = try container.decodeIfPresent(String.self, forKey: .workspaceName)
         agent = try container.decodeIfPresent(String.self, forKey: .agent)
+        modelOverride = try container.decodeIfPresent(String.self, forKey: .modelOverride)
         backend = try container.decodeIfPresent(String.self, forKey: .backend)
         history = try container.decode([MissionHistoryEntry].self, forKey: .history)
         createdAt = try container.decode(String.self, forKey: .createdAt)
@@ -121,6 +139,11 @@ struct Mission: Codable, Identifiable, Hashable {
             return title.count > 60 ? String(title.prefix(60)) + "..." : title
         }
         return "Untitled Mission"
+    }
+
+    var displayShortDescription: String? {
+        guard let shortDescription, !shortDescription.isEmpty else { return nil }
+        return shortDescription.count > 100 ? String(shortDescription.prefix(100)) + "..." : shortDescription
     }
     
     var updatedDate: Date? {
@@ -253,6 +276,34 @@ struct RunningMissionInfo: Codable, Identifiable {
             return title.count > 24 ? String(title.prefix(24)) + "…" : title
         }
         return shortId
+    }
+}
+
+struct MissionMomentSearchResult: Codable {
+    let mission: Mission
+    let entryIndex: Int
+    let role: String
+    let snippet: String
+    let rationale: String
+    let relevanceScore: Double
+
+    enum CodingKeys: String, CodingKey {
+        case mission
+        case entryIndex = "entry_index"
+        case role
+        case snippet
+        case rationale
+        case relevanceScore = "relevance_score"
+    }
+}
+
+struct MissionSearchResult: Codable {
+    let mission: Mission
+    let relevanceScore: Double
+
+    enum CodingKeys: String, CodingKey {
+        case mission
+        case relevanceScore = "relevance_score"
     }
 }
 

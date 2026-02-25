@@ -7,13 +7,15 @@
 //! - supports frontend/interactive tools by accepting tool results
 //! - supports persistent missions (goal-oriented sessions)
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::convert::Infallible;
+use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use axum::{
     body::Bytes,
-    extract::{Extension, Path, State},
+    extract::{Extension, Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::sse::{Event, Sse},
     Json,
@@ -143,16 +145,40 @@ fn activity_label_from_tool_call(tool_name: &str, args: &serde_json::Value) -> S
 /// Extract a concise title from the assistant's first response.
 /// Returns the first substantive line, cleaned of markdown formatting.
 fn extract_title_from_assistant(content: &str) -> Option<String> {
-    // Find the first non-trivial line that isn't a code fence
-    let first_line = content
-        .lines()
-        .map(|l| l.trim())
-        .find(|l| l.len() > 5 && !l.starts_with("```"))?;
+    let lines: Vec<&str> = content.lines().collect();
+    let mut inside_fenced_block: Option<char> = None;
+    let mut first_line: Option<&str> = None;
+    for idx in 0..lines.len() {
+        let line = lines[idx].trim();
+        if let Some(fence_char) = markdown_fence_char(line) {
+            if inside_fenced_block == Some(fence_char) {
+                inside_fenced_block = None;
+                continue;
+            }
+            if inside_fenced_block.is_none() {
+                let has_closing_fence = lines[(idx + 1)..]
+                    .iter()
+                    .any(|candidate| markdown_fence_char(candidate.trim()) == Some(fence_char));
+                if has_closing_fence {
+                    inside_fenced_block = Some(fence_char);
+                }
+                continue;
+            }
+        }
+        if inside_fenced_block.is_none() && !line.is_empty() {
+            first_line = Some(line);
+            break;
+        }
+    }
+    let first_line = first_line?;
 
     // Strip markdown prefixes
     let cleaned = first_line.trim_start_matches(['#', '*', '-', ' ']).trim();
 
     if cleaned.len() < 5 {
+        return None;
+    }
+    if is_unsuccessful_assistant_summary(cleaned) {
         return None;
     }
 
@@ -162,6 +188,1623 @@ fn extract_title_from_assistant(content: &str) -> Option<String> {
         Some(format!("{}...", &cleaned[..safe_end]))
     } else {
         Some(cleaned.to_string())
+    }
+}
+
+fn is_unsuccessful_assistant_summary(text: &str) -> bool {
+    let normalized = normalize_metadata_text(text);
+    if normalized.is_empty() {
+        return true;
+    }
+    normalized.starts_with("error")
+        || normalized.starts_with("failed")
+        || normalized.starts_with("exception")
+        || normalized.starts_with("traceback")
+        || normalized.starts_with("i am sorry")
+        || normalized.starts_with("im sorry")
+        || normalized.starts_with("sorry")
+}
+
+/// Extract a concise short description from the first user or assistant message.
+fn extract_short_description_from_history(
+    history: &[(String, String)],
+    max_len: usize,
+) -> Option<String> {
+    history
+        .iter()
+        .find(|(role, _)| role == "user")
+        .and_then(|(_, content)| extract_short_description_from_content(content, max_len))
+        .or_else(|| {
+            history
+                .iter()
+                .find(|(role, _)| role == "assistant")
+                .and_then(|(_, content)| extract_short_description_from_content(content, max_len))
+        })
+}
+
+fn extract_short_description_from_recent_role(
+    history: &[(String, String)],
+    role: &str,
+    max_len: usize,
+) -> Option<String> {
+    history
+        .iter()
+        .rev()
+        .filter(|(entry_role, _)| entry_role == role)
+        .find_map(|(_, content)| extract_short_description_from_content(content, max_len))
+}
+
+fn extract_short_description_from_recent_history(
+    history: &[(String, String)],
+    max_len: usize,
+) -> Option<String> {
+    extract_short_description_from_recent_role(history, "assistant", max_len)
+        .or_else(|| extract_short_description_from_recent_role(history, "user", max_len))
+}
+
+fn extract_short_description_from_first_successful_assistant(
+    history: &[(String, String)],
+    max_len: usize,
+) -> Option<String> {
+    history
+        .iter()
+        .filter(|(entry_role, _)| entry_role == "assistant")
+        .find_map(|(_, content)| {
+            extract_short_description_from_content(content, max_len)
+                .filter(|candidate| !is_unsuccessful_assistant_summary(candidate))
+        })
+}
+
+fn assistant_reply_is_successful(content: &str) -> bool {
+    extract_short_description_from_content(content, 160)
+        .map(|candidate| !is_unsuccessful_assistant_summary(&candidate))
+        .unwrap_or(false)
+}
+
+fn extract_short_description_from_content(content: &str, max_len: usize) -> Option<String> {
+    let lines: Vec<&str> = content.lines().collect();
+    let mut inside_fenced_block: Option<char> = None;
+    let mut first_line: Option<&str> = None;
+    for idx in 0..lines.len() {
+        let line = lines[idx].trim();
+        if let Some(fence_char) = markdown_fence_char(line) {
+            if inside_fenced_block == Some(fence_char) {
+                inside_fenced_block = None;
+                continue;
+            }
+            if inside_fenced_block.is_none() {
+                let has_closing_fence = lines[(idx + 1)..]
+                    .iter()
+                    .any(|candidate| markdown_fence_char(candidate.trim()) == Some(fence_char));
+                if has_closing_fence {
+                    inside_fenced_block = Some(fence_char);
+                }
+                continue;
+            }
+        }
+        if inside_fenced_block.is_none() && !line.is_empty() {
+            first_line = Some(line);
+            break;
+        }
+    }
+    let first_line = first_line?;
+
+    let cleaned = strip_markdown_prefixes(first_line);
+    let collapsed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        return None;
+    }
+
+    let max_len = collapsed.len().min(max_len);
+    let safe_end = safe_truncate_index(&collapsed, max_len);
+    if safe_end < collapsed.len() {
+        Some(format!("{}...", &collapsed[..safe_end]))
+    } else {
+        Some(collapsed)
+    }
+}
+
+fn strip_markdown_prefixes(line: &str) -> &str {
+    let mut cleaned = line.trim();
+    loop {
+        let next = if let Some(stripped) = cleaned.strip_prefix('#') {
+            Some(stripped.trim_start())
+        } else if let Some(stripped) = cleaned.strip_prefix('>') {
+            Some(stripped.trim_start())
+        } else if let Some(stripped) = cleaned.strip_prefix("- ") {
+            Some(stripped.trim_start())
+        } else if let Some(stripped) = cleaned.strip_prefix("* ") {
+            Some(stripped.trim_start())
+        } else if let Some(stripped) = cleaned.strip_prefix("+ ") {
+            Some(stripped.trim_start())
+        } else {
+            strip_ordered_list_prefix(cleaned)
+        };
+
+        match next {
+            Some(candidate) if candidate != cleaned => cleaned = candidate,
+            _ => break,
+        }
+    }
+    cleaned
+}
+
+fn strip_ordered_list_prefix(line: &str) -> Option<&str> {
+    let mut idx = 0;
+    for ch in line.chars() {
+        if ch.is_ascii_digit() {
+            idx += ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    if idx == 0 || idx >= line.len() {
+        return None;
+    }
+
+    let marker = line[idx..].chars().next()?;
+    if marker != '.' && marker != ')' {
+        return None;
+    }
+    let marker_end = idx + marker.len_utf8();
+    let suffix = line.get(marker_end..)?;
+    if suffix.is_empty() {
+        return None;
+    }
+    if !suffix.chars().next().is_some_and(char::is_whitespace) {
+        return None;
+    }
+    Some(suffix.trim_start())
+}
+
+fn markdown_fence_char(line: &str) -> Option<char> {
+    if line.starts_with("```") {
+        Some('`')
+    } else if line.starts_with("~~~") {
+        Some('~')
+    } else {
+        None
+    }
+}
+
+fn normalize_metadata_text(text: &str) -> String {
+    text.to_lowercase()
+        .chars()
+        .map(|ch| {
+            if ch.is_alphanumeric() || ch.is_whitespace() {
+                ch
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+const METADATA_SOURCE_BACKEND_HEURISTIC: &str = "backend_heuristic";
+const METADATA_SOURCE_USER: &str = "user";
+const METADATA_VERSION_V1: &str = "v1";
+static MISSION_TITLE_UPDATE_LOCK: std::sync::LazyLock<Mutex<()>> =
+    std::sync::LazyLock::new(|| Mutex::new(()));
+struct MetadataRefreshTaskEntry {
+    handle: tokio::task::JoinHandle<()>,
+    force_refresh: bool,
+    task_id: u64,
+}
+
+struct MetadataRefreshTaskRegistration {
+    superseded: Option<tokio::task::JoinHandle<()>>,
+}
+
+static MISSION_METADATA_REFRESH_TASKS: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<Uuid, MetadataRefreshTaskEntry>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+static MISSION_METADATA_REFRESH_TASK_ID: AtomicU64 = AtomicU64::new(1);
+static MISSION_METADATA_REFRESH_BASELINES: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<Uuid, usize>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+fn register_metadata_refresh_task(
+    tasks: &mut HashMap<Uuid, MetadataRefreshTaskEntry>,
+    mission_id: Uuid,
+    force_refresh: bool,
+    task_id: u64,
+    handle: tokio::task::JoinHandle<()>,
+) -> MetadataRefreshTaskRegistration {
+    tasks.retain(|_, existing| !existing.handle.is_finished());
+
+    if let Some(existing) = tasks.get(&mission_id) {
+        if existing.force_refresh && !force_refresh {
+            return MetadataRefreshTaskRegistration {
+                superseded: Some(handle),
+            };
+        }
+    }
+
+    let replaced = tasks.insert(
+        mission_id,
+        MetadataRefreshTaskEntry {
+            handle,
+            force_refresh,
+            task_id,
+        },
+    );
+    MetadataRefreshTaskRegistration {
+        superseded: replaced.map(|entry| entry.handle),
+    }
+}
+
+fn should_skip_metadata_refresh_schedule(
+    tasks: &mut HashMap<Uuid, MetadataRefreshTaskEntry>,
+    mission_id: Uuid,
+    force_refresh: bool,
+) -> bool {
+    tasks.retain(|_, existing| !existing.handle.is_finished());
+    matches!(
+        tasks.get(&mission_id),
+        Some(existing) if existing.force_refresh && !force_refresh
+    )
+}
+
+fn complete_metadata_refresh_task(
+    tasks: &mut HashMap<Uuid, MetadataRefreshTaskEntry>,
+    mission_id: Uuid,
+    task_id: u64,
+) {
+    if tasks
+        .get(&mission_id)
+        .map(|entry| entry.task_id == task_id)
+        .unwrap_or(false)
+    {
+        tasks.remove(&mission_id);
+    }
+}
+
+fn clear_mission_metadata_refresh_state(mission_id: Uuid) {
+    let stale_task = {
+        let mut tasks = MISSION_METADATA_REFRESH_TASKS
+            .lock()
+            .expect("metadata refresh task registry lock poisoned");
+        tasks.remove(&mission_id)
+    };
+    if let Some(stale_task) = stale_task {
+        stale_task.handle.abort();
+    }
+
+    let mut baselines = MISSION_METADATA_REFRESH_BASELINES
+        .lock()
+        .expect("metadata refresh baseline lock poisoned");
+    baselines.remove(&mission_id);
+}
+
+async fn clear_stale_mission_metadata_refresh_state(mission_store: &Arc<dyn MissionStore>) {
+    let tracked_ids: std::collections::HashSet<Uuid> = {
+        let tasks = MISSION_METADATA_REFRESH_TASKS
+            .lock()
+            .expect("metadata refresh task registry lock poisoned");
+        let baselines = MISSION_METADATA_REFRESH_BASELINES
+            .lock()
+            .expect("metadata refresh baseline lock poisoned");
+
+        tasks.keys().chain(baselines.keys()).copied().collect()
+    };
+
+    for mission_id in tracked_ids {
+        match mission_store.get_mission(mission_id).await {
+            Ok(Some(_)) => {}
+            Ok(None) => clear_mission_metadata_refresh_state(mission_id),
+            Err(err) => tracing::warn!(
+                "Failed to verify mission {} while clearing stale metadata refresh state: {}",
+                mission_id,
+                err
+            ),
+        }
+    }
+}
+
+fn normalize_raw_title_for_dedupe(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+fn strip_numeric_title_suffix(title: &str) -> &str {
+    let trimmed = title.trim();
+    if !trimmed.ends_with(')') {
+        return trimmed;
+    }
+    let Some(open_idx) = trimmed.rfind(" (") else {
+        return trimmed;
+    };
+    let suffix = &trimmed[(open_idx + 2)..(trimmed.len() - 1)];
+    if suffix.is_empty() || !suffix.chars().all(|c| c.is_ascii_digit()) {
+        return trimmed;
+    }
+    trimmed[..open_idx].trim_end()
+}
+
+fn canonical_title_key(title: &str) -> String {
+    normalize_metadata_text(strip_numeric_title_suffix(title))
+}
+
+fn title_similarity_token(token: &str) -> String {
+    if token.len() > 4 && token.ends_with("ies") {
+        return format!("{}y", &token[..token.len() - 3]);
+    }
+    if token.len() > 4 && token.ends_with('s') && !token.ends_with("ss") {
+        return token[..token.len() - 1].to_string();
+    }
+    token.to_string()
+}
+
+fn title_similarity_tokens(title: &str) -> Vec<String> {
+    normalize_metadata_text(strip_numeric_title_suffix(title))
+        .split_whitespace()
+        .filter(|token| !token.is_empty() && !is_search_stopword(token))
+        .map(title_similarity_token)
+        .filter(|token| !token.is_empty())
+        .collect()
+}
+
+fn token_similarity_strength(lhs: &str, rhs: &str) -> f64 {
+    search_token_match_strength(lhs, rhs).max(search_token_match_strength(rhs, lhs))
+}
+
+fn title_near_duplicate_score(lhs: &str, rhs: &str) -> f64 {
+    let lhs_tokens = title_similarity_tokens(lhs);
+    let rhs_tokens = title_similarity_tokens(rhs);
+    if lhs_tokens.is_empty() || rhs_tokens.is_empty() {
+        return 0.0;
+    }
+
+    let lhs_best_avg = lhs_tokens
+        .iter()
+        .map(|lhs_token| {
+            rhs_tokens
+                .iter()
+                .map(|rhs_token| token_similarity_strength(lhs_token, rhs_token))
+                .fold(0.0_f64, f64::max)
+        })
+        .sum::<f64>()
+        / lhs_tokens.len() as f64;
+
+    let rhs_best_avg = rhs_tokens
+        .iter()
+        .map(|rhs_token| {
+            lhs_tokens
+                .iter()
+                .map(|lhs_token| token_similarity_strength(rhs_token, lhs_token))
+                .fold(0.0_f64, f64::max)
+        })
+        .sum::<f64>()
+        / rhs_tokens.len() as f64;
+
+    (lhs_best_avg + rhs_best_avg) / 2.0
+}
+
+fn is_near_duplicate_title(candidate: &str, existing: &str) -> bool {
+    const NEAR_DUPLICATE_THRESHOLD: f64 = 0.9;
+    title_near_duplicate_score(candidate, existing) >= NEAR_DUPLICATE_THRESHOLD
+}
+
+fn title_collides_with_existing(candidate: &str, existing: &str) -> bool {
+    let candidate_normalized = normalize_metadata_text(candidate);
+    let existing_normalized = normalize_metadata_text(existing);
+    if !candidate_normalized.is_empty() && candidate_normalized == existing_normalized {
+        return true;
+    }
+    is_near_duplicate_title(candidate, existing)
+}
+
+async fn load_recent_mission_titles(
+    mission_store: &Arc<dyn MissionStore>,
+    mission_id: Uuid,
+) -> Vec<String> {
+    const RECENT_TITLE_SCAN_PAGE_SIZE: usize = 200;
+    const RECENT_TITLE_SCAN_MAX: usize = 2_000;
+
+    let mut titles = Vec::new();
+    let mut offset = 0;
+
+    while offset < RECENT_TITLE_SCAN_MAX {
+        match mission_store
+            .list_missions(RECENT_TITLE_SCAN_PAGE_SIZE, offset)
+            .await
+        {
+            Ok(missions) => {
+                if missions.is_empty() {
+                    break;
+                }
+                let page_len = missions.len();
+                titles.extend(
+                    missions
+                        .into_iter()
+                        .filter(|mission| mission.id != mission_id)
+                        .filter_map(|mission| mission.title)
+                        .map(|title| title.trim().to_string())
+                        .filter(|title| !title.is_empty()),
+                );
+
+                if page_len < RECENT_TITLE_SCAN_PAGE_SIZE {
+                    break;
+                }
+                offset += RECENT_TITLE_SCAN_PAGE_SIZE;
+            }
+            Err(err) => {
+                tracing::warn!(
+                    "Failed to load recent mission titles for metadata generation: {err}"
+                );
+                break;
+            }
+        }
+    }
+
+    if offset >= RECENT_TITLE_SCAN_MAX {
+        tracing::warn!(
+            "Recent-title scan hit cap ({} missions); some older titles may be skipped",
+            RECENT_TITLE_SCAN_MAX
+        );
+    }
+
+    titles
+}
+
+fn derive_title_qualifier_from_text(base_title: &str, text: &str) -> Option<String> {
+    let base_tokens: HashSet<String> = normalize_metadata_text(base_title)
+        .split_whitespace()
+        .map(ToString::to_string)
+        .collect();
+    let qualifier_tokens: Vec<String> = normalize_metadata_text(text)
+        .split_whitespace()
+        .filter(|token| !base_tokens.contains(*token))
+        .filter(|token| !is_search_stopword(token))
+        .take(4)
+        .map(ToString::to_string)
+        .collect();
+
+    if qualifier_tokens.len() < 2 {
+        return None;
+    }
+    Some(qualifier_tokens.join(" "))
+}
+
+fn append_title_qualifier(base_title: &str, qualifier: &str) -> String {
+    let combined = format!("{} - {}", base_title.trim(), qualifier.trim());
+    let max_len = combined.len().min(100);
+    let safe_end = safe_truncate_index(&combined, max_len);
+    if safe_end < combined.len() {
+        format!("{}...", &combined[..safe_end])
+    } else {
+        combined
+    }
+}
+
+async fn diversify_generated_title_with_recent_context(
+    mission_store: &Arc<dyn MissionStore>,
+    mission_id: Uuid,
+    title_candidate: String,
+    history: &[(String, String)],
+    fallback_user_content: Option<&str>,
+) -> String {
+    let recent_titles = load_recent_mission_titles(mission_store, mission_id).await;
+    if recent_titles.is_empty()
+        || !recent_titles
+            .iter()
+            .any(|existing| title_collides_with_existing(&title_candidate, existing))
+    {
+        return title_candidate;
+    }
+
+    // Prefer user-origin context as negative prompt signal to diversify generic duplicates.
+    let mut qualifier_sources: Vec<&str> = Vec::new();
+    if let Some(user_content) = fallback_user_content {
+        qualifier_sources.push(user_content);
+    }
+    for (role, content) in history {
+        if role == "user" {
+            qualifier_sources.push(content);
+        }
+    }
+    for (role, content) in history {
+        if role == "assistant" {
+            qualifier_sources.push(content);
+        }
+    }
+
+    for source in qualifier_sources {
+        if let Some(qualifier) = derive_title_qualifier_from_text(&title_candidate, source) {
+            let diversified = append_title_qualifier(&title_candidate, &qualifier);
+            if !recent_titles
+                .iter()
+                .any(|existing| title_collides_with_existing(&diversified, existing))
+            {
+                return diversified;
+            }
+        }
+    }
+
+    title_candidate
+}
+
+fn has_significant_metadata_drift(existing: &str, candidate: &str) -> bool {
+    let existing_normalized = normalize_metadata_text(existing);
+    let candidate_normalized = normalize_metadata_text(candidate);
+
+    if existing_normalized.is_empty() {
+        return !candidate_normalized.is_empty();
+    }
+    if existing_normalized == candidate_normalized {
+        return false;
+    }
+    if existing_normalized.contains(&candidate_normalized)
+        || candidate_normalized.contains(&existing_normalized)
+    {
+        return false;
+    }
+
+    let existing_tokens: Vec<&str> = existing_normalized.split_whitespace().collect();
+    let candidate_tokens: Vec<&str> = candidate_normalized.split_whitespace().collect();
+    if existing_tokens.is_empty() || candidate_tokens.is_empty() {
+        return true;
+    }
+    let existing_set: HashSet<&str> = existing_tokens.iter().copied().collect();
+    let candidate_set: HashSet<&str> = candidate_tokens.iter().copied().collect();
+    let overlap = existing_set.intersection(&candidate_set).count();
+    let min_len = existing_set.len().min(candidate_set.len());
+    if min_len > 0 {
+        let overlap_ratio = overlap as f64 / min_len as f64;
+        if overlap_ratio >= 0.8 {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn mission_search_synonyms(token: &str) -> &'static [&'static str] {
+    match token {
+        "api" => &["endpoint", "http", "rest", "rpc"],
+        "auth" => &["login", "signin", "oauth", "credential", "credentials"],
+        "blocked" => &["stalled", "waiting"],
+        "bug" => &["issue", "error", "fix", "problem"],
+        "ci" => &["pipeline", "build", "integration", "tests"],
+        "crash" => &["panic", "exception", "failure"],
+        "db" => &["database", "sql", "sqlite", "postgres"],
+        "cd" => &["deploy", "release", "rollout", "ship"],
+        "deploy" => &["release", "rollout", "ship"],
+        "error" => &["bug", "issue", "failure"],
+        "failed" => &["error", "failure"],
+        "fix" => &["bug", "issue", "error", "repair"],
+        "issue" => &["bug", "error", "problem", "fix"],
+        "login" => &["auth", "signin", "oauth", "credentials"],
+        "perf" => &["performance", "slow", "latency", "optimize"],
+        "performance" => &["perf", "slow", "latency", "optimize"],
+        "release" => &["deploy", "rollout", "ship"],
+        "sid" => &["session", "id", "sessionid", "cookie", "token"],
+        "signin" => &["login", "auth", "oauth", "credentials"],
+        "slow" => &["performance", "latency", "timeout", "stall"],
+        "sso" => &["signin", "login", "auth", "oauth"],
+        "stalled" => &["blocked", "waiting", "timeout"],
+        "timeout" => &["slow", "latency", "stalled", "hang"],
+        "ui" => &["ux", "interface", "frontend"],
+        "ux" => &["ui", "interface", "frontend"],
+        _ => &[],
+    }
+}
+
+fn mission_search_phrase_expansions(token: &str) -> &'static [&'static str] {
+    match token {
+        "ci" => &["continuous integration"],
+        "cd" => &["continuous deployment"],
+        "sid" => &["session id"],
+        "sso" => &["single sign on"],
+        _ => &[],
+    }
+}
+
+fn expand_search_query_group(token: &str) -> Vec<String> {
+    let normalized = normalize_metadata_text(token);
+    if normalized.is_empty() {
+        return Vec::new();
+    }
+
+    let mut values = HashSet::new();
+    values.insert(normalized.clone());
+    for candidate in mission_search_synonyms(&normalized) {
+        let normalized_candidate = normalize_metadata_text(candidate);
+        if !normalized_candidate.is_empty() {
+            values.insert(normalized_candidate);
+        }
+    }
+
+    values.into_iter().collect()
+}
+
+fn search_token_match_strength(token: &str, candidate: &str) -> f64 {
+    if token == candidate {
+        return 1.0;
+    }
+
+    let ascii_candidate = candidate
+        .chars()
+        .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit());
+    let candidate_len = candidate.chars().count();
+    let token_len = token.chars().count();
+
+    if token.starts_with(candidate) && (!ascii_candidate || candidate_len >= 3) {
+        return 0.7;
+    }
+    if ascii_candidate
+        && token_len >= 5
+        && candidate.starts_with(token)
+        && candidate_len.saturating_sub(token_len) <= 2
+    {
+        return 0.65;
+    }
+    if candidate_len >= 4 && token.contains(candidate) {
+        return 0.45;
+    }
+    0.0
+}
+
+fn search_token_set(text: &str) -> HashSet<String> {
+    normalize_metadata_text(text)
+        .split_whitespace()
+        .filter(|token| !token.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn is_search_stopword(token: &str) -> bool {
+    matches!(
+        token,
+        "a" | "an"
+            | "and"
+            | "at"
+            | "did"
+            | "do"
+            | "does"
+            | "for"
+            | "from"
+            | "how"
+            | "i"
+            | "in"
+            | "is"
+            | "it"
+            | "me"
+            | "my"
+            | "of"
+            | "on"
+            | "or"
+            | "our"
+            | "please"
+            | "show"
+            | "that"
+            | "the"
+            | "this"
+            | "to"
+            | "us"
+            | "was"
+            | "we"
+            | "what"
+            | "when"
+            | "where"
+            | "which"
+            | "who"
+            | "why"
+            | "with"
+            | "you"
+            | "your"
+    )
+}
+
+#[derive(Debug, Clone)]
+struct SearchQueryTerms {
+    normalized_query: String,
+    normalized_core_query: String,
+    query_groups: Vec<Vec<String>>,
+    phrase_queries: Vec<String>,
+}
+
+fn build_search_query_terms(search_query: &str) -> Option<SearchQueryTerms> {
+    let normalized_query = normalize_metadata_text(search_query);
+    if normalized_query.is_empty() {
+        return None;
+    }
+
+    let query_tokens: Vec<&str> = normalized_query.split_whitespace().collect();
+    if query_tokens.is_empty() {
+        return None;
+    }
+
+    let mut filtered_tokens: Vec<&str> = query_tokens
+        .iter()
+        .copied()
+        .filter(|token| !is_search_stopword(token))
+        .collect();
+    if filtered_tokens.is_empty() {
+        filtered_tokens = query_tokens.clone();
+    }
+    let normalized_core_query = filtered_tokens.join(" ");
+
+    let query_groups: Vec<Vec<String>> = filtered_tokens
+        .iter()
+        .map(|token| expand_search_query_group(token))
+        .filter(|group| !group.is_empty())
+        .collect();
+    if query_groups.is_empty() {
+        return None;
+    }
+
+    let mut phrase_queries = Vec::new();
+    phrase_queries.push(normalized_core_query.clone());
+    for token in &filtered_tokens {
+        for phrase in mission_search_phrase_expansions(token) {
+            let normalized_phrase = normalize_metadata_text(phrase);
+            if !normalized_phrase.is_empty() {
+                phrase_queries.push(normalized_phrase);
+            }
+        }
+    }
+    phrase_queries.sort();
+    phrase_queries.dedup();
+
+    Some(SearchQueryTerms {
+        normalized_query,
+        normalized_core_query,
+        query_groups,
+        phrase_queries,
+    })
+}
+
+fn group_match_strength_for_token_set(group: &[String], token_set: &HashSet<String>) -> f64 {
+    let mut best = 0.0;
+    for candidate in group {
+        if candidate.is_empty() {
+            continue;
+        }
+        for token in token_set {
+            let strength = search_token_match_strength(token, candidate);
+            if strength > best {
+                best = strength;
+            }
+            if best >= 1.0 {
+                return best;
+            }
+        }
+    }
+    best
+}
+
+fn mission_search_relevance_score(
+    mission: &Mission,
+    search_query: &str,
+    workspace_label: Option<&str>,
+) -> f64 {
+    let Some(query_terms) = build_search_query_terms(search_query) else {
+        return 0.0;
+    };
+    let phrase_queries = if query_terms.phrase_queries.is_empty() {
+        vec![if query_terms.normalized_core_query.is_empty() {
+            query_terms.normalized_query.clone()
+        } else {
+            query_terms.normalized_core_query.clone()
+        }]
+    } else {
+        query_terms.phrase_queries.clone()
+    };
+
+    let title = mission.title.as_deref().unwrap_or("").trim();
+    let short_description = mission.short_description.as_deref().unwrap_or("").trim();
+    let backend = mission.backend.trim();
+    let status = mission.status.to_string();
+    let display_name = workspace_label.unwrap_or("");
+    let combined = format!(
+        "{} {} {} {} {}",
+        display_name, title, short_description, backend, status
+    );
+    let normalized_combined = normalize_metadata_text(&combined);
+    if normalized_combined.is_empty() {
+        return 0.0;
+    }
+
+    let fields = [
+        (5.0, search_token_set(display_name)),
+        (8.0, search_token_set(title)),
+        (7.0, search_token_set(short_description)),
+        (3.0, search_token_set(backend)),
+        (2.0, search_token_set(&status)),
+        (1.0, search_token_set(&combined)),
+    ];
+
+    let mut score = 0.0;
+    for group in &query_terms.query_groups {
+        let mut best_group_score: f64 = 0.0;
+        for (weight, token_set) in &fields {
+            let strength = group_match_strength_for_token_set(group, token_set);
+            if strength > 0.0 {
+                best_group_score = best_group_score.max(strength * weight);
+            }
+        }
+        if best_group_score <= 0.0 {
+            return 0.0;
+        }
+        score += best_group_score;
+    }
+
+    let phrase_boost_targets = [
+        (normalize_metadata_text(title), 14.0),
+        (normalize_metadata_text(short_description), 12.0),
+        (normalize_metadata_text(display_name), 8.0),
+        (normalize_metadata_text(&combined), 5.0),
+    ];
+    for (target, boost) in phrase_boost_targets {
+        if target.is_empty() {
+            continue;
+        }
+        if phrase_queries
+            .iter()
+            .any(|phrase_query| !phrase_query.is_empty() && target.contains(phrase_query))
+        {
+            score += boost;
+        }
+    }
+
+    score
+}
+
+#[derive(Debug, Clone)]
+struct MissionMomentMatch {
+    entry_index: usize,
+    role: String,
+    snippet: String,
+    rationale: String,
+    relevance_score: f64,
+}
+
+fn mission_moment_snippet(content: &str, max_chars: usize) -> String {
+    let collapsed = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        return String::new();
+    }
+    if collapsed.chars().count() <= max_chars {
+        return collapsed;
+    }
+    let mut result = String::new();
+    for ch in collapsed.chars().take(max_chars) {
+        result.push(ch);
+    }
+    result.push('…');
+    result
+}
+
+fn mission_moment_relevance_score(role: &str, content: &str, search_query: &str) -> f64 {
+    let Some(query_terms) = build_search_query_terms(search_query) else {
+        return 0.0;
+    };
+    let phrase_queries = if query_terms.phrase_queries.is_empty() {
+        vec![if query_terms.normalized_core_query.is_empty() {
+            query_terms.normalized_query.clone()
+        } else {
+            query_terms.normalized_core_query.clone()
+        }]
+    } else {
+        query_terms.phrase_queries.clone()
+    };
+    let normalized_content = normalize_metadata_text(content);
+    if normalized_content.is_empty() {
+        return 0.0;
+    }
+
+    let content_tokens = search_token_set(content);
+    let role_tokens = search_token_set(role);
+    let mut score = 0.0;
+    for group in &query_terms.query_groups {
+        let content_strength = group_match_strength_for_token_set(group, &content_tokens);
+        let role_strength = group_match_strength_for_token_set(group, &role_tokens);
+        let best = (content_strength * 8.0).max(role_strength * 1.5);
+        if best <= 0.0 {
+            return 0.0;
+        }
+        score += best;
+    }
+
+    if phrase_queries
+        .iter()
+        .any(|phrase_query| !phrase_query.is_empty() && normalized_content.contains(phrase_query))
+    {
+        score += 10.0;
+    }
+    score
+}
+
+fn mission_moment_rationale(role: &str, content: &str, search_query: &str) -> String {
+    let query_terms = match build_search_query_terms(search_query) {
+        Some(query_terms) => query_terms,
+        None => return format!("Keyword match in {} message", role),
+    };
+
+    let phrase_queries = if query_terms.phrase_queries.is_empty() {
+        vec![if query_terms.normalized_core_query.is_empty() {
+            query_terms.normalized_query.clone()
+        } else {
+            query_terms.normalized_core_query.clone()
+        }]
+    } else {
+        query_terms.phrase_queries.clone()
+    };
+
+    let normalized_content = normalize_metadata_text(content);
+    if phrase_queries
+        .iter()
+        .any(|phrase_query| !phrase_query.is_empty() && normalized_content.contains(phrase_query))
+    {
+        return format!("Phrase match in {} message", role);
+    }
+
+    let content_tokens = search_token_set(content);
+    let mut matched_terms = Vec::new();
+    for group in &query_terms.query_groups {
+        let mut best_candidate: Option<(&str, f64)> = None;
+        for candidate in group {
+            for token in &content_tokens {
+                let strength = search_token_match_strength(token, candidate)
+                    .max(search_token_match_strength(candidate, token));
+                if strength <= 0.0 {
+                    continue;
+                }
+                match best_candidate {
+                    Some((_, best_strength)) if best_strength >= strength => {}
+                    _ => best_candidate = Some((candidate.as_str(), strength)),
+                }
+            }
+        }
+        if let Some((candidate, _)) = best_candidate {
+            matched_terms.push(candidate.to_string());
+        }
+    }
+
+    if !matched_terms.is_empty() {
+        matched_terms.sort();
+        matched_terms.dedup();
+        let matched_summary = matched_terms
+            .into_iter()
+            .take(3)
+            .collect::<Vec<_>>()
+            .join(", ");
+        return format!("Matched {} in {} message", matched_summary, role);
+    }
+
+    format!("Keyword match in {} message", role)
+}
+
+fn best_mission_moment(mission: &Mission, search_query: &str) -> Option<MissionMomentMatch> {
+    let mut best: Option<MissionMomentMatch> = None;
+    for (idx, entry) in mission.history.iter().enumerate() {
+        let score = mission_moment_relevance_score(&entry.role, &entry.content, search_query);
+        if score <= 0.0 {
+            continue;
+        }
+        let candidate = MissionMomentMatch {
+            entry_index: idx,
+            role: entry.role.clone(),
+            snippet: mission_moment_snippet(&entry.content, 180),
+            rationale: mission_moment_rationale(&entry.role, &entry.content, search_query),
+            relevance_score: score,
+        };
+        match &best {
+            Some(existing) if existing.relevance_score >= candidate.relevance_score => {}
+            _ => best = Some(candidate),
+        }
+    }
+    best
+}
+
+async fn disambiguate_generated_title(
+    mission_store: &Arc<dyn MissionStore>,
+    mission_id: Uuid,
+    title: &str,
+) -> String {
+    const TITLE_DEDUPE_PAGE_SIZE: usize = 200;
+    const TITLE_DEDUPE_MAX_SCAN: usize = 5_000;
+
+    let base_title = title.trim();
+    if base_title.is_empty() {
+        return title.to_string();
+    }
+
+    let mut exact_titles = HashSet::new();
+    let mut canonical_titles = HashSet::new();
+    let mut raw_titles = HashSet::new();
+    let mut canonical_raw_titles = HashSet::new();
+    let mut dedupe_probe_titles = Vec::new();
+
+    let mut offset = 0;
+    while offset < TITLE_DEDUPE_MAX_SCAN {
+        let missions = match mission_store
+            .list_missions(TITLE_DEDUPE_PAGE_SIZE, offset)
+            .await
+        {
+            Ok(missions) => missions,
+            Err(err) => {
+                tracing::warn!("Failed to load mission titles for dedupe guard: {}", err);
+                return base_title.to_string();
+            }
+        };
+
+        if missions.is_empty() {
+            break;
+        }
+
+        for mission in &missions {
+            if mission.id == mission_id {
+                continue;
+            }
+            if let Some(existing_title) = &mission.title {
+                let raw = normalize_raw_title_for_dedupe(existing_title);
+                if !raw.is_empty() {
+                    raw_titles.insert(raw);
+                }
+                let canonical_raw =
+                    normalize_raw_title_for_dedupe(strip_numeric_title_suffix(existing_title));
+                if !canonical_raw.is_empty() {
+                    canonical_raw_titles.insert(canonical_raw);
+                }
+
+                let normalized = normalize_metadata_text(existing_title);
+                if !normalized.is_empty() {
+                    exact_titles.insert(normalized);
+                }
+                let canonical = canonical_title_key(existing_title);
+                if !canonical.is_empty() {
+                    canonical_titles.insert(canonical);
+                }
+                dedupe_probe_titles.push(existing_title.clone());
+            }
+        }
+
+        if missions.len() < TITLE_DEDUPE_PAGE_SIZE {
+            break;
+        }
+        offset += TITLE_DEDUPE_PAGE_SIZE;
+    }
+
+    if offset >= TITLE_DEDUPE_MAX_SCAN {
+        tracing::warn!(
+            "Title dedupe scan hit cap ({} missions); duplicates may still exist",
+            TITLE_DEDUPE_MAX_SCAN
+        );
+    }
+
+    let candidate_exact = normalize_metadata_text(base_title);
+    let candidate_raw = normalize_raw_title_for_dedupe(base_title);
+    let candidate_canonical = canonical_title_key(base_title);
+    let candidate_canonical_raw =
+        normalize_raw_title_for_dedupe(strip_numeric_title_suffix(base_title));
+
+    let is_taken = |candidate: &str| {
+        let normalized = normalize_metadata_text(candidate);
+        let raw = normalize_raw_title_for_dedupe(candidate);
+        let normalized_match = !normalized.is_empty() && exact_titles.contains(&normalized);
+        let raw_match = !raw.is_empty() && raw_titles.contains(&raw);
+        normalized_match || raw_match
+    };
+
+    let has_duplicate = if candidate_exact.is_empty() {
+        if candidate_raw.is_empty() {
+            false
+        } else if candidate_canonical_raw.is_empty() {
+            raw_titles.contains(&candidate_raw)
+        } else {
+            raw_titles.contains(&candidate_raw)
+                || canonical_raw_titles.contains(&candidate_canonical_raw)
+        }
+    } else if candidate_canonical.is_empty() {
+        exact_titles.contains(&candidate_exact)
+    } else {
+        exact_titles.contains(&candidate_exact) || canonical_titles.contains(&candidate_canonical)
+    };
+    let has_near_duplicate = dedupe_probe_titles
+        .iter()
+        .any(|existing| is_near_duplicate_title(base_title, existing));
+    if !has_duplicate && !has_near_duplicate {
+        return base_title.to_string();
+    }
+
+    for idx in 2..100 {
+        let candidate = format!("{} ({})", base_title, idx);
+        if !is_taken(&candidate) {
+            return candidate;
+        }
+    }
+
+    format!("{} ({})", base_title, Uuid::new_v4().as_simple())
+}
+
+async fn generate_mission_metadata_updates(
+    mission_store: &Arc<dyn MissionStore>,
+    mission_id: Uuid,
+    mission: &Mission,
+    history: &[(String, String)],
+    fallback_user_content: Option<&str>,
+    should_refresh: bool,
+) -> (Option<String>, Option<String>) {
+    if history.is_empty() {
+        return (None, None);
+    }
+
+    let title_missing = mission
+        .title
+        .as_ref()
+        .map(|t| t.trim().is_empty())
+        .unwrap_or(true);
+    let short_description_missing = mission
+        .short_description
+        .as_ref()
+        .map(|d| d.trim().is_empty())
+        .unwrap_or(true);
+    let title_user_managed =
+        mission.metadata_source.as_deref() == Some(METADATA_SOURCE_USER) && !title_missing;
+    let has_assistant_reply = history.iter().any(|(role, _)| role == "assistant");
+    let has_successful_assistant_reply = history
+        .iter()
+        .any(|(role, content)| role == "assistant" && assistant_reply_is_successful(content));
+    let should_bootstrap_title_from_first_assistant =
+        title_missing && has_successful_assistant_reply;
+    let should_bootstrap_short_description_from_first_assistant = has_successful_assistant_reply
+        && (short_description_missing || title_missing)
+        && !should_refresh;
+
+    if !title_missing
+        && !short_description_missing
+        && !should_refresh
+        && !should_bootstrap_title_from_first_assistant
+        && !should_bootstrap_short_description_from_first_assistant
+    {
+        return (None, None);
+    }
+
+    let title_candidate = if (title_missing || should_refresh) && !title_user_managed {
+        let assistant_title_candidate = if should_bootstrap_title_from_first_assistant {
+            history
+                .iter()
+                .filter(|(role, _)| role == "assistant")
+                .find_map(|(_, content)| extract_title_from_assistant(content))
+        } else {
+            history
+                .iter()
+                .rev()
+                .filter(|(role, _)| role == "assistant")
+                .find_map(|(_, content)| extract_title_from_assistant(content))
+        };
+
+        assistant_title_candidate.or_else(|| {
+            if should_bootstrap_title_from_first_assistant {
+                fallback_user_content.map(|user_content| {
+                    if user_content.len() > 100 {
+                        let safe_end = safe_truncate_index(user_content, 100);
+                        format!("{}...", &user_content[..safe_end])
+                    } else {
+                        user_content.to_string()
+                    }
+                })
+            } else {
+                None
+            }
+        })
+    } else {
+        None
+    };
+    let title_candidate = match title_candidate {
+        Some(candidate) => Some(
+            diversify_generated_title_with_recent_context(
+                mission_store,
+                mission_id,
+                candidate,
+                history,
+                fallback_user_content,
+            )
+            .await,
+        ),
+        None => None,
+    };
+
+    let short_description_candidate = if short_description_missing
+        || should_refresh
+        || should_bootstrap_short_description_from_first_assistant
+    {
+        if should_bootstrap_short_description_from_first_assistant {
+            extract_short_description_from_first_successful_assistant(history, 160)
+                .or_else(|| extract_short_description_from_history(history, 160))
+        } else if should_refresh {
+            extract_short_description_from_recent_history(history, 160)
+                .or_else(|| extract_short_description_from_history(history, 160))
+        } else if has_assistant_reply {
+            None
+        } else {
+            extract_short_description_from_history(history, 160)
+        }
+    } else {
+        None
+    };
+
+    let mut updated_title: Option<String> = None;
+    if let Some(candidate_title) = title_candidate {
+        let should_update = mission
+            .title
+            .as_deref()
+            .map(|existing| has_significant_metadata_drift(existing, &candidate_title))
+            .unwrap_or(true);
+        if should_update {
+            let differs_from_existing = mission
+                .title
+                .as_deref()
+                .map(|existing| {
+                    normalize_metadata_text(existing) != normalize_metadata_text(&candidate_title)
+                })
+                .unwrap_or(true);
+            if differs_from_existing {
+                updated_title = Some(candidate_title);
+            }
+        }
+    }
+
+    let mut updated_short_description: Option<String> = None;
+    if let Some(candidate_short_description) = short_description_candidate {
+        let should_update = if should_bootstrap_short_description_from_first_assistant {
+            true
+        } else {
+            mission
+                .short_description
+                .as_deref()
+                .map(|existing| {
+                    has_significant_metadata_drift(existing, &candidate_short_description)
+                })
+                .unwrap_or(true)
+        };
+        if should_update {
+            let differs_from_existing = mission
+                .short_description
+                .as_deref()
+                .map(|existing| {
+                    normalize_metadata_text(existing)
+                        != normalize_metadata_text(&candidate_short_description)
+                })
+                .unwrap_or(true);
+            if differs_from_existing {
+                updated_short_description = Some(candidate_short_description);
+            }
+        }
+    }
+
+    (updated_title, updated_short_description)
+}
+
+async fn apply_generated_mission_metadata_updates(
+    mission_store: &Arc<dyn MissionStore>,
+    events_tx: &broadcast::Sender<AgentEvent>,
+    mission_id: Uuid,
+    generated_title: Option<String>,
+    generated_short_description: Option<String>,
+    metadata_source_update: Option<Option<&str>>,
+    metadata_model: Option<&str>,
+) -> bool {
+    if generated_title.is_none() && generated_short_description.is_none() {
+        return false;
+    }
+
+    let _title_update_guard = if generated_title.is_some() {
+        Some(MISSION_TITLE_UPDATE_LOCK.lock().await)
+    } else {
+        None
+    };
+
+    let title_to_write = match generated_title {
+        Some(title) => Some(disambiguate_generated_title(mission_store, mission_id, &title).await),
+        None => None,
+    };
+
+    if let Err(err) = mission_store
+        .update_mission_metadata(
+            mission_id,
+            title_to_write.as_deref().map(Some),
+            generated_short_description.as_deref().map(Some),
+            metadata_source_update,
+            metadata_model.map(Some),
+            Some(Some(METADATA_VERSION_V1)),
+        )
+        .await
+    {
+        tracing::warn!("Failed to update mission metadata: {}", err);
+        return false;
+    }
+
+    match mission_store.get_mission(mission_id).await {
+        Ok(Some(updated)) => {
+            emit_mission_metadata_updated_event(events_tx, mission_id, &updated);
+            if title_to_write.is_some() {
+                if let Some(title) = updated.title {
+                    let _ = events_tx.send(AgentEvent::MissionTitleChanged { mission_id, title });
+                }
+            }
+        }
+        Ok(None) => {
+            tracing::warn!("Mission {} disappeared after metadata update", mission_id);
+        }
+        Err(err) => {
+            tracing::warn!("Failed to reload mission metadata after update: {}", err);
+        }
+    }
+    true
+}
+
+fn emit_mission_metadata_updated_event(
+    events_tx: &broadcast::Sender<AgentEvent>,
+    mission_id: Uuid,
+    mission: &Mission,
+) {
+    let _ = events_tx.send(AgentEvent::MissionMetadataUpdated {
+        mission_id,
+        title: mission.title.clone(),
+        short_description: mission.short_description.clone(),
+        metadata_updated_at: mission.metadata_updated_at.clone(),
+        updated_at: Some(mission.updated_at.clone()),
+        metadata_source: mission.metadata_source.clone(),
+        metadata_model: mission.metadata_model.clone(),
+        metadata_version: mission.metadata_version.clone(),
+    });
+}
+
+fn conversational_message_count(history: &[(String, String)]) -> usize {
+    history
+        .iter()
+        .filter(|(role, _)| role == "user" || role == "assistant")
+        .count()
+}
+
+fn should_refresh_metadata_by_cadence(
+    mission_id: Uuid,
+    mission: &Mission,
+    conversational_count: usize,
+    force_refresh: bool,
+) -> bool {
+    if force_refresh {
+        return true;
+    }
+    if conversational_count == 0 {
+        return false;
+    }
+
+    let mut baselines = MISSION_METADATA_REFRESH_BASELINES
+        .lock()
+        .expect("metadata refresh baseline lock poisoned");
+    let baseline = baselines.entry(mission_id).or_insert_with(|| {
+        if mission.metadata_updated_at.is_some() {
+            conversational_count
+        } else {
+            0
+        }
+    });
+
+    if conversational_count < *baseline {
+        *baseline = conversational_count;
+        return false;
+    }
+
+    conversational_count.saturating_sub(*baseline) >= 10
+}
+
+fn record_metadata_refresh_baseline(mission_id: Uuid, conversational_count: usize) {
+    let mut baselines = MISSION_METADATA_REFRESH_BASELINES
+        .lock()
+        .expect("metadata refresh baseline lock poisoned");
+    baselines.insert(mission_id, conversational_count);
+}
+
+fn record_metadata_refresh_baseline_from_mission(mission_id: Uuid, mission: &Mission) {
+    let conversational_count = mission
+        .history
+        .iter()
+        .filter(|entry| entry.role == "user" || entry.role == "assistant")
+        .count();
+    record_metadata_refresh_baseline(mission_id, conversational_count);
+}
+
+async fn persist_mission_history_and_schedule_metadata_refresh(
+    mission_store: &Arc<dyn MissionStore>,
+    events_tx: &broadcast::Sender<AgentEvent>,
+    mission_id: Uuid,
+    entries: &[MissionHistoryEntry],
+) {
+    if let Err(e) = mission_store
+        .update_mission_history(mission_id, entries)
+        .await
+    {
+        tracing::warn!("Failed to persist mission history: {}", e);
+        return;
+    }
+    schedule_mission_metadata_refresh(mission_store, events_tx, mission_id, false);
+}
+
+async fn refresh_mission_metadata_from_store(
+    mission_store: &Arc<dyn MissionStore>,
+    events_tx: &broadcast::Sender<AgentEvent>,
+    mission_id: Uuid,
+    force_refresh: bool,
+) {
+    let mission = match mission_store.get_mission(mission_id).await {
+        Ok(Some(mission)) => mission,
+        Ok(None) => {
+            tracing::warn!(
+                "Skipping metadata refresh; mission {} not found",
+                mission_id
+            );
+            return;
+        }
+        Err(err) => {
+            tracing::warn!(
+                "Failed to load mission {} for metadata refresh: {}",
+                mission_id,
+                err
+            );
+            return;
+        }
+    };
+
+    let history_pairs: Vec<(String, String)> = mission
+        .history
+        .iter()
+        .map(|entry| (entry.role.clone(), entry.content.clone()))
+        .collect();
+    let fallback_user_content = history_pairs
+        .iter()
+        .find(|(role, _)| role == "user")
+        .map(|(_, content)| content.as_str());
+    let conversational_count = conversational_message_count(&history_pairs);
+    let should_refresh = should_refresh_metadata_by_cadence(
+        mission_id,
+        &mission,
+        conversational_count,
+        force_refresh,
+    );
+
+    let (generated_title, generated_short_description) = generate_mission_metadata_updates(
+        mission_store,
+        mission_id,
+        &mission,
+        &history_pairs,
+        fallback_user_content,
+        should_refresh,
+    )
+    .await;
+    let metadata_source_update = if generated_title.is_none()
+        && mission.metadata_source.as_deref() == Some(METADATA_SOURCE_USER)
+        && mission
+            .title
+            .as_deref()
+            .map(|title| !title.trim().is_empty())
+            .unwrap_or(false)
+    {
+        None
+    } else {
+        Some(Some(METADATA_SOURCE_BACKEND_HEURISTIC))
+    };
+    let metadata_updated = apply_generated_mission_metadata_updates(
+        mission_store,
+        events_tx,
+        mission_id,
+        generated_title,
+        generated_short_description,
+        metadata_source_update,
+        mission.model_override.as_deref(),
+    )
+    .await;
+    if should_refresh || metadata_updated {
+        record_metadata_refresh_baseline(mission_id, conversational_count);
+    }
+}
+
+fn schedule_mission_metadata_refresh(
+    mission_store: &Arc<dyn MissionStore>,
+    events_tx: &broadcast::Sender<AgentEvent>,
+    mission_id: Uuid,
+    force_refresh: bool,
+) {
+    {
+        let mut tasks = MISSION_METADATA_REFRESH_TASKS
+            .lock()
+            .expect("metadata refresh task registry lock poisoned");
+        if should_skip_metadata_refresh_schedule(&mut tasks, mission_id, force_refresh) {
+            return;
+        }
+    }
+
+    let task_id = MISSION_METADATA_REFRESH_TASK_ID.fetch_add(1, Ordering::Relaxed);
+    let mission_store = Arc::clone(mission_store);
+    let events_tx = events_tx.clone();
+    let background_refresh = tokio::spawn(async move {
+        refresh_mission_metadata_from_store(&mission_store, &events_tx, mission_id, force_refresh)
+            .await;
+        let mut tasks = MISSION_METADATA_REFRESH_TASKS
+            .lock()
+            .expect("metadata refresh task registry lock poisoned");
+        complete_metadata_refresh_task(&mut tasks, mission_id, task_id);
+    });
+    let registration = {
+        let mut tasks = MISSION_METADATA_REFRESH_TASKS
+            .lock()
+            .expect("metadata refresh task registry lock poisoned");
+        register_metadata_refresh_task(
+            &mut tasks,
+            mission_id,
+            force_refresh,
+            task_id,
+            background_refresh,
+        )
+    };
+    if let Some(superseded) = registration.superseded {
+        superseded.abort();
+    }
+}
+
+async fn refresh_mission_metadata_for_milestone(
+    mission_store: &Arc<dyn MissionStore>,
+    events_tx: &broadcast::Sender<AgentEvent>,
+    mission_id: Uuid,
+) {
+    refresh_mission_metadata_from_store(mission_store, events_tx, mission_id, true).await;
+}
+
+fn schedule_mission_metadata_refresh_for_milestone(
+    mission_store: &Arc<dyn MissionStore>,
+    events_tx: &broadcast::Sender<AgentEvent>,
+    mission_id: Uuid,
+) {
+    {
+        let mut tasks = MISSION_METADATA_REFRESH_TASKS
+            .lock()
+            .expect("metadata refresh task registry lock poisoned");
+        if should_skip_metadata_refresh_schedule(&mut tasks, mission_id, true) {
+            return;
+        }
+    }
+
+    let task_id = MISSION_METADATA_REFRESH_TASK_ID.fetch_add(1, Ordering::Relaxed);
+    let mission_store = Arc::clone(mission_store);
+    let events_tx = events_tx.clone();
+    let background_refresh = tokio::spawn(async move {
+        refresh_mission_metadata_for_milestone(&mission_store, &events_tx, mission_id).await;
+        let mut tasks = MISSION_METADATA_REFRESH_TASKS
+            .lock()
+            .expect("metadata refresh task registry lock poisoned");
+        complete_metadata_refresh_task(&mut tasks, mission_id, task_id);
+    });
+    let registration = {
+        let mut tasks = MISSION_METADATA_REFRESH_TASKS
+            .lock()
+            .expect("metadata refresh task registry lock poisoned");
+        register_metadata_refresh_task(&mut tasks, mission_id, true, task_id, background_refresh)
+    };
+    if let Some(superseded) = registration.superseded {
+        superseded.abort();
+    }
+}
+
+fn status_requires_metadata_milestone_refresh(status: MissionStatus) -> bool {
+    !matches!(status, MissionStatus::Pending | MissionStatus::Active)
+}
+
+fn maybe_schedule_mission_metadata_refresh_for_status(
+    mission_store: &Arc<dyn MissionStore>,
+    events_tx: &broadcast::Sender<AgentEvent>,
+    mission_id: Uuid,
+    status: MissionStatus,
+) {
+    if status_requires_metadata_milestone_refresh(status) {
+        schedule_mission_metadata_refresh_for_milestone(mission_store, events_tx, mission_id);
     }
 }
 
@@ -795,6 +2438,17 @@ pub enum AgentEvent {
     },
     /// Mission title changed (by user)
     MissionTitleChanged { mission_id: Uuid, title: String },
+    /// Mission metadata changed (title/short description refresh)
+    MissionMetadataUpdated {
+        mission_id: Uuid,
+        title: Option<String>,
+        short_description: Option<String>,
+        metadata_updated_at: Option<String>,
+        updated_at: Option<String>,
+        metadata_source: Option<String>,
+        metadata_model: Option<String>,
+        metadata_version: Option<String>,
+    },
     /// Agent phase update (for showing preparation steps)
     AgentPhase {
         /// Phase name: "executing", "delegating", etc.
@@ -927,6 +2581,7 @@ impl AgentEvent {
             AgentEvent::SessionIdUpdate { .. } => "session_id_update",
             AgentEvent::MissionActivity { .. } => "mission_activity",
             AgentEvent::MissionTitleChanged { .. } => "mission_title_changed",
+            AgentEvent::MissionMetadataUpdated { .. } => "mission_metadata_updated",
         }
     }
 
@@ -947,6 +2602,7 @@ impl AgentEvent {
             AgentEvent::SessionIdUpdate { mission_id, .. } => Some(*mission_id),
             AgentEvent::MissionActivity { mission_id, .. } => *mission_id,
             AgentEvent::MissionTitleChanged { mission_id, .. } => Some(*mission_id),
+            AgentEvent::MissionMetadataUpdated { mission_id, .. } => Some(*mission_id),
         }
     }
 }
@@ -1208,6 +2864,8 @@ pub struct ControlState {
     pub max_parallel: usize,
     /// Mission persistence (SQLite-backed)
     pub mission_store: Arc<dyn MissionStore>,
+    /// Cache for semantic mission search results keyed by normalized query hash
+    pub mission_search_cache: Arc<RwLock<HashMap<u64, MissionSearchCacheEntry>>>,
 }
 
 /// Control session manager for per-user sessions.
@@ -1545,15 +3203,354 @@ pub async fn list_missions(
         .list_missions(50, 0)
         .await
         .map_err(internal_error)?;
+    populate_workspace_names(&state, &mut missions).await;
+    Ok(Json(missions))
+}
 
-    // Populate workspace_name for each mission
-    for mission in &mut missions {
+async fn populate_workspace_names(state: &Arc<AppState>, missions: &mut [Mission]) {
+    for mission in missions {
         if let Some(workspace) = state.workspaces.get(mission.workspace_id).await {
             mission.workspace_name = Some(workspace.name);
         }
     }
+}
 
-    Ok(Json(missions))
+#[derive(Debug, Clone)]
+struct MissionSearchCandidate {
+    mission: Mission,
+    relevance_score: f64,
+}
+
+async fn list_missions_for_search(
+    state: &Arc<AppState>,
+    control: &ControlState,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<MissionSearchCandidate>, (StatusCode, String)> {
+    const SEARCH_PAGE_SIZE_MIN: usize = 50;
+    const SEARCH_PAGE_SIZE_MAX: usize = 200;
+    const SEARCH_TARGET_MATCH_MULTIPLIER: usize = 8;
+    const SEARCH_MAX_SCAN: usize = 10_000;
+
+    let page_size = (limit.saturating_mul(5)).clamp(SEARCH_PAGE_SIZE_MIN, SEARCH_PAGE_SIZE_MAX);
+    let target_matches = limit
+        .saturating_mul(SEARCH_TARGET_MATCH_MULTIPLIER)
+        .max(limit);
+
+    let mut all = Vec::new();
+    let mut offset = 0;
+    let mut matched_total = 0usize;
+
+    while offset < SEARCH_MAX_SCAN {
+        let mut page = control
+            .mission_store
+            .list_missions(page_size, offset)
+            .await
+            .map_err(internal_error)?;
+        if page.is_empty() {
+            break;
+        }
+        populate_workspace_names(state, &mut page).await;
+        let page_len = page.len();
+        let mut matched_in_page = 0usize;
+        for mission in page {
+            let relevance_score =
+                mission_search_relevance_score(&mission, query, mission.workspace_name.as_deref());
+            if relevance_score > 0.0 {
+                matched_in_page += 1;
+            }
+            all.push(MissionSearchCandidate {
+                mission,
+                relevance_score,
+            });
+        }
+        matched_total += matched_in_page;
+        if page_len < page_size {
+            break;
+        }
+        offset += page_size;
+        if matched_total >= target_matches {
+            break;
+        }
+    }
+
+    if offset >= SEARCH_MAX_SCAN {
+        tracing::warn!(
+            "Mission search scan hit cap ({} missions); some older missions may not be searched",
+            SEARCH_MAX_SCAN
+        );
+    }
+
+    Ok(all)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SearchMissionsQuery {
+    pub q: String,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SearchMissionMomentsQuery {
+    pub q: String,
+    pub mission_id: Option<Uuid>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MissionSearchResult {
+    pub mission: Mission,
+    pub relevance_score: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MissionMomentSearchResult {
+    pub mission: Mission,
+    pub entry_index: usize,
+    pub role: String,
+    pub snippet: String,
+    pub rationale: String,
+    pub relevance_score: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct MissionSearchCacheEntry {
+    pub cached_at: std::time::Instant,
+    pub freshness_key: u64,
+    pub recency_fingerprint: u64,
+    pub results: Vec<MissionSearchResult>,
+}
+
+const MISSION_SEARCH_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+
+fn mission_search_cache_hit_by_ttl(
+    entry: &MissionSearchCacheEntry,
+    recency_fingerprint: u64,
+) -> bool {
+    entry.cached_at.elapsed() <= MISSION_SEARCH_CACHE_TTL
+        && entry.recency_fingerprint == recency_fingerprint
+}
+
+fn mission_search_cache_hit_by_freshness(
+    entry: &MissionSearchCacheEntry,
+    recency_fingerprint: u64,
+    freshness_key: u64,
+) -> bool {
+    entry.recency_fingerprint == recency_fingerprint && entry.freshness_key == freshness_key
+}
+
+fn mission_search_query_hash(query: &str) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    normalize_metadata_text(query).hash(&mut hasher);
+    hasher.finish()
+}
+
+fn mission_search_freshness_key(missions: &[MissionSearchCandidate], page_size: usize) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    missions.len().hash(&mut hasher);
+    page_size.hash(&mut hasher);
+    for candidate in missions {
+        let mission = &candidate.mission;
+        mission.id.hash(&mut hasher);
+        mission.updated_at.hash(&mut hasher);
+        mission.metadata_updated_at.hash(&mut hasher);
+        mission.workspace_name.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+async fn mission_search_recency_fingerprint(
+    mission_store: &Arc<dyn MissionStore>,
+) -> Result<u64, String> {
+    const MISSION_SEARCH_RECENCY_FINGERPRINT_LIMIT: usize = 64;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let recent = mission_store
+        .list_missions(MISSION_SEARCH_RECENCY_FINGERPRINT_LIMIT, 0)
+        .await?;
+    recent.len().hash(&mut hasher);
+    for mission in recent {
+        mission.id.hash(&mut hasher);
+        mission.updated_at.hash(&mut hasher);
+        mission.metadata_updated_at.hash(&mut hasher);
+        mission.title.hash(&mut hasher);
+        mission.short_description.hash(&mut hasher);
+        mission.workspace_name.hash(&mut hasher);
+    }
+    Ok(hasher.finish())
+}
+
+/// Search missions with semantic-aware ranking.
+pub async fn search_missions(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+    Query(params): Query<SearchMissionsQuery>,
+) -> Result<Json<Vec<MissionSearchResult>>, (StatusCode, String)> {
+    let query = params.q.trim();
+    if query.is_empty() {
+        return Ok(Json(Vec::new()));
+    }
+
+    let limit = params.limit.unwrap_or(20).clamp(1, 100);
+    let query_hash = mission_search_query_hash(query);
+    let control = control_for_user(&state, &user).await;
+    let recency_fingerprint = mission_search_recency_fingerprint(&control.mission_store)
+        .await
+        .map_err(internal_error)?;
+    if let Some(cached_results) = {
+        let cache = control.mission_search_cache.read().await;
+        cache.get(&query_hash).and_then(|entry| {
+            if mission_search_cache_hit_by_ttl(entry, recency_fingerprint) {
+                Some(entry.results.clone())
+            } else {
+                None
+            }
+        })
+    } {
+        let mut results = cached_results;
+        results.truncate(limit);
+        return Ok(Json(results));
+    }
+
+    let page_size = (limit.saturating_mul(5)).clamp(50, 200);
+    let mission_candidates = list_missions_for_search(&state, &control, query, limit).await?;
+    let freshness_key = mission_search_freshness_key(&mission_candidates, page_size);
+
+    if let Some(cached_results) = {
+        let cache = control.mission_search_cache.read().await;
+        cache.get(&query_hash).and_then(|entry| {
+            if mission_search_cache_hit_by_freshness(entry, recency_fingerprint, freshness_key) {
+                Some(entry.results.clone())
+            } else {
+                None
+            }
+        })
+    } {
+        let mut results = cached_results;
+        results.truncate(limit);
+        return Ok(Json(results));
+    }
+
+    let mut scored: Vec<MissionSearchResult> = mission_candidates
+        .into_iter()
+        .filter_map(|candidate| {
+            if candidate.relevance_score > 0.0 {
+                Some(MissionSearchResult {
+                    mission: candidate.mission,
+                    relevance_score: candidate.relevance_score,
+                })
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    scored.sort_by(|a, b| {
+        b.relevance_score
+            .total_cmp(&a.relevance_score)
+            .then_with(|| b.mission.updated_at.cmp(&a.mission.updated_at))
+    });
+    {
+        const MISSION_SEARCH_CACHE_MAX_ENTRIES: usize = 128;
+        let mut cache = control.mission_search_cache.write().await;
+        if cache.len() >= MISSION_SEARCH_CACHE_MAX_ENTRIES {
+            if let Some(key_to_drop) = cache.keys().next().copied() {
+                cache.remove(&key_to_drop);
+            }
+        }
+        cache.insert(
+            query_hash,
+            MissionSearchCacheEntry {
+                cached_at: std::time::Instant::now(),
+                freshness_key,
+                recency_fingerprint,
+                results: scored.clone(),
+            },
+        );
+    }
+
+    scored.truncate(limit);
+    Ok(Json(scored))
+}
+
+/// Search mission history and return the best matching moment per mission.
+pub async fn search_mission_moments(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<AuthUser>,
+    Query(params): Query<SearchMissionMomentsQuery>,
+) -> Result<Json<Vec<MissionMomentSearchResult>>, (StatusCode, String)> {
+    let query = params.q.trim();
+    if query.is_empty() {
+        return Ok(Json(Vec::new()));
+    }
+
+    let limit = params.limit.unwrap_or(10).clamp(1, 50);
+    let control = control_for_user(&state, &user).await;
+
+    let mut missions: Vec<Mission> = if let Some(mission_id) = params.mission_id {
+        let Some(mission) = control
+            .mission_store
+            .get_mission(mission_id)
+            .await
+            .map_err(internal_error)?
+        else {
+            return Ok(Json(Vec::new()));
+        };
+        vec![mission]
+    } else {
+        const SEARCH_PAGE_SIZE: usize = 100;
+        const SEARCH_MAX_SCAN: usize = 2_000;
+        let mut all = Vec::new();
+        let mut offset = 0usize;
+        while offset < SEARCH_MAX_SCAN {
+            let page = control
+                .mission_store
+                .list_missions(SEARCH_PAGE_SIZE, offset)
+                .await
+                .map_err(internal_error)?;
+            if page.is_empty() {
+                break;
+            }
+            let page_len = page.len();
+            all.extend(page);
+            if page_len < SEARCH_PAGE_SIZE {
+                break;
+            }
+            offset += SEARCH_PAGE_SIZE;
+        }
+        if offset >= SEARCH_MAX_SCAN {
+            tracing::warn!(
+                "Mission moment search scan hit cap ({} missions); some older missions may not be searched",
+                SEARCH_MAX_SCAN
+            );
+        }
+        all
+    };
+
+    populate_workspace_names(&state, &mut missions).await;
+
+    let mut results: Vec<MissionMomentSearchResult> = missions
+        .into_iter()
+        .filter_map(|mission| {
+            let best = best_mission_moment(&mission, query)?;
+            Some(MissionMomentSearchResult {
+                mission,
+                entry_index: best.entry_index,
+                role: best.role,
+                snippet: best.snippet,
+                rationale: best.rationale,
+                relevance_score: best.relevance_score,
+            })
+        })
+        .collect();
+
+    results.sort_by(|a, b| {
+        b.relevance_score
+            .total_cmp(&a.relevance_score)
+            .then_with(|| b.mission.updated_at.cmp(&a.mission.updated_at))
+            .then_with(|| a.entry_index.cmp(&b.entry_index))
+    });
+    results.truncate(limit);
+    Ok(Json(results))
 }
 
 /// Get a specific mission.
@@ -2158,6 +4155,7 @@ pub async fn delete_mission(
         .map_err(internal_error)?;
 
     if deleted {
+        clear_mission_metadata_refresh_state(mission_id);
         Ok(Json(serde_json::json!({
             "ok": true,
             "deleted": mission_id
@@ -2183,6 +4181,10 @@ pub async fn cleanup_empty_missions(
         .delete_empty_untitled_missions_excluding(&running_ids)
         .await
         .map_err(internal_error)?;
+
+    if count > 0 {
+        clear_stale_mission_metadata_refresh_state(&control.mission_store).await;
+    }
 
     Ok(Json(serde_json::json!({
         "ok": true,
@@ -2354,6 +4356,7 @@ fn spawn_control_session(
     let current_tree = Arc::new(RwLock::new(None));
     let progress = Arc::new(RwLock::new(ExecutionProgress::default()));
     let running_missions = Arc::new(RwLock::new(Vec::new()));
+    let mission_search_cache = Arc::new(RwLock::new(HashMap::new()));
     let max_parallel =
         crate::settings::max_parallel_missions_cached_or(config.max_parallel_missions);
 
@@ -2368,6 +4371,7 @@ fn spawn_control_session(
         running_missions: Arc::clone(&running_missions),
         max_parallel,
         mission_store: Arc::clone(&mission_store),
+        mission_search_cache,
     };
 
     // Spawn the main control actor
@@ -2421,6 +4425,12 @@ fn spawn_control_session(
                                 e
                             );
                         } else {
+                            maybe_schedule_mission_metadata_refresh_for_status(
+                                &store,
+                                &tx,
+                                mission.id,
+                                MissionStatus::Interrupted,
+                            );
                             let _ = tx.send(AgentEvent::MissionStatusChanged {
                                 mission_id: mission.id,
                                 status: MissionStatus::Interrupted,
@@ -2564,6 +4574,12 @@ async fn stale_mission_cleanup_loop(
                                     e
                                 );
                             } else {
+                                maybe_schedule_mission_metadata_refresh_for_status(
+                                    &mission_store,
+                                    &events_tx,
+                                    mission.id,
+                                    MissionStatus::Interrupted,
+                                );
                                 let _ = events_tx.send(AgentEvent::MissionStatusChanged {
                                     mission_id: mission.id,
                                     status: MissionStatus::Interrupted,
@@ -2604,6 +4620,12 @@ async fn stale_mission_cleanup_loop(
                     {
                         tracing::warn!("Failed to auto-close stale mission {}: {}", mission.id, e);
                     } else {
+                        maybe_schedule_mission_metadata_refresh_for_status(
+                            &mission_store,
+                            &events_tx,
+                            mission.id,
+                            MissionStatus::Completed,
+                        );
                         let _ = events_tx.send(AgentEvent::MissionStatusChanged {
                             mission_id: mission.id,
                             status: MissionStatus::Completed,
@@ -3303,6 +5325,7 @@ async fn control_actor_loop(
     // Helper to persist history to a specific mission ID
     async fn persist_mission_history_to(
         mission_store: &Arc<dyn MissionStore>,
+        events_tx: &broadcast::Sender<AgentEvent>,
         mission_id: Option<Uuid>,
         history: &[(String, String)],
     ) {
@@ -3314,53 +5337,25 @@ async fn control_actor_loop(
                     content: content.clone(),
                 })
                 .collect();
-            if let Err(e) = mission_store.update_mission_history(mid, &entries).await {
-                tracing::warn!("Failed to persist mission history: {}", e);
-            }
-
-            // Auto-generate title from conversation if not set
-            if history.len() >= 2 {
-                let should_update = mission_store
-                    .get_mission(mid)
-                    .await
-                    .ok()
-                    .flatten()
-                    .and_then(|m| m.title)
-                    .map(|t| t.trim().is_empty())
-                    .unwrap_or(true);
-                if should_update {
-                    // Prefer assistant's opening line (often a summary of intent)
-                    let title = history
-                        .iter()
-                        .rev()
-                        .find(|(role, _)| role == "assistant")
-                        .and_then(|(_, content)| extract_title_from_assistant(content))
-                        .unwrap_or_else(|| {
-                            // Fall back to user's first message
-                            let user_content = &history[0].1;
-                            if user_content.len() > 100 {
-                                let safe_end = safe_truncate_index(user_content, 100);
-                                format!("{}...", &user_content[..safe_end])
-                            } else {
-                                user_content.clone()
-                            }
-                        });
-                    if let Err(e) = mission_store.update_mission_title(mid, &title).await {
-                        tracing::warn!("Failed to update mission title: {}", e);
-                    }
-                }
-            }
+            persist_mission_history_and_schedule_metadata_refresh(
+                mission_store,
+                events_tx,
+                mid,
+                &entries,
+            )
+            .await;
         }
     }
 
     // Helper to persist history to current mission (wrapper for backwards compatibility)
     async fn persist_mission_history(
         mission_store: &Arc<dyn MissionStore>,
+        events_tx: &broadcast::Sender<AgentEvent>,
         current_mission: &Arc<RwLock<Option<Uuid>>>,
         history: &[(String, String)],
     ) {
         let mission_id = *current_mission.read().await;
-        persist_mission_history_to(mission_store, mission_id, history).await;
+        persist_mission_history_to(mission_store, events_tx, mission_id, history).await;
     }
 
     fn parse_tool_result_object(result: &serde_json::Value) -> Option<serde_json::Value> {
@@ -3828,7 +5823,13 @@ async fn control_actor_loop(
                                 if !main_is_running {
                                     if mission_id != Some(tid) {
                                         // Switch main session to target mission
-                                        persist_mission_history(&mission_store, &current_mission, &history).await;
+                                        persist_mission_history(
+                                            &mission_store,
+                                            &events_tx,
+                                            &current_mission,
+                                            &history,
+                                        )
+                                        .await;
                                         if let Ok(mission) = load_mission_record(&mission_store, tid).await {
                                             history.clear();
                                             for entry in &mission.history {
@@ -3943,7 +5944,12 @@ async fn control_actor_loop(
 
                                 // Immediately persist user message so it's visible when loading mission
                                 history.push(("user".to_string(), msg.clone()));
-                                persist_mission_history_to(&mission_store, msg_target_mid, &history)
+                                persist_mission_history_to(
+                                    &mission_store,
+                                    &events_tx,
+                                    msg_target_mid,
+                                    &history,
+                                )
                                     .await;
 
                                 let cfg = config.clone();
@@ -4084,6 +6090,7 @@ async fn control_actor_loop(
                         // First persist current mission history
                         persist_mission_history(
                             &mission_store,
+                            &events_tx,
                             &current_mission,
                             &history,
                         )
@@ -4130,6 +6137,7 @@ async fn control_actor_loop(
                         // First persist current mission history
                         persist_mission_history(
                             &mission_store,
+                            &events_tx,
                             &current_mission,
                             &history,
                         )
@@ -4189,6 +6197,12 @@ async fn control_actor_loop(
                             .update_mission_status(id, new_status)
                             .await;
                         if result.is_ok() {
+                            maybe_schedule_mission_metadata_refresh_for_status(
+                                &mission_store,
+                                &events_tx,
+                                id,
+                                new_status,
+                            );
                             let _ = events_tx.send(AgentEvent::MissionStatusChanged {
                                 mission_id: id,
                                 status: new_status,
@@ -4204,6 +6218,25 @@ async fn control_actor_loop(
                                 mission_id: id,
                                 title: title.clone(),
                             });
+                            match mission_store.get_mission(id).await {
+                                Ok(Some(updated)) => {
+                                    record_metadata_refresh_baseline_from_mission(id, &updated);
+                                    emit_mission_metadata_updated_event(&events_tx, id, &updated);
+                                }
+                                Ok(None) => {
+                                    tracing::warn!(
+                                        "Mission {} disappeared after title update",
+                                        id
+                                    );
+                                }
+                                Err(err) => {
+                                    tracing::warn!(
+                                        "Failed to reload mission {} after title update: {}",
+                                        id,
+                                        err
+                                    );
+                                }
+                            }
                         }
                         let _ = respond.send(result);
                     }
@@ -4295,6 +6328,13 @@ async fn control_actor_loop(
                                 tracing::warn!(
                                     "Failed to update cancelled parallel mission status: {}",
                                     e
+                                );
+                            } else {
+                                maybe_schedule_mission_metadata_refresh_for_status(
+                                    &mission_store,
+                                    &events_tx,
+                                    mission_id,
+                                    MissionStatus::Interrupted,
                                 );
                             }
                             let _ = events_tx.send(AgentEvent::Error {
@@ -4405,6 +6445,7 @@ async fn control_actor_loop(
                                 // First persist current mission history (if any)
                                 persist_mission_history(
                                     &mission_store,
+                                    &events_tx,
                                     &current_mission,
                                     &history,
                                 )
@@ -4423,6 +6464,12 @@ async fn control_actor_loop(
                                 {
                                     tracing::warn!("Failed to resume mission {}: {}", mission_id, e);
                                 } else {
+                                    maybe_schedule_mission_metadata_refresh_for_status(
+                                        &mission_store,
+                                        &events_tx,
+                                        mission_id,
+                                        MissionStatus::Active,
+                                    );
                                     // Send status changed event so UI updates
                                     let _ = events_tx.send(AgentEvent::MissionStatusChanged {
                                         mission_id,
@@ -4544,6 +6591,7 @@ async fn control_actor_loop(
                                 if current_mid == Some(mission_id) {
                                     persist_mission_history(
                                         &mission_store,
+                                        &events_tx,
                                         &current_mission,
                                         &history,
                                     )
@@ -4557,6 +6605,12 @@ async fn control_actor_loop(
                                     .await
                                     .is_ok()
                                 {
+                                    maybe_schedule_mission_metadata_refresh_for_status(
+                                        &mission_store,
+                                        &events_tx,
+                                        mission_id,
+                                        MissionStatus::Interrupted,
+                                    );
                                     interrupted_ids.push(mission_id);
                                     tracing::info!("Marked mission {} as interrupted", mission_id);
                                 }
@@ -4579,21 +6633,24 @@ async fn control_actor_loop(
                                     content: content.clone(),
                                 })
                                 .collect();
-                            if let Err(e) = mission_store
-                                .update_mission_history(*mission_id, &entries)
-                                .await
-                            {
-                                tracing::warn!(
-                                    "Failed to persist parallel mission history {}: {}",
-                                    mission_id,
-                                    e
-                                );
-                            }
+                            persist_mission_history_and_schedule_metadata_refresh(
+                                &mission_store,
+                                &events_tx,
+                                *mission_id,
+                                &entries,
+                            )
+                            .await;
                             if mission_store
                                 .update_mission_status(*mission_id, MissionStatus::Interrupted)
                                 .await
                                 .is_ok()
                             {
+                                maybe_schedule_mission_metadata_refresh_for_status(
+                                    &mission_store,
+                                    &events_tx,
+                                    *mission_id,
+                                    MissionStatus::Interrupted,
+                                );
                                 interrupted_ids.push(*mission_id);
                                 tracing::info!("Marked parallel mission {} as interrupted", mission_id);
                             }
@@ -4725,6 +6782,12 @@ async fn control_actor_loop(
                                 .await
                                 .is_ok()
                             {
+                                maybe_schedule_mission_metadata_refresh_for_status(
+                                    &mission_store,
+                                    &events_tx,
+                                    id,
+                                    new_status,
+                                );
                                 // Generate and store mission summary
                                 if let Some(ref summary_text) = summary {
                                     // Extract key files from conversation (look for paths in assistant messages)
@@ -4771,7 +6834,7 @@ async fn control_actor_loop(
                     running_mission_id = None;
                     main_runner_activity = None;
                     match res {
-                        Ok((_mid, user_msg, agent_result)) => {
+                        Ok((_mid, _user_msg, agent_result)) => {
                             // Only append assistant to local history if this mission is still the current mission.
                             // Note: User message was already added before execution started.
                             // If the user created a new mission mid-execution, history was cleared for that new mission,
@@ -4800,34 +6863,13 @@ async fn control_actor_loop(
                                             mission_store.update_mission_history(mid, &entries).await
                                         {
                                             tracing::warn!("Failed to persist mission history: {}", e);
-                                        }
-
-                                        let title_empty = mission
-                                            .title
-                                            .as_ref()
-                                            .map(|s| s.trim().is_empty())
-                                            .unwrap_or(true);
-                                        if title_empty && entries.len() >= 2 {
-                                            // Prefer assistant's opening line, fall back to user message
-                                            let title = entries
-                                                .iter()
-                                                .rev()
-                                                .find(|e| e.role == "assistant")
-                                                .and_then(|e| extract_title_from_assistant(&e.content))
-                                                .unwrap_or_else(|| {
-                                                    if user_msg.len() > 100 {
-                                                        let safe_end =
-                                                            safe_truncate_index(&user_msg, 100);
-                                                        format!("{}...", &user_msg[..safe_end])
-                                                    } else {
-                                                        user_msg.clone()
-                                                    }
-                                                });
-                                            if let Err(e) =
-                                                mission_store.update_mission_title(mid, &title).await
-                                            {
-                                                tracing::warn!("Failed to update mission title: {}", e);
-                                            }
+                                        } else {
+                                            schedule_mission_metadata_refresh(
+                                                &mission_store,
+                                                &events_tx,
+                                                mid,
+                                                false,
+                                            );
                                         }
                                     }
                                     Ok(None) => {
@@ -4897,6 +6939,12 @@ async fn control_actor_loop(
                                                     {
                                                         tracing::warn!("Failed to auto-complete mission: {}", e);
                                                     } else {
+                                                        maybe_schedule_mission_metadata_refresh_for_status(
+                                                            &mission_store,
+                                                            &events_tx,
+                                                            mission_id,
+                                                            new_status,
+                                                        );
                                                         // Send status change event - the actual completion content
                                                         // is already in the assistant_message event, so we just provide
                                                         // a clean summary based on how the mission ended
@@ -5063,6 +7111,12 @@ async fn control_actor_loop(
                                 {
                                     tracing::warn!("Failed to update mission status after join error: {}", e);
                                 } else {
+                                    maybe_schedule_mission_metadata_refresh_for_status(
+                                        &mission_store,
+                                        &events_tx,
+                                        mission_id,
+                                        MissionStatus::Failed,
+                                    );
                                     let _ = events_tx.send(AgentEvent::MissionStatusChanged {
                                         mission_id,
                                         status: MissionStatus::Failed,
@@ -5115,7 +7169,12 @@ async fn control_actor_loop(
 
                     // Immediately persist user message so it's visible when loading mission
                     history.push(("user".to_string(), msg.clone()));
-                    persist_mission_history_to(&mission_store, msg_target_mid, &history)
+                    persist_mission_history_to(
+                        &mission_store,
+                        &events_tx,
+                        msg_target_mid,
+                        &history,
+                    )
                         .await;
 
                     let cfg = config.clone();
@@ -5308,15 +7367,13 @@ async fn control_actor_loop(
                                     content: content.clone(),
                                 })
                                 .collect();
-                            if let Err(e) = mission_store
-                                .update_mission_history(*mission_id, &entries)
-                                .await
-                            {
-                                tracing::warn!(
-                                    "Failed to persist parallel mission history: {}",
-                                    e
-                                );
-                            }
+                            persist_mission_history_and_schedule_metadata_refresh(
+                                &mission_store,
+                                &events_tx,
+                                *mission_id,
+                                &entries,
+                            )
+                            .await;
 
                             // Check if we should enqueue agent_finished automations
                             let was_queue_empty = runner.queue.is_empty();
@@ -5397,6 +7454,12 @@ async fn control_actor_loop(
                                                     e
                                                 );
                                             } else {
+                                                maybe_schedule_mission_metadata_refresh_for_status(
+                                                    &mission_store,
+                                                    &events_tx,
+                                                    *mission_id,
+                                                    new_status,
+                                                );
                                                 let _ = events_tx.send(AgentEvent::MissionStatusChanged {
                                                     mission_id: *mission_id,
                                                     status: new_status,
@@ -6216,7 +8279,9 @@ pub async fn create_automation(
         trigger,
         variables: req.variables,
         active: true,
-        stop_policy: req.stop_policy.unwrap_or(mission_store::StopPolicy::Never),
+        stop_policy: req
+            .stop_policy
+            .unwrap_or(mission_store::StopPolicy::WhenFailingConsecutively { count: 2 }),
         fresh_session: req
             .fresh_session
             .unwrap_or(mission_store::FreshSession::Keep),
@@ -6796,6 +8861,7 @@ pub async fn webhook_receiver(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn test_parse_image_tag() {
@@ -6846,6 +8912,2182 @@ And the report:
     }
 
     #[test]
+    fn test_strip_numeric_title_suffix() {
+        assert_eq!(
+            strip_numeric_title_suffix("Fix flaky CI (2)"),
+            "Fix flaky CI"
+        );
+        assert_eq!(strip_numeric_title_suffix("Fix flaky CI"), "Fix flaky CI");
+        assert_eq!(
+            strip_numeric_title_suffix("Fix flaky CI (alpha)"),
+            "Fix flaky CI (alpha)"
+        );
+    }
+
+    #[test]
+    fn test_has_significant_metadata_drift_detects_minor_and_major_changes() {
+        assert!(!has_significant_metadata_drift(
+            "Fix the login redirect race",
+            "Fix login redirect race"
+        ));
+        assert!(has_significant_metadata_drift(
+            "Fix the login redirect race",
+            "Investigate websocket reconnect failures"
+        ));
+    }
+
+    #[test]
+    fn test_has_significant_metadata_drift_handles_unicode_equivalents() {
+        assert!(!has_significant_metadata_drift(
+            "Исправить сбой входа!",
+            "исправить   сбой входа"
+        ));
+    }
+
+    #[test]
+    fn test_is_near_duplicate_title_handles_plural_variant() {
+        assert!(is_near_duplicate_title(
+            "Fix flaky CI pipeline",
+            "Fix flaky CI pipelines"
+        ));
+    }
+
+    #[test]
+    fn test_is_near_duplicate_title_rejects_different_topic() {
+        assert!(!is_near_duplicate_title(
+            "Investigate API timeout on auth",
+            "Refactor dashboard sidebar layout"
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_disambiguate_generated_title_appends_next_suffix() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let existing = store
+            .create_mission(Some("Fix flaky CI"), None, None, None, None, None, None)
+            .await
+            .expect("create mission");
+        store
+            .create_mission(Some("Fix flaky CI (2)"), None, None, None, None, None, None)
+            .await
+            .expect("create mission");
+
+        let disambiguated = disambiguate_generated_title(&store, existing.id, "Fix flaky CI").await;
+        assert_eq!(disambiguated, "Fix flaky CI (3)");
+    }
+
+    #[tokio::test]
+    async fn test_disambiguate_generated_title_scans_beyond_first_page() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        store
+            .create_mission(
+                Some("Need unique title"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("create mission");
+
+        let mut probe_id = Uuid::nil();
+        for idx in 0..205 {
+            let mission = store
+                .create_mission(
+                    Some(&format!("Filler {}", idx)),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .expect("create mission");
+            if idx == 204 {
+                probe_id = mission.id;
+            }
+        }
+
+        let disambiguated =
+            disambiguate_generated_title(&store, probe_id, "Need unique title").await;
+        assert_eq!(disambiguated, "Need unique title (2)");
+    }
+
+    #[tokio::test]
+    async fn test_disambiguate_generated_title_handles_punctuation_only_titles() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let existing = store
+            .create_mission(Some("!!!"), None, None, None, None, None, None)
+            .await
+            .expect("create mission");
+        store
+            .create_mission(Some("!!! (2)"), None, None, None, None, None, None)
+            .await
+            .expect("create mission");
+
+        let disambiguated = disambiguate_generated_title(&store, existing.id, "!!!").await;
+        assert_eq!(disambiguated, "!!! (3)");
+    }
+
+    #[tokio::test]
+    async fn test_disambiguate_generated_title_handles_unicode_casefolding() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        store
+            .create_mission(
+                Some("Исправить сбой входа"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("create mission");
+        let probe = store
+            .create_mission(None, None, None, None, None, None, None)
+            .await
+            .expect("create mission");
+
+        let disambiguated =
+            disambiguate_generated_title(&store, probe.id, "ИСПРАВИТЬ СБОЙ ВХОДА").await;
+        assert_eq!(disambiguated, "ИСПРАВИТЬ СБОЙ ВХОДА (2)");
+    }
+
+    #[tokio::test]
+    async fn test_disambiguate_generated_title_handles_near_duplicate_variants() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        store
+            .create_mission(
+                Some("Fix flaky CI pipeline"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("create mission");
+        let probe = store
+            .create_mission(None, None, None, None, None, None, None)
+            .await
+            .expect("create mission");
+
+        let disambiguated =
+            disambiguate_generated_title(&store, probe.id, "Fix flaky CI pipelines").await;
+        assert_eq!(disambiguated, "Fix flaky CI pipelines (2)");
+    }
+
+    #[tokio::test]
+    async fn test_generate_mission_metadata_updates_populates_short_description_from_first_message()
+    {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = store
+            .create_mission(None, None, None, None, None, None, None)
+            .await
+            .expect("create mission");
+        let history = vec![("user".to_string(), "Hi".to_string())];
+
+        let (updated_title, updated_short_description) = generate_mission_metadata_updates(
+            &store,
+            mission.id,
+            &mission,
+            &history,
+            Some("Hi"),
+            false,
+        )
+        .await;
+
+        assert_eq!(updated_title, None);
+        assert_eq!(updated_short_description.as_deref(), Some("Hi"));
+    }
+
+    #[tokio::test]
+    async fn test_generate_mission_metadata_updates_generates_title_after_first_assistant_reply() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = store
+            .create_mission(None, None, None, None, None, None, None)
+            .await
+            .expect("create mission");
+        let history = vec![
+            (
+                "user".to_string(),
+                "Investigate oauth callback timeout in production".to_string(),
+            ),
+            (
+                "assistant".to_string(),
+                "Investigate oauth callback timeout root cause\nStarting with logs.".to_string(),
+            ),
+        ];
+
+        let (updated_title, updated_short_description) = generate_mission_metadata_updates(
+            &store,
+            mission.id,
+            &mission,
+            &history,
+            history.first().map(|(_, content)| content.as_str()),
+            false,
+        )
+        .await;
+
+        assert_eq!(
+            updated_title.as_deref(),
+            Some("Investigate oauth callback timeout root cause")
+        );
+        assert_eq!(
+            updated_short_description.as_deref(),
+            Some("Investigate oauth callback timeout root cause")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_generate_mission_metadata_updates_bootstrap_title_uses_first_assistant_response()
+    {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = store
+            .create_mission(None, None, None, None, None, None, None)
+            .await
+            .expect("create mission");
+        let history = vec![
+            (
+                "user".to_string(),
+                "Investigate oauth callback timeout in production".to_string(),
+            ),
+            (
+                "assistant".to_string(),
+                "Initial root cause hypothesis: oauth callback host mismatch.".to_string(),
+            ),
+            (
+                "assistant".to_string(),
+                "Follow-up: retry timing also contributes to failures.".to_string(),
+            ),
+        ];
+
+        let (updated_title, updated_short_description) = generate_mission_metadata_updates(
+            &store,
+            mission.id,
+            &mission,
+            &history,
+            history.first().map(|(_, content)| content.as_str()),
+            false,
+        )
+        .await;
+
+        assert_eq!(
+            updated_title.as_deref(),
+            Some("Initial root cause hypothesis: oauth callback host mismatch.")
+        );
+        assert_eq!(
+            updated_short_description.as_deref(),
+            Some("Initial root cause hypothesis: oauth callback host mismatch.")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_generate_mission_metadata_updates_bootstrap_uses_first_successful_assistant_response(
+    ) {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = store
+            .create_mission(None, None, None, None, None, None, None)
+            .await
+            .expect("create mission");
+        let history = vec![
+            (
+                "user".to_string(),
+                "Fix oauth callback failures on mobile safari".to_string(),
+            ),
+            (
+                "assistant".to_string(),
+                "Error: unable to complete analysis because logs are missing.".to_string(),
+            ),
+            (
+                "assistant".to_string(),
+                "Identified root cause: callback URL host mismatch in production.".to_string(),
+            ),
+        ];
+
+        let (updated_title, updated_short_description) = generate_mission_metadata_updates(
+            &store,
+            mission.id,
+            &mission,
+            &history,
+            history.first().map(|(_, content)| content.as_str()),
+            false,
+        )
+        .await;
+
+        assert_eq!(
+            updated_title.as_deref(),
+            Some("Identified root cause: callback URL host mismatch in production.")
+        );
+        assert_eq!(
+            updated_short_description.as_deref(),
+            Some("Identified root cause: callback URL host mismatch in production.")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_generate_mission_metadata_updates_waits_for_successful_assistant_before_bootstrap(
+    ) {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = store
+            .create_mission(None, None, None, None, None, None, None)
+            .await
+            .expect("create mission");
+        let history = vec![
+            (
+                "user".to_string(),
+                "Fix oauth callback failures on mobile safari".to_string(),
+            ),
+            (
+                "assistant".to_string(),
+                "Error: unable to complete analysis because logs are missing.".to_string(),
+            ),
+        ];
+
+        let (updated_title, updated_short_description) = generate_mission_metadata_updates(
+            &store,
+            mission.id,
+            &mission,
+            &history,
+            history.first().map(|(_, content)| content.as_str()),
+            false,
+        )
+        .await;
+
+        assert_eq!(updated_title, None);
+        assert_eq!(updated_short_description, None);
+    }
+
+    #[tokio::test]
+    async fn test_generate_mission_metadata_updates_does_not_overwrite_user_managed_title() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = store
+            .create_mission(Some("Initial title"), None, None, None, None, None, None)
+            .await
+            .expect("create mission");
+        store
+            .update_mission_metadata(
+                mission.id,
+                None,
+                None,
+                Some(Some(METADATA_SOURCE_USER)),
+                None,
+                None,
+            )
+            .await
+            .expect("mark title as user-managed");
+        let mission = store
+            .get_mission(mission.id)
+            .await
+            .expect("load mission")
+            .expect("mission exists");
+        let history = vec![
+            ("user".to_string(), "Track flaky auth tests".to_string()),
+            (
+                "assistant".to_string(),
+                "Auth test flakes are caused by parallel DB seed races.".to_string(),
+            ),
+        ];
+
+        let (updated_title, updated_short_description) = generate_mission_metadata_updates(
+            &store,
+            mission.id,
+            &mission,
+            &history,
+            history.first().map(|(_, c)| c.as_str()),
+            true,
+        )
+        .await;
+
+        assert_eq!(updated_title, None);
+        assert_eq!(
+            updated_short_description.as_deref(),
+            Some("Auth test flakes are caused by parallel DB seed races.")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_refresh_mission_metadata_preserves_user_source_when_only_short_description_changes(
+    ) {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = store
+            .create_mission(
+                Some("User chosen title"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("create mission");
+        store
+            .update_mission_title(mission.id, "User chosen title")
+            .await
+            .expect("mark title as user managed");
+        store
+            .update_mission_history(
+                mission.id,
+                &[
+                    MissionHistoryEntry {
+                        role: "user".to_string(),
+                        content: "Investigate oauth callback timeout".to_string(),
+                    },
+                    MissionHistoryEntry {
+                        role: "assistant".to_string(),
+                        content: "Root cause is stale oauth callback cache state across retries."
+                            .to_string(),
+                    },
+                ],
+            )
+            .await
+            .expect("seed history");
+
+        let (events_tx, _events_rx) = broadcast::channel::<AgentEvent>(16);
+        refresh_mission_metadata_for_milestone(&store, &events_tx, mission.id).await;
+
+        let refreshed = store
+            .get_mission(mission.id)
+            .await
+            .expect("get mission")
+            .expect("mission exists");
+        assert_eq!(refreshed.title.as_deref(), Some("User chosen title"));
+        assert_eq!(
+            refreshed.short_description.as_deref(),
+            Some("Root cause is stale oauth callback cache state across retries.")
+        );
+        assert_eq!(
+            refreshed.metadata_source.as_deref(),
+            Some(METADATA_SOURCE_USER)
+        );
+        assert_eq!(
+            refreshed.metadata_version.as_deref(),
+            Some(METADATA_VERSION_V1)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_generate_mission_metadata_updates_prefers_assistant_short_description_when_title_exists(
+    ) {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = store
+            .create_mission(
+                Some("Existing mission title"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("create mission");
+        let history = vec![
+            ("user".to_string(), "Hi".to_string()),
+            (
+                "assistant".to_string(),
+                "Investigate oauth callback timeout root cause and retry behavior.".to_string(),
+            ),
+        ];
+
+        let (updated_title, updated_short_description) = generate_mission_metadata_updates(
+            &store,
+            mission.id,
+            &mission,
+            &history,
+            history.first().map(|(_, content)| content.as_str()),
+            false,
+        )
+        .await;
+
+        assert_eq!(updated_title, None);
+        assert_eq!(
+            updated_short_description.as_deref(),
+            Some("Investigate oauth callback timeout root cause and retry behavior.")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_generate_mission_metadata_updates_upgrades_existing_short_description_from_assistant(
+    ) {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = store
+            .create_mission(None, None, None, None, None, None, None)
+            .await
+            .expect("create mission");
+        store
+            .update_mission_metadata(
+                mission.id,
+                None,
+                Some(Some("Hi")),
+                Some(Some(METADATA_SOURCE_BACKEND_HEURISTIC)),
+                None,
+                Some(Some(METADATA_VERSION_V1)),
+            )
+            .await
+            .expect("seed short description");
+        let mission = store
+            .get_mission(mission.id)
+            .await
+            .expect("get mission")
+            .expect("mission exists");
+        let history = vec![
+            ("user".to_string(), "Hi".to_string()),
+            (
+                "assistant".to_string(),
+                "Investigate oauth callback timeout root cause and retry behavior.".to_string(),
+            ),
+        ];
+
+        let (updated_title, updated_short_description) = generate_mission_metadata_updates(
+            &store,
+            mission.id,
+            &mission,
+            &history,
+            history.first().map(|(_, content)| content.as_str()),
+            false,
+        )
+        .await;
+
+        assert_eq!(
+            updated_title.as_deref(),
+            Some("Investigate oauth callback timeout root cause and retry behavior.")
+        );
+        assert_eq!(
+            updated_short_description.as_deref(),
+            Some("Investigate oauth callback timeout root cause and retry behavior.")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_generate_mission_metadata_updates_bootstrap_short_description_prefers_first_assistant_even_when_overlap_is_high(
+    ) {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = store
+            .create_mission(None, None, None, None, None, None, None)
+            .await
+            .expect("create mission");
+        store
+            .update_mission_metadata(
+                mission.id,
+                None,
+                Some(Some("Investigate oauth callback timeout root cause")),
+                Some(Some(METADATA_SOURCE_BACKEND_HEURISTIC)),
+                None,
+                Some(Some(METADATA_VERSION_V1)),
+            )
+            .await
+            .expect("seed short description");
+        let mission = store
+            .get_mission(mission.id)
+            .await
+            .expect("get mission")
+            .expect("mission exists");
+        let history = vec![
+            (
+                "user".to_string(),
+                "Investigate oauth callback timeout root cause".to_string(),
+            ),
+            (
+                "assistant".to_string(),
+                "Investigate oauth callback timeout root cause and retry behavior.".to_string(),
+            ),
+        ];
+
+        let (updated_title, updated_short_description) = generate_mission_metadata_updates(
+            &store,
+            mission.id,
+            &mission,
+            &history,
+            history.first().map(|(_, content)| content.as_str()),
+            false,
+        )
+        .await;
+
+        assert_eq!(
+            updated_title.as_deref(),
+            Some("Investigate oauth callback timeout root cause and retry behavior.")
+        );
+        assert_eq!(
+            updated_short_description.as_deref(),
+            Some("Investigate oauth callback timeout root cause and retry behavior.")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_generate_mission_metadata_updates_uses_recent_titles_as_negative_context() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        store
+            .create_mission(
+                Some("Fix login redirect"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("create existing mission");
+        let mission = store
+            .create_mission(None, None, None, None, None, None, None)
+            .await
+            .expect("create probe mission");
+        let history = vec![
+            (
+                "user".to_string(),
+                "Fix login redirect on mobile safari callback flow".to_string(),
+            ),
+            (
+                "assistant".to_string(),
+                "Fix login redirect\nI'll investigate auth callback handling.".to_string(),
+            ),
+        ];
+
+        let (updated_title, updated_short_description) = generate_mission_metadata_updates(
+            &store,
+            mission.id,
+            &mission,
+            &history,
+            history.first().map(|(_, content)| content.as_str()),
+            false,
+        )
+        .await;
+
+        assert_eq!(
+            updated_title.as_deref(),
+            Some("Fix login redirect - mobile safari callback flow")
+        );
+        assert_eq!(
+            updated_short_description.as_deref(),
+            Some("Fix login redirect")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_generate_mission_metadata_updates_negative_context_scans_beyond_first_page() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        store
+            .create_mission(
+                Some("Fix login redirect"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("create existing mission");
+
+        for idx in 0..320 {
+            store
+                .create_mission(
+                    Some(&format!("Filler mission {}", idx)),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .expect("create filler mission");
+        }
+
+        let mission = store
+            .create_mission(None, None, None, None, None, None, None)
+            .await
+            .expect("create probe mission");
+        let history = vec![
+            (
+                "user".to_string(),
+                "Fix login redirect in admin callback flow for enterprise SSO".to_string(),
+            ),
+            (
+                "assistant".to_string(),
+                "Fix login redirect\nI'll investigate auth callback handling.".to_string(),
+            ),
+        ];
+
+        let (updated_title, _) = generate_mission_metadata_updates(
+            &store,
+            mission.id,
+            &mission,
+            &history,
+            history.first().map(|(_, content)| content.as_str()),
+            false,
+        )
+        .await;
+
+        let updated_title = updated_title.expect("title should be generated");
+        assert_ne!(updated_title, "Fix login redirect");
+        assert!(
+            updated_title.starts_with("Fix login redirect - admin callback flow"),
+            "unexpected diversified title: {updated_title}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_generate_mission_metadata_updates_refreshes_on_milestone_event() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = store
+            .create_mission(Some("Legacy title"), None, None, None, None, None, None)
+            .await
+            .expect("create mission");
+        store
+            .update_mission_metadata(
+                mission.id,
+                Some(Some("Legacy title")),
+                Some(Some("Legacy short description")),
+                Some(Some(METADATA_SOURCE_BACKEND_HEURISTIC)),
+                None,
+                None,
+            )
+            .await
+            .expect("seed metadata");
+        let mission = store
+            .get_mission(mission.id)
+            .await
+            .expect("get mission")
+            .expect("mission exists");
+        let history = vec![
+            (
+                "user".to_string(),
+                "Investigate production timeout in payment worker".to_string(),
+            ),
+            ("assistant".to_string(), "Thanks, checking now.".to_string()),
+            (
+                "assistant".to_string(),
+                "Investigate payment timeout root cause\nStarting with logs.".to_string(),
+            ),
+        ];
+
+        let without_milestone = generate_mission_metadata_updates(
+            &store,
+            mission.id,
+            &mission,
+            &history,
+            history.first().map(|(_, content)| content.as_str()),
+            false,
+        )
+        .await;
+        assert_eq!(without_milestone, (None, None));
+
+        let with_milestone = generate_mission_metadata_updates(
+            &store,
+            mission.id,
+            &mission,
+            &history,
+            history.first().map(|(_, content)| content.as_str()),
+            true,
+        )
+        .await;
+        assert_eq!(
+            with_milestone.0.as_deref(),
+            Some("Investigate payment timeout root cause")
+        );
+        assert_eq!(
+            with_milestone.1.as_deref(),
+            Some("Investigate payment timeout root cause")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_generate_mission_metadata_updates_refresh_uses_recent_conversational_short_description(
+    ) {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = store
+            .create_mission(Some("Legacy title"), None, None, None, None, None, None)
+            .await
+            .expect("create mission");
+        store
+            .update_mission_metadata(
+                mission.id,
+                Some(Some("Legacy title")),
+                Some(Some("Legacy short description")),
+                Some(Some(METADATA_SOURCE_BACKEND_HEURISTIC)),
+                None,
+                None,
+            )
+            .await
+            .expect("seed metadata");
+        let mission = store
+            .get_mission(mission.id)
+            .await
+            .expect("get mission")
+            .expect("mission exists");
+        let history = vec![
+            (
+                "user".to_string(),
+                "Start by auditing invoice retry failures in webhook processing.".to_string(),
+            ),
+            (
+                "assistant".to_string(),
+                "Acknowledged. I'll inspect the retry pipeline first.".to_string(),
+            ),
+            (
+                "user".to_string(),
+                "Check current retry backoff settings.".to_string(),
+            ),
+            (
+                "assistant".to_string(),
+                "Backoff settings retrieved from worker config.".to_string(),
+            ),
+            (
+                "user".to_string(),
+                "Look at dead-letter queue behavior next.".to_string(),
+            ),
+            (
+                "assistant".to_string(),
+                "Dead-letter queue is receiving retries after max attempts.".to_string(),
+            ),
+            (
+                "user".to_string(),
+                "Confirm alerting on repeated failures.".to_string(),
+            ),
+            (
+                "assistant".to_string(),
+                "Current alerts only trigger on total outage.".to_string(),
+            ),
+            (
+                "user".to_string(),
+                "Propose what we should change.".to_string(),
+            ),
+            (
+                "assistant".to_string(),
+                "Finalize webhook retry policy with staged backoff and failure alert routing."
+                    .to_string(),
+            ),
+        ];
+
+        let (_, updated_short_description) = generate_mission_metadata_updates(
+            &store,
+            mission.id,
+            &mission,
+            &history,
+            history.first().map(|(_, content)| content.as_str()),
+            true,
+        )
+        .await;
+
+        assert_eq!(
+            updated_short_description.as_deref(),
+            Some("Finalize webhook retry policy with staged backoff and failure alert routing.")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_refresh_mission_metadata_for_milestone_updates_store_and_emits_event() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let model_override = "openai/gpt-5";
+        let mission = store
+            .create_mission(
+                Some("Legacy title"),
+                None,
+                None,
+                Some(model_override),
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("create mission");
+        store
+            .update_mission_metadata(
+                mission.id,
+                Some(Some("Legacy title")),
+                Some(Some("Legacy short description")),
+                Some(Some(METADATA_SOURCE_BACKEND_HEURISTIC)),
+                None,
+                None,
+            )
+            .await
+            .expect("seed metadata");
+        store
+            .update_mission_history(
+                mission.id,
+                &[
+                    MissionHistoryEntry {
+                        role: "user".to_string(),
+                        content: "Investigate oauth callback timeout".to_string(),
+                    },
+                    MissionHistoryEntry {
+                        role: "assistant".to_string(),
+                        content:
+                            "Investigate oauth callback timeout root cause\nStarting with ingress logs."
+                                .to_string(),
+                    },
+                ],
+            )
+            .await
+            .expect("seed history");
+
+        let (events_tx, mut events_rx) = broadcast::channel::<AgentEvent>(16);
+        refresh_mission_metadata_for_milestone(&store, &events_tx, mission.id).await;
+
+        let refreshed = store
+            .get_mission(mission.id)
+            .await
+            .expect("get mission")
+            .expect("mission exists");
+        assert_eq!(
+            refreshed.title.as_deref(),
+            Some("Investigate oauth callback timeout root cause")
+        );
+        assert_eq!(
+            refreshed.short_description.as_deref(),
+            Some("Investigate oauth callback timeout root cause")
+        );
+        assert_eq!(
+            refreshed.metadata_source.as_deref(),
+            Some(METADATA_SOURCE_BACKEND_HEURISTIC)
+        );
+        assert_eq!(
+            refreshed.metadata_version.as_deref(),
+            Some(METADATA_VERSION_V1)
+        );
+        assert_eq!(refreshed.metadata_model.as_deref(), Some(model_override));
+
+        let mut saw_metadata_event = false;
+        while let Ok(event) = events_rx.try_recv() {
+            if let AgentEvent::MissionMetadataUpdated {
+                mission_id,
+                metadata_model,
+                updated_at,
+                ..
+            } = event
+            {
+                if mission_id == mission.id {
+                    assert_eq!(metadata_model.as_deref(), Some(model_override));
+                    assert_eq!(updated_at.as_deref(), Some(refreshed.updated_at.as_str()));
+                    saw_metadata_event = true;
+                    break;
+                }
+            }
+        }
+        assert!(
+            saw_metadata_event,
+            "expected mission_metadata_updated event"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_schedule_mission_metadata_refresh_for_milestone_updates_store_and_emits_event() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = store
+            .create_mission(Some("Legacy title"), None, None, None, None, None, None)
+            .await
+            .expect("create mission");
+        store
+            .update_mission_metadata(
+                mission.id,
+                Some(Some("Legacy title")),
+                Some(Some("Legacy short description")),
+                Some(Some(METADATA_SOURCE_BACKEND_HEURISTIC)),
+                None,
+                None,
+            )
+            .await
+            .expect("seed metadata");
+        store
+            .update_mission_history(
+                mission.id,
+                &[
+                    MissionHistoryEntry {
+                        role: "user".to_string(),
+                        content: "Investigate websocket reconnect loop".to_string(),
+                    },
+                    MissionHistoryEntry {
+                        role: "assistant".to_string(),
+                        content: "Investigate websocket reconnect loop root cause".to_string(),
+                    },
+                ],
+            )
+            .await
+            .expect("seed history");
+
+        let (events_tx, mut events_rx) = broadcast::channel::<AgentEvent>(16);
+        schedule_mission_metadata_refresh_for_milestone(&store, &events_tx, mission.id);
+
+        let saw_metadata_event = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                match events_rx.recv().await {
+                    Ok(AgentEvent::MissionMetadataUpdated { mission_id, .. })
+                        if mission_id == mission.id =>
+                    {
+                        break true;
+                    }
+                    Ok(_) => continue,
+                    Err(_) => break false,
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for metadata refresh event");
+        assert!(
+            saw_metadata_event,
+            "expected mission_metadata_updated event"
+        );
+
+        let refreshed = store
+            .get_mission(mission.id)
+            .await
+            .expect("get mission")
+            .expect("mission exists");
+        assert_eq!(
+            refreshed.title.as_deref(),
+            Some("Investigate websocket reconnect loop root cause")
+        );
+        assert_eq!(
+            refreshed.short_description.as_deref(),
+            Some("Investigate websocket reconnect loop root cause")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_maybe_schedule_mission_metadata_refresh_for_status_forces_terminal_statuses() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = store
+            .create_mission(Some("Legacy title"), None, None, None, None, None, None)
+            .await
+            .expect("create mission");
+        store
+            .update_mission_metadata(
+                mission.id,
+                Some(Some("Legacy title")),
+                Some(Some("Legacy short description")),
+                Some(Some(METADATA_SOURCE_BACKEND_HEURISTIC)),
+                None,
+                None,
+            )
+            .await
+            .expect("seed metadata");
+        store
+            .update_mission_history(
+                mission.id,
+                &[
+                    MissionHistoryEntry {
+                        role: "user".to_string(),
+                        content: "Investigate websocket reconnect loop".to_string(),
+                    },
+                    MissionHistoryEntry {
+                        role: "assistant".to_string(),
+                        content: "Checking ingress timeout settings".to_string(),
+                    },
+                    MissionHistoryEntry {
+                        role: "assistant".to_string(),
+                        content: "Investigate websocket reconnect loop root cause".to_string(),
+                    },
+                ],
+            )
+            .await
+            .expect("seed history");
+
+        let (events_tx, mut events_rx) = broadcast::channel::<AgentEvent>(16);
+        maybe_schedule_mission_metadata_refresh_for_status(
+            &store,
+            &events_tx,
+            mission.id,
+            MissionStatus::Completed,
+        );
+
+        let saw_metadata_event = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                match events_rx.recv().await {
+                    Ok(AgentEvent::MissionMetadataUpdated { mission_id, .. })
+                        if mission_id == mission.id =>
+                    {
+                        break true;
+                    }
+                    Ok(_) => continue,
+                    Err(_) => break false,
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for metadata refresh event");
+        assert!(
+            saw_metadata_event,
+            "expected mission_metadata_updated event"
+        );
+
+        let refreshed = store
+            .get_mission(mission.id)
+            .await
+            .expect("get mission")
+            .expect("mission exists");
+        assert_eq!(
+            refreshed.title.as_deref(),
+            Some("Investigate websocket reconnect loop root cause")
+        );
+        assert_eq!(
+            refreshed.short_description.as_deref(),
+            Some("Investigate websocket reconnect loop root cause")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_maybe_schedule_mission_metadata_refresh_for_status_skips_non_milestone_statuses()
+    {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = store
+            .create_mission(
+                Some("Existing mission title"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("create mission");
+        store
+            .update_mission_metadata(
+                mission.id,
+                Some(Some("Existing mission title")),
+                Some(Some("Existing mission short description")),
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("seed metadata");
+        let seeded = store
+            .get_mission(mission.id)
+            .await
+            .expect("get mission")
+            .expect("mission exists");
+        let seeded_updated_at = seeded
+            .metadata_updated_at
+            .clone()
+            .expect("seed metadata timestamp");
+
+        store
+            .update_mission_history(
+                mission.id,
+                &[
+                    MissionHistoryEntry {
+                        role: "user".to_string(),
+                        content: "Investigate websocket reconnect loop".to_string(),
+                    },
+                    MissionHistoryEntry {
+                        role: "assistant".to_string(),
+                        content: "Investigate websocket reconnect loop root cause".to_string(),
+                    },
+                    MissionHistoryEntry {
+                        role: "assistant".to_string(),
+                        content: "Collecting additional traces".to_string(),
+                    },
+                ],
+            )
+            .await
+            .expect("seed history");
+
+        let (events_tx, mut events_rx) = broadcast::channel::<AgentEvent>(16);
+        maybe_schedule_mission_metadata_refresh_for_status(
+            &store,
+            &events_tx,
+            mission.id,
+            MissionStatus::Active,
+        );
+
+        let saw_metadata_event =
+            tokio::time::timeout(std::time::Duration::from_millis(250), async {
+                loop {
+                    match events_rx.recv().await {
+                        Ok(AgentEvent::MissionMetadataUpdated { mission_id, .. })
+                            if mission_id == mission.id =>
+                        {
+                            break true;
+                        }
+                        Ok(_) => continue,
+                        Err(_) => break false,
+                    }
+                }
+            })
+            .await
+            .unwrap_or(false);
+        assert!(
+            !saw_metadata_event,
+            "did not expect metadata refresh for non-milestone status"
+        );
+
+        let refreshed = store
+            .get_mission(mission.id)
+            .await
+            .expect("get mission")
+            .expect("mission exists");
+        assert_eq!(refreshed.title.as_deref(), Some("Existing mission title"));
+        assert_eq!(
+            refreshed.short_description.as_deref(),
+            Some("Existing mission short description")
+        );
+        assert_eq!(
+            refreshed.metadata_updated_at.as_deref(),
+            Some(seeded_updated_at.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_schedule_mission_metadata_refresh_updates_store_without_force_refresh() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = store
+            .create_mission(None, None, None, None, None, None, None)
+            .await
+            .expect("create mission");
+        store
+            .update_mission_history(
+                mission.id,
+                &[
+                    MissionHistoryEntry {
+                        role: "user".to_string(),
+                        content: "Investigate websocket reconnect loop".to_string(),
+                    },
+                    MissionHistoryEntry {
+                        role: "assistant".to_string(),
+                        content: "Investigate websocket reconnect loop root cause".to_string(),
+                    },
+                ],
+            )
+            .await
+            .expect("seed history");
+
+        let (events_tx, mut events_rx) = broadcast::channel::<AgentEvent>(16);
+        schedule_mission_metadata_refresh(&store, &events_tx, mission.id, false);
+
+        let saw_metadata_event = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                match events_rx.recv().await {
+                    Ok(AgentEvent::MissionMetadataUpdated { mission_id, .. })
+                        if mission_id == mission.id =>
+                    {
+                        break true;
+                    }
+                    Ok(_) => continue,
+                    Err(_) => break false,
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for metadata refresh event");
+        assert!(
+            saw_metadata_event,
+            "expected mission_metadata_updated event"
+        );
+
+        let refreshed = store
+            .get_mission(mission.id)
+            .await
+            .expect("get mission")
+            .expect("mission exists");
+        assert_eq!(
+            refreshed.title.as_deref(),
+            Some("Investigate websocket reconnect loop root cause")
+        );
+        assert_eq!(
+            refreshed.short_description.as_deref(),
+            Some("Investigate websocket reconnect loop root cause")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_persist_mission_history_and_schedule_metadata_refresh_emits_metadata_update() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = store
+            .create_mission(None, None, None, None, None, None, None)
+            .await
+            .expect("create mission");
+        let entries = vec![
+            MissionHistoryEntry {
+                role: "user".to_string(),
+                content: "Debug websocket reconnect loop".to_string(),
+            },
+            MissionHistoryEntry {
+                role: "assistant".to_string(),
+                content: "Root cause is stale session token refresh ordering".to_string(),
+            },
+        ];
+
+        let (events_tx, mut events_rx) = broadcast::channel::<AgentEvent>(16);
+        persist_mission_history_and_schedule_metadata_refresh(
+            &store, &events_tx, mission.id, &entries,
+        )
+        .await;
+
+        let saw_metadata_event = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                match events_rx.recv().await {
+                    Ok(AgentEvent::MissionMetadataUpdated { mission_id, .. })
+                        if mission_id == mission.id =>
+                    {
+                        break true;
+                    }
+                    Ok(_) => continue,
+                    Err(_) => break false,
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for metadata refresh event");
+        assert!(
+            saw_metadata_event,
+            "expected mission_metadata_updated event"
+        );
+
+        let refreshed = store
+            .get_mission(mission.id)
+            .await
+            .expect("get mission")
+            .expect("mission exists");
+        assert_eq!(
+            refreshed.title.as_deref(),
+            Some("Root cause is stale session token refresh ordering")
+        );
+        assert_eq!(
+            refreshed.short_description.as_deref(),
+            Some("Root cause is stale session token refresh ordering")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_schedule_mission_metadata_refresh_skips_non_cadence_updates_without_force_refresh(
+    ) {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = store
+            .create_mission(None, None, None, None, None, None, None)
+            .await
+            .expect("create mission");
+        store
+            .update_mission_metadata(
+                mission.id,
+                Some(Some("Existing mission title")),
+                Some(Some("Existing mission short description")),
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("seed metadata");
+        let seeded = store
+            .get_mission(mission.id)
+            .await
+            .expect("get mission")
+            .expect("mission exists");
+        let seeded_updated_at = seeded
+            .metadata_updated_at
+            .clone()
+            .expect("seed metadata timestamp");
+        store
+            .update_mission_history(
+                mission.id,
+                &[
+                    MissionHistoryEntry {
+                        role: "user".to_string(),
+                        content: "Initial request".to_string(),
+                    },
+                    MissionHistoryEntry {
+                        role: "assistant".to_string(),
+                        content: "Initial response".to_string(),
+                    },
+                    MissionHistoryEntry {
+                        role: "user".to_string(),
+                        content: "Follow-up request".to_string(),
+                    },
+                    MissionHistoryEntry {
+                        role: "assistant".to_string(),
+                        content: "Refined response".to_string(),
+                    },
+                ],
+            )
+            .await
+            .expect("seed history");
+
+        let (events_tx, mut events_rx) = broadcast::channel::<AgentEvent>(16);
+        schedule_mission_metadata_refresh(&store, &events_tx, mission.id, false);
+
+        let saw_metadata_event =
+            tokio::time::timeout(std::time::Duration::from_millis(300), async {
+                loop {
+                    match events_rx.recv().await {
+                        Ok(AgentEvent::MissionMetadataUpdated { mission_id, .. })
+                            if mission_id == mission.id =>
+                        {
+                            break true;
+                        }
+                        Ok(_) => continue,
+                        Err(_) => break false,
+                    }
+                }
+            })
+            .await
+            .unwrap_or(false);
+        assert!(
+            !saw_metadata_event,
+            "metadata refresh should not run before cadence threshold when force_refresh is false"
+        );
+
+        let refreshed = store
+            .get_mission(mission.id)
+            .await
+            .expect("get mission")
+            .expect("mission exists");
+        assert_eq!(refreshed.title.as_deref(), Some("Existing mission title"));
+        assert_eq!(
+            refreshed.short_description.as_deref(),
+            Some("Existing mission short description")
+        );
+        assert_eq!(
+            refreshed.metadata_updated_at.as_deref(),
+            Some(seeded_updated_at.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_schedule_mission_metadata_refresh_ignores_non_conversational_entries_for_cadence()
+    {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = store
+            .create_mission(None, None, None, None, None, None, None)
+            .await
+            .expect("create mission");
+        store
+            .update_mission_metadata(
+                mission.id,
+                Some(Some("Existing mission title")),
+                Some(Some("Existing mission short description")),
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("seed metadata");
+        let seeded = store
+            .get_mission(mission.id)
+            .await
+            .expect("get mission")
+            .expect("mission exists");
+        let seeded_updated_at = seeded
+            .metadata_updated_at
+            .clone()
+            .expect("seed metadata timestamp");
+        store
+            .update_mission_history(
+                mission.id,
+                &[
+                    MissionHistoryEntry {
+                        role: "user".to_string(),
+                        content: "Initial request".to_string(),
+                    },
+                    MissionHistoryEntry {
+                        role: "assistant".to_string(),
+                        content: "Initial response".to_string(),
+                    },
+                    MissionHistoryEntry {
+                        role: "tool".to_string(),
+                        content: "tool_call: inspect logs".to_string(),
+                    },
+                    MissionHistoryEntry {
+                        role: "user".to_string(),
+                        content: "Follow-up request".to_string(),
+                    },
+                    MissionHistoryEntry {
+                        role: "assistant".to_string(),
+                        content: "Follow-up response".to_string(),
+                    },
+                    MissionHistoryEntry {
+                        role: "tool".to_string(),
+                        content: "tool_result: log output".to_string(),
+                    },
+                    MissionHistoryEntry {
+                        role: "user".to_string(),
+                        content: "Investigate retries".to_string(),
+                    },
+                    MissionHistoryEntry {
+                        role: "assistant".to_string(),
+                        content: "Retries are triggered by 502s".to_string(),
+                    },
+                    MissionHistoryEntry {
+                        role: "user".to_string(),
+                        content: "Patch retry jitter".to_string(),
+                    },
+                    MissionHistoryEntry {
+                        role: "assistant".to_string(),
+                        content: "Added jitter and bounded retries".to_string(),
+                    },
+                ],
+            )
+            .await
+            .expect("seed history");
+
+        let (events_tx, mut events_rx) = broadcast::channel::<AgentEvent>(16);
+        schedule_mission_metadata_refresh(&store, &events_tx, mission.id, false);
+
+        let saw_metadata_event =
+            tokio::time::timeout(std::time::Duration::from_millis(300), async {
+                loop {
+                    match events_rx.recv().await {
+                        Ok(AgentEvent::MissionMetadataUpdated { mission_id, .. })
+                            if mission_id == mission.id =>
+                        {
+                            break true;
+                        }
+                        Ok(_) => continue,
+                        Err(_) => break false,
+                    }
+                }
+            })
+            .await
+            .unwrap_or(false);
+        assert!(
+            !saw_metadata_event,
+            "metadata refresh should not run when only non-conversational entries push history length to cadence boundary"
+        );
+
+        let refreshed = store
+            .get_mission(mission.id)
+            .await
+            .expect("get mission")
+            .expect("mission exists");
+        assert_eq!(refreshed.title.as_deref(), Some("Existing mission title"));
+        assert_eq!(
+            refreshed.short_description.as_deref(),
+            Some("Existing mission short description")
+        );
+        assert_eq!(
+            refreshed.metadata_updated_at.as_deref(),
+            Some(seeded_updated_at.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_schedule_mission_metadata_refresh_uses_last_refresh_baseline_not_global_modulo() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = store
+            .create_mission(Some("Legacy title"), None, None, None, None, None, None)
+            .await
+            .expect("create mission");
+
+        let mut history: Vec<MissionHistoryEntry> = Vec::new();
+        for idx in 0..27 {
+            let role = if idx % 2 == 0 { "user" } else { "assistant" };
+            history.push(MissionHistoryEntry {
+                role: role.to_string(),
+                content: format!("history entry {}", idx),
+            });
+        }
+        store
+            .update_mission_history(mission.id, &history)
+            .await
+            .expect("seed history");
+
+        let (forced_events_tx, _forced_events_rx) = broadcast::channel::<AgentEvent>(16);
+        refresh_mission_metadata_for_milestone(&store, &forced_events_tx, mission.id).await;
+
+        let after_forced = store
+            .get_mission(mission.id)
+            .await
+            .expect("get mission")
+            .expect("mission exists");
+        let forced_timestamp = after_forced
+            .metadata_updated_at
+            .clone()
+            .expect("forced refresh should set metadata timestamp");
+
+        for idx in 27..30 {
+            let role = if idx % 2 == 0 { "user" } else { "assistant" };
+            history.push(MissionHistoryEntry {
+                role: role.to_string(),
+                content: format!("post-forced history entry {}", idx),
+            });
+        }
+        store
+            .update_mission_history(mission.id, &history)
+            .await
+            .expect("update history");
+
+        let (events_tx, mut events_rx) = broadcast::channel::<AgentEvent>(16);
+        schedule_mission_metadata_refresh(&store, &events_tx, mission.id, false);
+
+        let saw_metadata_event =
+            tokio::time::timeout(std::time::Duration::from_millis(300), async {
+                loop {
+                    match events_rx.recv().await {
+                        Ok(AgentEvent::MissionMetadataUpdated { mission_id, .. })
+                            if mission_id == mission.id =>
+                        {
+                            break true;
+                        }
+                        Ok(_) => continue,
+                        Err(_) => break false,
+                    }
+                }
+            })
+            .await
+            .unwrap_or(false);
+        assert!(
+            !saw_metadata_event,
+            "metadata refresh should not run only 3 conversational turns after a forced refresh"
+        );
+
+        let refreshed = store
+            .get_mission(mission.id)
+            .await
+            .expect("get mission")
+            .expect("mission exists");
+        assert_eq!(
+            refreshed.metadata_updated_at.as_deref(),
+            Some(forced_timestamp.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_should_refresh_metadata_by_cadence_rebases_when_history_is_rewritten_shorter() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = store
+            .create_mission(Some("Existing mission"), None, None, None, None, None, None)
+            .await
+            .expect("create mission");
+        store
+            .update_mission_metadata(
+                mission.id,
+                Some(Some("Existing mission")),
+                Some(Some("Existing short description")),
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("seed metadata");
+        let mission = store
+            .get_mission(mission.id)
+            .await
+            .expect("get mission")
+            .expect("mission exists");
+
+        clear_mission_metadata_refresh_state(mission.id);
+
+        assert!(!should_refresh_metadata_by_cadence(
+            mission.id, &mission, 24, false
+        ));
+        assert!(!should_refresh_metadata_by_cadence(
+            mission.id, &mission, 4, false
+        ));
+        assert!(!should_refresh_metadata_by_cadence(
+            mission.id, &mission, 13, false
+        ));
+        assert!(should_refresh_metadata_by_cadence(
+            mission.id, &mission, 14, false
+        ));
+
+        clear_mission_metadata_refresh_state(mission.id);
+    }
+
+    #[tokio::test]
+    async fn test_record_metadata_refresh_baseline_from_mission_rebases_manual_title_updates() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = store
+            .create_mission(Some("Existing mission"), None, None, None, None, None, None)
+            .await
+            .expect("create mission");
+        store
+            .update_mission_history(
+                mission.id,
+                &[
+                    MissionHistoryEntry {
+                        role: "user".to_string(),
+                        content: "one".to_string(),
+                    },
+                    MissionHistoryEntry {
+                        role: "assistant".to_string(),
+                        content: "two".to_string(),
+                    },
+                    MissionHistoryEntry {
+                        role: "tool".to_string(),
+                        content: "{}".to_string(),
+                    },
+                    MissionHistoryEntry {
+                        role: "assistant".to_string(),
+                        content: "three".to_string(),
+                    },
+                ],
+            )
+            .await
+            .expect("seed history");
+        store
+            .update_mission_metadata(
+                mission.id,
+                Some(Some("Existing mission")),
+                Some(Some("Existing short description")),
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("seed metadata");
+        let mission = store
+            .get_mission(mission.id)
+            .await
+            .expect("get mission")
+            .expect("mission exists");
+
+        clear_mission_metadata_refresh_state(mission.id);
+        record_metadata_refresh_baseline(mission.id, 0);
+
+        record_metadata_refresh_baseline_from_mission(mission.id, &mission);
+
+        assert!(!should_refresh_metadata_by_cadence(
+            mission.id, &mission, 11, false
+        ));
+        assert!(!should_refresh_metadata_by_cadence(
+            mission.id, &mission, 12, false
+        ));
+        assert!(should_refresh_metadata_by_cadence(
+            mission.id, &mission, 13, false
+        ));
+
+        clear_mission_metadata_refresh_state(mission.id);
+    }
+
+    #[tokio::test]
+    async fn test_register_metadata_refresh_task_replaces_existing_task_for_same_mission() {
+        let mission_id = Uuid::new_v4();
+        let mut tasks: HashMap<Uuid, MetadataRefreshTaskEntry> = HashMap::new();
+
+        let first = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        });
+        let first_task_id = first.id();
+        let registration = register_metadata_refresh_task(&mut tasks, mission_id, false, 1, first);
+        assert!(registration.superseded.is_none());
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(
+            tasks.get(&mission_id).map(|entry| entry.handle.id()),
+            Some(first_task_id)
+        );
+
+        let second = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        });
+        let second_task_id = second.id();
+        let registration = register_metadata_refresh_task(&mut tasks, mission_id, false, 2, second);
+        let replaced = registration
+            .superseded
+            .expect("expected previous task to be replaced");
+        assert_eq!(replaced.id(), first_task_id);
+        replaced.abort();
+
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(
+            tasks.get(&mission_id).map(|entry| entry.handle.id()),
+            Some(second_task_id)
+        );
+
+        if let Some(active) = tasks.remove(&mission_id) {
+            active.handle.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_register_metadata_refresh_task_keeps_in_flight_forced_task_over_non_forced() {
+        let mission_id = Uuid::new_v4();
+        let mut tasks: HashMap<Uuid, MetadataRefreshTaskEntry> = HashMap::new();
+
+        let forced = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        });
+        let forced_task_id = forced.id();
+        let forced_registration =
+            register_metadata_refresh_task(&mut tasks, mission_id, true, 1, forced);
+        assert!(forced_registration.superseded.is_none());
+
+        let non_forced = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        });
+        let non_forced_task_id = non_forced.id();
+        let non_forced_registration =
+            register_metadata_refresh_task(&mut tasks, mission_id, false, 2, non_forced);
+        let rejected = non_forced_registration
+            .superseded
+            .expect("new non-forced task should be rejected");
+        assert_eq!(rejected.id(), non_forced_task_id);
+        rejected.abort();
+
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(
+            tasks.get(&mission_id).map(|entry| entry.handle.id()),
+            Some(forced_task_id)
+        );
+        assert!(tasks
+            .get(&mission_id)
+            .is_some_and(|entry| entry.force_refresh));
+
+        if let Some(active) = tasks.remove(&mission_id) {
+            active.handle.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_register_metadata_refresh_task_forced_replaces_non_forced() {
+        let mission_id = Uuid::new_v4();
+        let mut tasks: HashMap<Uuid, MetadataRefreshTaskEntry> = HashMap::new();
+
+        let non_forced = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        });
+        let non_forced_task_id = non_forced.id();
+        let non_forced_registration =
+            register_metadata_refresh_task(&mut tasks, mission_id, false, 1, non_forced);
+        assert!(non_forced_registration.superseded.is_none());
+
+        let forced = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        });
+        let forced_task_id = forced.id();
+        let forced_registration =
+            register_metadata_refresh_task(&mut tasks, mission_id, true, 2, forced);
+        let replaced = forced_registration
+            .superseded
+            .expect("existing non-forced task should be replaced");
+        assert_eq!(replaced.id(), non_forced_task_id);
+        replaced.abort();
+
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(
+            tasks.get(&mission_id).map(|entry| entry.handle.id()),
+            Some(forced_task_id)
+        );
+        assert!(tasks
+            .get(&mission_id)
+            .is_some_and(|entry| entry.force_refresh));
+
+        if let Some(active) = tasks.remove(&mission_id) {
+            active.handle.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_should_skip_metadata_refresh_schedule_rejects_non_forced_when_forced_in_flight() {
+        let mission_id = Uuid::new_v4();
+        let mut tasks: HashMap<Uuid, MetadataRefreshTaskEntry> = HashMap::new();
+
+        let forced = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        });
+        let registration = register_metadata_refresh_task(&mut tasks, mission_id, true, 1, forced);
+        assert!(registration.superseded.is_none());
+
+        assert!(should_skip_metadata_refresh_schedule(
+            &mut tasks, mission_id, false
+        ));
+        assert!(!should_skip_metadata_refresh_schedule(
+            &mut tasks, mission_id, true
+        ));
+
+        if let Some(active) = tasks.remove(&mission_id) {
+            active.handle.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_should_skip_metadata_refresh_schedule_drops_finished_tasks() {
+        let mission_id = Uuid::new_v4();
+        let mut tasks: HashMap<Uuid, MetadataRefreshTaskEntry> = HashMap::new();
+
+        let finished = tokio::spawn(async {});
+        let registration =
+            register_metadata_refresh_task(&mut tasks, mission_id, true, 1, finished);
+        assert!(registration.superseded.is_none());
+        tokio::task::yield_now().await;
+
+        assert!(!should_skip_metadata_refresh_schedule(
+            &mut tasks, mission_id, false
+        ));
+        assert!(tasks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_complete_metadata_refresh_task_only_removes_matching_generation() {
+        let mission_id = Uuid::new_v4();
+        let mut tasks: HashMap<Uuid, MetadataRefreshTaskEntry> = HashMap::new();
+
+        let task = tokio::spawn(async {});
+        let registration = register_metadata_refresh_task(&mut tasks, mission_id, false, 42, task);
+        assert!(registration.superseded.is_none());
+        assert_eq!(tasks.len(), 1);
+
+        complete_metadata_refresh_task(&mut tasks, mission_id, 41);
+        assert_eq!(tasks.len(), 1);
+
+        complete_metadata_refresh_task(&mut tasks, mission_id, 42);
+        assert!(tasks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_clear_mission_metadata_refresh_state_removes_task_and_baseline() {
+        let mission_id = Uuid::new_v4();
+        let other_mission_id = Uuid::new_v4();
+
+        clear_mission_metadata_refresh_state(mission_id);
+
+        let task = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        });
+
+        {
+            let mut tasks = MISSION_METADATA_REFRESH_TASKS
+                .lock()
+                .expect("metadata refresh task registry lock poisoned");
+            tasks.insert(
+                mission_id,
+                MetadataRefreshTaskEntry {
+                    handle: task,
+                    force_refresh: false,
+                    task_id: 1,
+                },
+            );
+            tasks.insert(
+                other_mission_id,
+                MetadataRefreshTaskEntry {
+                    handle: tokio::spawn(async {
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    }),
+                    force_refresh: false,
+                    task_id: 2,
+                },
+            );
+        }
+
+        {
+            let mut baselines = MISSION_METADATA_REFRESH_BASELINES
+                .lock()
+                .expect("metadata refresh baseline lock poisoned");
+            baselines.insert(mission_id, 10);
+            baselines.insert(other_mission_id, 20);
+        }
+
+        clear_mission_metadata_refresh_state(mission_id);
+
+        {
+            let tasks = MISSION_METADATA_REFRESH_TASKS
+                .lock()
+                .expect("metadata refresh task registry lock poisoned");
+            assert!(!tasks.contains_key(&mission_id));
+            assert!(tasks.contains_key(&other_mission_id));
+        }
+        {
+            let baselines = MISSION_METADATA_REFRESH_BASELINES
+                .lock()
+                .expect("metadata refresh baseline lock poisoned");
+            assert!(!baselines.contains_key(&mission_id));
+            assert_eq!(baselines.get(&other_mission_id), Some(&20usize));
+        }
+
+        clear_mission_metadata_refresh_state(other_mission_id);
+    }
+
+    #[tokio::test]
+    async fn test_clear_stale_mission_metadata_refresh_state_prunes_deleted_missions() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+
+        let deleted_mission = store
+            .create_mission(None, None, None, None, None, None, None)
+            .await
+            .expect("create deleted mission");
+        let existing_mission = store
+            .create_mission(None, None, None, None, None, None, None)
+            .await
+            .expect("create existing mission");
+
+        let deleted_task = tokio::spawn(std::future::pending::<()>());
+        let existing_task = tokio::spawn(std::future::pending::<()>());
+
+        {
+            let mut tasks = MISSION_METADATA_REFRESH_TASKS
+                .lock()
+                .expect("metadata refresh task registry lock poisoned");
+            tasks.insert(
+                deleted_mission.id,
+                MetadataRefreshTaskEntry {
+                    task_id: 1,
+                    force_refresh: false,
+                    handle: deleted_task,
+                },
+            );
+            tasks.insert(
+                existing_mission.id,
+                MetadataRefreshTaskEntry {
+                    task_id: 2,
+                    force_refresh: false,
+                    handle: existing_task,
+                },
+            );
+
+            let mut baselines = MISSION_METADATA_REFRESH_BASELINES
+                .lock()
+                .expect("metadata refresh baseline lock poisoned");
+            baselines.insert(deleted_mission.id, 10);
+            baselines.insert(existing_mission.id, 20);
+        }
+
+        store
+            .delete_mission(deleted_mission.id)
+            .await
+            .expect("delete mission should succeed");
+
+        clear_stale_mission_metadata_refresh_state(&store).await;
+
+        {
+            let tasks = MISSION_METADATA_REFRESH_TASKS
+                .lock()
+                .expect("metadata refresh task registry lock poisoned");
+            assert!(!tasks.contains_key(&deleted_mission.id));
+            assert!(tasks.contains_key(&existing_mission.id));
+        }
+
+        {
+            let baselines = MISSION_METADATA_REFRESH_BASELINES
+                .lock()
+                .expect("metadata refresh baseline lock poisoned");
+            assert!(!baselines.contains_key(&deleted_mission.id));
+            assert_eq!(baselines.get(&existing_mission.id), Some(&20usize));
+        }
+
+        clear_mission_metadata_refresh_state(existing_mission.id);
+    }
+
+    #[test]
+    fn test_mission_metadata_updated_event_serializes_explicit_null_clears() {
+        let mission_id = Uuid::new_v4();
+        let event = AgentEvent::MissionMetadataUpdated {
+            mission_id,
+            title: None,
+            short_description: Some("Investigate timeout path".to_string()),
+            metadata_updated_at: None,
+            updated_at: None,
+            metadata_source: None,
+            metadata_model: None,
+            metadata_version: None,
+        };
+
+        let value = serde_json::to_value(event).expect("serialize mission metadata event");
+        assert_eq!(
+            value.get("type").and_then(|v| v.as_str()),
+            Some("mission_metadata_updated")
+        );
+        assert!(value.get("title").is_some(), "title key should be present");
+        assert!(value.get("title").is_some_and(serde_json::Value::is_null));
+        assert_eq!(
+            value.get("short_description").and_then(|v| v.as_str()),
+            Some("Investigate timeout path")
+        );
+        assert!(
+            value
+                .get("metadata_updated_at")
+                .is_some_and(serde_json::Value::is_null),
+            "metadata_updated_at key should be present as null when cleared"
+        );
+        assert!(
+            value
+                .get("updated_at")
+                .is_some_and(serde_json::Value::is_null),
+            "updated_at key should be present as null when not provided"
+        );
+    }
+
+    #[test]
+    fn test_extract_short_description_from_history_allows_short_messages() {
+        let history = vec![("user".to_string(), "Hi".to_string())];
+        let extracted = extract_short_description_from_history(&history, 160);
+        assert_eq!(extracted.as_deref(), Some("Hi"));
+    }
+
+    #[test]
+    fn test_extract_short_description_from_history_skips_fenced_code_blocks() {
+        let history = vec![(
+            "user".to_string(),
+            "```rust\nfn main() {}\n```\nInvestigate rust build failure".to_string(),
+        )];
+        let extracted = extract_short_description_from_history(&history, 160);
+        assert_eq!(extracted.as_deref(), Some("Investigate rust build failure"));
+    }
+
+    #[test]
+    fn test_extract_short_description_from_history_returns_none_for_code_only_message() {
+        let history = vec![("user".to_string(), "```bash\necho test\n```".to_string())];
+        let extracted = extract_short_description_from_history(&history, 160);
+        assert_eq!(extracted, None);
+    }
+
+    #[test]
+    fn test_extract_short_description_from_history_skips_tilde_fenced_code_blocks() {
+        let history = vec![(
+            "user".to_string(),
+            "~~~python\nprint('hi')\n~~~\nDescribe retry strategy".to_string(),
+        )];
+        let extracted = extract_short_description_from_history(&history, 160);
+        assert_eq!(extracted.as_deref(), Some("Describe retry strategy"));
+    }
+
+    #[test]
+    fn test_extract_short_description_from_history_handles_unclosed_fence() {
+        let history = vec![(
+            "user".to_string(),
+            "```markdown\nInvestigate flaky CI timeout".to_string(),
+        )];
+        let extracted = extract_short_description_from_history(&history, 160);
+        assert_eq!(extracted.as_deref(), Some("Investigate flaky CI timeout"));
+    }
+
+    #[test]
+    fn test_extract_short_description_from_history_strips_markdown_prefixes() {
+        let history = vec![(
+            "user".to_string(),
+            "## > - * 1. Investigate flaky CI timeout".to_string(),
+        )];
+        let extracted = extract_short_description_from_history(&history, 160);
+        assert_eq!(extracted.as_deref(), Some("Investigate flaky CI timeout"));
+    }
+
+    #[test]
+    fn test_extract_short_description_from_history_strips_ordered_list_markers() {
+        let history = vec![(
+            "user".to_string(),
+            "12) Resolve dashboard state drift".to_string(),
+        )];
+        let extracted = extract_short_description_from_history(&history, 160);
+        assert_eq!(extracted.as_deref(), Some("Resolve dashboard state drift"));
+    }
+
+    #[test]
+    fn test_extract_title_from_assistant_skips_fenced_code_blocks() {
+        let title = extract_title_from_assistant(
+            "```rust\nfn main() {}\n```\nFix flaky CI timeout handling",
+        );
+        assert_eq!(title.as_deref(), Some("Fix flaky CI timeout handling"));
+    }
+
+    #[test]
+    fn test_extract_title_from_assistant_returns_none_for_code_only_message() {
+        let title = extract_title_from_assistant("```bash\necho test\n```");
+        assert_eq!(title, None);
+    }
+
+    #[test]
+    fn test_extract_title_from_assistant_skips_tilde_fenced_code_blocks() {
+        let title =
+            extract_title_from_assistant("~~~json\n{\"ok\":true}\n~~~\n# Final status summary");
+        assert_eq!(title.as_deref(), Some("Final status summary"));
+    }
+
+    #[test]
     fn test_normalize_model_effort_accepts_supported_values() {
         assert_eq!(normalize_model_effort("low"), Some("low".to_string()));
         assert_eq!(
@@ -6883,6 +11125,447 @@ And the report:
             normalize_model_override_for_backend(Some("codex"), "   "),
             None
         );
+    }
+
+    #[test]
+    fn test_mission_search_relevance_score_prefers_exact_phrase() {
+        let now = mission_store::now_string();
+        let strong = Mission {
+            id: Uuid::new_v4(),
+            status: MissionStatus::Active,
+            title: Some("Fix login timeout regression".to_string()),
+            short_description: Some(
+                "Investigate timeout happening after login redirect".to_string(),
+            ),
+            metadata_updated_at: None,
+            metadata_source: None,
+            metadata_model: None,
+            metadata_version: None,
+            workspace_id: crate::workspace::DEFAULT_WORKSPACE_ID,
+            workspace_name: Some("Sandboxed".to_string()),
+            agent: None,
+            model_override: None,
+            model_effort: None,
+            backend: "claudecode".to_string(),
+            config_profile: None,
+            history: Vec::new(),
+            created_at: now.clone(),
+            updated_at: now.clone(),
+            interrupted_at: None,
+            resumable: false,
+            desktop_sessions: Vec::new(),
+            session_id: None,
+            terminal_reason: None,
+        };
+        let weak = Mission {
+            id: Uuid::new_v4(),
+            status: MissionStatus::Active,
+            title: Some("Login failure investigation".to_string()),
+            short_description: Some("Issue affecting auth flow and API retries".to_string()),
+            metadata_updated_at: None,
+            metadata_source: None,
+            metadata_model: None,
+            metadata_version: None,
+            workspace_id: crate::workspace::DEFAULT_WORKSPACE_ID,
+            workspace_name: Some("Sandboxed".to_string()),
+            agent: None,
+            model_override: None,
+            model_effort: None,
+            backend: "claudecode".to_string(),
+            config_profile: None,
+            history: Vec::new(),
+            created_at: now.clone(),
+            updated_at: now,
+            interrupted_at: None,
+            resumable: false,
+            desktop_sessions: Vec::new(),
+            session_id: None,
+            terminal_reason: None,
+        };
+
+        let strong_score = mission_search_relevance_score(
+            &strong,
+            "login timeout",
+            strong.workspace_name.as_deref(),
+        );
+        let weak_score =
+            mission_search_relevance_score(&weak, "login timeout", weak.workspace_name.as_deref());
+
+        assert!(strong_score > weak_score);
+    }
+
+    #[test]
+    fn test_mission_search_relevance_score_supports_query_expansion() {
+        let now = mission_store::now_string();
+        let mission = Mission {
+            id: Uuid::new_v4(),
+            status: MissionStatus::Completed,
+            title: Some("Release prep for dashboard deploy".to_string()),
+            short_description: Some("Ship the rollout to production".to_string()),
+            metadata_updated_at: None,
+            metadata_source: None,
+            metadata_model: None,
+            metadata_version: None,
+            workspace_id: crate::workspace::DEFAULT_WORKSPACE_ID,
+            workspace_name: Some("Sandboxed".to_string()),
+            agent: None,
+            model_override: None,
+            model_effort: None,
+            backend: "codex".to_string(),
+            config_profile: None,
+            history: Vec::new(),
+            created_at: now.clone(),
+            updated_at: now,
+            interrupted_at: None,
+            resumable: false,
+            desktop_sessions: Vec::new(),
+            session_id: None,
+            terminal_reason: None,
+        };
+
+        let score = mission_search_relevance_score(
+            &mission,
+            "deploy rollout",
+            mission.workspace_name.as_deref(),
+        );
+        assert!(score > 0.0);
+    }
+
+    #[test]
+    fn test_mission_search_relevance_score_supports_abbreviation_query_expansion() {
+        let now = mission_store::now_string();
+        let mission = Mission {
+            id: Uuid::new_v4(),
+            status: MissionStatus::Completed,
+            title: Some("Fix session id timeout handling".to_string()),
+            short_description: Some("Normalize cookie session id parsing".to_string()),
+            metadata_updated_at: None,
+            metadata_source: None,
+            metadata_model: None,
+            metadata_version: None,
+            workspace_id: crate::workspace::DEFAULT_WORKSPACE_ID,
+            workspace_name: Some("Sandboxed".to_string()),
+            agent: None,
+            model_override: None,
+            model_effort: None,
+            backend: "codex".to_string(),
+            config_profile: None,
+            history: Vec::new(),
+            created_at: now.clone(),
+            updated_at: now,
+            interrupted_at: None,
+            resumable: false,
+            desktop_sessions: Vec::new(),
+            session_id: None,
+            terminal_reason: None,
+        };
+
+        let score = mission_search_relevance_score(
+            &mission,
+            "sid timeout",
+            mission.workspace_name.as_deref(),
+        );
+        assert!(score > 0.0);
+    }
+
+    #[test]
+    fn test_mission_search_relevance_score_returns_zero_for_non_matching_query() {
+        let now = mission_store::now_string();
+        let mission = Mission {
+            id: Uuid::new_v4(),
+            status: MissionStatus::Completed,
+            title: Some("Implement payment retry flow".to_string()),
+            short_description: Some("Handle webhook retries for failed invoices".to_string()),
+            metadata_updated_at: None,
+            metadata_source: None,
+            metadata_model: None,
+            metadata_version: None,
+            workspace_id: crate::workspace::DEFAULT_WORKSPACE_ID,
+            workspace_name: Some("Sandboxed".to_string()),
+            agent: None,
+            model_override: None,
+            model_effort: None,
+            backend: "codex".to_string(),
+            config_profile: None,
+            history: Vec::new(),
+            created_at: now.clone(),
+            updated_at: now,
+            interrupted_at: None,
+            resumable: false,
+            desktop_sessions: Vec::new(),
+            session_id: None,
+            terminal_reason: None,
+        };
+
+        let score = mission_search_relevance_score(
+            &mission,
+            "kubernetes autoscaling",
+            mission.workspace_name.as_deref(),
+        );
+        assert_eq!(score, 0.0);
+    }
+
+    #[test]
+    fn test_mission_search_relevance_score_ignores_natural_language_stopwords() {
+        let now = mission_store::now_string();
+        let mission = Mission {
+            id: Uuid::new_v4(),
+            status: MissionStatus::Completed,
+            title: Some("Fix session id timeout handling".to_string()),
+            short_description: Some("Root cause was stale session id parsing".to_string()),
+            metadata_updated_at: None,
+            metadata_source: None,
+            metadata_model: None,
+            metadata_version: None,
+            workspace_id: crate::workspace::DEFAULT_WORKSPACE_ID,
+            workspace_name: Some("Sandboxed".to_string()),
+            agent: None,
+            model_override: None,
+            model_effort: None,
+            backend: "codex".to_string(),
+            config_profile: None,
+            history: Vec::new(),
+            created_at: now.clone(),
+            updated_at: now,
+            interrupted_at: None,
+            resumable: false,
+            desktop_sessions: Vec::new(),
+            session_id: None,
+            terminal_reason: None,
+        };
+
+        let score = mission_search_relevance_score(
+            &mission,
+            "where did we fix the session id timeout",
+            mission.workspace_name.as_deref(),
+        );
+        assert!(score > 0.0);
+    }
+
+    #[test]
+    fn test_mission_moment_relevance_score_prefers_exact_phrase_match() {
+        let exact = mission_moment_relevance_score(
+            "assistant",
+            "Root cause was a session id timeout in OAuth callback handling.",
+            "session id timeout",
+        );
+        let loose = mission_moment_relevance_score(
+            "assistant",
+            "Investigating OAuth callback handling and login failures.",
+            "session id timeout",
+        );
+        assert!(exact > loose);
+    }
+
+    #[test]
+    fn test_mission_moment_relevance_score_returns_zero_for_unrelated_query() {
+        let score = mission_moment_relevance_score(
+            "assistant",
+            "Investigate payment webhook retry loop",
+            "kubernetes autoscaling",
+        );
+        assert_eq!(score, 0.0);
+    }
+
+    #[test]
+    fn test_mission_moment_relevance_score_ignores_natural_language_stopwords() {
+        let score = mission_moment_relevance_score(
+            "assistant",
+            "We fixed the session id timeout by normalizing the cookie key.",
+            "show me where we fixed the session id timeout",
+        );
+        assert!(score > 0.0);
+    }
+
+    #[test]
+    fn test_mission_moment_relevance_score_supports_abbreviation_query_expansion() {
+        let score = mission_moment_relevance_score(
+            "assistant",
+            "We fixed the session id timeout by normalizing the cookie key.",
+            "sid timeout",
+        );
+        assert!(score > 0.0);
+    }
+
+    #[test]
+    fn test_mission_moment_rationale_prefers_phrase_match_with_expansion() {
+        let rationale = mission_moment_rationale(
+            "assistant",
+            "The issue was in session id parsing for cookie state.",
+            "sid parsing",
+        );
+        assert_eq!(rationale, "Phrase match in assistant message");
+    }
+
+    #[test]
+    fn test_mission_moment_rationale_lists_matched_terms() {
+        let rationale = mission_moment_rationale(
+            "assistant",
+            "The auth flow kept failing because login credentials expired.",
+            "why did signin fail",
+        );
+        assert!(rationale.starts_with("Matched "));
+        assert!(rationale.ends_with(" in assistant message"));
+        assert!(rationale.contains("fail"));
+    }
+
+    #[test]
+    fn test_mission_moment_snippet_truncates_utf8_safely() {
+        let source = "Fix résumé parser by preserving naïve unicode handling in results";
+        let snippet = mission_moment_snippet(source, 18);
+        assert!(snippet.ends_with('…'));
+        assert!(snippet.chars().count() <= 19);
+    }
+
+    #[test]
+    fn test_mission_search_query_hash_normalizes_equivalent_queries() {
+        let hash_a = mission_search_query_hash("Login Timeout");
+        let hash_b = mission_search_query_hash(" login   timeout ");
+        let hash_c = mission_search_query_hash("LOGIN-timeout");
+        assert_eq!(hash_a, hash_b);
+        assert_eq!(hash_b, hash_c);
+    }
+
+    #[test]
+    fn test_mission_search_freshness_key_changes_on_metadata_update() {
+        let now = mission_store::now_string();
+        let mut mission = Mission {
+            id: Uuid::new_v4(),
+            status: MissionStatus::Completed,
+            title: Some("Implement payment retry flow".to_string()),
+            short_description: Some("Handle webhook retries for failed invoices".to_string()),
+            metadata_updated_at: Some(now.clone()),
+            metadata_source: None,
+            metadata_model: None,
+            metadata_version: None,
+            workspace_id: crate::workspace::DEFAULT_WORKSPACE_ID,
+            workspace_name: Some("Sandboxed".to_string()),
+            agent: None,
+            model_override: None,
+            model_effort: None,
+            backend: "codex".to_string(),
+            config_profile: None,
+            history: Vec::new(),
+            created_at: now.clone(),
+            updated_at: now.clone(),
+            interrupted_at: None,
+            resumable: false,
+            desktop_sessions: Vec::new(),
+            session_id: None,
+            terminal_reason: None,
+        };
+        let before = mission_search_freshness_key(
+            &[MissionSearchCandidate {
+                mission: mission.clone(),
+                relevance_score: 1.0,
+            }],
+            100,
+        );
+
+        mission.short_description = Some("Handle webhook retries and alerting".to_string());
+        mission.metadata_updated_at = Some("2099-01-01T00:00:00Z".to_string());
+        let after = mission_search_freshness_key(
+            &[MissionSearchCandidate {
+                mission,
+                relevance_score: 1.0,
+            }],
+            100,
+        );
+
+        assert_ne!(before, after);
+    }
+
+    #[tokio::test]
+    async fn test_mission_search_recency_fingerprint_changes_on_metadata_update() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let mission = store
+            .create_mission(
+                Some("Investigate cache drift"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("mission should be created");
+
+        let before = mission_search_recency_fingerprint(&store)
+            .await
+            .expect("recency fingerprint should be computed");
+
+        store
+            .update_mission_metadata(
+                mission.id,
+                Some(Some("Investigate cache drift")),
+                Some(Some("Updated metadata")),
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("metadata update should succeed");
+
+        let after = mission_search_recency_fingerprint(&store)
+            .await
+            .expect("recency fingerprint should be computed");
+        assert_ne!(before, after);
+    }
+
+    #[tokio::test]
+    async fn test_mission_search_recency_fingerprint_changes_for_non_head_mission_update() {
+        let store: Arc<dyn MissionStore> = Arc::new(mission_store::InMemoryMissionStore::new());
+        let older_mission = store
+            .create_mission(Some("Older mission"), None, None, None, None, None, None)
+            .await
+            .expect("older mission should be created");
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let newer_mission = store
+            .create_mission(Some("Newer mission"), None, None, None, None, None, None)
+            .await
+            .expect("newer mission should be created");
+
+        let before = mission_search_recency_fingerprint(&store)
+            .await
+            .expect("recency fingerprint should be computed");
+
+        store
+            .update_mission_metadata(
+                older_mission.id,
+                Some(Some("Older mission")),
+                Some(Some("Metadata changed on older mission")),
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("metadata update should succeed");
+
+        // Ensure older_mission is non-head at read time.
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        store
+            .update_mission_title(newer_mission.id, "Newer mission touched")
+            .await
+            .expect("title update should succeed");
+
+        let after = mission_search_recency_fingerprint(&store)
+            .await
+            .expect("recency fingerprint should be computed");
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn test_mission_search_cache_hit_by_freshness_requires_recency_match() {
+        let entry = MissionSearchCacheEntry {
+            cached_at: std::time::Instant::now(),
+            freshness_key: 42,
+            recency_fingerprint: 100,
+            results: Vec::new(),
+        };
+
+        assert!(mission_search_cache_hit_by_freshness(&entry, 100, 42));
+        assert!(!mission_search_cache_hit_by_freshness(&entry, 101, 42));
     }
 
     #[test]

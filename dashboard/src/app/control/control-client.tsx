@@ -27,6 +27,7 @@ import {
   loadMission,
   getMission,
   getMissionEvents,
+  searchMissionMoments,
   createMission,
   listMissions,
   setMissionStatus,
@@ -175,6 +176,7 @@ function streamLog(level: StreamLogLevel, message: string, meta?: Record<string,
       break;
   }
 }
+
 import {
   OptionList,
   OptionListErrorBoundary,
@@ -190,7 +192,7 @@ import { useLocalStorage } from "@/hooks/use-local-storage";
 import { useCopyToClipboard } from "@/hooks/use-copy-to-clipboard";
 import { DesktopStream } from "@/components/desktop-stream";
 import { NewMissionDialog } from "@/components/new-mission-dialog";
-import { MissionSwitcher } from "@/components/mission-switcher";
+import { MissionSwitcher, normalizeMetadataText } from "@/components/mission-switcher";
 
 import type { SharedFile } from "@/lib/api";
 
@@ -1777,8 +1779,10 @@ function parseSubagentResult(result: unknown): {
 // Memoized to prevent re-renders when parent state changes
 const SubagentToolItem = memo(function SubagentToolItem({
   item,
+  highlighted = false,
 }: {
   item: Extract<ChatItem, { kind: "tool" }>;
+  highlighted?: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
@@ -1825,7 +1829,14 @@ const SubagentToolItem = memo(function SubagentToolItem({
   );
 
   return (
-    <div className="my-3">
+    <div
+      id={`chat-item-${item.id}`}
+      data-chat-item-id={item.id}
+      className={cn(
+        "my-3 rounded-xl transition-colors",
+        highlighted && "ring-1 ring-amber-400/70 bg-amber-500/10"
+      )}
+    >
       {/* Main card */}
       <div
         className={cn(
@@ -2117,10 +2128,12 @@ function ImagePreview({
 // Memoized to prevent re-renders when parent state changes
 const ToolCallItem = memo(function ToolCallItem({
   item,
+  highlighted = false,
   workspaceId,
   missionId,
 }: {
   item: Extract<ChatItem, { kind: "tool" }>;
+  highlighted?: boolean;
   workspaceId?: string;
   missionId?: string;
 }) {
@@ -2201,7 +2214,14 @@ const ToolCallItem = memo(function ToolCallItem({
   );
 
   return (
-    <div className="my-2">
+    <div
+      id={`chat-item-${item.id}`}
+      data-chat-item-id={item.id}
+      className={cn(
+        "my-2 rounded-xl transition-colors",
+        highlighted && "ring-1 ring-amber-400/70 bg-amber-500/10"
+      )}
+    >
       {/* Compact header */}
       <button
         onClick={() => setExpanded(!expanded)}
@@ -2508,6 +2528,8 @@ export default function ControlClient() {
     []
   );
   const [showMissionSwitcher, setShowMissionSwitcher] = useState(false);
+  const [highlightedItemId, setHighlightedItemId] = useState<string | null>(null);
+  const deepLinkFocusKeyRef = useRef<string | null>(null);
   const [showAutomationsDialog, setShowAutomationsDialog] = useState(false);
 
   // Track which mission's events we're viewing (for parallel missions)
@@ -4358,6 +4380,235 @@ export default function ControlClient() {
     ]
   );
 
+  const findChatItemIdForEntryIndex = useCallback(
+    (entryIndex: number, snippet?: string): string | null => {
+      if (entryIndex < 0) return null;
+
+      const historyEntrySpan = (item: GroupedItem): number => {
+        if (item.kind === "user" || item.kind === "assistant") {
+          return 1;
+        }
+        if (item.kind === "tool") {
+          // Backend moment indices may count both tool_call and tool_result rows.
+          return item.result === undefined ? 1 : 2;
+        }
+        if (item.kind === "tool_group") {
+          return item.tools.reduce(
+            (count, tool) => count + (tool.result === undefined ? 1 : 2),
+            0
+          );
+        }
+        return 0;
+      };
+      const stringifyToolPayload = (payload: unknown): string => {
+        if (payload === undefined) return "";
+        if (typeof payload === "string") return payload;
+        try {
+          const serialized = JSON.stringify(payload);
+          return serialized ?? "";
+        } catch {
+          return String(payload);
+        }
+      };
+      const historyItemSearchText = (item: GroupedItem): string => {
+        if (item.kind === "user" || item.kind === "assistant") {
+          return item.content;
+        }
+        if (item.kind === "tool") {
+          const argsText = stringifyToolPayload(item.args);
+          const resultText = stringifyToolPayload(item.result);
+          return `${item.name} ${argsText} ${resultText}`.trim();
+        }
+        if (item.kind === "tool_group") {
+          return item.tools
+            .map((tool) => {
+              const argsText = stringifyToolPayload(tool.args);
+              const resultText = stringifyToolPayload(tool.result);
+              return `${tool.name} ${argsText} ${resultText}`.trim();
+            })
+            .join(" ");
+        }
+        return "";
+      };
+
+      let historyIndex = 0;
+      for (const item of groupedItems) {
+        const span = historyEntrySpan(item);
+        if (span <= 0) continue;
+        if (entryIndex >= historyIndex && entryIndex < historyIndex + span) {
+          if (item.kind === "tool_group") {
+            return item.groupId;
+          }
+          if (item.kind === "user" || item.kind === "assistant" || item.kind === "tool") {
+            return item.id;
+          }
+        }
+        historyIndex += span;
+      }
+
+      const normalizedSnippet = normalizeMetadataText(snippet ?? "");
+      if (!normalizedSnippet) return null;
+      for (const item of groupedItems) {
+        if (historyEntrySpan(item) <= 0) continue;
+        if (
+          normalizeMetadataText(historyItemSearchText(item)).includes(normalizedSnippet)
+        ) {
+          if (item.kind === "tool_group") {
+            return item.groupId;
+          }
+          if (item.kind === "user" || item.kind === "assistant" || item.kind === "tool") {
+            return item.id;
+          }
+        }
+      }
+      return null;
+    },
+    [groupedItems]
+  );
+
+  const focusChatItem = useCallback(
+    (itemId: string, entryIndex?: number) => {
+      let requiredVisible = groupedItems.length;
+      if (typeof entryIndex === "number" && entryIndex >= 0) {
+        let historyIndex = 0;
+        const groupedIndex = groupedItems.findIndex((item) => {
+          const span =
+            item.kind === "tool_group"
+              ? item.tools.reduce(
+                  (count, tool) => count + (tool.result === undefined ? 1 : 2),
+                  0
+                )
+              : item.kind === "tool"
+                ? item.result === undefined
+                  ? 1
+                  : 2
+                : item.kind === "user" || item.kind === "assistant"
+                  ? 1
+                  : 0;
+          if (span <= 0) {
+            return false;
+          }
+          const matches = entryIndex >= historyIndex && entryIndex < historyIndex + span;
+          historyIndex += span;
+          if (matches) {
+            return true;
+          }
+          return false;
+        });
+        if (groupedIndex >= 0) {
+          requiredVisible = Math.max(1, groupedItems.length - groupedIndex);
+        }
+      }
+
+      setVisibleItemsLimit((prev) => Math.max(prev, requiredVisible));
+      setHighlightedItemId(itemId);
+
+      let attempts = 0;
+      const tryFocus = () => {
+        const el = document.getElementById(`chat-item-${itemId}`);
+        if (el) {
+          el.scrollIntoView({ behavior: "smooth", block: "center" });
+          return;
+        }
+        attempts += 1;
+        if (attempts < 6) {
+          requestAnimationFrame(tryFocus);
+        }
+      };
+      requestAnimationFrame(tryFocus);
+    },
+    [groupedItems]
+  );
+
+  useEffect(() => {
+    if (!highlightedItemId) return;
+    const timeout = window.setTimeout(() => setHighlightedItemId(null), 2400);
+    return () => window.clearTimeout(timeout);
+  }, [highlightedItemId]);
+
+  useEffect(() => {
+    const focus = searchParams.get("focus");
+    const missionFromQuery = searchParams.get("mission");
+    const rawQuery = searchParams.get("query") ?? "";
+    if ((focus !== "failure" && focus !== "moment") || !missionFromQuery) {
+      deepLinkFocusKeyRef.current = null;
+      return;
+    }
+    if (!viewingMission || viewingMission.id !== missionFromQuery) return;
+
+    const focusKey = `${focus}:${missionFromQuery}:${rawQuery}`;
+    if (deepLinkFocusKeyRef.current === focusKey) return;
+    deepLinkFocusKeyRef.current = focusKey;
+
+    let cancelled = false;
+    (async () => {
+      const query =
+        focus === "failure"
+          ? "failing tool call error"
+          : normalizeMetadataText(rawQuery);
+      if (!query) {
+        toast.error("Missing moment query");
+        router.replace(`/control?mission=${missionFromQuery}`, { scroll: false });
+        return;
+      }
+
+      try {
+        const results = await searchMissionMoments(query, {
+          missionId: missionFromQuery,
+          limit: 1,
+        });
+        if (cancelled) return;
+        const best = results[0];
+        if (!best) {
+          if (focus === "failure") {
+            toast.error("No failing tool call moment found");
+          } else {
+            toast.error("No matching moment found");
+          }
+          router.replace(`/control?mission=${missionFromQuery}`, { scroll: false });
+          return;
+        }
+
+        const targetId = findChatItemIdForEntryIndex(best.entry_index, best.snippet);
+        if (targetId) {
+          focusChatItem(targetId, best.entry_index);
+        } else {
+          // Ensure older history is visible before failing deep-link focus.
+          setVisibleItemsLimit((prev) => Math.max(prev, groupedItems.length));
+          requestAnimationFrame(() => {
+            const retryTargetId = findChatItemIdForEntryIndex(best.entry_index, best.snippet);
+            if (retryTargetId) {
+              focusChatItem(retryTargetId, best.entry_index);
+            } else {
+              toast.error("Could not locate the target moment in loaded history");
+            }
+          });
+        }
+        router.replace(`/control?mission=${missionFromQuery}`, { scroll: false });
+      } catch (err) {
+        if (cancelled) return;
+        console.error("Failed to search mission moments:", err);
+        if (focus === "failure") {
+          toast.error("Failed to locate failing tool call");
+        } else {
+          toast.error("Failed to locate mission moment");
+        }
+        router.replace(`/control?mission=${missionFromQuery}`, { scroll: false });
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    searchParams,
+    viewingMission?.id,
+    router,
+    focusChatItem,
+    findChatItemIdForEntryIndex,
+    groupedItems.length,
+  ]);
+
   // Sync viewingMissionId with currentMission only when there's no explicit viewing mission set
   useEffect(() => {
     if (currentMission && !viewingMissionId) {
@@ -4490,6 +4741,93 @@ export default function ControlClient() {
       setMissionLoading(false);
     }
   };
+
+  const handleResumeMissionById = async (missionId: string) => {
+    const activeMissionId = (viewingMission ?? currentMission)?.id;
+    if (activeMissionId === missionId) {
+      await handleResumeMission();
+      return;
+    }
+
+    try {
+      setMissionLoading(true);
+      await resumeMission(missionId);
+      await handleViewMission(missionId);
+      refreshRecentMissions();
+      toast.success("Mission resumed");
+    } catch (err) {
+      console.error("Failed to resume mission from switcher:", err);
+      toast.error("Failed to resume mission");
+    } finally {
+      setMissionLoading(false);
+    }
+  };
+
+  const handleOpenFailingToolCallById = useCallback(
+    async (missionId: string) => {
+      router.replace(`/control?mission=${missionId}&focus=failure`, { scroll: false });
+    },
+    [router]
+  );
+
+  const buildFollowUpPrompt = useCallback((mission: Mission) => {
+    const sourceLabel =
+      mission.title?.trim()
+      || mission.short_description?.trim()
+      || `mission ${getMissionShortName(mission.id)}`;
+    return `Follow up on "${sourceLabel}".\n\nSummarize current progress briefly, then continue with the next concrete steps.`;
+  }, []);
+
+  const handleFollowUpMissionById = useCallback(
+    async (missionId: string) => {
+      const activeMission = viewingMission ?? currentMission;
+      const cachedMission =
+        recentMissions.find((mission) => mission.id === missionId)
+        ?? (activeMission?.id === missionId ? activeMission : null);
+
+      try {
+        setMissionLoading(true);
+        const sourceMission = cachedMission ?? (await getMission(missionId));
+        if (!sourceMission) {
+          toast.error("Source mission not found");
+          return;
+        }
+
+        const followUpMission = await createMission({
+          workspaceId: sourceMission.workspace_id,
+          agent: sourceMission.agent,
+          modelOverride: sourceMission.model_override,
+          modelEffort: sourceMission.model_effort,
+          backend: sourceMission.backend,
+        });
+
+        pendingMissionNavRef.current = followUpMission.id;
+        setCurrentMission(followUpMission);
+        setViewingMission(followUpMission);
+        setViewingMissionId(followUpMission.id);
+        setItems([]);
+        setHasDesktopSession(false);
+        setInput(buildFollowUpPrompt(sourceMission));
+        setShowMissionSwitcher(false);
+        router.replace(`/control?mission=${followUpMission.id}`, { scroll: false });
+        refreshRecentMissions();
+        toast.success("Follow-up mission created");
+      } catch (err) {
+        console.error("Failed to create follow-up mission:", err);
+        toast.error("Failed to create follow-up mission");
+      } finally {
+        setMissionLoading(false);
+      }
+    },
+    [
+      viewingMission,
+      currentMission,
+      recentMissions,
+      buildFollowUpPrompt,
+      router,
+      refreshRecentMissions,
+    ]
+  );
 
   // Debouncing for thinking updates to reduce re-renders during streaming
   const pendingThinkingRef = useRef<{
@@ -5287,6 +5625,15 @@ export default function ControlClient() {
 
         // Always update mission status in state when it changes
         if (missionId) {
+          setRecentMissions((prev) => {
+            let changed = false;
+            const next = prev.map((mission) => {
+              if (mission.id !== missionId) return mission;
+              changed = true;
+              return { ...mission, status: newStatus as MissionStatus };
+            });
+            return changed ? next : prev;
+          });
           if (currentMissionRef.current?.id === missionId) {
             setCurrentMission((prev) =>
               prev ? { ...prev, status: newStatus as MissionStatus } : prev
@@ -5334,6 +5681,155 @@ export default function ControlClient() {
             ...prev,
             phase: "idle",
           }));
+        }
+      }
+
+      if (event.type === "mission_title_changed" && isRecord(data)) {
+        const missionId = typeof data["mission_id"] === "string" ? data["mission_id"] : undefined;
+        const title = typeof data["title"] === "string" ? data["title"] : undefined;
+        if (missionId && title !== undefined) {
+          setRecentMissions((prev) => {
+            let changed = false;
+            const next = prev.map((mission) => {
+              if (mission.id !== missionId) return mission;
+              changed = true;
+              return { ...mission, title };
+            });
+            return changed ? next : prev;
+          });
+          if (currentMissionRef.current?.id === missionId) {
+            setCurrentMission((prev) => (prev ? { ...prev, title } : prev));
+          }
+          if (viewingMissionRef.current?.id === missionId) {
+            setViewingMission((prev) => (prev ? { ...prev, title } : prev));
+          }
+        }
+      }
+
+      if (event.type === "mission_metadata_updated" && isRecord(data)) {
+        const missionId = typeof data["mission_id"] === "string" ? data["mission_id"] : undefined;
+        if (missionId) {
+          const title =
+            data["title"] === null
+              ? null
+              : typeof data["title"] === "string"
+                ? data["title"]
+                : undefined;
+          const shortDescription =
+            data["short_description"] === null
+              ? null
+              : typeof data["short_description"] === "string"
+                ? data["short_description"]
+                : undefined;
+          const metadataUpdatedAt =
+            data["metadata_updated_at"] === null
+              ? null
+              : typeof data["metadata_updated_at"] === "string"
+                ? data["metadata_updated_at"]
+                : undefined;
+          const updatedAt =
+            typeof data["updated_at"] === "string" ? data["updated_at"] : undefined;
+          const metadataSource =
+            data["metadata_source"] === null
+              ? null
+              : typeof data["metadata_source"] === "string"
+                ? data["metadata_source"]
+                : undefined;
+          const metadataModel =
+            data["metadata_model"] === null
+              ? null
+              : typeof data["metadata_model"] === "string"
+                ? data["metadata_model"]
+                : undefined;
+          const metadataVersion =
+            data["metadata_version"] === null
+              ? null
+              : typeof data["metadata_version"] === "string"
+                ? data["metadata_version"]
+                : undefined;
+          setRecentMissions((prev) => {
+            let changed = false;
+            const next = prev.map((mission) => {
+              if (mission.id !== missionId) return mission;
+              changed = true;
+              return {
+                ...mission,
+                ...(title !== undefined ? { title } : {}),
+                ...(shortDescription !== undefined
+                  ? { short_description: shortDescription }
+                  : {}),
+                ...(metadataUpdatedAt !== undefined
+                  ? { metadata_updated_at: metadataUpdatedAt }
+                  : {}),
+                ...(updatedAt !== undefined ? { updated_at: updatedAt } : {}),
+                ...(metadataSource !== undefined
+                  ? { metadata_source: metadataSource }
+                  : {}),
+                ...(metadataModel !== undefined
+                  ? { metadata_model: metadataModel }
+                  : {}),
+                ...(metadataVersion !== undefined
+                  ? { metadata_version: metadataVersion }
+                  : {}),
+              };
+            });
+            if (!changed) return prev;
+            if (updatedAt === undefined) return next;
+            return [...next].sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+          });
+
+          if (currentMissionRef.current?.id === missionId) {
+            setCurrentMission((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    ...(title !== undefined ? { title } : {}),
+                    ...(shortDescription !== undefined
+                      ? { short_description: shortDescription }
+                      : {}),
+                    ...(metadataUpdatedAt !== undefined
+                      ? { metadata_updated_at: metadataUpdatedAt }
+                      : {}),
+                    ...(updatedAt !== undefined ? { updated_at: updatedAt } : {}),
+                    ...(metadataSource !== undefined
+                      ? { metadata_source: metadataSource }
+                      : {}),
+                    ...(metadataModel !== undefined
+                      ? { metadata_model: metadataModel }
+                      : {}),
+                    ...(metadataVersion !== undefined
+                      ? { metadata_version: metadataVersion }
+                      : {}),
+                  }
+                : prev
+            );
+          }
+          if (viewingMissionRef.current?.id === missionId) {
+            setViewingMission((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    ...(title !== undefined ? { title } : {}),
+                    ...(shortDescription !== undefined
+                      ? { short_description: shortDescription }
+                      : {}),
+                    ...(metadataUpdatedAt !== undefined
+                      ? { metadata_updated_at: metadataUpdatedAt }
+                      : {}),
+                    ...(updatedAt !== undefined ? { updated_at: updatedAt } : {}),
+                    ...(metadataSource !== undefined
+                      ? { metadata_source: metadataSource }
+                      : {}),
+                    ...(metadataModel !== undefined
+                      ? { metadata_model: metadataModel }
+                      : {}),
+                    ...(metadataVersion !== undefined
+                      ? { metadata_version: metadataVersion }
+                      : {}),
+                  }
+                : prev
+            );
+          }
         }
       }
 
@@ -5881,6 +6377,9 @@ export default function ControlClient() {
         workspaceNameById={workspaceNameById}
         onSelectMission={handleViewMission}
         onCancelMission={handleCancelMission}
+        onResumeMission={handleResumeMissionById}
+        onOpenFailingToolCall={handleOpenFailingToolCallById}
+        onFollowUpMission={handleFollowUpMissionById}
         onRefresh={refreshRecentMissions}
       />
 
@@ -6499,35 +6998,52 @@ export default function ControlClient() {
                 if (item.kind === "tool_group") {
                   const isExpanded = expandedToolGroups.has(item.groupId);
                   return (
-                    <CollapsedToolGroup
+                    <div
                       key={item.groupId}
-                      tools={item.tools}
-                      isExpanded={isExpanded}
-                      onToggleExpand={() => {
-                        // Use startTransition so expanding many tools
-                        // doesn't block the browser from painting the
-                        // button's click feedback first (issue #156).
-                        startTransition(() => {
-                          setExpandedToolGroups((prev) => {
-                            const next = new Set(prev);
-                            if (next.has(item.groupId)) {
-                              next.delete(item.groupId);
-                            } else {
-                              next.add(item.groupId);
-                            }
-                            return next;
+                      id={`chat-item-${item.groupId}`}
+                      data-chat-item-id={item.groupId}
+                      className={cn(
+                        "rounded-xl transition-colors",
+                        highlightedItemId === item.groupId && "ring-1 ring-amber-400/70 bg-amber-500/10"
+                      )}
+                    >
+                      <CollapsedToolGroup
+                        tools={item.tools}
+                        isExpanded={isExpanded}
+                        onToggleExpand={() => {
+                          // Use startTransition so expanding many tools
+                          // doesn't block the browser from painting the
+                          // button's click feedback first (issue #156).
+                          startTransition(() => {
+                            setExpandedToolGroups((prev) => {
+                              const next = new Set(prev);
+                              if (next.has(item.groupId)) {
+                                next.delete(item.groupId);
+                              } else {
+                                next.add(item.groupId);
+                              }
+                              return next;
+                            });
                           });
-                        });
-                      }}
-                      workspaceId={missionForDownloads?.workspace_id}
-                      missionId={missionForDownloads?.id}
-                    />
+                        }}
+                        workspaceId={missionForDownloads?.workspace_id}
+                        missionId={missionForDownloads?.id}
+                      />
+                    </div>
                   );
                 }
 
                 if (item.kind === "user") {
                   return (
-                    <div key={item.id} className="flex justify-end gap-3 group">
+                    <div
+                      key={item.id}
+                      id={`chat-item-${item.id}`}
+                      data-chat-item-id={item.id}
+                      className={cn(
+                        "flex justify-end gap-3 group rounded-xl transition-colors",
+                        highlightedItemId === item.id && "ring-1 ring-amber-400/70 bg-amber-500/10"
+                      )}
+                    >
                       <CopyButton
                         text={item.content}
                         className="self-start mt-2"
@@ -6574,7 +7090,12 @@ export default function ControlClient() {
                   return (
                     <div
                       key={item.id}
-                      className="flex justify-start gap-3 group"
+                      id={`chat-item-${item.id}`}
+                      data-chat-item-id={item.id}
+                      className={cn(
+                        "flex justify-start gap-3 group rounded-xl transition-colors",
+                        highlightedItemId === item.id && "ring-1 ring-amber-400/70 bg-amber-500/10"
+                      )}
                     >
                       <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-indigo-500/20">
                         <Bot className="h-4 w-4 text-indigo-400" />
@@ -6862,6 +7383,7 @@ export default function ControlClient() {
                       <ToolCallItem
                         key={item.id}
                         item={item}
+                        highlighted={highlightedItemId === item.id}
                         workspaceId={missionForDownloads?.workspace_id}
                         missionId={missionForDownloads?.id}
                       />
@@ -6870,7 +7392,13 @@ export default function ControlClient() {
 
                   // Subagent/background task tools get enhanced rendering
                   if (isSubagentTool(item.name)) {
-                  return <SubagentToolItem key={item.id} item={item} />;
+                    return (
+                      <SubagentToolItem
+                        key={item.id}
+                        item={item}
+                        highlighted={highlightedItemId === item.id}
+                      />
+                    );
                   }
 
                   // Non-UI tools use the collapsible ToolCallItem component
@@ -6878,6 +7406,7 @@ export default function ControlClient() {
                     <ToolCallItem
                       key={item.id}
                       item={item}
+                      highlighted={highlightedItemId === item.id}
                       workspaceId={missionForDownloads?.workspace_id}
                       missionId={missionForDownloads?.id}
                     />
