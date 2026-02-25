@@ -244,15 +244,23 @@ impl MonitoringState {
             // Collect per-container metrics
             let container_elapsed_secs = now.duration_since(prev_container_time).as_secs_f64();
             prev_container_time = now;
-            let container_metrics =
-                self.collect_container_metrics(&mut prev_cpu_ns, container_elapsed_secs, num_cpus, memory_total).await;
+            let container_metrics = self
+                .collect_container_metrics(
+                    &mut prev_cpu_ns,
+                    container_elapsed_secs,
+                    num_cpus,
+                    memory_total,
+                )
+                .await;
 
             // Add container metrics to history
             {
                 let mut ch = self.container_history.write().await;
                 // Track which workspace IDs are still active
-                let active_ids: std::collections::HashSet<String> =
-                    container_metrics.iter().map(|m| m.workspace_id.clone()).collect();
+                let active_ids: std::collections::HashSet<String> = container_metrics
+                    .iter()
+                    .map(|m| m.workspace_id.clone())
+                    .collect();
 
                 for cm in &container_metrics {
                     let history = ch
@@ -302,10 +310,8 @@ impl MonitoringState {
             }
 
             let ws_id = ws.id.to_string();
-            let container_name = format!(
-                "mission-{}",
-                ws_id.split('-').next().unwrap_or("unknown")
-            );
+            let container_name =
+                format!("mission-{}", ws_id.split('-').next().unwrap_or("unknown"));
             let scope_name = format!("machine-{}.scope", container_name);
 
             let output = match tokio::process::Command::new("systemctl")
