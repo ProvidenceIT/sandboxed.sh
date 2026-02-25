@@ -190,6 +190,35 @@ final class APIService {
         return try await get(urlString)
     }
 
+    func searchMissions(query: String, limit: Int? = nil) async throws -> [MissionSearchResult] {
+        var queryItems: [URLQueryItem] = [URLQueryItem(name: "q", value: query)]
+        if let limit {
+            queryItems.append(URLQueryItem(name: "limit", value: String(limit)))
+        }
+
+        var components = URLComponents(string: "/api/control/missions/search")
+        components?.queryItems = queryItems
+        return try await get(components?.string ?? "/api/control/missions/search")
+    }
+
+    func searchMissionMoments(
+        query: String,
+        limit: Int? = nil,
+        missionId: String? = nil
+    ) async throws -> [MissionMomentSearchResult] {
+        var queryItems: [URLQueryItem] = [URLQueryItem(name: "q", value: query)]
+        if let limit {
+            queryItems.append(URLQueryItem(name: "limit", value: String(limit)))
+        }
+        if let missionId, !missionId.isEmpty {
+            queryItems.append(URLQueryItem(name: "mission_id", value: missionId))
+        }
+
+        var components = URLComponents(string: "/api/control/missions/search/moments")
+        components?.queryItems = queryItems
+        return try await get(components?.string ?? "/api/control/missions/search/moments")
+    }
+
     func cleanupEmptyMissions() async throws -> Int {
         struct CleanupResponse: Decodable {
             let ok: Bool

@@ -836,6 +836,15 @@ async fn build_workspace(
         ));
     }
 
+    // Get library for init script assembly - require it when workspace has fragments
+    let library = clone_library(&state.library).await;
+    if library.is_none() && !workspace.init_scripts.is_empty() {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Library not initialized yet, init script fragments cannot be assembled".to_string(),
+        ));
+    }
+
     // Set status to Building immediately to prevent concurrent builds
     workspace.status = WorkspaceStatus::Building;
     state.workspaces.update(workspace.clone()).await;
@@ -844,8 +853,6 @@ async fn build_workspace(
     let workspaces_store = Arc::clone(&state.workspaces);
     let working_dir = state.config.working_dir.clone();
     let mut workspace_for_build = workspace.clone();
-    // Get library for init script assembly
-    let library = clone_library(&state.library).await;
 
     tokio::spawn(async move {
         let result = crate::workspace::build_container_workspace(

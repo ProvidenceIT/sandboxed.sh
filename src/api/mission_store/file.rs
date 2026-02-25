@@ -14,6 +14,8 @@ use tokio::fs;
 use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
+const METADATA_SOURCE_USER: &str = "user";
+
 #[derive(Debug, Serialize, Deserialize, Default)]
 struct MissionStoreSnapshot {
     missions: HashMap<Uuid, Mission>,
@@ -107,10 +109,24 @@ impl MissionStore for FileMissionStore {
         config_profile: Option<&str>,
     ) -> Result<Mission, String> {
         let now = now_string();
+        let metadata_source = title.and_then(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(METADATA_SOURCE_USER.to_string())
+            }
+        });
+        let metadata_updated_at = metadata_source.as_ref().map(|_| now.clone());
         let mission = Mission {
             id: Uuid::new_v4(),
             status: MissionStatus::Pending,
             title: title.map(|s| s.to_string()),
+            short_description: None,
+            metadata_updated_at,
+            metadata_source,
+            metadata_model: None,
+            metadata_version: None,
             workspace_id: workspace_id.unwrap_or(crate::workspace::DEFAULT_WORKSPACE_ID),
             workspace_name: None,
             agent: agent.map(|s| s.to_string()),
@@ -205,7 +221,58 @@ impl MissionStore for FileMissionStore {
             .get_mut(&id)
             .ok_or_else(|| format!("Mission {} not found", id))?;
         mission.title = Some(title.to_string());
-        mission.updated_at = now_string();
+        mission.metadata_source = Some("user".to_string());
+        mission.metadata_model = None;
+        mission.metadata_version = None;
+        let now = now_string();
+        mission.metadata_updated_at = Some(now.clone());
+        mission.updated_at = now;
+        drop(missions);
+        self.persist().await
+    }
+
+    async fn update_mission_metadata(
+        &self,
+        id: Uuid,
+        title: Option<Option<&str>>,
+        short_description: Option<Option<&str>>,
+        metadata_source: Option<Option<&str>>,
+        metadata_model: Option<Option<&str>>,
+        metadata_version: Option<Option<&str>>,
+    ) -> Result<(), String> {
+        if title.is_none()
+            && short_description.is_none()
+            && metadata_source.is_none()
+            && metadata_model.is_none()
+            && metadata_version.is_none()
+        {
+            return Ok(());
+        }
+
+        let mut missions = self.missions.write().await;
+        let mission = missions
+            .get_mut(&id)
+            .ok_or_else(|| format!("Mission {} not found", id))?;
+
+        if let Some(title) = title {
+            mission.title = title.map(ToString::to_string);
+        }
+        if let Some(short_description) = short_description {
+            mission.short_description = short_description.map(ToString::to_string);
+        }
+        if let Some(metadata_source) = metadata_source {
+            mission.metadata_source = metadata_source.map(ToString::to_string);
+        }
+        if let Some(metadata_model) = metadata_model {
+            mission.metadata_model = metadata_model.map(ToString::to_string);
+        }
+        if let Some(metadata_version) = metadata_version {
+            mission.metadata_version = metadata_version.map(ToString::to_string);
+        }
+
+        let now = now_string();
+        mission.metadata_updated_at = Some(now.clone());
+        mission.updated_at = now;
         drop(missions);
         self.persist().await
     }
@@ -314,5 +381,213 @@ impl MissionStore for FileMissionStore {
         _success: bool,
     ) -> Result<(), String> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn update_mission_metadata_is_noop_when_fields_missing() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = FileMissionStore::new(temp_dir.path().to_path_buf(), "test-user")
+            .await
+            .expect("file store");
+        let mission = store
+            .create_mission(Some("Initial"), None, None, None, None, None, None)
+            .await
+            .expect("create mission");
+
+        store
+            .update_mission_metadata(
+                mission.id,
+                Some(Some("Renamed")),
+                Some(Some("Short summary")),
+                Some(Some("backend_heuristic")),
+                None,
+                Some(Some("v1")),
+            )
+            .await
+            .expect("set metadata");
+
+        let after_set = store
+            .get_mission(mission.id)
+            .await
+            .expect("get mission")
+            .expect("mission exists");
+        let metadata_updated_at = after_set
+            .metadata_updated_at
+            .clone()
+            .expect("metadata timestamp should be set");
+        let updated_at = after_set.updated_at.clone();
+
+        store
+            .update_mission_metadata(mission.id, None, None, None, None, None)
+            .await
+            .expect("noop metadata update");
+
+        let after_noop = store
+            .get_mission(mission.id)
+            .await
+            .expect("get mission")
+            .expect("mission exists");
+
+        assert_eq!(after_noop.title.as_deref(), Some("Renamed"));
+        assert_eq!(
+            after_noop.short_description.as_deref(),
+            Some("Short summary")
+        );
+        assert_eq!(
+            after_noop.metadata_source.as_deref(),
+            Some("backend_heuristic")
+        );
+        assert_eq!(after_noop.metadata_model.as_deref(), None);
+        assert_eq!(after_noop.metadata_version.as_deref(), Some("v1"));
+        assert_eq!(
+            after_noop.metadata_updated_at.as_deref(),
+            Some(metadata_updated_at.as_str())
+        );
+        assert_eq!(after_noop.updated_at, updated_at);
+    }
+
+    #[tokio::test]
+    async fn update_mission_metadata_can_clear_fields() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = FileMissionStore::new(temp_dir.path().to_path_buf(), "test-user")
+            .await
+            .expect("file store");
+        let mission = store
+            .create_mission(Some("Initial"), None, None, None, None, None, None)
+            .await
+            .expect("create mission");
+
+        store
+            .update_mission_metadata(
+                mission.id,
+                Some(Some("Renamed")),
+                Some(Some("Short summary")),
+                Some(Some("backend_heuristic")),
+                None,
+                Some(Some("v1")),
+            )
+            .await
+            .expect("set metadata");
+
+        store
+            .update_mission_metadata(
+                mission.id,
+                Some(None),
+                Some(None),
+                Some(None),
+                None,
+                Some(None),
+            )
+            .await
+            .expect("clear metadata fields");
+
+        let mission = store
+            .get_mission(mission.id)
+            .await
+            .expect("get mission")
+            .expect("mission exists");
+        assert_eq!(mission.title, None);
+        assert_eq!(mission.short_description, None);
+        assert_eq!(mission.metadata_source, None);
+        assert_eq!(mission.metadata_version, None);
+    }
+
+    #[tokio::test]
+    async fn update_mission_title_marks_user_metadata_source() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = FileMissionStore::new(temp_dir.path().to_path_buf(), "test-user")
+            .await
+            .expect("file store");
+        let mission = store
+            .create_mission(Some("Initial"), None, None, None, None, None, None)
+            .await
+            .expect("create mission");
+
+        store
+            .update_mission_metadata(
+                mission.id,
+                None,
+                None,
+                Some(Some("backend_heuristic")),
+                Some(Some("gpt-5")),
+                Some(Some("v1")),
+            )
+            .await
+            .expect("seed metadata source");
+        let seeded = store
+            .get_mission(mission.id)
+            .await
+            .expect("get seeded mission")
+            .expect("mission exists");
+        let seeded_metadata_updated_at = seeded
+            .metadata_updated_at
+            .expect("seed metadata timestamp should exist");
+
+        store
+            .update_mission_title(mission.id, "Manual title")
+            .await
+            .expect("rename mission");
+
+        let mission = store
+            .get_mission(mission.id)
+            .await
+            .expect("get mission")
+            .expect("mission exists");
+        assert_eq!(mission.title.as_deref(), Some("Manual title"));
+        assert_eq!(mission.metadata_source.as_deref(), Some("user"));
+        assert_eq!(mission.metadata_model, None);
+        assert_eq!(mission.metadata_version, None);
+        let metadata_updated_at = mission
+            .metadata_updated_at
+            .expect("manual title update should set metadata timestamp");
+        assert!(
+            metadata_updated_at >= seeded_metadata_updated_at,
+            "manual title update should advance metadata timestamp"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_mission_marks_user_metadata_source_when_title_is_provided() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = FileMissionStore::new(temp_dir.path().to_path_buf(), "test-user")
+            .await
+            .expect("file store");
+
+        let titled = store
+            .create_mission(
+                Some("User titled mission"),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("create titled mission");
+        assert_eq!(titled.metadata_source.as_deref(), Some("user"));
+        assert!(
+            titled.metadata_updated_at.is_some(),
+            "titled mission should set metadata_updated_at"
+        );
+
+        let untitled = store
+            .create_mission(None, None, None, None, None, None, None)
+            .await
+            .expect("create untitled mission");
+        assert_eq!(untitled.metadata_source, None);
+        assert_eq!(untitled.metadata_updated_at, None);
+
+        let blank_titled = store
+            .create_mission(Some("  "), None, None, None, None, None, None)
+            .await
+            .expect("create blank titled mission");
+        assert_eq!(blank_titled.metadata_source, None);
+        assert_eq!(blank_titled.metadata_updated_at, None);
     }
 }

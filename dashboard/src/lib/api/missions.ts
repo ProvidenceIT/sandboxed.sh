@@ -31,6 +31,11 @@ export interface Mission {
   id: string;
   status: MissionStatus;
   title: string | null;
+  short_description?: string | null;
+  metadata_updated_at?: string | null;
+  metadata_source?: string | null;
+  metadata_model?: string | null;
+  metadata_version?: string | null;
   workspace_id?: string;
   workspace_name?: string;
   agent?: string;
@@ -91,12 +96,53 @@ export type MissionHealth =
   | { status: "missing_deliverables"; missing: string[] }
   | { status: "unexpected_end"; reason: string };
 
+export interface MissionSearchResult {
+  mission: Mission;
+  relevance_score: number;
+}
+
+export interface MissionMomentSearchResult {
+  mission: Mission;
+  entry_index: number;
+  role: string;
+  snippet: string;
+  rationale: string;
+  relevance_score: number;
+}
+
 // ---------------------------------------------------------------------------
 // API Functions
 // ---------------------------------------------------------------------------
 
 export async function listMissions(): Promise<Mission[]> {
   return apiGet("/api/control/missions", "Failed to fetch missions");
+}
+
+export async function searchMissions(
+  query: string,
+  options?: { limit?: number }
+): Promise<MissionSearchResult[]> {
+  const params = new URLSearchParams();
+  params.set("q", query);
+  if (options?.limit) params.set("limit", String(options.limit));
+  return apiGet(
+    `/api/control/missions/search?${params.toString()}`,
+    "Failed to search missions"
+  );
+}
+
+export async function searchMissionMoments(
+  query: string,
+  options?: { limit?: number; missionId?: string }
+): Promise<MissionMomentSearchResult[]> {
+  const params = new URLSearchParams();
+  params.set("q", query);
+  if (options?.limit) params.set("limit", String(options.limit));
+  if (options?.missionId) params.set("mission_id", options.missionId);
+  return apiGet(
+    `/api/control/missions/search/moments?${params.toString()}`,
+    "Failed to search mission moments"
+  );
 }
 
 export async function getMission(id: string): Promise<Mission> {

@@ -9,7 +9,7 @@ import {
   fetchLiveCerebrasModels,
   type LLMConfig,
 } from '@/lib/llm-settings';
-import { generateMissionTitle } from '@/lib/llm';
+import { generateMissionTitle, testLLMConnection } from '@/lib/llm';
 import {
   Sparkles,
   Eye,
@@ -96,19 +96,27 @@ export default function LLMSettingsPage() {
     const wasEnabled = config.enabled;
     if (!wasEnabled) writeLLMConfig({ ...config, enabled: true });
     try {
+      const probe = await testLLMConnection();
+      if (!probe.ok) {
+        toast.error(`Connection failed: ${probe.error ?? 'Unknown error'}`);
+        return;
+      }
+
       const title = await generateMissionTitle(
         'Fix the authentication bug in the login page',
         'I\'ll investigate the login flow and fix the session handling issue.'
       );
-
-      if (title) {
-        setTestResult(title);
+      const sample = title || probe.content || 'OK';
+      if (sample) {
+        setTestResult(sample);
         toast.success('LLM connection working');
       } else {
         toast.error('No response from LLM — check your API key and base URL');
       }
-    } catch {
-      toast.error('LLM request failed');
+    } catch (err) {
+      toast.error(
+        `LLM request failed: ${err instanceof Error ? err.message : 'Unknown error'}`
+      );
     } finally {
       // Restore only the enabled flag we toggled, using the *current* config
       // so any other edits the user made during the test are preserved.

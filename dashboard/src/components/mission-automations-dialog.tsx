@@ -207,7 +207,10 @@ export function MissionAutomationsDialog({
   const [intervalValue, setIntervalValue] = useState('5');
   const [intervalUnit, setIntervalUnit] = useState<IntervalUnit>('minutes');
   const [startImmediately, setStartImmediately] = useState(true);
-  const [stopPolicy, setStopPolicy] = useState<StopPolicy>({ type: 'never' });
+  const [stopPolicy, setStopPolicy] = useState<StopPolicy>({
+    type: 'when_failing_consecutively',
+    count: 2,
+  });
   const [freshSession, setFreshSession] = useState<'always' | 'keep'>('keep');
   const [variables, setVariables] = useState<Array<{ key: string; value: string }>>([]);
   const [creating, setCreating] = useState(false);
@@ -597,7 +600,7 @@ export function MissionAutomationsDialog({
       setInlinePromptState('');
       setIntervalValue('5');
       setIntervalUnit('minutes');
-      setStopPolicy({ type: 'never' });
+      setStopPolicy({ type: 'when_failing_consecutively', count: 2 });
       setFreshSession('keep');
       setVariables([]);
       if (promptTimerRef.current) {
@@ -989,11 +992,11 @@ export function MissionAutomationsDialog({
                     className={cn(selectClass, 'w-full')}
                     style={selectStyle}
                   >
-                    <option value="never" className="bg-[#1a1a1a]">
-                      Never (recommended)
-                    </option>
                     <option value="when_failing_consecutively" className="bg-[#1a1a1a]">
-                      After 2 consecutive failures
+                      After 2 consecutive failures (recommended)
+                    </option>
+                    <option value="never" className="bg-[#1a1a1a]">
+                      Never
                     </option>
                   </select>
                   <div className="mt-1 text-[11px] text-white/30">
