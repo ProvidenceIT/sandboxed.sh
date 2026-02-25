@@ -5,7 +5,7 @@ import { cn } from "@/lib/utils";
 import { formatBytes, formatBytesPerSec } from "@/lib/format";
 import { getValidJwt } from "@/lib/auth";
 import { getRuntimeApiBase } from "@/lib/settings";
-import { Activity, ChevronDown } from "lucide-react";
+import { Activity } from "lucide-react";
 
 interface SystemMetrics {
   cpu_percent: number;
