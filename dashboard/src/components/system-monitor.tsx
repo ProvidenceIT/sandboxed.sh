@@ -236,17 +236,19 @@ function CpuChart({
   );
 }
 
-// Single-line CPU chart for containers
-function ContainerCpuChart({
+// Base single-series area chart — shared rendering for CPU/Memory charts.
+function AreaChart({
   data,
-  percent,
-  label,
-  height = 100,
+  gridFractions,
+  height = 80,
+  topLeft,
+  topRight,
 }: {
   data: number[];
-  percent: number;
-  label: string;
+  gridFractions: number[];
   height?: number;
+  topLeft: React.ReactNode;
+  topRight: React.ReactNode;
 }) {
   const width = 400;
   const padding = 2;
@@ -278,24 +280,12 @@ function ContainerCpuChart({
     })
     .join(" L")}`;
 
-  const gridLines = [0.25, 0.5, 0.75].map((p) => padding + chartHeight * (1 - p));
+  const gridLines = gridFractions.map((p) => padding + chartHeight * (1 - p));
 
   return (
     <div className="relative h-full rounded-xl overflow-hidden bg-white/[0.02] border border-white/[0.04]">
-      <GlassPill position="top-left">
-        <div className="flex items-center gap-2">
-          <span className="text-[10px] leading-none font-medium uppercase tracking-wide text-white/50">CPU</span>
-          <span className="text-[10px] leading-none font-semibold tabular-nums text-white/80">
-            {percent.toFixed(1)}%
-          </span>
-        </div>
-      </GlassPill>
-
-      <GlassPill position="top-right">
-        <span className="text-[10px] leading-none font-medium text-white/50 truncate max-w-[160px]">
-          {label}
-        </span>
-      </GlassPill>
+      <GlassPill position="top-left">{topLeft}</GlassPill>
+      <GlassPill position="top-right">{topRight}</GlassPill>
 
       <svg
         className="w-full h-full"
@@ -321,6 +311,43 @@ function ContainerCpuChart({
   );
 }
 
+const CPU_GRID = [0.25, 0.5, 0.75];
+const MEM_GRID = [0.5];
+
+// Single-line CPU chart for containers
+function ContainerCpuChart({
+  data,
+  percent,
+  label,
+  height = 100,
+}: {
+  data: number[];
+  percent: number;
+  label: string;
+  height?: number;
+}) {
+  return (
+    <AreaChart
+      data={data}
+      gridFractions={CPU_GRID}
+      height={height}
+      topLeft={
+        <div className="flex items-center gap-2">
+          <span className="text-[10px] leading-none font-medium uppercase tracking-wide text-white/50">CPU</span>
+          <span className="text-[10px] leading-none font-semibold tabular-nums text-white/80">
+            {percent.toFixed(1)}%
+          </span>
+        </div>
+      }
+      topRight={
+        <span className="text-[10px] leading-none font-medium text-white/50 truncate max-w-[160px]">
+          {label}
+        </span>
+      }
+    />
+  );
+}
+
 // Simple area chart for Memory
 function MemoryChart({
   data,
@@ -335,91 +362,25 @@ function MemoryChart({
   total: number;
   height?: number;
 }) {
-  const width = 400;
-  const padding = 2;
-  const chartHeight = height - padding * 2;
-  const maxPoints = 60;
-  const snap = (value: number) => Math.round(value * 2) / 2;
-
-  const paddedData = data.length < maxPoints
-    ? [...Array(maxPoints - data.length).fill(0), ...data]
-    : data.slice(-maxPoints);
-
-  const pointSpacing = width / (maxPoints - 1);
-
-  const areaPoints = paddedData
-    .map((v, i) => {
-      const x = snap(i * pointSpacing);
-      const y = snap(padding + chartHeight - (Math.min(v, 100) / 100) * chartHeight);
-      return `${x},${y}`;
-    })
-    .join(" L");
-
-  const areaPath = `M${snap(0)},${snap(height)} L${snap(0)},${snap(padding + chartHeight - (Math.min(paddedData[0], 100) / 100) * chartHeight)} L${areaPoints} L${snap(width)},${snap(height)} Z`;
-
-  const linePath = `M${paddedData
-    .map((v, i) => {
-      const x = snap(i * pointSpacing);
-      const y = snap(padding + chartHeight - (Math.min(v, 100) / 100) * chartHeight);
-      return `${x},${y}`;
-    })
-    .join(" L")}`;
-
-  const gridLines = [0.5].map((p) => padding + chartHeight * (1 - p));
-
   return (
-    <div className="relative h-full rounded-xl overflow-hidden bg-white/[0.02] border border-white/[0.04]">
-      {/* Glass pill overlay */}
-      <GlassPill position="top-left">
+    <AreaChart
+      data={data}
+      gridFractions={MEM_GRID}
+      height={height}
+      topLeft={
         <div className="flex items-center gap-2">
           <span className="text-[10px] leading-none font-medium uppercase tracking-wide text-white/50">MEM</span>
           <span className="text-[10px] leading-none font-semibold tabular-nums text-white/80">
             {percent.toFixed(0)}%
           </span>
         </div>
-      </GlassPill>
-
-      {/* Usage details - top right */}
-      <GlassPill position="top-right">
+      }
+      topRight={
         <span className="text-[10px] leading-none font-medium tabular-nums text-white/50">
           {formatBytes(used)} / {formatBytes(total)}
         </span>
-      </GlassPill>
-
-      {/* SVG Chart */}
-      <svg
-        className="w-full h-full"
-        viewBox={`0 0 ${width} ${height}`}
-        preserveAspectRatio="none"
-      >
-        {/* Grid line */}
-        {gridLines.map((y, i) => (
-          <line
-            key={i}
-            x1={0}
-            y1={y}
-            x2={width}
-            y2={y}
-            stroke={CHART_COLORS.grid}
-          />
-        ))}
-
-        {/* Area fill */}
-        <path d={areaPath} fill={CHART_COLORS.primaryFill} />
-
-        {/* Line */}
-        <path
-          d={linePath}
-          fill="none"
-          stroke={CHART_COLORS.primary}
-          strokeWidth="0.8"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          vectorEffect="non-scaling-stroke"
-          shapeRendering="geometricPrecision"
-        />
-      </svg>
-    </div>
+      }
+    />
   );
 }
 
