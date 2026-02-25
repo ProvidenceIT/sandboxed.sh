@@ -709,11 +709,10 @@ export function MissionSwitcher({
         if (!item.runningInfo) {
           return [];
         }
+        // Always include running missions without a full Mission record so they
+        // remain visible during search even when we lack metadata to score.
         const runningScore = runningMissionSearchRelevanceScore(item.runningInfo, normalizedSearchQuery);
-        if (runningScore <= 0) {
-          return [];
-        }
-        return [{ item, score: runningScore }];
+        return [{ item, score: Math.max(runningScore, 0.01) }];
       }
       const score = getMissionSearchScore(
         item.mission,
