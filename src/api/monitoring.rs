@@ -3,8 +3,11 @@
 //! Provides CPU, memory, and network usage metrics streamed
 //! to connected clients via WebSocket. Maintains a history buffer
 //! so new clients receive recent data immediately.
+//!
+//! Also streams per-container (systemd-nspawn) CPU and memory metrics
+//! for container workspaces, collected from cgroup stats.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -23,6 +26,7 @@ use tokio::sync::{broadcast, RwLock};
 
 use super::auth;
 use super::routes::AppState;
+use crate::workspace::{SharedWorkspaceStore, WorkspaceStatus, WorkspaceType};
 
 /// How many historical samples to keep (at 1 sample/sec = 60 seconds of history)
 const HISTORY_SIZE: usize = 60;
@@ -55,6 +59,25 @@ pub struct SystemMetrics {
     pub timestamp_ms: u64,
 }
 
+/// Per-container metrics snapshot
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContainerMetrics {
+    pub workspace_id: String,
+    pub workspace_name: String,
+    pub cpu_percent: f64,
+    pub memory_used: u64,
+    pub memory_total: u64,
+    pub memory_percent: f64,
+}
+
+/// Container metrics update sent over WebSocket
+#[derive(Debug, Clone, Serialize)]
+struct ContainerMetricsMessage {
+    #[serde(rename = "type")]
+    msg_type: &'static str,
+    containers: Vec<ContainerMetrics>,
+}
+
 /// Initial snapshot message sent to new clients
 #[derive(Debug, Clone, Serialize)]
 pub struct HistorySnapshot {
@@ -63,14 +86,27 @@ pub struct HistorySnapshot {
     pub msg_type: &'static str,
     /// Historical metrics (oldest first)
     pub history: Vec<SystemMetrics>,
+    /// Per-container historical metrics (oldest first), keyed by workspace_id
+    pub container_history: HashMap<String, Vec<ContainerMetrics>>,
+}
+
+/// Combined broadcast message containing both system and container metrics
+#[derive(Debug, Clone)]
+pub(crate) struct MonitoringBroadcast {
+    system: SystemMetrics,
+    containers: Vec<ContainerMetrics>,
 }
 
 /// Shared monitoring state that persists across connections
 pub struct MonitoringState {
     /// Historical metrics buffer (oldest first)
     history: RwLock<VecDeque<SystemMetrics>>,
+    /// Per-container historical metrics (oldest first), keyed by workspace_id
+    container_history: RwLock<HashMap<String, VecDeque<ContainerMetrics>>>,
     /// Broadcast channel for real-time updates
-    broadcast_tx: broadcast::Sender<SystemMetrics>,
+    broadcast_tx: broadcast::Sender<MonitoringBroadcast>,
+    /// Workspace store for querying container workspaces
+    workspaces: RwLock<Option<SharedWorkspaceStore>>,
 }
 
 impl MonitoringState {
@@ -78,7 +114,9 @@ impl MonitoringState {
         let (broadcast_tx, _) = broadcast::channel(64);
         let state = Arc::new(Self {
             history: RwLock::new(VecDeque::with_capacity(HISTORY_SIZE)),
+            container_history: RwLock::new(HashMap::new()),
             broadcast_tx,
+            workspaces: RwLock::new(None),
         });
 
         // Start the background collector task
@@ -95,6 +133,13 @@ impl MonitoringState {
         state
     }
 
+    /// Set the workspace store for container metrics collection.
+    /// Called after AppState is initialized.
+    pub async fn set_workspaces(&self, ws: SharedWorkspaceStore) {
+        let mut guard = self.workspaces.write().await;
+        *guard = Some(ws);
+    }
+
     /// Background task that continuously collects metrics
     async fn run_collector(self: Arc<Self>) {
         let mut sys = System::new_all();
@@ -104,6 +149,10 @@ impl MonitoringState {
         let mut prev_rx_bytes: u64 = 0;
         let mut prev_tx_bytes: u64 = 0;
         let mut prev_time = std::time::Instant::now();
+
+        // Track previous CPU nanoseconds per container for delta calculation
+        let mut prev_cpu_ns: HashMap<String, u64> = HashMap::new();
+        let mut prev_container_time = std::time::Instant::now();
 
         // Initial refresh
         sys.refresh_all();
@@ -117,6 +166,7 @@ impl MonitoringState {
 
         // Collection interval (1 second)
         let interval = Duration::from_secs(1);
+        let num_cpus = sys.cpus().len().max(1) as f64;
 
         loop {
             tokio::time::sleep(interval).await;
@@ -191,9 +241,148 @@ impl MonitoringState {
                 history.push_back(metrics.clone());
             }
 
+            // Collect per-container metrics
+            let container_elapsed_secs = now.duration_since(prev_container_time).as_secs_f64();
+            prev_container_time = now;
+            let container_metrics =
+                self.collect_container_metrics(&mut prev_cpu_ns, container_elapsed_secs, num_cpus, memory_total).await;
+
+            // Add container metrics to history
+            {
+                let mut ch = self.container_history.write().await;
+                // Track which workspace IDs are still active
+                let active_ids: std::collections::HashSet<String> =
+                    container_metrics.iter().map(|m| m.workspace_id.clone()).collect();
+
+                for cm in &container_metrics {
+                    let history = ch
+                        .entry(cm.workspace_id.clone())
+                        .or_insert_with(|| VecDeque::with_capacity(HISTORY_SIZE));
+                    if history.len() >= HISTORY_SIZE {
+                        history.pop_front();
+                    }
+                    history.push_back(cm.clone());
+                }
+
+                // Remove history for containers that no longer exist
+                ch.retain(|id, _| active_ids.contains(id));
+            }
+
             // Broadcast to all connected clients (ignore if no receivers)
-            let _ = self.broadcast_tx.send(metrics);
+            let _ = self.broadcast_tx.send(MonitoringBroadcast {
+                system: metrics,
+                containers: container_metrics,
+            });
         }
+    }
+
+    /// Collect CPU and memory metrics for all active container workspaces.
+    async fn collect_container_metrics(
+        &self,
+        prev_cpu_ns: &mut HashMap<String, u64>,
+        elapsed_secs: f64,
+        num_cpus: f64,
+        host_memory_total: u64,
+    ) -> Vec<ContainerMetrics> {
+        let workspaces = {
+            let guard = self.workspaces.read().await;
+            match guard.as_ref() {
+                Some(ws) => ws.list().await,
+                None => return Vec::new(),
+            }
+        };
+
+        let mut results = Vec::new();
+        let elapsed_ns = (elapsed_secs * 1_000_000_000.0) as u64;
+
+        for ws in workspaces {
+            if ws.workspace_type != WorkspaceType::Container || ws.status != WorkspaceStatus::Ready
+            {
+                continue;
+            }
+
+            let ws_id = ws.id.to_string();
+            let container_name = format!(
+                "mission-{}",
+                ws_id.split('-').next().unwrap_or("unknown")
+            );
+            let scope_name = format!("machine-{}.scope", container_name);
+
+            let output = match tokio::process::Command::new("systemctl")
+                .args(["show", &scope_name])
+                .output()
+                .await
+            {
+                Ok(o) if o.status.success() => o,
+                _ => continue,
+            };
+
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let mut memory_current: Option<u64> = None;
+            let mut memory_max: Option<u64> = None;
+            let mut cpu_usage_ns: Option<u64> = None;
+
+            for line in stdout.lines() {
+                if let Some((key, value)) = line.split_once('=') {
+                    match key {
+                        "MemoryCurrent" => memory_current = value.parse::<u64>().ok(),
+                        "MemoryMax" => {
+                            if value == "infinity" {
+                                memory_max = Some(host_memory_total);
+                            } else {
+                                memory_max = value.parse::<u64>().ok();
+                            }
+                        }
+                        "CPUUsageNSec" => cpu_usage_ns = value.parse::<u64>().ok(),
+                        _ => {}
+                    }
+                }
+            }
+
+            let mem_used = memory_current.unwrap_or(0);
+            // Use host total memory as fallback when cgroup limit is unlimited
+            let mem_total = match memory_max {
+                Some(v) if v < u64::MAX => v,
+                _ => host_memory_total,
+            };
+            let mem_percent = if mem_total > 0 {
+                (mem_used as f64 / mem_total as f64) * 100.0
+            } else {
+                0.0
+            };
+
+            // Calculate CPU % from delta of cumulative CPUUsageNSec
+            let cpu_pct = if let Some(current_ns) = cpu_usage_ns {
+                let prev = prev_cpu_ns.get(&ws_id).copied().unwrap_or(current_ns);
+                let delta_ns = current_ns.saturating_sub(prev);
+                prev_cpu_ns.insert(ws_id.clone(), current_ns);
+
+                if elapsed_ns > 0 {
+                    // CPU% relative to all cores: delta_ns / (elapsed_ns * num_cores) * 100
+                    (delta_ns as f64 / (elapsed_ns as f64 * num_cpus)) * 100.0
+                } else {
+                    0.0
+                }
+            } else {
+                0.0
+            };
+
+            results.push(ContainerMetrics {
+                workspace_id: ws_id,
+                workspace_name: ws.name.clone(),
+                cpu_percent: cpu_pct,
+                memory_used: mem_used,
+                memory_total: mem_total,
+                memory_percent: mem_percent,
+            });
+        }
+
+        // Clean up prev_cpu_ns for containers that no longer exist
+        let active_ids: std::collections::HashSet<&str> =
+            results.iter().map(|m| m.workspace_id.as_str()).collect();
+        prev_cpu_ns.retain(|id, _| active_ids.contains(id.as_str()));
+
+        results
     }
 
     /// Get a snapshot of the current history
@@ -202,8 +391,16 @@ impl MonitoringState {
         history.iter().cloned().collect()
     }
 
+    /// Get a snapshot of per-container history
+    pub async fn get_container_history(&self) -> HashMap<String, Vec<ContainerMetrics>> {
+        let ch = self.container_history.read().await;
+        ch.iter()
+            .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
+            .collect()
+    }
+
     /// Subscribe to real-time updates
-    pub fn subscribe(&self) -> broadcast::Receiver<SystemMetrics> {
+    pub fn subscribe(&self) -> broadcast::Receiver<MonitoringBroadcast> {
         self.broadcast_tx.subscribe()
     }
 }
@@ -222,6 +419,14 @@ pub fn init_monitoring() {
     // which spawns the background collector task.
     let _ = get_monitoring_state();
     tracing::info!("Monitoring background collector started");
+}
+
+/// Set the workspace store so the monitoring collector can query container metrics.
+/// Should be called after AppState is initialized.
+pub async fn init_monitoring_workspaces(workspaces: SharedWorkspaceStore) {
+    let state = get_monitoring_state();
+    state.set_workspaces(workspaces).await;
+    tracing::info!("Monitoring container metrics collection enabled");
 }
 
 /// Extract JWT from WebSocket subprotocol header
@@ -281,12 +486,14 @@ async fn handle_monitoring_stream(socket: WebSocket) {
     // Split the socket
     let (mut ws_sender, mut ws_receiver) = socket.split();
 
-    // Send historical data first
+    // Send historical data first (system + container)
     let history = monitoring.get_history().await;
-    if !history.is_empty() {
+    let container_history = monitoring.get_container_history().await;
+    if !history.is_empty() || !container_history.is_empty() {
         let snapshot = HistorySnapshot {
             msg_type: "history",
             history,
+            container_history,
         };
         if let Ok(json) = serde_json::to_string(&snapshot) {
             if ws_sender.send(Message::Text(json)).await.is_err() {
@@ -337,12 +544,13 @@ async fn handle_monitoring_stream(socket: WebSocket) {
 
             // Wait for next broadcast
             match rx.recv().await {
-                Ok(metrics) => {
+                Ok(broadcast) => {
                     if paused {
                         continue;
                     }
 
-                    let json = match serde_json::to_string(&metrics) {
+                    // Send system metrics
+                    let json = match serde_json::to_string(&broadcast.system) {
                         Ok(j) => j,
                         Err(_) => continue,
                     };
@@ -350,6 +558,22 @@ async fn handle_monitoring_stream(socket: WebSocket) {
                     if ws_sender.send(Message::Text(json)).await.is_err() {
                         tracing::debug!("Client disconnected from monitoring stream");
                         break;
+                    }
+
+                    // Send container metrics if any
+                    if !broadcast.containers.is_empty() {
+                        let msg = ContainerMetricsMessage {
+                            msg_type: "container_metrics",
+                            containers: broadcast.containers,
+                        };
+                        if let Ok(json) = serde_json::to_string(&msg) {
+                            if ws_sender.send(Message::Text(json)).await.is_err() {
+                                tracing::debug!(
+                                    "Client disconnected during container metrics send"
+                                );
+                                break;
+                            }
+                        }
                     }
                 }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
