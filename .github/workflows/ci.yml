@@ -22,7 +22,8 @@ env:
 jobs:
   test:
     name: Test
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     # Skip CI on draft PRs unless explicitly requested
     if: github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule'
     steps:
@@ -47,7 +48,8 @@ jobs:
 
   clippy:
     name: Clippy
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     # Skip CI on draft PRs unless explicitly requested
     if: github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule'
     steps:
@@ -74,7 +76,8 @@ jobs:
 
   fmt:
     name: Format
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     # Skip CI on draft PRs unless explicitly requested
     if: github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule'
     steps:
@@ -90,7 +93,8 @@ jobs:
 
   harness-contract:
     name: Harness Contract Tests
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     # Skip CI on draft PRs unless explicitly requested
     if: github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule'
     steps:
@@ -115,7 +119,8 @@ jobs:
 
   capability-matrix:
     name: Capability Matrix Contract Check
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     # Skip CI on draft PRs unless explicitly requested
     if: github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule'
     steps:
@@ -126,7 +131,8 @@ jobs:
 
   dashboard-test:
     name: Dashboard Unit Tests
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     # Skip CI on draft PRs unless explicitly requested
     if: github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule'
     defaults:
