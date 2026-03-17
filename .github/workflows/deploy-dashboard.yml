@@ -15,6 +15,10 @@ jobs:
   test:
     name: Dashboard Tests
     runs-on: ubuntu-latest
+<<<<<<< copilot/modify-workflows-to-ubuntu-latest
+=======
+    timeout-minutes: 15
+>>>>>>> master
     defaults:
       run:
         working-directory: dashboard
@@ -39,6 +43,10 @@ jobs:
     name: Deploy to Production
     needs: test
     runs-on: ubuntu-latest
+<<<<<<< copilot/modify-workflows-to-ubuntu-latest
+=======
+    timeout-minutes: 15
+>>>>>>> master
     steps:
       - uses: actions/checkout@v4
 

@@ -9,6 +9,10 @@ jobs:
   sync:
     name: Sync from upstream
     runs-on: ubuntu-latest
+<<<<<<< copilot/modify-workflows-to-ubuntu-latest
+=======
+    timeout-minutes: 10
+>>>>>>> master
     steps:
       - uses: actions/checkout@v4
         with:
