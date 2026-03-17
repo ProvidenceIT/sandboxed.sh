@@ -14,7 +14,8 @@ concurrency:
 jobs:
   test:
     name: Dashboard Tests
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: dashboard
@@ -38,7 +39,8 @@ jobs:
   deploy:
     name: Deploy to Production
     needs: test
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
