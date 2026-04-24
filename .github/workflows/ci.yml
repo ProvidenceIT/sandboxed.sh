@@ -22,8 +22,8 @@ env:
 jobs:
   test:
     name: Test
-    runs-on: ubuntu-latest
-<<<<<<< copilot/modify-workflows-to-ubuntu-latest
+    runs-on: self-hosted
+<<<<<<< copilot/modify-workflows-to-self-hosted
 =======
     timeout-minutes: 30
 >>>>>>> master
@@ -51,8 +51,8 @@ jobs:
 
   clippy:
     name: Clippy
-    runs-on: ubuntu-latest
-<<<<<<< copilot/modify-workflows-to-ubuntu-latest
+    runs-on: self-hosted
+<<<<<<< copilot/modify-workflows-to-self-hosted
 =======
     timeout-minutes: 30
 >>>>>>> master
@@ -82,8 +82,8 @@ jobs:
 
   fmt:
     name: Format
-    runs-on: ubuntu-latest
-<<<<<<< copilot/modify-workflows-to-ubuntu-latest
+    runs-on: self-hosted
+<<<<<<< copilot/modify-workflows-to-self-hosted
 =======
     timeout-minutes: 10
 >>>>>>> master
@@ -102,8 +102,8 @@ jobs:
 
   harness-contract:
     name: Harness Contract Tests
-    runs-on: ubuntu-latest
-<<<<<<< copilot/modify-workflows-to-ubuntu-latest
+    runs-on: self-hosted
+<<<<<<< copilot/modify-workflows-to-self-hosted
 =======
     timeout-minutes: 30
 >>>>>>> master
@@ -131,8 +131,8 @@ jobs:
 
   capability-matrix:
     name: Capability Matrix Contract Check
-    runs-on: ubuntu-latest
-<<<<<<< copilot/modify-workflows-to-ubuntu-latest
+    runs-on: self-hosted
+<<<<<<< copilot/modify-workflows-to-self-hosted
 =======
     timeout-minutes: 10
 >>>>>>> master
@@ -146,8 +146,8 @@ jobs:
 
   dashboard-test:
     name: Dashboard Unit Tests
-    runs-on: ubuntu-latest
-<<<<<<< copilot/modify-workflows-to-ubuntu-latest
+    runs-on: self-hosted
+<<<<<<< copilot/modify-workflows-to-self-hosted
 =======
     timeout-minutes: 15
 >>>>>>> master

@@ -8,8 +8,8 @@ on:
 jobs:
   sync:
     name: Sync from upstream
-    runs-on: ubuntu-latest
-<<<<<<< copilot/modify-workflows-to-ubuntu-latest
+    runs-on: self-hosted
+<<<<<<< copilot/modify-workflows-to-self-hosted
 =======
     timeout-minutes: 10
 >>>>>>> master

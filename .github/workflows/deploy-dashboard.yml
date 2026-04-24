@@ -14,8 +14,8 @@ concurrency:
 jobs:
   test:
     name: Dashboard Tests
-    runs-on: ubuntu-latest
-<<<<<<< copilot/modify-workflows-to-ubuntu-latest
+    runs-on: self-hosted
+<<<<<<< copilot/modify-workflows-to-self-hosted
 =======
     timeout-minutes: 15
 >>>>>>> master
@@ -42,8 +42,8 @@ jobs:
   deploy:
     name: Deploy to Production
     needs: test
-    runs-on: ubuntu-latest
-<<<<<<< copilot/modify-workflows-to-ubuntu-latest
+    runs-on: self-hosted
+<<<<<<< copilot/modify-workflows-to-self-hosted
 =======
     timeout-minutes: 15
 >>>>>>> master
