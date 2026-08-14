@@ -8,11 +8,8 @@ on:
 jobs:
   sync:
     name: Sync from upstream
-    runs-on: self-hosted
-<<<<<<< copilot/modify-workflows-to-self-hosted
-=======
+    runs-on: ${{ vars.RUNS_ON_DEFAULT || 'ubuntu-latest' }}
     timeout-minutes: 10
->>>>>>> master
     steps:
       - uses: actions/checkout@v4
         with:

@@ -14,11 +14,8 @@ concurrency:
 jobs:
   test:
     name: Dashboard Tests
-    runs-on: self-hosted
-<<<<<<< copilot/modify-workflows-to-self-hosted
-=======
+    runs-on: ${{ vars.RUNS_ON_DEFAULT || 'ubuntu-latest' }}
     timeout-minutes: 15
->>>>>>> master
     defaults:
       run:
         working-directory: dashboard
@@ -42,11 +39,8 @@ jobs:
   deploy:
     name: Deploy to Production
     needs: test
-    runs-on: self-hosted
-<<<<<<< copilot/modify-workflows-to-self-hosted
-=======
+    runs-on: ${{ vars.RUNS_ON_DEFAULT || 'ubuntu-latest' }}
     timeout-minutes: 15
->>>>>>> master
     steps:
       - uses: actions/checkout@v4
 
