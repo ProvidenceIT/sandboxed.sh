@@ -22,7 +22,7 @@ env:
 jobs:
   test:
     name: Test
-    runs-on: ${{ vars.RUNS_ON_DEFAULT || 'ubuntu-latest' }}
+    runs-on: ${{ vars.RUNS_ON_DEFAULT || 'node-build' }}
     timeout-minutes: 30
     # Skip CI on draft PRs unless explicitly requested
     if: github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule'
@@ -48,7 +48,7 @@ jobs:
 
   clippy:
     name: Clippy
-    runs-on: ${{ vars.RUNS_ON_DEFAULT || 'ubuntu-latest' }}
+    runs-on: ${{ vars.RUNS_ON_DEFAULT || 'node-build' }}
     timeout-minutes: 30
     # Skip CI on draft PRs unless explicitly requested
     if: github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule'
@@ -76,7 +76,7 @@ jobs:
 
   fmt:
     name: Format
-    runs-on: ${{ vars.RUNS_ON_DEFAULT || 'ubuntu-latest' }}
+    runs-on: ${{ vars.RUNS_ON_DEFAULT || 'node-build' }}
     timeout-minutes: 10
     # Skip CI on draft PRs unless explicitly requested
     if: github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule'
@@ -93,7 +93,7 @@ jobs:
 
   harness-contract:
     name: Harness Contract Tests
-    runs-on: ${{ vars.RUNS_ON_DEFAULT || 'ubuntu-latest' }}
+    runs-on: ${{ vars.RUNS_ON_DEFAULT || 'node-build' }}
     timeout-minutes: 30
     # Skip CI on draft PRs unless explicitly requested
     if: github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule'
@@ -119,7 +119,7 @@ jobs:
 
   capability-matrix:
     name: Capability Matrix Contract Check
-    runs-on: ${{ vars.RUNS_ON_DEFAULT || 'ubuntu-latest' }}
+    runs-on: ${{ vars.RUNS_ON_DEFAULT || 'node-build' }}
     timeout-minutes: 10
     # Skip CI on draft PRs unless explicitly requested
     if: github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule'
@@ -131,7 +131,7 @@ jobs:
 
   dashboard-test:
     name: Dashboard Unit Tests
-    runs-on: ${{ vars.RUNS_ON_DEFAULT || 'ubuntu-latest' }}
+    runs-on: ${{ vars.RUNS_ON_DEFAULT || 'node-build' }}
     timeout-minutes: 15
     # Skip CI on draft PRs unless explicitly requested
     if: github.event.pull_request.draft == false || github.event_name == 'push' || github.event_name == 'schedule'
