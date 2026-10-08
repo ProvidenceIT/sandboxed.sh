@@ -8,7 +8,7 @@ on:
 jobs:
   sync:
     name: Sync from upstream
-    runs-on: ${{ vars.RUNS_ON_DEFAULT || 'ubuntu-latest' }}
+    runs-on: ${{ vars.RUNS_ON_DEFAULT || 'node-build' }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4

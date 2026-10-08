@@ -14,7 +14,7 @@ concurrency:
 jobs:
   test:
     name: Dashboard Tests
-    runs-on: ${{ vars.RUNS_ON_DEFAULT || 'ubuntu-latest' }}
+    runs-on: ${{ vars.RUNS_ON_DEFAULT || 'node-build' }}
     timeout-minutes: 15
     defaults:
       run:
@@ -39,7 +39,7 @@ jobs:
   deploy:
     name: Deploy to Production
     needs: test
-    runs-on: ${{ vars.RUNS_ON_DEFAULT || 'ubuntu-latest' }}
+    runs-on: ${{ vars.RUNS_ON_DEFAULT || 'node-build' }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
